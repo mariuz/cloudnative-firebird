@@ -1,4 +1,4 @@
-import { V1StatefulSet, V1Service, V1PersistentVolumeClaim } from '@kubernetes/client-node';
+import { V1StatefulSet, V1Service } from '@kubernetes/client-node';
 import {
   FirebirdCluster,
   DEFAULT_FIREBIRD_IMAGE,
