@@ -1,0 +1,36 @@
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: my-firebird-replication
+  namespace: default
+spec:
+  # Run 3 Firebird instances (1 primary + 2 replicas)
+  instances: 3
+
+  # Firebird 4.0+ is required for journal-based replication.
+  # Pin to a specific patch version in production (e.g. firebirdsql/firebird:4.0.5).
+  imageName: firebirdsql/firebird:4.0
+
+  # Reference to the Secret containing the SYSDBA password
+  superuserSecret:
+    name: my-firebird-secret
+
+  # Storage configuration
+  storage:
+    size: 10Gi
+    storageClass: fast-ssd
+
+  # Resource requests and limits
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+
+  # Enable asynchronous replication across instances.
+  # A dedicated <name>-replica Service will be created for read-replica connections.
+  replication:
+    enabled: true
+    mode: async

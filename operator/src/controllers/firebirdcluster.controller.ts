@@ -8,6 +8,7 @@ import { Logger } from 'pino';
 import { logger } from '../utils/logger';
 import {
   buildHeadlessService,
+  buildReplicaService,
   buildService,
   buildStatefulSet,
   statefulSetNeedsUpdate,
@@ -55,6 +56,10 @@ export class FirebirdClusterController {
       await this.reconcileHeadlessService(cluster, log);
       await this.reconcileService(cluster, log);
       await this.reconcileStatefulSet(cluster, log);
+
+      if (cluster.spec.replication?.enabled) {
+        await this.reconcileReplicaService(cluster, log);
+      }
 
       await this.updateStatus(cluster, {
         phase: 'Running',
@@ -125,6 +130,27 @@ export class FirebirdClusterController {
       log.debug('Service already exists, skipping');
     } catch {
       log.info('Creating cluster service');
+      await this.coreApi.createNamespacedService({
+        namespace,
+        body: desired,
+      });
+    }
+  }
+
+  /** Reconcile the read-replica service for replication-enabled clusters */
+  private async reconcileReplicaService(
+    cluster: FirebirdCluster,
+    log: Logger,
+  ): Promise<void> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    const replicaName = `${name}-replica`;
+    const desired = buildReplicaService(cluster);
+
+    try {
+      await this.coreApi.readNamespacedService({ name: replicaName, namespace });
+      log.debug('Replica service already exists, skipping');
+    } catch {
+      log.info('Creating replica service');
       await this.coreApi.createNamespacedService({
         namespace,
         body: desired,
