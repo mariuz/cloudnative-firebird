@@ -1,0 +1,28 @@
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: my-firebird-cluster
+  namespace: default
+spec:
+  # Number of Firebird instances
+  instances: 1
+
+  # Firebird Docker image (defaults to jacobalberty/firebird:latest)
+  imageName: jacobalberty/firebird:latest
+
+  # Reference to the Secret containing the SYSDBA password
+  superuserSecret:
+    name: my-firebird-secret
+
+  # Storage for Firebird data files
+  storage:
+    size: 1Gi
+
+  # Resource requests and limits
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"

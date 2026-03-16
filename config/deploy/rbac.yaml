@@ -1,0 +1,112 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloudnative-firebird-operator
+  labels:
+    app.kubernetes.io/name: cloudnative-firebird
+    app.kubernetes.io/component: operator
+rules:
+  # FirebirdCluster resources
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdclusters
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdclusters/status
+    verbs:
+      - get
+      - update
+      - patch
+  # StatefulSets
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # Services
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # PersistentVolumeClaims
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumeclaims
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # Secrets (for superuser password)
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  # Events
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  # Pods (for status reporting)
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloudnative-firebird-operator
+  labels:
+    app.kubernetes.io/name: cloudnative-firebird
+    app.kubernetes.io/component: operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cloudnative-firebird-operator
+subjects:
+  - kind: ServiceAccount
+    name: cloudnative-firebird-operator
+    namespace: cloudnative-firebird-system

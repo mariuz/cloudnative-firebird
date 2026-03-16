@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudnative-firebird-system
+  labels:
+    app.kubernetes.io/name: cloudnative-firebird
+    app.kubernetes.io/component: operator

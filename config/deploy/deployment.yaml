@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudnative-firebird-operator
+  namespace: cloudnative-firebird-system
+  labels:
+    app.kubernetes.io/name: cloudnative-firebird
+    app.kubernetes.io/component: operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudnative-firebird
+      app.kubernetes.io/component: operator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cloudnative-firebird
+        app.kubernetes.io/component: operator
+    spec:
+      serviceAccountName: cloudnative-firebird-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+        - name: operator
+          image: ghcr.io/mariuz/cloudnative-firebird:latest
+          imagePullPolicy: Always
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: LOG_LEVEL
+              value: info
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      terminationGracePeriodSeconds: 10
