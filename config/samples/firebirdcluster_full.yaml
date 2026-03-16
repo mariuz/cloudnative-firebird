@@ -1,0 +1,44 @@
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: my-firebird-ha
+  namespace: default
+spec:
+  # Run 3 Firebird instances
+  instances: 3
+
+  # Specific Firebird version
+  imageName: jacobalberty/firebird:4.0
+
+  # Reference to the Secret containing the SYSDBA password
+  superuserSecret:
+    name: my-firebird-secret
+
+  # Storage configuration
+  storage:
+    size: 10Gi
+    storageClass: fast-ssd
+
+  # Resource requests and limits
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+
+  # Backup configuration
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"
+    retentionPolicy: "7d"
+
+  # Prometheus monitoring
+  monitoring:
+    enablePodMonitor: true
+
+  # Additional environment variables
+  env:
+    - name: FIREBIRD_DATABASE
+      value: mydb.fdb
