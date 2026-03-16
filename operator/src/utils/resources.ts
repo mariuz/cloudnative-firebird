@@ -44,6 +44,19 @@ export function buildStatefulSet(cluster: FirebirdCluster): V1StatefulSet {
           },
         ]
       : [{ name: 'ISC_PASSWORD', value: 'masterkey' }]),
+    // Replication environment variables
+    ...(spec.replication?.enabled
+      ? [
+          {
+            name: 'FIREBIRD_REPLICATION_ENABLED',
+            value: 'true',
+          },
+          {
+            name: 'FIREBIRD_REPLICATION_MODE',
+            value: spec.replication.mode ?? 'async',
+          },
+        ]
+      : []),
     // Additional env vars from spec
     ...(spec.env ?? []),
   ];
@@ -213,6 +226,56 @@ export function buildHeadlessService(cluster: FirebirdCluster): V1Service {
     spec: {
       clusterIP: 'None',
       publishNotReadyAddresses: true,
+      selector: labels,
+      ports: [
+        {
+          name: 'firebird',
+          port: 3050,
+          targetPort: 3050,
+          protocol: 'TCP',
+        },
+      ],
+    },
+  };
+
+  return service;
+}
+
+/**
+ * Builds the read-replica Service for a FirebirdCluster with replication enabled.
+ * This service provides a dedicated endpoint for read-replica connections,
+ * allowing clients to route read-only traffic separately from write traffic.
+ * Note: the service selects the same pods as the primary service. Enforcing
+ * read-only access at the pod level (e.g., via Firebird replica role assignment
+ * or application-level routing) must be handled separately.
+ */
+export function buildReplicaService(cluster: FirebirdCluster): V1Service {
+  const { name, namespace = 'default' } = cluster.metadata;
+  const labels = clusterLabels(name);
+
+  const service: V1Service = {
+    apiVersion: 'v1',
+    kind: 'Service',
+    metadata: {
+      name: `${name}-replica`,
+      namespace,
+      labels: {
+        ...labels,
+        'app.kubernetes.io/component': 'database-replica',
+      },
+      ownerReferences: [
+        {
+          apiVersion: `${API_GROUP}/v1`,
+          kind: RESOURCE_KIND,
+          name: cluster.metadata.name,
+          uid: cluster.metadata.uid ?? '',
+          controller: true,
+          blockOwnerDeletion: true,
+        },
+      ],
+    },
+    spec: {
+      type: 'ClusterIP',
       selector: labels,
       ports: [
         {

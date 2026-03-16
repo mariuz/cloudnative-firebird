@@ -137,6 +137,24 @@ spec:
                     enablePodMonitor:
                       description: Whether to enable Prometheus PodMonitor
                       type: boolean
+                replication:
+                  description: Replication configuration (requires Firebird 4.0+)
+                  type: object
+                  required:
+                    - enabled
+                  properties:
+                    enabled:
+                      description: Whether replication is enabled
+                      type: boolean
+                    mode:
+                      description: >
+                        Replication mode. 'sync' waits for replica acknowledgement before
+                        confirming writes (safer, slower). 'async' confirms writes immediately
+                        and lets replicas catch up (faster, less durable). Defaults to 'async'.
+                      type: string
+                      enum:
+                        - sync
+                        - async
                 env:
                   description: Additional environment variables for the Firebird container
                   type: array

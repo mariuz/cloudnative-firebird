@@ -56,6 +56,22 @@ export interface MonitoringConfiguration {
 }
 
 /**
+ * Replication configuration for a Firebird cluster.
+ * Uses Firebird 4.0+ journal-based replication.
+ */
+export interface ReplicationConfiguration {
+  /** Whether replication is enabled */
+  enabled: boolean;
+  /**
+   * Replication mode.
+   * - sync: writes are confirmed only after replica acknowledges (safer, slower)
+   * - async: writes are confirmed immediately, replica catches up (faster, less durable)
+   * Defaults to 'async'.
+   */
+  mode?: 'sync' | 'async';
+}
+
+/**
  * Specification of a FirebirdCluster resource.
  */
 export interface FirebirdClusterSpec {
@@ -76,6 +92,8 @@ export interface FirebirdClusterSpec {
   backup?: BackupConfiguration;
   /** Monitoring configuration */
   monitoring?: MonitoringConfiguration;
+  /** Replication configuration */
+  replication?: ReplicationConfiguration;
   /** Additional environment variables to pass to the Firebird container */
   env?: Array<{ name: string; value?: string; valueFrom?: object }>;
 }

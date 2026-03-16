@@ -1,4 +1,4 @@
-import { buildService, buildStatefulSet, buildHeadlessService, clusterLabels, statefulSetNeedsUpdate } from '../src/utils/resources';
+import { buildService, buildStatefulSet, buildHeadlessService, buildReplicaService, clusterLabels, statefulSetNeedsUpdate } from '../src/utils/resources';
 import { FirebirdCluster, DEFAULT_FIREBIRD_IMAGE } from '../src/types';
 
 const makeCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): FirebirdCluster => ({
@@ -195,5 +195,111 @@ describe('statefulSetNeedsUpdate', () => {
     const sts1 = buildStatefulSet(cluster1);
     const sts2 = buildStatefulSet(cluster2);
     expect(statefulSetNeedsUpdate(sts1, sts2)).toBe(true);
+  });
+});
+
+describe('buildStatefulSet (replication)', () => {
+  it('does not set replication env vars when replication is disabled', () => {
+    const cluster = makeCluster({ replication: { enabled: false } });
+    const sts = buildStatefulSet(cluster);
+    const container = sts.spec?.template?.spec?.containers?.[0];
+    const replicationEnv = container?.env?.find(
+      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_ENABLED',
+    );
+    expect(replicationEnv).toBeUndefined();
+  });
+
+  it('does not set replication env vars when replication spec is absent', () => {
+    const cluster = makeCluster();
+    const sts = buildStatefulSet(cluster);
+    const container = sts.spec?.template?.spec?.containers?.[0];
+    const replicationEnv = container?.env?.find(
+      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_ENABLED',
+    );
+    expect(replicationEnv).toBeUndefined();
+  });
+
+  it('sets FIREBIRD_REPLICATION_ENABLED=true when replication is enabled', () => {
+    const cluster = makeCluster({ replication: { enabled: true } });
+    const sts = buildStatefulSet(cluster);
+    const container = sts.spec?.template?.spec?.containers?.[0];
+    const replicationEnv = container?.env?.find(
+      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_ENABLED',
+    );
+    expect(replicationEnv?.value).toBe('true');
+  });
+
+  it('defaults FIREBIRD_REPLICATION_MODE to async when mode is not specified', () => {
+    const cluster = makeCluster({ replication: { enabled: true } });
+    const sts = buildStatefulSet(cluster);
+    const container = sts.spec?.template?.spec?.containers?.[0];
+    const modeEnv = container?.env?.find(
+      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_MODE',
+    );
+    expect(modeEnv?.value).toBe('async');
+  });
+
+  it('sets FIREBIRD_REPLICATION_MODE to sync when mode is sync', () => {
+    const cluster = makeCluster({ replication: { enabled: true, mode: 'sync' } });
+    const sts = buildStatefulSet(cluster);
+    const container = sts.spec?.template?.spec?.containers?.[0];
+    const modeEnv = container?.env?.find(
+      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_MODE',
+    );
+    expect(modeEnv?.value).toBe('sync');
+  });
+
+  it('sets FIREBIRD_REPLICATION_MODE to async when mode is explicitly async', () => {
+    const cluster = makeCluster({ replication: { enabled: true, mode: 'async' } });
+    const sts = buildStatefulSet(cluster);
+    const container = sts.spec?.template?.spec?.containers?.[0];
+    const modeEnv = container?.env?.find(
+      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_MODE',
+    );
+    expect(modeEnv?.value).toBe('async');
+  });
+});
+
+describe('buildReplicaService', () => {
+  it('creates a replica service named <cluster>-replica', () => {
+    const cluster = makeCluster();
+    const svc = buildReplicaService(cluster);
+    expect(svc.metadata?.name).toBe('test-cluster-replica');
+    expect(svc.metadata?.namespace).toBe('default');
+  });
+
+  it('creates a ClusterIP service', () => {
+    const cluster = makeCluster();
+    const svc = buildReplicaService(cluster);
+    expect(svc.spec?.type).toBe('ClusterIP');
+  });
+
+  it('exposes port 3050', () => {
+    const cluster = makeCluster();
+    const svc = buildReplicaService(cluster);
+    expect(svc.spec?.ports?.[0]?.port).toBe(3050);
+  });
+
+  it('sets the database-replica component label', () => {
+    const cluster = makeCluster();
+    const svc = buildReplicaService(cluster);
+    expect(svc.metadata?.labels?.['app.kubernetes.io/component']).toBe('database-replica');
+  });
+
+  it('sets ownerReference pointing to the FirebirdCluster', () => {
+    const cluster = makeCluster();
+    const svc = buildReplicaService(cluster);
+    const ownerRef = svc.metadata?.ownerReferences?.[0];
+    expect(ownerRef?.kind).toBe('FirebirdCluster');
+    expect(ownerRef?.name).toBe('test-cluster');
+    expect(ownerRef?.uid).toBe('test-uid-1234');
+    expect(ownerRef?.controller).toBe(true);
+  });
+
+  it('selects the same pods as the primary service via cluster labels', () => {
+    const cluster = makeCluster();
+    const primarySvc = buildService(cluster);
+    const replicaSvc = buildReplicaService(cluster);
+    expect(replicaSvc.spec?.selector).toEqual(primarySvc.spec?.selector);
   });
 });
