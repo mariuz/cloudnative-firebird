@@ -47,10 +47,10 @@ describe('buildStatefulSet', () => {
   });
 
   it('uses the specified imageName when provided', () => {
-    const cluster = makeCluster({ imageName: 'jacobalberty/firebird:4.0' });
+    const cluster = makeCluster({ imageName: 'firebirdsql/firebird:4.0' });
     const sts = buildStatefulSet(cluster);
     const container = sts.spec?.template?.spec?.containers?.[0];
-    expect(container?.image).toBe('jacobalberty/firebird:4.0');
+    expect(container?.image).toBe('firebirdsql/firebird:4.0');
   });
 
   it('sets the correct number of replicas', () => {
@@ -190,8 +190,8 @@ describe('statefulSetNeedsUpdate', () => {
   });
 
   it('returns true when image differs', () => {
-    const cluster1 = makeCluster({ imageName: 'jacobalberty/firebird:3.0' });
-    const cluster2 = makeCluster({ imageName: 'jacobalberty/firebird:4.0' });
+    const cluster1 = makeCluster({ imageName: 'firebirdsql/firebird:3.0' });
+    const cluster2 = makeCluster({ imageName: 'firebirdsql/firebird:4.0' });
     const sts1 = buildStatefulSet(cluster1);
     const sts2 = buildStatefulSet(cluster2);
     expect(statefulSetNeedsUpdate(sts1, sts2)).toBe(true);

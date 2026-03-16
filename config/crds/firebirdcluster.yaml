@@ -74,7 +74,7 @@ spec:
                 imageName:
                   description: >
                     Full name of the Firebird Docker image to use.
-                    Defaults to jacobalberty/firebird:latest
+                    Defaults to firebirdsql/firebird:latest
                   type: string
                 superuserSecret:
                   description: Reference to the Secret containing the SYSDBA password

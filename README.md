@@ -103,8 +103,8 @@ spec:
   # Number of Firebird instances (required, 1-10)
   instances: 1
 
-  # Docker image (defaults to jacobalberty/firebird:latest)
-  imageName: jacobalberty/firebird:latest
+  # Docker image (defaults to firebirdsql/firebird:latest)
+  imageName: firebirdsql/firebird:latest
 
   # Reference to Secret containing SYSDBA password (key: "password")
   superuserSecret:

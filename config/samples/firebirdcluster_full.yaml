@@ -8,7 +8,7 @@ spec:
   instances: 3
 
   # Specific Firebird version
-  imageName: jacobalberty/firebird:4.0
+  imageName: firebirdsql/firebird:4.0
 
   # Reference to the Secret containing the SYSDBA password
   superuserSecret:
