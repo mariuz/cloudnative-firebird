@@ -63,7 +63,7 @@ export interface FirebirdClusterSpec {
   instances: number;
   /**
    * Docker image name for Firebird.
-   * Defaults to jacobalberty/firebird:latest
+   * Defaults to firebirdsql/firebird:latest
    */
   imageName?: string;
   /** Reference to the Secret containing the superuser password (SYSDBA) */
@@ -145,7 +145,7 @@ export interface FirebirdClusterList {
 }
 
 /** Default Firebird Docker image */
-export const DEFAULT_FIREBIRD_IMAGE = 'jacobalberty/firebird:latest';
+export const DEFAULT_FIREBIRD_IMAGE = 'firebirdsql/firebird:latest';
 
 /** API group for the FirebirdCluster CRD */
 export const API_GROUP = 'firebird.cloudnative-firebird.io';
