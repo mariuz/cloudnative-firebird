@@ -36,15 +36,77 @@ export interface ResourceRequirements {
 }
 
 /**
+ * S3 cloud object storage configuration for database backups.
+ */
+export interface S3BackupConfiguration {
+  /** S3 Endpoint URL (e.g., "https://s3.us-east-1.amazonaws.com" or MinIO endpoint) */
+  endpoint?: string;
+  /** S3 Bucket name for archiving backups */
+  bucket: string;
+  /** AWS/S3 Region (defaults to "us-east-1") */
+  region?: string;
+  /** Reference to Secret containing AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY */
+  secretRef: {
+    name: string;
+  };
+  /** Object key prefix/folder inside bucket */
+  prefix?: string;
+}
+
+/**
  * Backup configuration for a Firebird cluster.
  */
 export interface BackupConfiguration {
   /** Whether backups are enabled */
   enabled: boolean;
+  /**
+   * Backup strategy:
+   * - 'logical': uses gbak tool (defaults to 'logical')
+   * - 'physical': uses nbackup tool
+   */
+  type?: 'logical' | 'physical';
+  /**
+   * nbackup level (for physical backups):
+   * 0: Full physical base backup
+   * 1, 2: Incremental physical backup
+   * Defaults to 0.
+   */
+  level?: 0 | 1 | 2;
   /** Cron schedule for backups (e.g. "0 2 * * *") */
   schedule?: string;
   /** Backup retention policy (e.g. "7d", "30d") */
   retentionPolicy?: string;
+  /** Cloud object storage configuration for backup archive export */
+  s3?: S3BackupConfiguration;
+}
+
+/**
+ * NetworkPolicy configuration for database traffic isolation.
+ */
+export interface NetworkPolicyConfiguration {
+  /** Whether to create a NetworkPolicy for the cluster */
+  enabled: boolean;
+  /** Ingress rules to allow incoming database connections on port 3050 */
+  ingressFrom?: Array<{
+    podSelector?: Record<string, string>;
+    namespaceSelector?: Record<string, string>;
+  }>;
+}
+
+/**
+ * Configuration for the Prometheus exporter sidecar container.
+ */
+export interface ExporterConfiguration {
+  /** Whether to run a Prometheus exporter sidecar container */
+  enabled: boolean;
+  /** Custom Docker image for the exporter container (default: "prom/firebird-exporter:latest") */
+  image?: string;
+  /** Container port for metrics scraping (default: 9108) */
+  port?: number;
+  /** Resource requests and limits for the exporter sidecar */
+  resources?: ResourceRequirements;
+  /** Environment variables for the exporter container */
+  env?: Array<{ name: string; value?: string; valueFrom?: object }>;
 }
 
 /**
@@ -53,6 +115,24 @@ export interface BackupConfiguration {
 export interface MonitoringConfiguration {
   /** Whether to enable Prometheus metrics via PodMonitor */
   enablePodMonitor?: boolean;
+  /** Metrics exporter sidecar configuration */
+  exporter?: ExporterConfiguration;
+}
+
+/**
+ * TLS / WireCrypt security configuration.
+ */
+export interface TLSConfiguration {
+  /** Whether TLS encryption is required/enabled for database connections */
+  enabled: boolean;
+  /** Name of Secret containing server TLS certificate and key (tls.crt, tls.key) */
+  secretName?: string;
+  /** cert-manager Issuer/ClusterIssuer reference for automated TLS certificate issuance */
+  issuerRef?: {
+    name: string;
+    kind?: string;
+    group?: string;
+  };
 }
 
 /**
@@ -72,6 +152,34 @@ export interface ReplicationConfiguration {
 }
 
 /**
+ * AutoSweep configuration for Firebird database transaction garbage collection.
+ */
+export interface AutoSweepConfiguration {
+  /** Whether database sweeping is enabled */
+  enabled: boolean;
+  /** Cron schedule for sweep execution (defaults to "0 3 * * *") */
+  schedule?: string;
+  /** Database file name to sweep (defaults to "mydb.fdb") */
+  databaseName?: string;
+}
+
+/**
+ * Custom firebird.conf settings.
+ */
+export interface FirebirdConfig {
+  /** Key-value settings to project into firebird.conf */
+  settings?: Record<string, string>;
+}
+
+/**
+ * Bootstrap configuration for initializing a new cluster.
+ */
+export interface BootstrapConfiguration {
+  /** Inline DDL/DML SQL script to run on initial database creation */
+  initSql?: string;
+}
+
+/**
  * Specification of a FirebirdCluster resource.
  */
 export interface FirebirdClusterSpec {
@@ -86,22 +194,44 @@ export interface FirebirdClusterSpec {
   superuserSecret?: SuperuserSecretRef;
   /** Storage configuration for the Firebird data files */
   storage: StorageConfiguration;
-  /** Resource requirements for each Firebird instance */
+  /** Resource requirements for each Firebird container */
   resources?: ResourceRequirements;
   /** Backup configuration */
   backup?: BackupConfiguration;
+  /** NetworkPolicy configuration */
+  networkPolicy?: NetworkPolicyConfiguration;
   /** Monitoring configuration */
   monitoring?: MonitoringConfiguration;
   /** Replication configuration */
   replication?: ReplicationConfiguration;
+  /** AutoSweep configuration for periodic gfix database sweeping */
+  autoSweep?: AutoSweepConfiguration;
+  /** Custom firebird.conf configuration settings */
+  config?: FirebirdConfig;
+  /** TLS configuration for client and wire communication encryption */
+  tls?: TLSConfiguration;
+  /** Bootstrap options for initial database creation */
+  bootstrap?: BootstrapConfiguration;
+  /** Whether the operator should suspend reconciliation for this cluster */
+  suspended?: boolean;
   /** Additional environment variables to pass to the Firebird container */
   env?: Array<{ name: string; value?: string; valueFrom?: object }>;
+  /** Node labels required for pod scheduling */
+  nodeSelector?: Record<string, string>;
+  /** Pod affinity and anti-affinity rules */
+  affinity?: object;
+  /** Node taint tolerations */
+  tolerations?: Array<object>;
+  /** Kubernetes Service type (defaults to ClusterIP) */
+  serviceType?: 'ClusterIP' | 'NodePort' | 'LoadBalancer';
+  /** Custom annotations to apply to primary and replica services */
+  serviceAnnotations?: Record<string, string>;
 }
 
 /**
  * Condition types for the FirebirdCluster status.
  */
-export type ConditionType = 'Ready' | 'Progressing' | 'Degraded';
+export type ConditionType = 'Ready' | 'Progressing' | 'Degraded' | 'Paused';
 export type ConditionStatus = 'True' | 'False' | 'Unknown';
 
 /**
@@ -124,7 +254,7 @@ export interface FirebirdClusterStatus {
   /** Number of ready instances */
   readyInstances?: number;
   /** Current phase of the cluster */
-  phase?: 'Creating' | 'Running' | 'Updating' | 'Degraded' | 'Deleting';
+  phase?: 'Creating' | 'Running' | 'Updating' | 'Degraded' | 'Deleting' | 'Paused';
   /** Human-readable message about current status */
   phaseReason?: string;
   /** List of status conditions */

@@ -124,12 +124,67 @@ spec:
                     enabled:
                       description: Whether backups are enabled
                       type: boolean
+                    type:
+                      description: Backup strategy ('logical' via gbak or 'physical' via nbackup)
+                      type: string
+                      enum:
+                        - logical
+                        - physical
+                    level:
+                      description: nbackup physical backup level (0 for full base backup, 1 or 2 for incremental)
+                      type: integer
+                      minimum: 0
+                      maximum: 2
                     schedule:
                       description: Cron schedule for backups (e.g. "0 2 * * *")
                       type: string
                     retentionPolicy:
                       description: Backup retention policy (e.g. "7d")
                       type: string
+                    s3:
+                      description: Cloud object storage configuration for backup archive export
+                      type: object
+                      required:
+                        - bucket
+                        - secretRef
+                      properties:
+                        endpoint:
+                          type: string
+                        bucket:
+                          type: string
+                        region:
+                          type: string
+                        prefix:
+                          type: string
+                        secretRef:
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
+                networkPolicy:
+                  description: NetworkPolicy configuration for database isolation
+                  type: object
+                  required:
+                    - enabled
+                  properties:
+                    enabled:
+                      description: Whether to enable NetworkPolicy for port 3050
+                      type: boolean
+                    ingressFrom:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          podSelector:
+                            type: object
+                            additionalProperties:
+                              type: string
+                          namespaceSelector:
+                            type: object
+                            additionalProperties:
+                              type: string
                 monitoring:
                   description: Monitoring configuration
                   type: object
@@ -137,6 +192,50 @@ spec:
                     enablePodMonitor:
                       description: Whether to enable Prometheus PodMonitor
                       type: boolean
+                    exporter:
+                      description: Prometheus exporter sidecar configuration
+                      type: object
+                      required:
+                        - enabled
+                      properties:
+                        enabled:
+                          type: boolean
+                        image:
+                          type: string
+                        port:
+                          type: integer
+                          minimum: 1024
+                          maximum: 65535
+                        resources:
+                          type: object
+                        env:
+                          type: array
+                          items:
+                            type: object
+                tls:
+                  description: TLS / WireCrypt security configuration
+                  type: object
+                  required:
+                    - enabled
+                  properties:
+                    enabled:
+                      description: Whether TLS encryption is required for database connections
+                      type: boolean
+                    secretName:
+                      description: Secret containing server TLS certificate and key
+                      type: string
+                    issuerRef:
+                      description: cert-manager Issuer reference for automated TLS certificate issuance
+                      type: object
+                      required:
+                        - name
+                      properties:
+                        name:
+                          type: string
+                        kind:
+                          type: string
+                        group:
+                          type: string
                 replication:
                   description: Replication configuration (requires Firebird 4.0+)
                   type: object
@@ -155,6 +254,36 @@ spec:
                       enum:
                         - sync
                         - async
+                autoSweep:
+                  description: AutoSweep configuration for periodic gfix database sweeping
+                  type: object
+                  required:
+                    - enabled
+                  properties:
+                    enabled:
+                      description: Whether database sweeping is enabled
+                      type: boolean
+                    schedule:
+                      description: Cron schedule for sweep execution (defaults to "0 3 * * *")
+                      type: string
+                    databaseName:
+                      description: Database file name to sweep (defaults to "mydb.fdb")
+                      type: string
+                config:
+                  description: Custom firebird.conf configuration settings
+                  type: object
+                  properties:
+                    settings:
+                      type: object
+                      additionalProperties:
+                        type: string
+                bootstrap:
+                  description: Bootstrap options for initial database creation
+                  type: object
+                  properties:
+                    initSql:
+                      description: Inline DDL/DML SQL script to run on initial database creation
+                      type: string
                 env:
                   description: Additional environment variables for the Firebird container
                   type: array
@@ -170,6 +299,36 @@ spec:
                       valueFrom:
                         type: object
                         x-kubernetes-preserve-unknown-fields: true
+                nodeSelector:
+                  description: Node labels required for pod scheduling
+                  type: object
+                  additionalProperties:
+                    type: string
+                affinity:
+                  description: Pod affinity and anti-affinity rules
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                tolerations:
+                  description: Node taint tolerations
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                serviceType:
+                  description: Kubernetes Service type (ClusterIP, NodePort, LoadBalancer)
+                  type: string
+                  enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                suspended:
+                  description: Whether reconciliation is suspended for this cluster
+                  type: boolean
+                serviceAnnotations:
+                  description: Custom annotations to apply to primary and replica services
+                  type: object
+                  additionalProperties:
+                    type: string
             status:
               description: FirebirdClusterStatus defines the observed state of a FirebirdCluster
               type: object
@@ -189,6 +348,7 @@ spec:
                     - Updating
                     - Degraded
                     - Deleting
+                    - Paused
                 phaseReason:
                   description: Human-readable message about the current phase
                   type: string

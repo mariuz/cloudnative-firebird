@@ -2,6 +2,7 @@ import { KubeConfig, Watch } from '@kubernetes/client-node';
 import { logger } from './utils/logger';
 import { HealthServer } from './utils/health';
 import { FirebirdClusterController } from './controllers/firebirdcluster.controller';
+import { FirebirdBackupController } from './controllers/backup.controller';
 import {
   API_GROUP,
   API_VERSION,
@@ -15,13 +16,16 @@ import {
 export class Operator {
   private readonly kubeConfig: KubeConfig;
   private readonly controller: FirebirdClusterController;
+  private readonly backupController: FirebirdBackupController;
   private readonly watch: Watch;
   private readonly healthServer: HealthServer;
   private watchRequest: { abort: () => void } | null = null;
+  private watchTimer: NodeJS.Timeout | null = null;
 
   constructor(kubeConfig: KubeConfig, healthPort = 8080) {
     this.kubeConfig = kubeConfig;
     this.controller = new FirebirdClusterController(kubeConfig);
+    this.backupController = new FirebirdBackupController(kubeConfig);
     this.watch = new Watch(kubeConfig);
     this.healthServer = new HealthServer(healthPort);
   }
@@ -43,6 +47,10 @@ export class Operator {
     this.healthServer.setReady(false);
     this.watchRequest?.abort();
     this.watchRequest = null;
+    if (this.watchTimer) {
+      clearTimeout(this.watchTimer);
+      this.watchTimer = null;
+    }
     this.healthServer.stop();
   }
 
@@ -68,7 +76,8 @@ export class Operator {
               logger.info('Watch stream ended gracefully, restarting');
             }
             // Restart the watch after a short delay
-            setTimeout(() => {
+            if (this.watchTimer) clearTimeout(this.watchTimer);
+            this.watchTimer = setTimeout(() => {
               restartWatch().catch((restartErr) => {
                 logger.error({ err: restartErr }, 'Failed to restart watch');
               });
@@ -77,7 +86,8 @@ export class Operator {
         );
       } catch (err) {
         logger.error({ err }, 'Failed to start watch, retrying in 10s');
-        setTimeout(() => {
+        if (this.watchTimer) clearTimeout(this.watchTimer);
+        this.watchTimer = setTimeout(() => {
           restartWatch().catch((retryErr) => {
             logger.error({ err: retryErr }, 'Failed to restart watch after error');
           });

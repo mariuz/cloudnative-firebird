@@ -1,18 +1,7 @@
-// Mock the ESM-only @kubernetes/client-node package before any imports
-jest.mock('@kubernetes/client-node', () => {
-  const makeApiClient = jest.fn();
-  class KubeConfig {
-    makeApiClient = makeApiClient;
-  }
-  class AppsV1Api {}
-  class CoreV1Api {}
-  class CustomObjectsApi {}
-  return { KubeConfig, AppsV1Api, CoreV1Api, CustomObjectsApi };
-});
-
+import { describe, it, expect, vi, type Mock } from 'vitest';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
 import { FirebirdCluster } from '../src/types';
-import { AppsV1Api, CoreV1Api, CustomObjectsApi, KubeConfig } from '@kubernetes/client-node';
+import { AppsV1Api, BatchV1Api, CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, PolicyV1Api } from '@kubernetes/client-node';
 
 /** Shape of arguments passed to createNamespacedService mock calls */
 type CreateServiceCall = [{ namespace: string; body: { metadata?: { name?: string; labels?: Record<string, string>; ownerReferences?: Array<{ kind?: string; uid?: string }> } } }];
@@ -40,19 +29,47 @@ const notFoundError = Object.assign(new Error('Not Found'), { statusCode: 404 })
 
 // Build a mock KubeConfig whose makeApiClient returns controllable fakes
 function makeMockKubeConfig({
-  readNamespacedServiceImpl = jest.fn().mockRejectedValue(notFoundError),
-  createNamespacedServiceImpl = jest.fn().mockResolvedValue({}),
-  readNamespacedStatefulSetImpl = jest.fn().mockRejectedValue(notFoundError),
-  createNamespacedStatefulSetImpl = jest.fn().mockResolvedValue({}),
-  patchNamespacedStatefulSetImpl = jest.fn().mockResolvedValue({}),
-  patchNamespacedCustomObjectStatusImpl = jest.fn().mockResolvedValue({}),
+  readNamespacedServiceImpl = vi.fn().mockRejectedValue(notFoundError),
+  createNamespacedServiceImpl = vi.fn().mockResolvedValue({}),
+  readNamespacedStatefulSetImpl = vi.fn().mockRejectedValue(notFoundError),
+  createNamespacedStatefulSetImpl = vi.fn().mockImplementation(async ({ body }: { body?: { spec?: { replicas?: number } } }) => ({
+    ...body,
+    status: { readyReplicas: body?.spec?.replicas ?? 1 },
+  })),
+  patchNamespacedStatefulSetImpl = vi.fn().mockImplementation(async ({ body }: { body?: { spec?: { replicas?: number } } }) => ({
+    ...body,
+    status: { readyReplicas: body?.spec?.replicas ?? 1 },
+  })),
+  readNamespacedCronJobImpl = vi.fn().mockRejectedValue(notFoundError),
+  createNamespacedCronJobImpl = vi.fn().mockResolvedValue({}),
+  patchNamespacedCronJobImpl = vi.fn().mockResolvedValue({}),
+  deleteNamespacedCronJobImpl = vi.fn().mockResolvedValue({}),
+  getNamespacedCustomObjectImpl = vi.fn().mockRejectedValue(notFoundError),
+  createNamespacedCustomObjectImpl = vi.fn().mockResolvedValue({}),
+  deleteNamespacedCustomObjectImpl = vi.fn().mockResolvedValue({}),
+  patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({}),
+  readNamespacedPodDisruptionBudgetImpl = vi.fn().mockRejectedValue(notFoundError),
+  createNamespacedPodDisruptionBudgetImpl = vi.fn().mockResolvedValue({}),
+  patchNamespacedPodDisruptionBudgetImpl = vi.fn().mockResolvedValue({}),
+  deleteNamespacedPodDisruptionBudgetImpl = vi.fn().mockResolvedValue({}),
 }: {
-  readNamespacedServiceImpl?: jest.Mock;
-  createNamespacedServiceImpl?: jest.Mock;
-  readNamespacedStatefulSetImpl?: jest.Mock;
-  createNamespacedStatefulSetImpl?: jest.Mock;
-  patchNamespacedStatefulSetImpl?: jest.Mock;
-  patchNamespacedCustomObjectStatusImpl?: jest.Mock;
+  readNamespacedServiceImpl?: Mock;
+  createNamespacedServiceImpl?: Mock;
+  readNamespacedStatefulSetImpl?: Mock;
+  createNamespacedStatefulSetImpl?: Mock;
+  patchNamespacedStatefulSetImpl?: Mock;
+  readNamespacedCronJobImpl?: Mock;
+  createNamespacedCronJobImpl?: Mock;
+  patchNamespacedCronJobImpl?: Mock;
+  deleteNamespacedCronJobImpl?: Mock;
+  getNamespacedCustomObjectImpl?: Mock;
+  createNamespacedCustomObjectImpl?: Mock;
+  deleteNamespacedCustomObjectImpl?: Mock;
+  patchNamespacedCustomObjectStatusImpl?: Mock;
+  readNamespacedPodDisruptionBudgetImpl?: Mock;
+  createNamespacedPodDisruptionBudgetImpl?: Mock;
+  patchNamespacedPodDisruptionBudgetImpl?: Mock;
+  deleteNamespacedPodDisruptionBudgetImpl?: Mock;
 } = {}) {
   const mockCoreApi = {
     readNamespacedService: readNamespacedServiceImpl,
@@ -65,23 +82,50 @@ function makeMockKubeConfig({
     patchNamespacedStatefulSet: patchNamespacedStatefulSetImpl,
   };
 
+  const mockBatchApi = {
+    readNamespacedCronJob: readNamespacedCronJobImpl,
+    createNamespacedCronJob: createNamespacedCronJobImpl,
+    patchNamespacedCronJob: patchNamespacedCronJobImpl,
+    deleteNamespacedCronJob: deleteNamespacedCronJobImpl,
+  };
+
   const mockCustomApi = {
+    getNamespacedCustomObject: getNamespacedCustomObjectImpl,
+    createNamespacedCustomObject: createNamespacedCustomObjectImpl,
+    deleteNamespacedCustomObject: deleteNamespacedCustomObjectImpl,
     patchNamespacedCustomObjectStatus: patchNamespacedCustomObjectStatusImpl,
   };
 
+  const mockPolicyApi = {
+    readNamespacedPodDisruptionBudget: readNamespacedPodDisruptionBudgetImpl,
+    createNamespacedPodDisruptionBudget: createNamespacedPodDisruptionBudgetImpl,
+    patchNamespacedPodDisruptionBudget: patchNamespacedPodDisruptionBudgetImpl,
+    deleteNamespacedPodDisruptionBudget: deleteNamespacedPodDisruptionBudgetImpl,
+  };
+
+  const mockCoordinationApi = {
+    readNamespacedLease: vi.fn().mockRejectedValue(notFoundError),
+    createNamespacedLease: vi.fn().mockResolvedValue({}),
+  };
+
   const mockKubeConfig = new KubeConfig();
-  (mockKubeConfig.makeApiClient as jest.Mock).mockImplementation((ApiType: unknown) => {
-    if (ApiType === CoreV1Api) return mockCoreApi;
-    if (ApiType === AppsV1Api) return mockAppsApi;
-    if (ApiType === CustomObjectsApi) return mockCustomApi;
-    return {};
+  vi.spyOn(mockKubeConfig, 'makeApiClient').mockImplementation((ApiType: unknown) => {
+    if (ApiType === CoreV1Api) return mockCoreApi as unknown as CoreV1Api;
+    if (ApiType === AppsV1Api) return mockAppsApi as unknown as AppsV1Api;
+    if (ApiType === BatchV1Api) return mockBatchApi as unknown as BatchV1Api;
+    if (ApiType === CustomObjectsApi) return mockCustomApi as unknown as CustomObjectsApi;
+    if (ApiType === PolicyV1Api) return mockPolicyApi as unknown as PolicyV1Api;
+    if (ApiType === CoordinationV1Api) return mockCoordinationApi as unknown as CoordinationV1Api;
+    return {} as unknown as CoreV1Api;
   });
 
   return {
     mockKubeConfig,
     mockCoreApi,
     mockAppsApi,
+    mockBatchApi,
     mockCustomApi,
+    mockPolicyApi,
   };
 }
 
@@ -94,8 +138,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      // Expect a service named "test-cluster-replica" to be created
-      const createdNames = (mockCoreApi.createNamespacedService as jest.Mock).mock.calls.map(
+      const createdNames = (mockCoreApi.createNamespacedService as Mock).mock.calls.map(
         (call: CreateServiceCall) => call[0].body?.metadata?.name,
       );
       expect(createdNames).toContain('test-cluster-replica');
@@ -108,7 +151,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const createdNames = (mockCoreApi.createNamespacedService as jest.Mock).mock.calls.map(
+      const createdNames = (mockCoreApi.createNamespacedService as Mock).mock.calls.map(
         (call: CreateServiceCall) => call[0].body?.metadata?.name,
       );
       expect(createdNames).toContain('test-cluster-headless');
@@ -123,15 +166,15 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const readCalls = (mockCoreApi.readNamespacedService as jest.Mock).mock.calls.map(
+      const readCalls = (mockCoreApi.readNamespacedService as Mock).mock.calls.map(
         (call: ReadServiceCall) => call[0].name,
       );
       expect(readCalls).toContain('test-cluster-replica');
     });
 
     it('does not create the replica service when it already exists', async () => {
-      const readNamespacedServiceImpl = jest.fn().mockResolvedValue({}); // all services exist
-      const createNamespacedServiceImpl = jest.fn().mockResolvedValue({});
+      const readNamespacedServiceImpl = vi.fn().mockResolvedValue({}); // all services exist
+      const createNamespacedServiceImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockCoreApi } = makeMockKubeConfig({
         readNamespacedServiceImpl,
         createNamespacedServiceImpl,
@@ -141,14 +184,14 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const createdNames = (mockCoreApi.createNamespacedService as jest.Mock).mock.calls.map(
+      const createdNames = (mockCoreApi.createNamespacedService as Mock).mock.calls.map(
         (call: CreateServiceCall) => call[0].body?.metadata?.name,
       );
       expect(createdNames).not.toContain('test-cluster-replica');
     });
 
     it('creates a StatefulSet with FIREBIRD_REPLICATION_ENABLED=true', async () => {
-      const createNamespacedStatefulSetImpl = jest.fn().mockResolvedValue({});
+      const createNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
         createNamespacedStatefulSetImpl,
       });
@@ -157,7 +200,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const createdSts = (mockAppsApi.createNamespacedStatefulSet as jest.Mock).mock.calls[0][0]
+      const createdSts = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0]
         .body;
       const container = createdSts.spec?.template?.spec?.containers?.[0];
       const replicationEnv = container?.env?.find(
@@ -167,7 +210,7 @@ describe('FirebirdClusterController – replication integration', () => {
     });
 
     it('creates a StatefulSet with FIREBIRD_REPLICATION_MODE=async by default', async () => {
-      const createNamespacedStatefulSetImpl = jest.fn().mockResolvedValue({});
+      const createNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
         createNamespacedStatefulSetImpl,
       });
@@ -176,7 +219,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const createdSts = (mockAppsApi.createNamespacedStatefulSet as jest.Mock).mock.calls[0][0]
+      const createdSts = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0]
         .body;
       const container = createdSts.spec?.template?.spec?.containers?.[0];
       const modeEnv = container?.env?.find(
@@ -186,7 +229,7 @@ describe('FirebirdClusterController – replication integration', () => {
     });
 
     it('creates a StatefulSet with FIREBIRD_REPLICATION_MODE=sync when mode is sync', async () => {
-      const createNamespacedStatefulSetImpl = jest.fn().mockResolvedValue({});
+      const createNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
         createNamespacedStatefulSetImpl,
       });
@@ -195,7 +238,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const createdSts = (mockAppsApi.createNamespacedStatefulSet as jest.Mock).mock.calls[0][0]
+      const createdSts = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0]
         .body;
       const container = createdSts.spec?.template?.spec?.containers?.[0];
       const modeEnv = container?.env?.find(
@@ -205,7 +248,7 @@ describe('FirebirdClusterController – replication integration', () => {
     });
 
     it('creates a StatefulSet with FIREBIRD_REPLICATION_MODE=async when mode is explicitly async', async () => {
-      const createNamespacedStatefulSetImpl = jest.fn().mockResolvedValue({});
+      const createNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
         createNamespacedStatefulSetImpl,
       });
@@ -214,7 +257,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const createdSts = (mockAppsApi.createNamespacedStatefulSet as jest.Mock).mock.calls[0][0]
+      const createdSts = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0]
         .body;
       const container = createdSts.spec?.template?.spec?.containers?.[0];
       const modeEnv = container?.env?.find(
@@ -224,7 +267,7 @@ describe('FirebirdClusterController – replication integration', () => {
     });
 
     it('updates status to Running after successful reconciliation with replication', async () => {
-      const patchNamespacedCustomObjectStatusImpl = jest.fn().mockResolvedValue({});
+      const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockCustomApi } = makeMockKubeConfig({
         patchNamespacedCustomObjectStatusImpl,
       });
@@ -233,7 +276,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const patchCalls = (mockCustomApi.patchNamespacedCustomObjectStatus as jest.Mock).mock.calls;
+      const patchCalls = (mockCustomApi.patchNamespacedCustomObjectStatus as Mock).mock.calls;
       const lastPatch = patchCalls[patchCalls.length - 1][0];
       const patchedStatus = lastPatch.body[0].value;
       expect(patchedStatus.phase).toBe('Running');
@@ -248,7 +291,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const createdNames = (mockCoreApi.createNamespacedService as jest.Mock).mock.calls.map(
+      const createdNames = (mockCoreApi.createNamespacedService as Mock).mock.calls.map(
         (call: CreateServiceCall) => call[0].body?.metadata?.name,
       );
       expect(createdNames).not.toContain('test-cluster-replica');
@@ -261,7 +304,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const createdNames = (mockCoreApi.createNamespacedService as jest.Mock).mock.calls.map(
+      const createdNames = (mockCoreApi.createNamespacedService as Mock).mock.calls.map(
         (call: CreateServiceCall) => call[0].body?.metadata?.name,
       );
       expect(createdNames).not.toContain('test-cluster-replica');
@@ -274,7 +317,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const readNames = (mockCoreApi.readNamespacedService as jest.Mock).mock.calls.map(
+      const readNames = (mockCoreApi.readNamespacedService as Mock).mock.calls.map(
         (call: ReadServiceCall) => call[0].name,
       );
       expect(readNames).not.toContain('test-cluster-replica');
@@ -287,7 +330,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const createdNames = (mockCoreApi.createNamespacedService as jest.Mock).mock.calls.map(
+      const createdNames = (mockCoreApi.createNamespacedService as Mock).mock.calls.map(
         (call: CreateServiceCall) => call[0].body?.metadata?.name,
       );
       expect(createdNames).toContain('test-cluster-headless');
@@ -295,7 +338,7 @@ describe('FirebirdClusterController – replication integration', () => {
     });
 
     it('does not inject replication env vars when replication is disabled', async () => {
-      const createNamespacedStatefulSetImpl = jest.fn().mockResolvedValue({});
+      const createNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
         createNamespacedStatefulSetImpl,
       });
@@ -304,7 +347,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const createdSts = (mockAppsApi.createNamespacedStatefulSet as jest.Mock).mock.calls[0][0]
+      const createdSts = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0]
         .body;
       const container = createdSts.spec?.template?.spec?.containers?.[0];
       const replicationEnv = container?.env?.find(
@@ -314,7 +357,7 @@ describe('FirebirdClusterController – replication integration', () => {
     });
 
     it('updates status to Running after successful reconciliation without replication', async () => {
-      const patchNamespacedCustomObjectStatusImpl = jest.fn().mockResolvedValue({});
+      const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockCustomApi } = makeMockKubeConfig({
         patchNamespacedCustomObjectStatusImpl,
       });
@@ -323,7 +366,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const patchCalls = (mockCustomApi.patchNamespacedCustomObjectStatus as jest.Mock).mock.calls;
+      const patchCalls = (mockCustomApi.patchNamespacedCustomObjectStatus as Mock).mock.calls;
       const lastPatch = patchCalls[patchCalls.length - 1][0];
       const patchedStatus = lastPatch.body[0].value;
       expect(patchedStatus.phase).toBe('Running');
@@ -333,7 +376,7 @@ describe('FirebirdClusterController – replication integration', () => {
   describe('reconcile() error handling with replication', () => {
     it('throws and sets Degraded status when replica service creation fails', async () => {
       const replicaCreateError = new Error('replica service creation failed');
-      const createNamespacedServiceImpl = jest.fn().mockImplementation(
+      const createNamespacedServiceImpl = vi.fn().mockImplementation(
         ({ body }: { body: { metadata?: { name?: string } } }) => {
           if (body?.metadata?.name === 'test-cluster-replica') {
             return Promise.reject(replicaCreateError);
@@ -341,7 +384,7 @@ describe('FirebirdClusterController – replication integration', () => {
           return Promise.resolve({});
         },
       );
-      const patchNamespacedCustomObjectStatusImpl = jest.fn().mockResolvedValue({});
+      const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
 
       const { mockKubeConfig, mockCustomApi } = makeMockKubeConfig({
         createNamespacedServiceImpl,
@@ -354,7 +397,7 @@ describe('FirebirdClusterController – replication integration', () => {
         'replica service creation failed',
       );
 
-      const patchCalls = (mockCustomApi.patchNamespacedCustomObjectStatus as jest.Mock).mock.calls;
+      const patchCalls = (mockCustomApi.patchNamespacedCustomObjectStatus as Mock).mock.calls;
       const degradedPatch = patchCalls.find(
         (call: [{ body: Array<{ value: { phase?: string } }> }]) =>
           call[0].body[0].value.phase === 'Degraded',
@@ -363,7 +406,7 @@ describe('FirebirdClusterController – replication integration', () => {
     });
 
     it('sets status to Creating at the start of reconciliation', async () => {
-      const patchNamespacedCustomObjectStatusImpl = jest.fn().mockResolvedValue({});
+      const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockCustomApi } = makeMockKubeConfig({
         patchNamespacedCustomObjectStatusImpl,
       });
@@ -373,7 +416,7 @@ describe('FirebirdClusterController – replication integration', () => {
       await controller.reconcile(cluster);
 
       const firstPatch = (
-        mockCustomApi.patchNamespacedCustomObjectStatus as jest.Mock
+        mockCustomApi.patchNamespacedCustomObjectStatus as Mock
       ).mock.calls[0][0];
       expect(firstPatch.body[0].value.phase).toBe('Creating');
     });
@@ -391,8 +434,8 @@ describe('FirebirdClusterController – replication integration', () => {
           },
         },
       };
-      const readNamespacedStatefulSetImpl = jest.fn().mockResolvedValue(outdatedSts);
-      const patchNamespacedStatefulSetImpl = jest.fn().mockResolvedValue({});
+      const readNamespacedStatefulSetImpl = vi.fn().mockResolvedValue(outdatedSts);
+      const patchNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
 
       const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
         readNamespacedStatefulSetImpl,
@@ -407,14 +450,14 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      expect(mockAppsApi.patchNamespacedStatefulSet as jest.Mock).toHaveBeenCalledTimes(1);
+      expect(mockAppsApi.patchNamespacedStatefulSet as Mock).toHaveBeenCalledTimes(1);
     });
 
     it('does not patch the StatefulSet when it is already up to date', async () => {
-      const createNamespacedStatefulSetImpl = jest.fn().mockResolvedValue({});
+      const createNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
       // Simulate StatefulSet not existing (404) so it gets created, not patched
-      const readNamespacedStatefulSetImpl = jest.fn().mockRejectedValue(notFoundError);
-      const patchNamespacedStatefulSetImpl = jest.fn().mockResolvedValue({});
+      const readNamespacedStatefulSetImpl = vi.fn().mockRejectedValue(notFoundError);
+      const patchNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
 
       const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
         readNamespacedStatefulSetImpl,
@@ -426,14 +469,14 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      expect(mockAppsApi.patchNamespacedStatefulSet as jest.Mock).not.toHaveBeenCalled();
-      expect(mockAppsApi.createNamespacedStatefulSet as jest.Mock).toHaveBeenCalledTimes(1);
+      expect(mockAppsApi.patchNamespacedStatefulSet as Mock).not.toHaveBeenCalled();
+      expect(mockAppsApi.createNamespacedStatefulSet as Mock).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('reconcile() replica service has correct shape', () => {
     it('creates replica service in the correct namespace', async () => {
-      const createNamespacedServiceImpl = jest.fn().mockResolvedValue({});
+      const createNamespacedServiceImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockCoreApi } = makeMockKubeConfig({
         createNamespacedServiceImpl,
       });
@@ -442,7 +485,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const replicaCreate = (mockCoreApi.createNamespacedService as jest.Mock).mock.calls.find(
+      const replicaCreate = (mockCoreApi.createNamespacedService as Mock).mock.calls.find(
         (call: CreateServiceCall) =>
           call[0].body?.metadata?.name === 'test-cluster-replica',
       );
@@ -451,7 +494,7 @@ describe('FirebirdClusterController – replication integration', () => {
     });
 
     it('creates replica service with database-replica component label', async () => {
-      const createNamespacedServiceImpl = jest.fn().mockResolvedValue({});
+      const createNamespacedServiceImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockCoreApi } = makeMockKubeConfig({
         createNamespacedServiceImpl,
       });
@@ -460,7 +503,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const replicaCreate = (mockCoreApi.createNamespacedService as jest.Mock).mock.calls.find(
+      const replicaCreate = (mockCoreApi.createNamespacedService as Mock).mock.calls.find(
         (call: CreateServiceCall) =>
           call[0].body?.metadata?.name === 'test-cluster-replica',
       );
@@ -470,7 +513,7 @@ describe('FirebirdClusterController – replication integration', () => {
     });
 
     it('creates replica service with ownerReference pointing to the FirebirdCluster', async () => {
-      const createNamespacedServiceImpl = jest.fn().mockResolvedValue({});
+      const createNamespacedServiceImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockCoreApi } = makeMockKubeConfig({
         createNamespacedServiceImpl,
       });
@@ -479,7 +522,7 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const replicaCreate = (mockCoreApi.createNamespacedService as jest.Mock).mock.calls.find(
+      const replicaCreate = (mockCoreApi.createNamespacedService as Mock).mock.calls.find(
         (call: CreateServiceCall) => call[0].body?.metadata?.name === 'test-cluster-replica',
       );
       const ownerRef = replicaCreate[0].body?.metadata?.ownerReferences?.[0];

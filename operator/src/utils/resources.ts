@@ -1,6 +1,17 @@
-import { V1StatefulSet, V1Service } from '@kubernetes/client-node';
+import {
+  V1StatefulSet,
+  V1Service,
+  V1CronJob,
+  V1Job,
+  V1Lease,
+  V1PodDisruptionBudget,
+  V1ConfigMap,
+  V1NetworkPolicy,
+} from '@kubernetes/client-node';
 import {
   FirebirdCluster,
+  FirebirdBackup,
+  FirebirdRestore,
   DEFAULT_FIREBIRD_IMAGE,
   API_GROUP,
   RESOURCE_KIND,
@@ -61,6 +72,107 @@ export function buildStatefulSet(cluster: FirebirdCluster): V1StatefulSet {
     ...(spec.env ?? []),
   ];
 
+  const containers = [
+    {
+      name: 'firebird',
+      image,
+      ports: [
+        {
+          name: 'firebird',
+          containerPort: 3050,
+          protocol: 'TCP',
+        },
+      ],
+      env,
+      resources: spec.resources,
+      volumeMounts: [
+        {
+          name: 'firebird-data',
+          mountPath: '/firebird/data',
+        },
+        ...(spec.config?.settings
+          ? [
+              {
+                name: 'cluster-config',
+                mountPath: '/firebird/etc/firebird.conf',
+                subPath: 'firebird.conf',
+              },
+            ]
+          : []),
+        ...(spec.bootstrap?.initSql
+          ? [
+              {
+                name: 'cluster-config',
+                mountPath: '/docker-entrypoint-initdb.d/init.sql',
+                subPath: 'init.sql',
+              },
+            ]
+          : []),
+        ...(spec.tls?.enabled
+          ? [
+              {
+                name: 'tls-cert',
+                mountPath: '/firebird/etc/tls',
+                readOnly: true,
+              },
+            ]
+          : []),
+      ],
+      livenessProbe: {
+        tcpSocket: { port: 3050 },
+        initialDelaySeconds: 30,
+        periodSeconds: 10,
+        failureThreshold: 5,
+      },
+      readinessProbe: {
+        tcpSocket: { port: 3050 },
+        initialDelaySeconds: 15,
+        periodSeconds: 5,
+        failureThreshold: 3,
+      },
+    },
+    ...(spec.monitoring?.exporter?.enabled
+      ? [
+          {
+            name: 'firebird-exporter',
+            image: spec.monitoring.exporter.image ?? 'prom/firebird-exporter:latest',
+            ports: [
+              {
+                name: 'metrics',
+                containerPort: spec.monitoring.exporter.port ?? 9108,
+                protocol: 'TCP',
+              },
+            ],
+            ...(spec.monitoring.exporter.resources ? { resources: spec.monitoring.exporter.resources } : {}),
+            ...(spec.monitoring.exporter.env ? { env: spec.monitoring.exporter.env } : {}),
+          },
+        ]
+      : []),
+  ];
+
+  const volumes = [
+    ...(spec.config?.settings || spec.bootstrap?.initSql
+      ? [
+          {
+            name: 'cluster-config',
+            configMap: {
+              name: `${name}-config`,
+            },
+          },
+        ]
+      : []),
+    ...(spec.tls?.enabled
+      ? [
+          {
+            name: 'tls-cert',
+            secret: {
+              secretName: spec.tls.secretName ?? `${name}-tls`,
+            },
+          },
+        ]
+      : []),
+  ];
+
   const statefulSet: V1StatefulSet = {
     apiVersion: 'apps/v1',
     kind: 'StatefulSet',
@@ -94,39 +206,11 @@ export function buildStatefulSet(cluster: FirebirdCluster): V1StatefulSet {
           securityContext: {
             fsGroup: 999,
           },
-          containers: [
-            {
-              name: 'firebird',
-              image,
-              ports: [
-                {
-                  name: 'firebird',
-                  containerPort: 3050,
-                  protocol: 'TCP',
-                },
-              ],
-              env,
-              resources: spec.resources,
-              volumeMounts: [
-                {
-                  name: 'firebird-data',
-                  mountPath: '/firebird/data',
-                },
-              ],
-              livenessProbe: {
-                tcpSocket: { port: 3050 },
-                initialDelaySeconds: 30,
-                periodSeconds: 10,
-                failureThreshold: 5,
-              },
-              readinessProbe: {
-                tcpSocket: { port: 3050 },
-                initialDelaySeconds: 15,
-                periodSeconds: 5,
-                failureThreshold: 3,
-              },
-            },
-          ],
+          ...(spec.nodeSelector ? { nodeSelector: spec.nodeSelector } : {}),
+          ...(spec.affinity ? { affinity: spec.affinity } : {}),
+          ...(spec.tolerations ? { tolerations: spec.tolerations } : {}),
+          containers,
+          ...(volumes.length > 0 ? { volumes } : {}),
         },
       },
       volumeClaimTemplates: [
@@ -167,6 +251,7 @@ export function buildService(cluster: FirebirdCluster): V1Service {
       name,
       namespace,
       labels,
+      ...(cluster.spec.serviceAnnotations ? { annotations: cluster.spec.serviceAnnotations } : {}),
       ownerReferences: [
         {
           apiVersion: `${API_GROUP}/v1`,
@@ -179,7 +264,7 @@ export function buildService(cluster: FirebirdCluster): V1Service {
       ],
     },
     spec: {
-      type: 'ClusterIP',
+      type: cluster.spec.serviceType ?? 'ClusterIP',
       selector: labels,
       ports: [
         {
@@ -263,6 +348,7 @@ export function buildReplicaService(cluster: FirebirdCluster): V1Service {
         ...labels,
         'app.kubernetes.io/component': 'database-replica',
       },
+      ...(cluster.spec.serviceAnnotations ? { annotations: cluster.spec.serviceAnnotations } : {}),
       ownerReferences: [
         {
           apiVersion: `${API_GROUP}/v1`,
@@ -275,7 +361,7 @@ export function buildReplicaService(cluster: FirebirdCluster): V1Service {
       ],
     },
     spec: {
-      type: 'ClusterIP',
+      type: cluster.spec.serviceType ?? 'ClusterIP',
       selector: labels,
       ports: [
         {
@@ -306,11 +392,754 @@ export function statefulSetNeedsUpdate(
 
   if (existingSpec.replicas !== desiredSpec.replicas) return true;
 
-  const existingContainer = existingSpec.template?.spec?.containers?.[0];
-  const desiredContainer = desiredSpec.template?.spec?.containers?.[0];
+  const existingPodSpec = existingSpec.template?.spec;
+  const desiredPodSpec = desiredSpec.template?.spec;
+  if (!existingPodSpec || !desiredPodSpec) return true;
+
+  if (JSON.stringify(existingPodSpec.nodeSelector) !== JSON.stringify(desiredPodSpec.nodeSelector)) return true;
+  if (JSON.stringify(existingPodSpec.affinity) !== JSON.stringify(desiredPodSpec.affinity)) return true;
+  if (JSON.stringify(existingPodSpec.tolerations) !== JSON.stringify(desiredPodSpec.tolerations)) return true;
+
+  const existingContainer = existingPodSpec.containers?.[0];
+  const desiredContainer = desiredPodSpec.containers?.[0];
 
   if (!existingContainer || !desiredContainer) return true;
   if (existingContainer.image !== desiredContainer.image) return true;
+  if (JSON.stringify(existingContainer.resources) !== JSON.stringify(desiredContainer.resources)) return true;
+  if (JSON.stringify(existingContainer.env) !== JSON.stringify(desiredContainer.env)) return true;
 
   return false;
 }
+
+/**
+ * Builds the CronJob resource for Firebird cluster backups.
+ */
+export function buildBackupCronJob(cluster: FirebirdCluster): V1CronJob {
+  const { name, namespace = 'default' } = cluster.metadata;
+  const spec = cluster.spec;
+  const backup = spec.backup;
+  const schedule = backup?.schedule ?? '0 2 * * *';
+  const image = spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const labels = {
+    ...clusterLabels(name),
+    'app.kubernetes.io/component': 'backup',
+  };
+
+  const backupType = backup?.type ?? 'logical';
+  const nbackupLevel = backup?.level ?? 0;
+  const backupFileName =
+    backupType === 'physical'
+      ? `nbackup-lvl${nbackupLevel}-\$(date +%Y%m%d%H%M%S).nbk`
+      : `backup-\$(date +%Y%m%d%H%M%S).fbk`;
+
+  const baseCmd =
+    backupType === 'physical'
+      ? `nbackup -L ${nbackupLevel} -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/mydb.fdb /firebird/data/${backupFileName}`
+      : `gbak -b -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/mydb.fdb /firebird/data/${backupFileName}`;
+
+  const s3Cmd = backup?.s3
+    ? ` && aws s3 cp /firebird/data/ s3://${backup.s3.bucket}/${backup.s3.prefix ? backup.s3.prefix + '/' : ''} --recursive --exclude "*"`
+    : '';
+
+  const backupCommand = baseCmd + s3Cmd;
+
+  const cronJob: V1CronJob = {
+    apiVersion: 'batch/v1',
+    kind: 'CronJob',
+    metadata: {
+      name: `${name}-backup`,
+      namespace,
+      labels,
+      ownerReferences: [
+        {
+          apiVersion: `${API_GROUP}/v1`,
+          kind: RESOURCE_KIND,
+          name: cluster.metadata.name,
+          uid: cluster.metadata.uid ?? '',
+          controller: true,
+          blockOwnerDeletion: true,
+        },
+      ],
+    },
+    spec: {
+      schedule,
+      concurrencyPolicy: 'Forbid',
+      successfulJobsHistoryLimit: 3,
+      failedJobsHistoryLimit: 1,
+      jobTemplate: {
+        spec: {
+          template: {
+            metadata: {
+              labels,
+            },
+            spec: {
+              restartPolicy: 'OnFailure',
+              containers: [
+                {
+                  name: 'firebird-backup',
+                  image,
+                  command: ['/bin/sh', '-c'],
+                  args: [backupCommand],
+                  env: [
+                    ...(spec.superuserSecret
+                      ? [
+                          {
+                            name: 'ISC_PASSWORD',
+                            valueFrom: {
+                              secretKeyRef: {
+                                name: spec.superuserSecret.name,
+                                key: 'password',
+                              },
+                            },
+                          },
+                        ]
+                      : [{ name: 'ISC_PASSWORD', value: 'masterkey' }]),
+                    ...(backup?.retentionPolicy
+                      ? [{ name: 'FIREBIRD_RETENTION_POLICY', value: backup.retentionPolicy }]
+                      : []),
+                    ...(backup?.s3
+                      ? [
+                          {
+                            name: 'AWS_ACCESS_KEY_ID',
+                            valueFrom: {
+                              secretKeyRef: {
+                                name: backup.s3.secretRef.name,
+                                key: 'AWS_ACCESS_KEY_ID',
+                              },
+                            },
+                          },
+                          {
+                            name: 'AWS_SECRET_ACCESS_KEY',
+                            valueFrom: {
+                              secretKeyRef: {
+                                name: backup.s3.secretRef.name,
+                                key: 'AWS_SECRET_ACCESS_KEY',
+                              },
+                            },
+                          },
+                        ]
+                      : []),
+                  ],
+                  volumeMounts: [
+                    {
+                      name: 'firebird-data',
+                      mountPath: '/firebird/data',
+                    },
+                  ],
+                },
+              ],
+              volumes: [
+                {
+                  name: 'firebird-data',
+                  persistentVolumeClaim: {
+                    claimName: `firebird-data-${name}-0`,
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+
+  return cronJob;
+}
+
+/**
+ * Checks if a Backup CronJob needs updating (e.g. schedule or image change).
+ */
+export function cronJobNeedsUpdate(existing: V1CronJob, desired: V1CronJob): boolean {
+  const existingSpec = existing.spec;
+  const desiredSpec = desired.spec;
+
+  if (!existingSpec || !desiredSpec) return true;
+  if (existingSpec.schedule !== desiredSpec.schedule) return true;
+
+  const existingContainer = existingSpec.jobTemplate?.spec?.template?.spec?.containers?.[0];
+  const desiredContainer = desiredSpec.jobTemplate?.spec?.template?.spec?.containers?.[0];
+
+  if (!existingContainer || !desiredContainer) return true;
+  if (existingContainer.image !== desiredContainer.image) return true;
+  if (JSON.stringify(existingContainer.args) !== JSON.stringify(desiredContainer.args)) return true;
+
+  return false;
+}
+
+/**
+ * Builds the Prometheus PodMonitor custom object for a FirebirdCluster.
+ */
+export function buildPodMonitor(cluster: FirebirdCluster): Record<string, unknown> {
+  const { name, namespace = 'default' } = cluster.metadata;
+  const labels = clusterLabels(name);
+  const exporterEnabled = cluster.spec.monitoring?.exporter?.enabled;
+
+  const podMetricsEndpoints = exporterEnabled
+    ? [
+        {
+          port: 'metrics',
+          path: '/metrics',
+          interval: '30s',
+        },
+      ]
+    : [
+        {
+          port: 'firebird',
+          path: '/metrics',
+          interval: '30s',
+        },
+      ];
+
+  return {
+    apiVersion: 'monitoring.coreos.com/v1',
+    kind: 'PodMonitor',
+    metadata: {
+      name: `${name}-podmonitor`,
+      namespace,
+      labels,
+      ownerReferences: [
+        {
+          apiVersion: `${API_GROUP}/v1`,
+          kind: RESOURCE_KIND,
+          name: cluster.metadata.name,
+          uid: cluster.metadata.uid ?? '',
+          controller: true,
+          blockOwnerDeletion: true,
+        },
+      ],
+    },
+    spec: {
+      selector: {
+        matchLabels: labels,
+      },
+      podMetricsEndpoints,
+    },
+  };
+}
+
+/**
+ * Builds the cert-manager Certificate resource for TLS encryption.
+ */
+export function buildCertificate(cluster: FirebirdCluster): Record<string, unknown> {
+  const { name, namespace = 'default' } = cluster.metadata;
+  const labels = clusterLabels(name);
+  const tls = cluster.spec.tls;
+
+  return {
+    apiVersion: 'cert-manager.io/v1',
+    kind: 'Certificate',
+    metadata: {
+      name: `${name}-cert`,
+      namespace,
+      labels,
+      ownerReferences: [
+        {
+          apiVersion: `${API_GROUP}/v1`,
+          kind: RESOURCE_KIND,
+          name: cluster.metadata.name,
+          uid: cluster.metadata.uid ?? '',
+          controller: true,
+          blockOwnerDeletion: true,
+        },
+      ],
+    },
+    spec: {
+      secretName: tls?.secretName ?? `${name}-tls`,
+      dnsNames: [
+        name,
+        `${name}.${namespace}`,
+        `${name}.${namespace}.svc.cluster.local`,
+        `*.${name}-headless.${namespace}.svc.cluster.local`,
+      ],
+      issuerRef: tls?.issuerRef ?? {
+        name: 'selfsigned-issuer',
+        kind: 'Issuer',
+        group: 'cert-manager.io',
+      },
+    },
+  };
+}
+
+/**
+ * Builds the primary leader Lease resource for HA failover and election.
+ */
+export function buildLease(cluster: FirebirdCluster): V1Lease {
+  const { name, namespace = 'default' } = cluster.metadata;
+  const labels = clusterLabels(name);
+
+  return {
+    apiVersion: 'coordination.k8s.io/v1',
+    kind: 'Lease',
+    metadata: {
+      name: `${name}-lease`,
+      namespace,
+      labels,
+      ownerReferences: [
+        {
+          apiVersion: `${API_GROUP}/v1`,
+          kind: RESOURCE_KIND,
+          name: cluster.metadata.name,
+          uid: cluster.metadata.uid ?? '',
+          controller: true,
+          blockOwnerDeletion: true,
+        },
+      ],
+    },
+    spec: {
+      holderIdentity: `${name}-0`,
+      leaseDurationSeconds: 15,
+      renewTime: new Date(),
+    },
+  };
+}
+
+/**
+ * Builds a Kubernetes Job for an on-demand FirebirdBackup CRD.
+ */
+export function buildBackupJob(backup: FirebirdBackup, cluster: FirebirdCluster): V1Job {
+  const { name: backupName, namespace = 'default' } = backup.metadata;
+  const clusterName = backup.spec.clusterName;
+  const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const labels = {
+    ...clusterLabels(clusterName),
+    'app.kubernetes.io/component': 'on-demand-backup',
+  };
+
+  const backupType = backup.spec.type ?? 'logical';
+  const nbackupLevel = backup.spec.level ?? 0;
+  const fileName =
+    backupType === 'physical'
+      ? `nbackup-manual-lvl${nbackupLevel}-${backupName}.nbk`
+      : `backup-manual-${backupName}.fbk`;
+
+  const cmd =
+    backupType === 'physical'
+      ? `nbackup -L ${nbackupLevel} -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/mydb.fdb /firebird/data/${fileName}`
+      : `gbak -b -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/mydb.fdb /firebird/data/${fileName}`;
+
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: `backup-${backupName}`,
+      namespace,
+      labels,
+    },
+    spec: {
+      template: {
+        metadata: { labels },
+        spec: {
+          restartPolicy: 'OnFailure',
+          containers: [
+            {
+              name: 'firebird-backup',
+              image,
+              command: ['/bin/sh', '-c'],
+              args: [cmd],
+              env: [
+                ...(cluster.spec.superuserSecret
+                  ? [
+                      {
+                        name: 'ISC_PASSWORD',
+                        valueFrom: {
+                          secretKeyRef: {
+                            name: cluster.spec.superuserSecret.name,
+                            key: 'password',
+                          },
+                        },
+                      },
+                    ]
+                  : [{ name: 'ISC_PASSWORD', value: 'masterkey' }]),
+              ],
+              volumeMounts: [
+                {
+                  name: 'firebird-data',
+                  mountPath: '/firebird/data',
+                },
+              ],
+            },
+          ],
+          volumes: [
+            {
+              name: 'firebird-data',
+              persistentVolumeClaim: {
+                claimName: `firebird-data-${clusterName}-0`,
+              },
+            },
+          ],
+        },
+      },
+    },
+  };
+}
+
+/**
+ * Builds a Kubernetes Job for a FirebirdRestore CRD.
+ */
+export function buildRestoreJob(restore: FirebirdRestore, cluster: FirebirdCluster): V1Job {
+  const { name: restoreName, namespace = 'default' } = restore.metadata;
+  const clusterName = restore.spec.clusterName;
+  const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const labels = {
+    ...clusterLabels(clusterName),
+    'app.kubernetes.io/component': 'restore',
+  };
+
+  const targetDb = restore.spec.targetDatabase ?? 'mydb.fdb';
+  const restoreType = restore.spec.restoreType ?? 'logical';
+  const backupPath = restore.spec.backupPath ?? '/firebird/data/backup-restore.fbk';
+
+  const cmd =
+    restoreType === 'physical'
+      ? `nbackup -R /firebird/data/${targetDb} ${backupPath}`
+      : `gbak -c -user SYSDBA -pas "\${ISC_PASSWORD}" ${backupPath} localhost:/firebird/data/${targetDb}`;
+
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: `restore-${restoreName}`,
+      namespace,
+      labels,
+    },
+    spec: {
+      template: {
+        metadata: { labels },
+        spec: {
+          restartPolicy: 'OnFailure',
+          containers: [
+            {
+              name: 'firebird-restore',
+              image,
+              command: ['/bin/sh', '-c'],
+              args: [cmd],
+              env: [
+                ...(cluster.spec.superuserSecret
+                  ? [
+                      {
+                        name: 'ISC_PASSWORD',
+                        valueFrom: {
+                          secretKeyRef: {
+                            name: cluster.spec.superuserSecret.name,
+                            key: 'password',
+                          },
+                        },
+                      },
+                    ]
+                  : [{ name: 'ISC_PASSWORD', value: 'masterkey' }]),
+              ],
+              volumeMounts: [
+                {
+                  name: 'firebird-data',
+                  mountPath: '/firebird/data',
+                },
+              ],
+            },
+          ],
+          volumes: [
+            {
+              name: 'firebird-data',
+              persistentVolumeClaim: {
+                claimName: `firebird-data-${clusterName}-0`,
+              },
+            },
+          ],
+        },
+      },
+    },
+  };
+}
+
+/**
+ * Builds the PodDisruptionBudget for a FirebirdCluster (when instances > 1).
+ */
+export function buildPodDisruptionBudget(cluster: FirebirdCluster): V1PodDisruptionBudget {
+  const { name, namespace = 'default' } = cluster.metadata;
+  const labels = clusterLabels(name);
+
+  const pdb: V1PodDisruptionBudget = {
+    apiVersion: 'policy/v1',
+    kind: 'PodDisruptionBudget',
+    metadata: {
+      name: `${name}-pdb`,
+      namespace,
+      labels,
+      ownerReferences: [
+        {
+          apiVersion: `${API_GROUP}/v1`,
+          kind: RESOURCE_KIND,
+          name: cluster.metadata.name,
+          uid: cluster.metadata.uid ?? '',
+          controller: true,
+          blockOwnerDeletion: true,
+        },
+      ],
+    },
+    spec: {
+      minAvailable: 1,
+      selector: {
+        matchLabels: labels,
+      },
+    },
+  };
+
+  return pdb;
+}
+
+/**
+ * Checks if a PodDisruptionBudget needs updating.
+ */
+export function podDisruptionBudgetNeedsUpdate(
+  existing: V1PodDisruptionBudget,
+  desired: V1PodDisruptionBudget,
+): boolean {
+  const existingSpec = existing.spec;
+  const desiredSpec = desired.spec;
+
+  if (!existingSpec || !desiredSpec) return true;
+  if (existingSpec.minAvailable !== desiredSpec.minAvailable) return true;
+
+  return false;
+}
+
+/**
+ * Builds the ConfigMap for custom firebird.conf settings or bootstrap init.sql.
+ */
+export function buildConfigMap(cluster: FirebirdCluster): V1ConfigMap | null {
+  const { name, namespace = 'default' } = cluster.metadata;
+  const labels = clusterLabels(name);
+  const data: Record<string, string> = {};
+
+  const settings = { ...(cluster.spec.config?.settings ?? {}) };
+  if (cluster.spec.tls?.enabled && !settings['WireCrypt']) {
+    settings['WireCrypt'] = 'Required';
+  }
+
+  if (Object.keys(settings).length > 0) {
+    const lines = Object.entries(settings).map(([key, val]) => `${key} = ${val}`);
+    data['firebird.conf'] = lines.join('\n') + '\n';
+  }
+
+  if (cluster.spec.bootstrap?.initSql) {
+    data['init.sql'] = cluster.spec.bootstrap.initSql;
+  }
+
+  if (Object.keys(data).length === 0) return null;
+
+  return {
+    apiVersion: 'v1',
+    kind: 'ConfigMap',
+    metadata: {
+      name: `${name}-config`,
+      namespace,
+      labels,
+      ownerReferences: [
+        {
+          apiVersion: `${API_GROUP}/v1`,
+          kind: RESOURCE_KIND,
+          name: cluster.metadata.name,
+          uid: cluster.metadata.uid ?? '',
+          controller: true,
+          blockOwnerDeletion: true,
+        },
+      ],
+    },
+    data,
+  };
+}
+
+/**
+ * Checks if a ConfigMap needs updating.
+ */
+export function configMapNeedsUpdate(existing: V1ConfigMap, desired: V1ConfigMap): boolean {
+  return JSON.stringify(existing.data ?? {}) !== JSON.stringify(desired.data ?? {});
+}
+
+/**
+ * Builds the CronJob for periodic Firebird database sweeping (gfix -sweep).
+ */
+export function buildAutoSweepCronJob(cluster: FirebirdCluster): V1CronJob {
+  const { name, namespace = 'default' } = cluster.metadata;
+  const spec = cluster.spec;
+  const autoSweep = spec.autoSweep;
+  const schedule = autoSweep?.schedule ?? '0 3 * * *';
+  const dbName = autoSweep?.databaseName ?? 'mydb.fdb';
+  const image = spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const labels = {
+    ...clusterLabels(name),
+    'app.kubernetes.io/component': 'sweep',
+  };
+
+  const cronJob: V1CronJob = {
+    apiVersion: 'batch/v1',
+    kind: 'CronJob',
+    metadata: {
+      name: `${name}-sweep`,
+      namespace,
+      labels,
+      ownerReferences: [
+        {
+          apiVersion: `${API_GROUP}/v1`,
+          kind: RESOURCE_KIND,
+          name: cluster.metadata.name,
+          uid: cluster.metadata.uid ?? '',
+          controller: true,
+          blockOwnerDeletion: true,
+        },
+      ],
+    },
+    spec: {
+      schedule,
+      concurrencyPolicy: 'Forbid',
+      successfulJobsHistoryLimit: 3,
+      failedJobsHistoryLimit: 1,
+      jobTemplate: {
+        spec: {
+          template: {
+            metadata: {
+              labels,
+            },
+            spec: {
+              restartPolicy: 'OnFailure',
+              containers: [
+                {
+                  name: 'firebird-sweep',
+                  image,
+                  command: ['/bin/sh', '-c'],
+                  args: [
+                    `gfix -sweep -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/${dbName}`,
+                  ],
+                  env: [
+                    ...(spec.superuserSecret
+                      ? [
+                          {
+                            name: 'ISC_PASSWORD',
+                            valueFrom: {
+                              secretKeyRef: {
+                                name: spec.superuserSecret.name,
+                                key: 'password',
+                              },
+                            },
+                          },
+                        ]
+                      : [{ name: 'ISC_PASSWORD', value: 'masterkey' }]),
+                  ],
+                  volumeMounts: [
+                    {
+                      name: 'firebird-data',
+                      mountPath: '/firebird/data',
+                    },
+                  ],
+                },
+              ],
+              volumes: [
+                {
+                  name: 'firebird-data',
+                  persistentVolumeClaim: {
+                    claimName: `firebird-data-${name}-0`,
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+
+  return cronJob;
+}
+
+/**
+ * Checks if an AutoSweep CronJob needs updating.
+ */
+export function autoSweepCronJobNeedsUpdate(existing: V1CronJob, desired: V1CronJob): boolean {
+  const existingSpec = existing.spec;
+  const desiredSpec = desired.spec;
+
+  if (!existingSpec || !desiredSpec) return true;
+  if (existingSpec.schedule !== desiredSpec.schedule) return true;
+
+  const existingContainer = existingSpec.jobTemplate?.spec?.template?.spec?.containers?.[0];
+  const desiredContainer = desiredSpec.jobTemplate?.spec?.template?.spec?.containers?.[0];
+
+  if (!existingContainer || !desiredContainer) return true;
+  if (existingContainer.image !== desiredContainer.image) return true;
+  if (JSON.stringify(existingContainer.args) !== JSON.stringify(desiredContainer.args)) return true;
+
+  return false;
+}
+
+/**
+ * Builds the NetworkPolicy resource for a FirebirdCluster.
+ */
+export function buildNetworkPolicy(cluster: FirebirdCluster): V1NetworkPolicy {
+  const { name, namespace = 'default' } = cluster.metadata;
+  const labels = clusterLabels(name);
+  const npConfig = cluster.spec.networkPolicy;
+
+  const ingressRules = npConfig?.ingressFrom?.map((rule) => ({
+    from: [
+      ...(rule.podSelector ? [{ podSelector: { matchLabels: rule.podSelector } }] : []),
+      ...(rule.namespaceSelector ? [{ namespaceSelector: { matchLabels: rule.namespaceSelector } }] : []),
+    ],
+    ports: [
+      {
+        protocol: 'TCP',
+        port: 3050,
+      },
+    ],
+  })) ?? [
+    {
+      ports: [
+        {
+          protocol: 'TCP',
+          port: 3050,
+        },
+      ],
+    },
+  ];
+
+  const networkPolicy: V1NetworkPolicy = {
+    apiVersion: 'networking.k8s.io/v1',
+    kind: 'NetworkPolicy',
+    metadata: {
+      name: `${name}-networkpolicy`,
+      namespace,
+      labels,
+      ownerReferences: [
+        {
+          apiVersion: `${API_GROUP}/v1`,
+          kind: RESOURCE_KIND,
+          name: cluster.metadata.name,
+          uid: cluster.metadata.uid ?? '',
+          controller: true,
+          blockOwnerDeletion: true,
+        },
+      ],
+    },
+    spec: {
+      podSelector: {
+        matchLabels: labels,
+      },
+      policyTypes: ['Ingress'],
+      ingress: ingressRules,
+    },
+  };
+
+  return networkPolicy;
+}
+
+/**
+ * Checks if a NetworkPolicy needs updating.
+ */
+export function networkPolicyNeedsUpdate(
+  existing: V1NetworkPolicy,
+  desired: V1NetworkPolicy,
+): boolean {
+  return JSON.stringify(existing.spec?.ingress ?? []) !== JSON.stringify(desired.spec?.ingress ?? []);
+}
+
+
+
+

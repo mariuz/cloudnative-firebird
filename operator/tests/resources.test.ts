@@ -1,4 +1,27 @@
-import { buildService, buildStatefulSet, buildHeadlessService, buildReplicaService, clusterLabels, statefulSetNeedsUpdate } from '../src/utils/resources';
+import { describe, it, expect } from 'vitest';
+import {
+  buildService,
+  buildStatefulSet,
+  buildHeadlessService,
+  buildReplicaService,
+  buildBackupCronJob,
+  cronJobNeedsUpdate,
+  buildPodMonitor,
+  buildPodDisruptionBudget,
+  podDisruptionBudgetNeedsUpdate,
+  buildConfigMap,
+  configMapNeedsUpdate,
+  buildAutoSweepCronJob,
+  autoSweepCronJobNeedsUpdate,
+  buildNetworkPolicy,
+  networkPolicyNeedsUpdate,
+  buildCertificate,
+  buildLease,
+  buildBackupJob,
+  buildRestoreJob,
+  clusterLabels,
+  statefulSetNeedsUpdate,
+} from '../src/utils/resources';
 import { FirebirdCluster, DEFAULT_FIREBIRD_IMAGE } from '../src/types';
 
 const makeCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): FirebirdCluster => ({
@@ -303,3 +326,465 @@ describe('buildReplicaService', () => {
     expect(replicaSvc.spec?.selector).toEqual(primarySvc.spec?.selector);
   });
 });
+
+describe('buildBackupCronJob', () => {
+  it('creates a CronJob named <cluster>-backup', () => {
+    const cluster = makeCluster({ backup: { enabled: true } });
+    const cronJob = buildBackupCronJob(cluster);
+    expect(cronJob.metadata?.name).toBe('test-cluster-backup');
+    expect(cronJob.metadata?.namespace).toBe('default');
+  });
+
+  it('uses default schedule 0 2 * * * when not specified', () => {
+    const cluster = makeCluster({ backup: { enabled: true } });
+    const cronJob = buildBackupCronJob(cluster);
+    expect(cronJob.spec?.schedule).toBe('0 2 * * *');
+  });
+
+  it('uses custom schedule when specified', () => {
+    const cluster = makeCluster({ backup: { enabled: true, schedule: '0 4 * * *' } });
+    const cronJob = buildBackupCronJob(cluster);
+    expect(cronJob.spec?.schedule).toBe('0 4 * * *');
+  });
+
+  it('uses default ISC_PASSWORD when superuserSecret is not provided', () => {
+    const cluster = makeCluster({ backup: { enabled: true } });
+    const cronJob = buildBackupCronJob(cluster);
+    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
+    const passwordEnv = container?.env?.find((e: { name: string }) => e.name === 'ISC_PASSWORD');
+    expect(passwordEnv?.value).toBe('masterkey');
+  });
+
+  it('uses secret reference for ISC_PASSWORD when superuserSecret is provided', () => {
+    const cluster = makeCluster({
+      backup: { enabled: true },
+      superuserSecret: { name: 'backup-secret' },
+    });
+    const cronJob = buildBackupCronJob(cluster);
+    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
+    const passwordEnv = container?.env?.find((e: { name: string }) => e.name === 'ISC_PASSWORD');
+    expect(passwordEnv?.valueFrom?.secretKeyRef?.name).toBe('backup-secret');
+  });
+
+  it('includes FIREBIRD_RETENTION_POLICY when retentionPolicy is specified', () => {
+    const cluster = makeCluster({ backup: { enabled: true, retentionPolicy: '7d' } });
+    const cronJob = buildBackupCronJob(cluster);
+    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
+    const retentionEnv = container?.env?.find((e: { name: string }) => e.name === 'FIREBIRD_RETENTION_POLICY');
+    expect(retentionEnv?.value).toBe('7d');
+  });
+
+  it('sets ownerReference pointing to FirebirdCluster', () => {
+    const cluster = makeCluster({ backup: { enabled: true } });
+    const cronJob = buildBackupCronJob(cluster);
+    const ownerRef = cronJob.metadata?.ownerReferences?.[0];
+    expect(ownerRef?.kind).toBe('FirebirdCluster');
+    expect(ownerRef?.name).toBe('test-cluster');
+  });
+
+  it('sets backup component label', () => {
+    const cluster = makeCluster({ backup: { enabled: true } });
+    const cronJob = buildBackupCronJob(cluster);
+    expect(cronJob.metadata?.labels?.['app.kubernetes.io/component']).toBe('backup');
+  });
+});
+
+describe('cronJobNeedsUpdate', () => {
+  it('returns false when schedule and image match', () => {
+    const cluster = makeCluster({ backup: { enabled: true } });
+    const cj = buildBackupCronJob(cluster);
+    expect(cronJobNeedsUpdate(cj, cj)).toBe(false);
+  });
+
+  it('returns true when schedule differs', () => {
+    const cj1 = buildBackupCronJob(makeCluster({ backup: { enabled: true, schedule: '0 1 * * *' } }));
+    const cj2 = buildBackupCronJob(makeCluster({ backup: { enabled: true, schedule: '0 2 * * *' } }));
+    expect(cronJobNeedsUpdate(cj1, cj2)).toBe(true);
+  });
+
+  it('returns true when image differs', () => {
+    const cj1 = buildBackupCronJob(makeCluster({ backup: { enabled: true }, imageName: 'firebirdsql/firebird:3.0' }));
+    const cj2 = buildBackupCronJob(makeCluster({ backup: { enabled: true }, imageName: 'firebirdsql/firebird:4.0' }));
+    expect(cronJobNeedsUpdate(cj1, cj2)).toBe(true);
+  });
+});
+
+describe('buildPodMonitor', () => {
+  it('creates a PodMonitor custom object with name <cluster>-podmonitor', () => {
+    const cluster = makeCluster({ monitoring: { enablePodMonitor: true } });
+    const pm = buildPodMonitor(cluster) as { metadata: { name: string; namespace: string }; apiVersion: string; kind: string };
+    expect(pm.metadata.name).toBe('test-cluster-podmonitor');
+    expect(pm.metadata.namespace).toBe('default');
+    expect(pm.apiVersion).toBe('monitoring.coreos.com/v1');
+    expect(pm.kind).toBe('PodMonitor');
+  });
+
+  it('sets ownerReference pointing to FirebirdCluster', () => {
+    const cluster = makeCluster({ monitoring: { enablePodMonitor: true } });
+    const pm = buildPodMonitor(cluster) as { metadata: { ownerReferences: Array<{ kind: string; name: string }> } };
+    expect(pm.metadata.ownerReferences[0].kind).toBe('FirebirdCluster');
+    expect(pm.metadata.ownerReferences[0].name).toBe('test-cluster');
+  });
+
+  it('configures metric endpoint for port firebird on /metrics', () => {
+    const cluster = makeCluster({ monitoring: { enablePodMonitor: true } });
+    const pm = buildPodMonitor(cluster) as { spec: { podMetricsEndpoints: Array<{ port: string; path: string }> } };
+    expect(pm.spec.podMetricsEndpoints[0].port).toBe('firebird');
+    expect(pm.spec.podMetricsEndpoints[0].path).toBe('/metrics');
+  });
+});
+
+describe('buildStatefulSet (scheduling & advanced options)', () => {
+  it('sets nodeSelector when provided', () => {
+    const cluster = makeCluster({ nodeSelector: { 'disktype': 'ssd' } });
+    const sts = buildStatefulSet(cluster);
+    expect(sts.spec?.template?.spec?.nodeSelector).toEqual({ 'disktype': 'ssd' });
+  });
+
+  it('sets affinity when provided', () => {
+    const affinity = { nodeAffinity: { requiredDuringSchedulingIgnoredDuringExecution: { nodeSelectorTerms: [] } } };
+    const cluster = makeCluster({ affinity });
+    const sts = buildStatefulSet(cluster);
+    expect(sts.spec?.template?.spec?.affinity).toEqual(affinity);
+  });
+
+  it('sets tolerations when provided', () => {
+    const tolerations = [{ key: 'dedicated', operator: 'Equal', value: 'database', effect: 'NoSchedule' }];
+    const cluster = makeCluster({ tolerations });
+    const sts = buildStatefulSet(cluster);
+    expect(sts.spec?.template?.spec?.tolerations).toEqual(tolerations);
+  });
+});
+
+describe('buildService (custom serviceType & annotations)', () => {
+  it('sets custom serviceType when specified', () => {
+    const cluster = makeCluster({ serviceType: 'LoadBalancer' });
+    const svc = buildService(cluster);
+    expect(svc.spec?.type).toBe('LoadBalancer');
+  });
+
+  it('applies serviceAnnotations when specified', () => {
+    const cluster = makeCluster({ serviceAnnotations: { 'service.beta.kubernetes.io/aws-load-balancer-type': 'nlb' } });
+    const svc = buildService(cluster);
+    expect(svc.metadata?.annotations?.['service.beta.kubernetes.io/aws-load-balancer-type']).toBe('nlb');
+  });
+});
+
+describe('statefulSetNeedsUpdate (extended properties)', () => {
+  it('returns true when nodeSelector differs', () => {
+    const sts1 = buildStatefulSet(makeCluster({ nodeSelector: { zone: 'a' } }));
+    const sts2 = buildStatefulSet(makeCluster({ nodeSelector: { zone: 'b' } }));
+    expect(statefulSetNeedsUpdate(sts1, sts2)).toBe(true);
+  });
+
+  it('returns true when env differs', () => {
+    const sts1 = buildStatefulSet(makeCluster({ env: [{ name: 'A', value: '1' }] }));
+    const sts2 = buildStatefulSet(makeCluster({ env: [{ name: 'A', value: '2' }] }));
+    expect(statefulSetNeedsUpdate(sts1, sts2)).toBe(true);
+  });
+
+  it('returns true when resources differ', () => {
+    const sts1 = buildStatefulSet(makeCluster({ resources: { requests: { memory: '128Mi' } } }));
+    const sts2 = buildStatefulSet(makeCluster({ resources: { requests: { memory: '256Mi' } } }));
+    expect(statefulSetNeedsUpdate(sts1, sts2)).toBe(true);
+  });
+});
+
+describe('buildPodDisruptionBudget', () => {
+  it('creates a PDB named <cluster>-pdb', () => {
+    const cluster = makeCluster({ instances: 2 });
+    const pdb = buildPodDisruptionBudget(cluster);
+    expect(pdb.metadata?.name).toBe('test-cluster-pdb');
+    expect(pdb.metadata?.namespace).toBe('default');
+    expect(pdb.spec?.minAvailable).toBe(1);
+  });
+
+  it('sets ownerReference pointing to FirebirdCluster', () => {
+    const cluster = makeCluster({ instances: 2 });
+    const pdb = buildPodDisruptionBudget(cluster);
+    const ownerRef = pdb.metadata?.ownerReferences?.[0];
+    expect(ownerRef?.kind).toBe('FirebirdCluster');
+    expect(ownerRef?.name).toBe('test-cluster');
+  });
+});
+
+describe('podDisruptionBudgetNeedsUpdate', () => {
+  it('returns false when minAvailable matches', () => {
+    const pdb = buildPodDisruptionBudget(makeCluster({ instances: 2 }));
+    expect(podDisruptionBudgetNeedsUpdate(pdb, pdb)).toBe(false);
+  });
+
+  it('returns true when minAvailable differs', () => {
+    const pdb1 = buildPodDisruptionBudget(makeCluster({ instances: 2 }));
+    const pdb2 = { ...pdb1, spec: { ...pdb1.spec, minAvailable: 2 } };
+    expect(podDisruptionBudgetNeedsUpdate(pdb1, pdb2)).toBe(true);
+  });
+});
+
+describe('buildConfigMap & configMapNeedsUpdate', () => {
+  it('returns null when neither config nor bootstrap initSql is provided', () => {
+    const cluster = makeCluster();
+    expect(buildConfigMap(cluster)).toBeNull();
+  });
+
+  it('creates ConfigMap with custom firebird.conf settings', () => {
+    const cluster = makeCluster({
+      config: { settings: { DefaultCacheMem: '256M', FileSystemCacheThreshold: '64K' } },
+    });
+    const cm = buildConfigMap(cluster);
+    expect(cm).not.toBeNull();
+    expect(cm?.metadata?.name).toBe('test-cluster-config');
+    expect(cm?.data?.['firebird.conf']).toContain('DefaultCacheMem = 256M');
+    expect(cm?.data?.['firebird.conf']).toContain('FileSystemCacheThreshold = 64K');
+  });
+
+  it('creates ConfigMap with bootstrap init.sql script', () => {
+    const cluster = makeCluster({
+      bootstrap: { initSql: 'CREATE TABLE users (id INT);' },
+    });
+    const cm = buildConfigMap(cluster);
+    expect(cm).not.toBeNull();
+    expect(cm?.data?.['init.sql']).toBe('CREATE TABLE users (id INT);');
+  });
+
+  it('detects ConfigMap updates correctly', () => {
+    const cm1 = buildConfigMap(makeCluster({ config: { settings: { A: '1' } } }));
+    const cm2 = buildConfigMap(makeCluster({ config: { settings: { A: '2' } } }));
+    expect(configMapNeedsUpdate(cm1!, cm1!)).toBe(false);
+    expect(configMapNeedsUpdate(cm1!, cm2!)).toBe(true);
+  });
+});
+
+describe('buildAutoSweepCronJob & autoSweepCronJobNeedsUpdate', () => {
+  it('creates an AutoSweep CronJob with default schedule and db name', () => {
+    const cluster = makeCluster({ autoSweep: { enabled: true } });
+    const cronJob = buildAutoSweepCronJob(cluster);
+    expect(cronJob.metadata?.name).toBe('test-cluster-sweep');
+    expect(cronJob.spec?.schedule).toBe('0 3 * * *');
+    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
+    expect(container?.args?.[0]).toContain('gfix -sweep');
+    expect(container?.args?.[0]).toContain('localhost:/firebird/data/mydb.fdb');
+  });
+
+  it('uses custom schedule and database name when provided', () => {
+    const cluster = makeCluster({
+      autoSweep: { enabled: true, schedule: '0 4 * * *', databaseName: 'custom.fdb' },
+    });
+    const cronJob = buildAutoSweepCronJob(cluster);
+    expect(cronJob.spec?.schedule).toBe('0 4 * * *');
+    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
+    expect(container?.args?.[0]).toContain('localhost:/firebird/data/custom.fdb');
+  });
+
+  it('detects AutoSweep CronJob updates correctly', () => {
+    const cj1 = buildAutoSweepCronJob(makeCluster({ autoSweep: { enabled: true, schedule: '0 3 * * *' } }));
+    const cj2 = buildAutoSweepCronJob(makeCluster({ autoSweep: { enabled: true, schedule: '0 5 * * *' } }));
+    expect(autoSweepCronJobNeedsUpdate(cj1, cj1)).toBe(false);
+    expect(autoSweepCronJobNeedsUpdate(cj1, cj2)).toBe(true);
+  });
+});
+
+describe('buildStatefulSet (config & bootstrap volume mounting)', () => {
+  it('mounts firebird.conf volume when config settings are provided', () => {
+    const cluster = makeCluster({
+      config: { settings: { DefaultCacheMem: '128M' } },
+    });
+    const sts = buildStatefulSet(cluster);
+    const container = sts.spec?.template?.spec?.containers?.[0];
+    const mount = container?.volumeMounts?.find((vm) => vm.mountPath === '/firebird/etc/firebird.conf');
+    expect(mount).toBeDefined();
+    expect(mount?.subPath).toBe('firebird.conf');
+  });
+
+  it('mounts init.sql volume when bootstrap initSql is provided', () => {
+    const cluster = makeCluster({
+      bootstrap: { initSql: 'CREATE TABLE t (id INT);' },
+    });
+    const sts = buildStatefulSet(cluster);
+    const container = sts.spec?.template?.spec?.containers?.[0];
+    const mount = container?.volumeMounts?.find((vm) => vm.mountPath === '/docker-entrypoint-initdb.d/init.sql');
+    expect(mount).toBeDefined();
+    expect(mount?.subPath).toBe('init.sql');
+  });
+});
+
+describe('buildBackupCronJob (physical nbackup & S3 cloud support)', () => {
+  it('generates nbackup command when backup.type is physical', () => {
+    const cluster = makeCluster({ backup: { enabled: true, type: 'physical', level: 0 } });
+    const cronJob = buildBackupCronJob(cluster);
+    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
+    expect(container?.args?.[0]).toContain('nbackup -L 0');
+    expect(container?.args?.[0]).toContain('/firebird/data/mydb.fdb');
+  });
+
+  it('uses nbackup level 1 when specified', () => {
+    const cluster = makeCluster({ backup: { enabled: true, type: 'physical', level: 1 } });
+    const cronJob = buildBackupCronJob(cluster);
+    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
+    expect(container?.args?.[0]).toContain('nbackup -L 1');
+  });
+
+  it('injects S3 environment variables and upload command when S3 is configured', () => {
+    const cluster = makeCluster({
+      backup: {
+        enabled: true,
+        s3: {
+          bucket: 'my-firebird-backups',
+          secretRef: { name: 's3-credentials' },
+          prefix: 'production',
+        },
+      },
+    });
+    const cronJob = buildBackupCronJob(cluster);
+    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
+    expect(container?.args?.[0]).toContain('aws s3 cp');
+    expect(container?.env).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'AWS_ACCESS_KEY_ID',
+          valueFrom: { secretKeyRef: { name: 's3-credentials', key: 'AWS_ACCESS_KEY_ID' } },
+        }),
+      ]),
+    );
+  });
+});
+
+describe('buildNetworkPolicy & networkPolicyNeedsUpdate', () => {
+  it('creates NetworkPolicy with default ingress rule for port 3050', () => {
+    const cluster = makeCluster({ networkPolicy: { enabled: true } });
+    const np = buildNetworkPolicy(cluster);
+    expect(np.metadata?.name).toBe('test-cluster-networkpolicy');
+    expect(np.spec?.podSelector?.matchLabels?.['firebird.cloudnative-firebird.io/cluster']).toBe('test-cluster');
+    expect(np.spec?.ingress?.[0]?.ports?.[0]?.port).toBe(3050);
+  });
+
+  it('creates NetworkPolicy with custom ingressFrom selectors', () => {
+    const cluster = makeCluster({
+      networkPolicy: {
+        enabled: true,
+        ingressFrom: [{ podSelector: { app: 'api' } }],
+      },
+    });
+    const np = buildNetworkPolicy(cluster);
+    expect(np.spec?.ingress?.[0]?.from?.[0]?.podSelector?.matchLabels).toEqual({ app: 'api' });
+  });
+
+  it('detects NetworkPolicy updates correctly', () => {
+    const np1 = buildNetworkPolicy(makeCluster({ networkPolicy: { enabled: true } }));
+    const np2 = buildNetworkPolicy(
+      makeCluster({ networkPolicy: { enabled: true, ingressFrom: [{ podSelector: { role: 'backend' } }] } }),
+    );
+    expect(networkPolicyNeedsUpdate(np1, np1)).toBe(false);
+    expect(networkPolicyNeedsUpdate(np1, np2)).toBe(true);
+  });
+});
+
+describe('Monitoring Exporter Sidecar & PodMonitor', () => {
+  it('injects firebird-exporter container into StatefulSet when exporter is enabled', () => {
+    const cluster = makeCluster({
+      monitoring: {
+        exporter: {
+          enabled: true,
+          image: 'prom/firebird-exporter:v1.2.0',
+          port: 9108,
+        },
+      },
+    });
+    const sts = buildStatefulSet(cluster);
+    const containers = sts.spec?.template?.spec?.containers;
+    expect(containers?.length).toBe(2);
+    expect(containers?.[1].name).toBe('firebird-exporter');
+    expect(containers?.[1].image).toBe('prom/firebird-exporter:v1.2.0');
+    expect(containers?.[1].ports?.[0].containerPort).toBe(9108);
+  });
+
+  it('configures PodMonitor with metrics endpoint when exporter is enabled', () => {
+    const cluster = makeCluster({
+      monitoring: {
+        enablePodMonitor: true,
+        exporter: { enabled: true },
+      },
+    });
+    const podMonitor = buildPodMonitor(cluster) as { spec: { podMetricsEndpoints: Array<{ port: string }> } };
+    expect(podMonitor.spec.podMetricsEndpoints[0].port).toBe('metrics');
+  });
+});
+
+describe('TLS & cert-manager integration', () => {
+  it('mounts tls-cert volume into container when TLS is enabled', () => {
+    const cluster = makeCluster({
+      tls: { enabled: true, secretName: 'my-custom-tls' },
+    });
+    const sts = buildStatefulSet(cluster);
+    const container = sts.spec?.template?.spec?.containers?.[0];
+    const mount = container?.volumeMounts?.find((vm) => vm.mountPath === '/firebird/etc/tls');
+    expect(mount).toBeDefined();
+
+    const volumes = sts.spec?.template?.spec?.volumes;
+    const tlsVol = volumes?.find((v) => v.name === 'tls-cert');
+    expect(tlsVol?.secret?.secretName).toBe('my-custom-tls');
+  });
+
+  it('injects WireCrypt = Required into ConfigMap when TLS is enabled', () => {
+    const cluster = makeCluster({ tls: { enabled: true } });
+    const cm = buildConfigMap(cluster);
+    expect(cm?.data?.['firebird.conf']).toContain('WireCrypt = Required');
+  });
+
+  it('builds cert-manager Certificate resource', () => {
+    const cluster = makeCluster({
+      tls: {
+        enabled: true,
+        issuerRef: { name: 'letsencrypt-prod', kind: 'ClusterIssuer' },
+      },
+    });
+    const cert = buildCertificate(cluster) as { apiVersion: string; metadata: { name: string }; spec: { issuerRef: { name: string } } };
+    expect(cert.apiVersion).toBe('cert-manager.io/v1');
+    expect(cert.metadata.name).toBe('test-cluster-cert');
+    expect(cert.spec.issuerRef.name).toBe('letsencrypt-prod');
+  });
+});
+
+describe('Leader Election Lease', () => {
+  it('builds primary leader Lease resource', () => {
+    const cluster = makeCluster();
+    const lease = buildLease(cluster);
+    expect(lease.apiVersion).toBe('coordination.k8s.io/v1');
+    expect(lease.metadata?.name).toBe('test-cluster-lease');
+    expect(lease.spec?.holderIdentity).toBe('test-cluster-0');
+  });
+});
+
+describe('FirebirdBackup & FirebirdRestore Job builders', () => {
+  it('builds a manual backup Job for FirebirdBackup', () => {
+    const cluster = makeCluster();
+    const backup = {
+      apiVersion: 'firebird.cloudnative-firebird.io/v1' as const,
+      kind: 'FirebirdBackup' as const,
+      metadata: { name: 'my-backup', namespace: 'default' },
+      spec: { clusterName: 'test-cluster', type: 'logical' as const },
+    };
+    const job = buildBackupJob(backup, cluster);
+    expect(job.metadata?.name).toBe('backup-my-backup');
+    expect(job.spec?.template?.spec?.containers?.[0].args?.[0]).toContain('gbak -b');
+  });
+
+  it('builds a restore Job for FirebirdRestore', () => {
+    const cluster = makeCluster();
+    const restore = {
+      apiVersion: 'firebird.cloudnative-firebird.io/v1' as const,
+      kind: 'FirebirdRestore' as const,
+      metadata: { name: 'my-restore', namespace: 'default' },
+      spec: { clusterName: 'test-cluster', restoreType: 'logical' as const, backupPath: '/firebird/data/dump.fbk' },
+    };
+    const job = buildRestoreJob(restore, cluster);
+    expect(job.metadata?.name).toBe('restore-my-restore');
+    expect(job.spec?.template?.spec?.containers?.[0].args?.[0]).toContain('gbak -c');
+  });
+});
+
+
+
+
+
+

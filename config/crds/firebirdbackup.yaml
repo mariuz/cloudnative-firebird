@@ -1,0 +1,105 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: firebirdbackups.firebird.cloudnative-firebird.io
+spec:
+  group: firebird.cloudnative-firebird.io
+  names:
+    kind: FirebirdBackup
+    listKind: FirebirdBackupList
+    plural: firebirdbackups
+    singular: firebirdbackup
+    shortNames:
+      - fbb
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterName
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          description: FirebirdBackup is the Schema for the firebirdbackups API
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: FirebirdBackupSpec defines the desired state of a FirebirdBackup
+              type: object
+              required:
+                - clusterName
+              properties:
+                clusterName:
+                  description: Target FirebirdCluster name
+                  type: string
+                type:
+                  description: Backup type ('logical' or 'physical')
+                  type: string
+                  enum:
+                    - logical
+                    - physical
+                level:
+                  description: Physical backup level (0, 1, 2)
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                s3:
+                  type: object
+                  required:
+                    - bucket
+                    - secretRef
+                  properties:
+                    endpoint:
+                      type: string
+                    bucket:
+                      type: string
+                    region:
+                      type: string
+                    prefix:
+                      type: string
+                    secretRef:
+                      type: object
+                      required:
+                        - name
+                      properties:
+                        name:
+                          type: string
+            status:
+              description: FirebirdBackupStatus defines the observed state of FirebirdBackup
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Running
+                    - Completed
+                    - Failed
+                startTime:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+                backupFileName:
+                  type: string
+                error:
+                  type: string

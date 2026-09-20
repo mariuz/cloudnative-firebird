@@ -197,6 +197,10 @@ npm run dev
 
 The operator uses `~/.kube/config` when `KUBERNETES_SERVICE_HOST` is not set (local development mode).
 
+## Roadmap
+
+For planned features inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg)—including automated failover, `nbackup` physical backups, PITR, `gfix` sweeping, cert-manager TLS, and dedicated backup CRDs—see [ROADMAP.md](ROADMAP.md).
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).

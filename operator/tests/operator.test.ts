@@ -5,15 +5,13 @@
  * these tests run without any real cluster connectivity.
  */
 
-// ---------------------------------------------------------------------------
-// Module mocks – must be declared before any imports
-// ---------------------------------------------------------------------------
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Capture the watch callback so tests can simulate incoming events.
 let capturedEventCallback: ((phase: string, obj: unknown) => void) | null = null;
 let capturedDoneCallback: ((err: unknown) => void) | null = null;
-const mockWatchAbort = jest.fn();
-const mockWatchFn = jest
+const mockWatchAbort = vi.fn();
+const mockWatchFn = vi
   .fn()
   .mockImplementation(
     (
@@ -29,10 +27,10 @@ const mockWatchFn = jest
   );
 
 // Mock the ESM-only @kubernetes/client-node package
-jest.mock('@kubernetes/client-node', () => {
-  const makeApiClient = jest.fn();
+vi.mock('@kubernetes/client-node', () => {
+  const makeApiClient = vi.fn();
   class KubeConfig {
-    loadFromDefault = jest.fn();
+    loadFromDefault = vi.fn();
     makeApiClient = makeApiClient;
   }
   class Watch {
@@ -40,52 +38,46 @@ jest.mock('@kubernetes/client-node', () => {
   }
   class AppsV1Api {}
   class CoreV1Api {}
+  class BatchV1Api {}
   class CustomObjectsApi {}
-  return { KubeConfig, Watch, AppsV1Api, CoreV1Api, CustomObjectsApi };
+  class PolicyV1Api {}
+  return { KubeConfig, Watch, AppsV1Api, CoreV1Api, BatchV1Api, CustomObjectsApi, PolicyV1Api };
 });
 
 // Mock the controller so we can track reconcile() calls without real K8s
-const mockReconcile = jest.fn().mockResolvedValue(undefined);
-jest.mock('../src/controllers/firebirdcluster.controller', () => ({
-  FirebirdClusterController: jest.fn().mockImplementation(() => ({
+const mockReconcile = vi.fn().mockResolvedValue(undefined);
+vi.mock('../src/controllers/firebirdcluster.controller', () => ({
+  FirebirdClusterController: vi.fn().mockImplementation(() => ({
     reconcile: mockReconcile,
   })),
 }));
 
 // Mock the health server so no real HTTP port is opened during tests
-const mockHealthStart = jest.fn();
-const mockHealthStop = jest.fn();
-const mockHealthSetReady = jest.fn();
-jest.mock('../src/utils/health', () => ({
-  HealthServer: jest.fn().mockImplementation(() => ({
+const mockHealthStart = vi.fn();
+const mockHealthStop = vi.fn();
+const mockHealthSetReady = vi.fn();
+vi.mock('../src/utils/health', () => ({
+  HealthServer: vi.fn().mockImplementation(() => ({
     start: mockHealthStart,
     stop: mockHealthStop,
     setReady: mockHealthSetReady,
   })),
 }));
 
-// ---------------------------------------------------------------------------
-// Imports (after mocks are hoisted)
-// ---------------------------------------------------------------------------
 import { KubeConfig } from '@kubernetes/client-node';
 import { Operator } from '../src/operator';
 import { makeCluster, makeNamedCluster } from './helpers/factories';
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 function makeOperator(): { operator: Operator; mockKubeConfig: KubeConfig } {
   const mockKubeConfig = new KubeConfig();
   const operator = new Operator(mockKubeConfig);
   return { operator, mockKubeConfig };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 describe('Operator – lifecycle', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     capturedEventCallback = null;
     capturedDoneCallback = null;
   });
@@ -142,7 +134,7 @@ describe('Operator – lifecycle', () => {
       const { operator } = makeOperator();
       await operator.start();
 
-      jest.clearAllMocks();
+      vi.clearAllMocks();
       operator.stop();
 
       expect(mockHealthSetReady).toHaveBeenCalledWith(false);
@@ -152,7 +144,7 @@ describe('Operator – lifecycle', () => {
       const { operator } = makeOperator();
       await operator.start();
 
-      jest.clearAllMocks();
+      vi.clearAllMocks();
       operator.stop();
 
       expect(mockHealthStop).toHaveBeenCalledTimes(1);
@@ -166,13 +158,21 @@ describe('Operator – lifecycle', () => {
 });
 
 describe('Operator – event handling', () => {
+  let activeOperator: Operator | null = null;
+
   beforeEach(async () => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     capturedEventCallback = null;
     capturedDoneCallback = null;
     // Start the operator so watch callbacks are registered
     const { operator } = makeOperator();
+    activeOperator = operator;
     await operator.start();
+  });
+
+  afterEach(() => {
+    activeOperator?.stop();
+    activeOperator = null;
   });
 
   describe('ADDED events', () => {
