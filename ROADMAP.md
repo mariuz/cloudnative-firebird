@@ -31,8 +31,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 - [x] **Automated Leader Election & Failover** *(v0.4.0)*
   - Kubernetes Lease-based leader monitoring for primary instance failover.
   - Automatic promotion of replica instances to primary role when primary pod fails.
-- [ ] **Firebird 4.0+ Journal-Based Replication Management**
-  - Dynamic journal file sync and status tracking.
+- [x] **Firebird 4.0+ Journal-Based Replication Management & PITR Archiving** *(v0.5.0)*
+  - Dynamic journal file sync, status tracking, and continuous archiving to S3.
   - Quorum management for synchronous replication (`mode: sync`).
 - [ ] **Smart Read-Only Traffic Routing**
   - Pod readiness and replication lag-aware endpoint management for read replicas.
@@ -48,7 +48,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 - [x] **Cloud Object Storage Support (S3, GCS, Azure Blob)** *(v0.4.0)*
   - Direct upload of backup archives (`gbak` / `nbackup`) to object storage.
   - Secret-based cloud credentials management (`AWS_ACCESS_KEY_ID`, `GCS_KEY`, etc.).
-- [ ] **Point-In-Time Recovery (PITR)**
+- [x] **Point-In-Time Recovery (PITR) & Journal Archiving** *(v0.5.0)*
   - Continuous archiving of Firebird 4.0+ replication journal files to object storage.
   - Replay of archived journal segments on top of `nbackup` base backups for exact timestamp recovery.
 - [x] **Dedicated Backup CRDs** *(v0.4.0)*
@@ -60,9 +60,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 
 ### 3. Bootstrap & Cluster Cloning (Inspired by CloudNative-PG Bootstrap)
 
-- [ ] **Bootstrap from Cloud Backup**
+- [x] **Bootstrap from Cloud Backup** *(v0.5.0)*
   - Provision a new `FirebirdCluster` pre-populated from an existing S3/GCS backup.
-- [ ] **Cluster-to-Cluster Cloning**
+- [x] **Cluster-to-Cluster Cloning** *(v0.5.0)*
   - Clone an active `FirebirdCluster` in the same or target namespace.
 - [x] **Custom Initialization Scripts** *(v0.3.0)*
   - Execute DDL/DML SQL scripts (`.sql` ConfigMaps) during initial cluster creation.
@@ -77,7 +77,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - Declarative `spec.suspended` flag to pause reconciliation during manual maintenance.
 - [x] **Automated Database Sweeping (`gfix -sweep`)** *(v0.3.0)*
   - Cron-driven garbage collection sweeping to prevent Oldest Interesting Transaction (`OIT`) / Oldest Active Transaction (`OAT`) gaps.
-- [ ] **Online Database Diagnostics (`gfix -v -full`)**
+- [x] **Online Database Diagnostics (`gfix -v -full`)** *(v0.4.0)*
   - Scheduled online database integrity checks and status reporting into CR status conditions.
 - [x] **Declarative `firebird.conf` Management** *(v0.3.0)*
   - ConfigMap projections for custom `firebird.conf` settings (`DefaultCacheMem`, `FileSystemCacheThreshold`, `LockHashSlots`).
@@ -95,8 +95,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - Automated TLS certificate generation, injection, and zero-downtime rotation.
 - [x] **Automated NetworkPolicies** *(v0.3.0)*
   - Auto-generated Kubernetes NetworkPolicy resources restricting port 3050 access to approved client labels/namespaces.
-- [ ] **SYSDBA & User Password Rotation**
-  - Automated password rotation for superuser and application credentials stored in Kubernetes Secrets.
+- [x] **SYSDBA & User Password Rotation** *(v0.5.0)*
+  - Automated password rotation tracking for superuser and application credentials stored in Kubernetes Secrets.
 
 ---
 
@@ -109,7 +109,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
     - Page reads, page writes, and cache hit ratios
     - Transaction counters (`OIT`, `OAT`, `Next Transaction`)
     - Replication lag and journal queue depth
-- [ ] **Grafana Dashboard ConfigMaps**
+- [x] **Grafana Dashboard ConfigMaps** *(v0.4.0)*
   - Pre-built Grafana visualization dashboards shipped as deployment ConfigMaps.
 
 ---
@@ -122,8 +122,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Failover / Promotion** | Automated Failover | K8s Lease Leader Election | **v0.4.0 (Done)** |
 | **Physical Backup** | Barman Cloud / `pg_basebackup` | `nbackup` (Level 0-2) | **v0.3.0 (Done)** |
 | **Logical Backup** | `pg_dump` / CronJob | `gbak` CronJob & CRDs | **v0.1.0 (Done)** |
-| **PITR (Point-In-Time)** | Continuous Archiving | Planned (Journals) | **v0.5.0** |
-| **Bootstrap / Restore** | From Backup / Clone | Dedicated Restore CRD | **v0.4.0 (Done)** |
+| **PITR (Point-In-Time)** | Continuous Archiving | Journal Archiving to S3 | **v0.5.0 (Done)** |
+| **Bootstrap / Restore** | From Backup / Clone | Dedicated Restore & Bootstrap | **v0.5.0 (Done)** |
 | **Node Maintenance** | PDB / Drain Handling | PDB Reconciled | **v0.2.0 (Done)** |
 | **Auto-Sweeping / Maintenance** | VACUUM Scheduling | `gfix -sweep` CronJob | **v0.3.0 (Done)** |
 | **Security & TLS** | cert-manager | WireCrypt & cert-manager | **v0.4.0 (Done)** |

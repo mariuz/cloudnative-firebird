@@ -115,8 +115,22 @@ export interface ExporterConfiguration {
 export interface MonitoringConfiguration {
   /** Whether to enable Prometheus metrics via PodMonitor */
   enablePodMonitor?: boolean;
+  /** Whether to reconcile a Grafana dashboard ConfigMap for database metrics */
+  enableGrafanaDashboard?: boolean;
   /** Metrics exporter sidecar configuration */
   exporter?: ExporterConfiguration;
+}
+
+/**
+ * Diagnostics configuration for online database integrity verification (gfix -v -full).
+ */
+export interface DiagnosticsConfiguration {
+  /** Whether database integrity verification checks are enabled */
+  enabled: boolean;
+  /** Cron schedule for diagnostic execution (defaults to "0 4 * * 0") */
+  schedule?: string;
+  /** Database file name to check (defaults to "mydb.fdb") */
+  databaseName?: string;
 }
 
 /**
@@ -149,6 +163,12 @@ export interface ReplicationConfiguration {
    * Defaults to 'async'.
    */
   mode?: 'sync' | 'async';
+  /** Directory path for replication journal files (defaults to "/firebird/data/journals") */
+  journalDirectory?: string;
+  /** Cloud S3 storage configuration for continuous journal archiving (PITR) */
+  journalArchiveS3?: S3BackupConfiguration;
+  /** Cron schedule for archiving completed journal files to object storage */
+  archiveSchedule?: string;
 }
 
 /**
@@ -172,11 +192,35 @@ export interface FirebirdConfig {
 }
 
 /**
+ * Cloud or file recovery settings for initial database bootstrapping.
+ */
+export interface BackupRecoveryConfiguration {
+  /** Backup file path or object storage key */
+  sourcePath?: string;
+  /** S3 cloud storage source configuration */
+  s3?: S3BackupConfiguration;
+}
+
+/**
+ * Target source cluster configuration for cluster-to-cluster cloning.
+ */
+export interface CloneConfiguration {
+  /** Name of the source FirebirdCluster to clone from */
+  sourceCluster: string;
+  /** Namespace of the source FirebirdCluster (defaults to same namespace as target cluster) */
+  namespace?: string;
+}
+
+/**
  * Bootstrap configuration for initializing a new cluster.
  */
 export interface BootstrapConfiguration {
   /** Inline DDL/DML SQL script to run on initial database creation */
   initSql?: string;
+  /** Cloud or file backup recovery configuration for database bootstrapping */
+  recovery?: BackupRecoveryConfiguration;
+  /** Source cluster configuration for cluster-to-cluster database cloning */
+  clone?: CloneConfiguration;
 }
 
 /**
@@ -206,6 +250,8 @@ export interface FirebirdClusterSpec {
   replication?: ReplicationConfiguration;
   /** AutoSweep configuration for periodic gfix database sweeping */
   autoSweep?: AutoSweepConfiguration;
+  /** Diagnostics configuration for online database integrity checks */
+  diagnostics?: DiagnosticsConfiguration;
   /** Custom firebird.conf configuration settings */
   config?: FirebirdConfig;
   /** TLS configuration for client and wire communication encryption */
@@ -246,6 +292,18 @@ export interface FirebirdClusterCondition {
 }
 
 /**
+ * Replication status of the cluster.
+ */
+export interface ReplicationStatus {
+  /** Pod name of current primary database instance */
+  primaryPod?: string;
+  /** Number of active replicating secondary instances */
+  activeReplicas?: number;
+  /** List of replica pod names operating in synchronous replication mode */
+  syncReplicas?: string[];
+}
+
+/**
  * Status of a FirebirdCluster resource.
  */
 export interface FirebirdClusterStatus {
@@ -259,6 +317,10 @@ export interface FirebirdClusterStatus {
   phaseReason?: string;
   /** List of status conditions */
   conditions?: FirebirdClusterCondition[];
+  /** Detailed replication status details */
+  replicationStatus?: ReplicationStatus;
+  /** Hash digest of current superuser secret for password rotation tracking */
+  superuserSecretHash?: string;
 }
 
 /**

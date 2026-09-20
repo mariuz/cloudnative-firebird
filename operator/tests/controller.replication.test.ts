@@ -529,5 +529,54 @@ describe('FirebirdClusterController – replication integration', () => {
       expect(ownerRef?.kind).toBe('FirebirdCluster');
       expect(ownerRef?.uid).toBe('test-uid-1234');
     });
+
+    it('creates journal archive CronJob when journalArchiveS3 is configured', async () => {
+      const createNamespacedCronJobImpl = vi.fn().mockResolvedValue({});
+      const { mockKubeConfig, mockBatchApi } = makeMockKubeConfig({
+        createNamespacedCronJobImpl,
+      });
+      const controller = new FirebirdClusterController(mockKubeConfig);
+      const cluster = makeCluster({
+        replication: {
+          enabled: true,
+          journalArchiveS3: {
+            bucket: 'archive-bucket',
+            secretRef: { name: 's3-secret' },
+          },
+        },
+      });
+
+      await controller.reconcile(cluster);
+
+      expect(mockBatchApi.createNamespacedCronJob).toHaveBeenCalledTimes(1);
+      const call = (mockBatchApi.createNamespacedCronJob as Mock).mock.calls[0][0];
+      expect(call.body.metadata.name).toBe('test-cluster-journal-archive');
+    });
+
+    it('updates status with replicationStatus details when replication is enabled', async () => {
+      const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
+      const { mockKubeConfig, mockCustomApi } = makeMockKubeConfig({
+        patchNamespacedCustomObjectStatusImpl,
+      });
+      const controller = new FirebirdClusterController(mockKubeConfig);
+      const cluster = makeCluster({
+        instances: 3,
+        replication: {
+          enabled: true,
+          mode: 'sync',
+        },
+      });
+
+      await controller.reconcile(cluster);
+
+      const statusCalls = (mockCustomApi.patchNamespacedCustomObjectStatus as Mock).mock.calls;
+      const lastStatusCall = statusCalls[statusCalls.length - 1][0];
+      const statusValue = lastStatusCall.body[0].value;
+      expect(statusValue.replicationStatus).toEqual({
+        primaryPod: 'test-cluster-0',
+        activeReplicas: 2,
+        syncReplicas: ['test-cluster-1', 'test-cluster-2'],
+      });
+    });
   });
 });

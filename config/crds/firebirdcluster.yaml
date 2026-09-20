@@ -192,6 +192,9 @@ spec:
                     enablePodMonitor:
                       description: Whether to enable Prometheus PodMonitor
                       type: boolean
+                    enableGrafanaDashboard:
+                      description: Whether to reconcile a Grafana dashboard ConfigMap
+                      type: boolean
                     exporter:
                       description: Prometheus exporter sidecar configuration
                       type: object
@@ -254,6 +257,34 @@ spec:
                       enum:
                         - sync
                         - async
+                    journalDirectory:
+                      description: Directory path for replication journal files (defaults to "/firebird/data/journals")
+                      type: string
+                    archiveSchedule:
+                      description: Cron schedule for archiving completed journal files to object storage
+                      type: string
+                    journalArchiveS3:
+                      description: Cloud S3 storage configuration for continuous journal archiving (PITR)
+                      type: object
+                      required:
+                        - bucket
+                        - secretRef
+                      properties:
+                        endpoint:
+                          type: string
+                        bucket:
+                          type: string
+                        region:
+                          type: string
+                        prefix:
+                          type: string
+                        secretRef:
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
                 autoSweep:
                   description: AutoSweep configuration for periodic gfix database sweeping
                   type: object
@@ -268,6 +299,21 @@ spec:
                       type: string
                     databaseName:
                       description: Database file name to sweep (defaults to "mydb.fdb")
+                      type: string
+                diagnostics:
+                  description: Diagnostics configuration for online database integrity checks (gfix -v -full)
+                  type: object
+                  required:
+                    - enabled
+                  properties:
+                    enabled:
+                      description: Whether online database diagnostics are enabled
+                      type: boolean
+                    schedule:
+                      description: Cron schedule for diagnostic execution (defaults to "0 4 * * 0")
+                      type: string
+                    databaseName:
+                      description: Database file name to check (defaults to "mydb.fdb")
                       type: string
                 config:
                   description: Custom firebird.conf configuration settings
@@ -284,6 +330,43 @@ spec:
                     initSql:
                       description: Inline DDL/DML SQL script to run on initial database creation
                       type: string
+                    recovery:
+                      description: Cloud or file backup recovery configuration for database bootstrapping
+                      type: object
+                      properties:
+                        sourcePath:
+                          type: string
+                        s3:
+                          type: object
+                          required:
+                            - bucket
+                            - secretRef
+                          properties:
+                            endpoint:
+                              type: string
+                            bucket:
+                              type: string
+                            region:
+                              type: string
+                            prefix:
+                              type: string
+                            secretRef:
+                              type: object
+                              required:
+                                - name
+                              properties:
+                                name:
+                                  type: string
+                    clone:
+                      description: Target source cluster configuration for cluster-to-cluster cloning
+                      type: object
+                      required:
+                        - sourceCluster
+                      properties:
+                        sourceCluster:
+                          type: string
+                        namespace:
+                          type: string
                 env:
                   description: Additional environment variables for the Firebird container
                   type: array
@@ -352,6 +435,21 @@ spec:
                 phaseReason:
                   description: Human-readable message about the current phase
                   type: string
+                superuserSecretHash:
+                  description: SHA-256 hash digest of superuser secret for password rotation tracking
+                  type: string
+                replicationStatus:
+                  description: Detailed replication status details
+                  type: object
+                  properties:
+                    primaryPod:
+                      type: string
+                    activeReplicas:
+                      type: integer
+                    syncReplicas:
+                      type: array
+                      items:
+                        type: string
                 conditions:
                   description: List of status conditions
                   type: array

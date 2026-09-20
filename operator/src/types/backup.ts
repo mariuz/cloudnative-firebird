@@ -109,3 +109,54 @@ export interface FirebirdRestore {
   spec: FirebirdRestoreSpec;
   status?: FirebirdRestoreStatus;
 }
+
+/**
+ * Specification for a FirebirdScheduledBackup resource.
+ */
+export interface FirebirdScheduledBackupSpec {
+  /** Target FirebirdCluster name */
+  clusterName: string;
+  /** Cron schedule expression (e.g. "0 2 * * *") */
+  schedule: string;
+  /** Whether scheduled backup execution is suspended */
+  suspend?: boolean;
+  /** Backup strategy ('logical' or 'physical') */
+  type?: 'logical' | 'physical';
+  /** Physical backup level (0, 1, 2) */
+  level?: 0 | 1 | 2;
+  /** Backup retention policy (e.g. "7d", "30d") */
+  retentionPolicy?: string;
+  /** S3 cloud storage export configuration */
+  s3?: S3BackupConfiguration;
+}
+
+/**
+ * Status of a FirebirdScheduledBackup resource.
+ */
+export interface FirebirdScheduledBackupStatus {
+  /** Timestamp of the last scheduled backup execution */
+  lastScheduleTime?: string;
+  /** Timestamp when last backup completed */
+  lastSuccessfulTime?: string;
+  /** Total count of backups executed by this scheduled backup */
+  backupCount?: number;
+}
+
+/**
+ * FirebirdScheduledBackup Custom Resource.
+ */
+export interface FirebirdScheduledBackup {
+  apiVersion: 'firebird.cloudnative-firebird.io/v1';
+  kind: 'FirebirdScheduledBackup';
+  metadata: {
+    name: string;
+    namespace?: string;
+    uid?: string;
+    resourceVersion?: string;
+    generation?: number;
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+  };
+  spec: FirebirdScheduledBackupSpec;
+  status?: FirebirdScheduledBackupStatus;
+}

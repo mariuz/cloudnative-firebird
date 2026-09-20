@@ -1,10 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FirebirdBackupController } from '../src/controllers/backup.controller';
 import { KubeConfig, BatchV1Api, CustomObjectsApi } from '@kubernetes/client-node';
-import { FirebirdBackup, FirebirdRestore, FirebirdCluster } from '../src/types';
+import { FirebirdBackup, FirebirdScheduledBackup, FirebirdRestore, FirebirdCluster } from '../src/types';
 
 describe('FirebirdBackupController', () => {
-  let mockBatchApi: { readNamespacedJob: ReturnType<typeof vi.fn>; createNamespacedJob: ReturnType<typeof vi.fn> };
+  let mockBatchApi: {
+    readNamespacedJob: ReturnType<typeof vi.fn>;
+    createNamespacedJob: ReturnType<typeof vi.fn>;
+    readNamespacedCronJob: ReturnType<typeof vi.fn>;
+    createNamespacedCronJob: ReturnType<typeof vi.fn>;
+  };
   let mockCustomApi: { getNamespacedCustomObject: ReturnType<typeof vi.fn>; patchNamespacedCustomObjectStatus: ReturnType<typeof vi.fn> };
   let mockKubeConfig: KubeConfig;
   let controller: FirebirdBackupController;
@@ -20,6 +25,8 @@ describe('FirebirdBackupController', () => {
     mockBatchApi = {
       readNamespacedJob: vi.fn().mockRejectedValue({ response: { statusCode: 404 } }),
       createNamespacedJob: vi.fn().mockResolvedValue({}),
+      readNamespacedCronJob: vi.fn().mockRejectedValue({ response: { statusCode: 404 } }),
+      createNamespacedCronJob: vi.fn().mockResolvedValue({}),
     };
 
     mockCustomApi = {
@@ -117,6 +124,38 @@ describe('FirebirdBackupController', () => {
             op: 'replace',
             path: '/status',
             value: expect.objectContaining({ phase: 'Completed' }),
+          }),
+        ]),
+      }),
+    );
+  });
+
+  it('reconciles FirebirdScheduledBackup by creating a CronJob and updating status', async () => {
+    const scheduledBackup: FirebirdScheduledBackup = {
+      apiVersion: 'firebird.cloudnative-firebird.io/v1',
+      kind: 'FirebirdScheduledBackup',
+      metadata: { name: 'nightly-backup', namespace: 'default' },
+      spec: { clusterName: 'test-cluster', schedule: '0 2 * * *' },
+    };
+
+    await controller.reconcileScheduledBackup(scheduledBackup);
+
+    expect(mockBatchApi.createNamespacedCronJob).toHaveBeenCalledWith({
+      namespace: 'default',
+      body: expect.objectContaining({
+        metadata: expect.objectContaining({ name: 'sched-backup-nightly-backup' }),
+      }),
+    });
+
+    expect(mockCustomApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plural: 'firebirdscheduledbackups',
+        name: 'nightly-backup',
+        body: expect.arrayContaining([
+          expect.objectContaining({
+            op: 'replace',
+            path: '/status',
+            value: expect.objectContaining({ backupCount: 1 }),
           }),
         ]),
       }),

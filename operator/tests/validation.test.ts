@@ -3,6 +3,7 @@ import {
   validateClusterSpec,
   validateBackupSpec,
   validateRestoreSpec,
+  validateScheduledBackupSpec,
   ValidationError,
 } from '../src/utils/validation';
 import { FirebirdCluster } from '../src/types';
@@ -118,6 +119,41 @@ describe('validateClusterSpec', () => {
     expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, mode: 'async' } }))).not.toThrow();
   });
 
+  it('throws ValidationError when replication journalArchiveS3 bucket is empty', () => {
+    const cluster = makeCluster({
+      replication: {
+        enabled: true,
+        journalArchiveS3: { bucket: '', secretRef: { name: 'secret' } },
+      },
+    });
+    expect(() => validateClusterSpec(cluster)).toThrow(ValidationError);
+    expect(() => validateClusterSpec(cluster)).toThrow(/Replication journalArchiveS3 bucket name is required/);
+  });
+
+  it('throws ValidationError when bootstrap clone sourceCluster is empty', () => {
+    const cluster = makeCluster({
+      bootstrap: { clone: { sourceCluster: '' } },
+    });
+    expect(() => validateClusterSpec(cluster)).toThrow(ValidationError);
+    expect(() => validateClusterSpec(cluster)).toThrow(/Bootstrap clone sourceCluster is required/);
+  });
+
+  it('throws ValidationError when bootstrap clone sourceCluster is self', () => {
+    const cluster = makeCluster({
+      bootstrap: { clone: { sourceCluster: 'test-cluster' } },
+    });
+    expect(() => validateClusterSpec(cluster)).toThrow(ValidationError);
+    expect(() => validateClusterSpec(cluster)).toThrow(/Bootstrap clone sourceCluster cannot be the cluster itself/);
+  });
+
+  it('throws ValidationError when bootstrap recovery is missing sourcePath and s3', () => {
+    const cluster = makeCluster({
+      bootstrap: { recovery: {} },
+    });
+    expect(() => validateClusterSpec(cluster)).toThrow(ValidationError);
+    expect(() => validateClusterSpec(cluster)).toThrow(/Bootstrap recovery requires either sourcePath or s3 configuration/);
+  });
+
   it('throws ValidationError for missing S3 bucket name', () => {
     const cluster = makeCluster({
       backup: {
@@ -164,6 +200,16 @@ describe('validateBackupSpec & validateRestoreSpec', () => {
       spec: { clusterName: '' },
     };
     expect(() => validateRestoreSpec(restore)).toThrow(/clusterName is required/);
+  });
+
+  it('throws ValidationError if FirebirdScheduledBackup schedule is invalid', () => {
+    const scheduledBackup = {
+      apiVersion: 'firebird.cloudnative-firebird.io/v1',
+      kind: 'FirebirdScheduledBackup',
+      metadata: { name: 'bad-schedule' },
+      spec: { clusterName: 'test-cluster', schedule: 'invalid cron' },
+    };
+    expect(() => validateScheduledBackupSpec(scheduledBackup)).toThrow(/Invalid scheduled backup schedule/);
   });
 });
 

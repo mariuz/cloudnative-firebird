@@ -708,7 +708,12 @@ describe('FirebirdClusterController – basic reconciliation', () => {
     });
 
     it('deletes ConfigMap when config is no longer specified and ConfigMap exists', async () => {
-      const readNamespacedConfigMapImpl = vi.fn().mockResolvedValue({ metadata: { name: 'test-cluster-config' } });
+      const readNamespacedConfigMapImpl = vi.fn().mockImplementation(async ({ name }: { name: string }) => {
+        if (name === 'test-cluster-config') {
+          return { metadata: { name: 'test-cluster-config' } };
+        }
+        throw notFoundError;
+      });
       const deleteNamespacedConfigMapImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockCoreApi } = makeMockKubeConfig({
         readNamespacedConfigMapImpl,

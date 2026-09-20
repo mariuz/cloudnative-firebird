@@ -49,14 +49,44 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     );
   }
 
-  if (
-    spec.replication?.enabled &&
-    spec.replication.mode &&
-    !['sync', 'async'].includes(spec.replication.mode)
-  ) {
-    throw new ValidationError(
-      `Invalid replication mode: ${spec.replication.mode}. Must be 'sync' or 'async'.`,
-    );
+  if (spec.replication?.enabled) {
+    if (spec.replication.mode && !['sync', 'async'].includes(spec.replication.mode)) {
+      throw new ValidationError(
+        `Invalid replication mode: ${spec.replication.mode}. Must be 'sync' or 'async'.`,
+      );
+    }
+    if (spec.replication.journalArchiveS3) {
+      if (!spec.replication.journalArchiveS3.bucket || spec.replication.journalArchiveS3.bucket.trim() === '') {
+        throw new ValidationError('Replication journalArchiveS3 bucket name is required');
+      }
+      if (!spec.replication.journalArchiveS3.secretRef?.name || spec.replication.journalArchiveS3.secretRef.name.trim() === '') {
+        throw new ValidationError('Replication journalArchiveS3 secretRef name is required');
+      }
+    }
+  }
+
+  if (spec.bootstrap?.clone) {
+    if (!spec.bootstrap.clone.sourceCluster || spec.bootstrap.clone.sourceCluster.trim() === '') {
+      throw new ValidationError('Bootstrap clone sourceCluster is required');
+    }
+    if (cluster.metadata?.name && spec.bootstrap.clone.sourceCluster === cluster.metadata.name) {
+      throw new ValidationError('Bootstrap clone sourceCluster cannot be the cluster itself');
+    }
+  }
+
+  if (spec.bootstrap?.recovery) {
+    const { sourcePath, s3 } = spec.bootstrap.recovery;
+    if ((!sourcePath || sourcePath.trim() === '') && !s3) {
+      throw new ValidationError('Bootstrap recovery requires either sourcePath or s3 configuration');
+    }
+    if (s3) {
+      if (!s3.bucket || s3.bucket.trim() === '') {
+        throw new ValidationError('Bootstrap recovery S3 bucket is required');
+      }
+      if (!s3.secretRef?.name || s3.secretRef.name.trim() === '') {
+        throw new ValidationError('Bootstrap recovery S3 secretRef name is required');
+      }
+    }
   }
 
   if (spec.backup?.enabled) {
@@ -145,6 +175,24 @@ export function validateRestoreSpec(restore: FirebirdRestore): void {
   }
   if (restore.spec.restoreType && !['logical', 'physical'].includes(restore.spec.restoreType)) {
     throw new ValidationError(`Invalid restoreType: ${restore.spec.restoreType}. Must be 'logical' or 'physical'.`);
+  }
+}
+
+/**
+ * Validates a FirebirdScheduledBackup custom resource specification.
+ */
+export function validateScheduledBackupSpec(scheduledBackup: { spec: { clusterName: string; schedule: string; type?: string; level?: number } }): void {
+  if (!scheduledBackup.spec?.clusterName || scheduledBackup.spec.clusterName.trim() === '') {
+    throw new ValidationError('FirebirdScheduledBackup clusterName is required');
+  }
+  if (!scheduledBackup.spec?.schedule || scheduledBackup.spec.schedule.trim().split(/\s+/).length !== 5) {
+    throw new ValidationError(`Invalid scheduled backup schedule cron expression: "${scheduledBackup.spec?.schedule}". Standard 5-field cron expression required.`);
+  }
+  if (scheduledBackup.spec.type && !['logical', 'physical'].includes(scheduledBackup.spec.type)) {
+    throw new ValidationError(`Invalid backup type: ${scheduledBackup.spec.type}. Must be 'logical' or 'physical'.`);
+  }
+  if (scheduledBackup.spec.level !== undefined && ![0, 1, 2].includes(scheduledBackup.spec.level)) {
+    throw new ValidationError(`Invalid physical backup level: ${scheduledBackup.spec.level}. Must be 0, 1, or 2.`);
   }
 }
 

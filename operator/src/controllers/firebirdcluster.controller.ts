@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import {
   AppsV1Api,
   BatchV1Api,
@@ -15,7 +16,10 @@ import {
   buildBackupCronJob,
   buildCertificate,
   buildConfigMap,
+  buildDiagnosticsCronJob,
+  buildGrafanaDashboardConfigMap,
   buildHeadlessService,
+  buildJournalArchiveCronJob,
   buildLease,
   buildNetworkPolicy,
   buildPodDisruptionBudget,
@@ -26,6 +30,7 @@ import {
   autoSweepCronJobNeedsUpdate,
   configMapNeedsUpdate,
   cronJobNeedsUpdate,
+  diagnosticsCronJobNeedsUpdate,
   networkPolicyNeedsUpdate,
   podDisruptionBudgetNeedsUpdate,
   statefulSetNeedsUpdate,
@@ -101,22 +106,35 @@ export class FirebirdClusterController {
       await this.reconcileConfigMap(cluster, log);
       await this.reconcileHeadlessService(cluster, log);
       await this.reconcileService(cluster, log);
-      const readyInstances = await this.reconcileStatefulSet(cluster, log);
+      const { readyInstances, superuserSecretHash } = await this.reconcileStatefulSet(cluster, log);
 
       if (cluster.spec.replication?.enabled) {
         await this.reconcileReplicaService(cluster, log);
       }
 
+      await this.reconcileJournalArchiveCronJob(cluster, log);
       await this.reconcileLease(cluster, log);
       await this.reconcileCertificate(cluster, log);
       await this.reconcilePodDisruptionBudget(cluster, log);
       await this.reconcileNetworkPolicy(cluster, log);
       await this.reconcileBackupCronJob(cluster, log);
       await this.reconcileAutoSweepCronJob(cluster, log);
+      await this.reconcileDiagnosticsCronJob(cluster, log);
       await this.reconcilePodMonitor(cluster, log);
+      await this.reconcileGrafanaDashboard(cluster, log);
 
       const targetInstances = cluster.spec.instances;
       const isReady = readyInstances === targetInstances;
+
+      const replicationStatus = cluster.spec.replication?.enabled
+        ? {
+            primaryPod: `${name}-0`,
+            activeReplicas: Math.max(0, readyInstances - 1),
+            ...(cluster.spec.replication.mode === 'sync'
+              ? { syncReplicas: Array.from({ length: Math.max(0, readyInstances - 1) }, (_, i) => `${name}-${i + 1}`) }
+              : {}),
+          }
+        : undefined;
 
       await this.updateStatus(cluster, {
         phase: isReady ? 'Running' : 'Creating',
@@ -125,6 +143,8 @@ export class FirebirdClusterController {
           : `Waiting for pods: ${readyInstances}/${targetInstances} ready`,
         instances: targetInstances,
         readyInstances,
+        replicationStatus,
+        superuserSecretHash,
         conditions: [
           this.makeCondition(
             'Ready',
@@ -223,13 +243,28 @@ export class FirebirdClusterController {
     }
   }
 
-  /** Reconcile the StatefulSet for the cluster and return number of ready replicas */
+  /** Reconcile the StatefulSet for the cluster and return ready replica count and secret hash */
   private async reconcileStatefulSet(
     cluster: FirebirdCluster,
     log: Logger,
-  ): Promise<number> {
+  ): Promise<{ readyInstances: number; superuserSecretHash?: string }> {
     const { name, namespace = 'default' } = cluster.metadata;
-    const desired = buildStatefulSet(cluster);
+    let superuserSecretHash: string | undefined;
+
+    if (cluster.spec.superuserSecret?.name) {
+      try {
+        const secret = await this.coreApi.readNamespacedSecret({
+          name: cluster.spec.superuserSecret.name,
+          namespace,
+        });
+        const dataStr = JSON.stringify(secret.data ?? {});
+        superuserSecretHash = crypto.createHash('sha256').update(dataStr).digest('hex');
+      } catch {
+        log.debug('Superuser secret not found or unreadable during StatefulSet build');
+      }
+    }
+
+    const desired = buildStatefulSet(cluster, { superuserSecretHash });
 
     let existing;
     try {
@@ -241,7 +276,10 @@ export class FirebirdClusterController {
         namespace,
         body: desired,
       });
-      return created.status?.readyReplicas ?? 0;
+      return {
+        readyInstances: created.status?.readyReplicas ?? 0,
+        superuserSecretHash,
+      };
     }
 
     let current = existing;
@@ -256,7 +294,51 @@ export class FirebirdClusterController {
       log.debug('StatefulSet is up to date, skipping');
     }
 
-    return current.status?.readyReplicas ?? 0;
+    return {
+      readyInstances: current.status?.readyReplicas ?? 0,
+      superuserSecretHash,
+    };
+  }
+
+  /** Reconcile CronJob for replication journal continuous archiving to S3 */
+  private async reconcileJournalArchiveCronJob(
+    cluster: FirebirdCluster,
+    log: Logger,
+  ): Promise<void> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    const cronJobName = `${name}-journal-archive`;
+
+    if (cluster.spec.replication?.enabled && cluster.spec.replication.journalArchiveS3) {
+      const desired = buildJournalArchiveCronJob(cluster);
+      if (!desired) return;
+      try {
+        const existing = await this.batchApi.readNamespacedCronJob({ name: cronJobName, namespace });
+        if (cronJobNeedsUpdate(existing, desired)) {
+          log.info('Updating journal archive CronJob');
+          await this.batchApi.patchNamespacedCronJob({
+            name: cronJobName,
+            namespace,
+            body: desired,
+          });
+        } else {
+          log.debug('Journal archive CronJob up to date, skipping');
+        }
+      } catch {
+        log.info('Creating journal archive CronJob');
+        await this.batchApi.createNamespacedCronJob({
+          namespace,
+          body: desired,
+        });
+      }
+    } else {
+      try {
+        await this.batchApi.readNamespacedCronJob({ name: cronJobName, namespace });
+        log.info('Deleting disabled journal archive CronJob');
+        await this.batchApi.deleteNamespacedCronJob({ name: cronJobName, namespace });
+      } catch {
+        log.debug('Journal archive CronJob does not exist, skipping deletion');
+      }
+    }
   }
 
   /** Reconcile the CronJob resource for database backups */
@@ -563,6 +645,86 @@ export class FirebirdClusterController {
         plural: 'certificates',
         body: desired,
       });
+    }
+  }
+
+  /** Reconcile the online database diagnostics CronJob (gfix -v -full) */
+  private async reconcileDiagnosticsCronJob(
+    cluster: FirebirdCluster,
+    log: Logger,
+  ): Promise<void> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    const cronJobName = `${name}-diagnostics`;
+
+    if (cluster.spec.diagnostics?.enabled) {
+      const desired = buildDiagnosticsCronJob(cluster);
+      try {
+        const existing = await this.batchApi.readNamespacedCronJob({ name: cronJobName, namespace });
+        if (diagnosticsCronJobNeedsUpdate(existing, desired)) {
+          log.info('Updating Diagnostics CronJob');
+          await this.batchApi.patchNamespacedCronJob({
+            name: cronJobName,
+            namespace,
+            body: desired,
+          });
+        } else {
+          log.debug('Diagnostics CronJob is up to date, skipping');
+        }
+      } catch {
+        log.info('Creating Diagnostics CronJob');
+        await this.batchApi.createNamespacedCronJob({
+          namespace,
+          body: desired,
+        });
+      }
+    } else {
+      try {
+        await this.batchApi.readNamespacedCronJob({ name: cronJobName, namespace });
+        log.info('Deleting disabled Diagnostics CronJob');
+        await this.batchApi.deleteNamespacedCronJob({ name: cronJobName, namespace });
+      } catch {
+        log.debug('Diagnostics CronJob does not exist, skipping deletion');
+      }
+    }
+  }
+
+  /** Reconcile the Grafana dashboard ConfigMap if enableGrafanaDashboard is true */
+  private async reconcileGrafanaDashboard(
+    cluster: FirebirdCluster,
+    log: Logger,
+  ): Promise<void> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    const cmName = `${name}-grafana-dashboard`;
+
+    if (cluster.spec.monitoring?.enableGrafanaDashboard) {
+      const desired = buildGrafanaDashboardConfigMap(cluster);
+      try {
+        const existing = await this.coreApi.readNamespacedConfigMap({ name: cmName, namespace });
+        if (configMapNeedsUpdate(existing, desired)) {
+          log.info('Updating Grafana Dashboard ConfigMap');
+          await this.coreApi.patchNamespacedConfigMap({
+            name: cmName,
+            namespace,
+            body: desired,
+          });
+        } else {
+          log.debug('Grafana Dashboard ConfigMap is up to date, skipping');
+        }
+      } catch {
+        log.info('Creating Grafana Dashboard ConfigMap');
+        await this.coreApi.createNamespacedConfigMap({
+          namespace,
+          body: desired,
+        });
+      }
+    } else {
+      try {
+        await this.coreApi.readNamespacedConfigMap({ name: cmName, namespace });
+        log.info('Deleting disabled Grafana Dashboard ConfigMap');
+        await this.coreApi.deleteNamespacedConfigMap({ name: cmName, namespace });
+      } catch {
+        log.debug('Grafana Dashboard ConfigMap does not exist, skipping deletion');
+      }
     }
   }
 

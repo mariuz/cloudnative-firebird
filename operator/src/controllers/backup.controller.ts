@@ -1,8 +1,15 @@
 import { BatchV1Api, CustomObjectsApi, KubeConfig } from '@kubernetes/client-node';
 import { logger } from '../utils/logger';
-import { buildBackupJob, buildRestoreJob } from '../utils/resources';
-import { validateBackupSpec, validateRestoreSpec } from '../utils/validation';
-import { API_GROUP, API_VERSION, FirebirdCluster, FirebirdBackup, FirebirdRestore } from '../types';
+import { buildBackupJob, buildRestoreJob, buildScheduledBackupCronJob } from '../utils/resources';
+import { validateBackupSpec, validateRestoreSpec, validateScheduledBackupSpec } from '../utils/validation';
+import {
+  API_GROUP,
+  API_VERSION,
+  FirebirdCluster,
+  FirebirdBackup,
+  FirebirdScheduledBackup,
+  FirebirdRestore,
+} from '../types';
 
 export class FirebirdBackupController {
   private readonly batchApi: BatchV1Api;
@@ -68,6 +75,51 @@ export class FirebirdBackupController {
         log.error({ err: statusErr }, 'Failed to update backup status');
       });
 
+      throw err;
+    }
+  }
+
+  /**
+   * Reconcile a FirebirdScheduledBackup resource.
+   */
+  async reconcileScheduledBackup(scheduledBackup: FirebirdScheduledBackup): Promise<void> {
+    const { name, namespace = 'default' } = scheduledBackup.metadata;
+    const log = logger.child({ scheduledBackup: name, namespace });
+
+    log.info('Reconciling FirebirdScheduledBackup');
+
+    try {
+      validateScheduledBackupSpec(scheduledBackup);
+
+      const clusterObj = await this.customApi.getNamespacedCustomObject({
+        group: API_GROUP,
+        version: API_VERSION,
+        namespace,
+        plural: 'firebirdclusters',
+        name: scheduledBackup.spec.clusterName,
+      });
+
+      const cluster = clusterObj as FirebirdCluster;
+      const cronJob = buildScheduledBackupCronJob(scheduledBackup, cluster);
+      const cronName = cronJob.metadata!.name!;
+
+      try {
+        await this.batchApi.readNamespacedCronJob({ name: cronName, namespace });
+        log.debug('Scheduled backup CronJob already exists');
+      } catch {
+        log.info({ cronName }, 'Creating scheduled backup CronJob');
+        await this.batchApi.createNamespacedCronJob({ namespace, body: cronJob });
+      }
+
+      await this.updateScheduledBackupStatus(scheduledBackup, {
+        lastScheduleTime: new Date().toISOString(),
+        lastSuccessfulTime: new Date().toISOString(),
+        backupCount: (scheduledBackup.status?.backupCount ?? 0) + 1,
+      });
+
+      log.info('FirebirdScheduledBackup reconciliation completed');
+    } catch (err) {
+      log.error({ err }, 'FirebirdScheduledBackup reconciliation failed');
       throw err;
     }
   }
@@ -159,6 +211,23 @@ export class FirebirdBackupController {
       version: API_VERSION,
       namespace,
       plural: 'firebirdrestores',
+      name,
+      body: patch,
+    });
+  }
+
+  private async updateScheduledBackupStatus(
+    scheduledBackup: FirebirdScheduledBackup,
+    status: NonNullable<FirebirdScheduledBackup['status']>,
+  ): Promise<void> {
+    const { name, namespace = 'default' } = scheduledBackup.metadata;
+    const patch = [{ op: 'replace' as const, path: '/status', value: { ...scheduledBackup.status, ...status } }];
+
+    await this.customApi.patchNamespacedCustomObjectStatus({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: 'firebirdscheduledbackups',
       name,
       body: patch,
     });
