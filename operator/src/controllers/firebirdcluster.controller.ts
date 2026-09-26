@@ -33,8 +33,14 @@ import {
   diagnosticsCronJobNeedsUpdate,
   networkPolicyNeedsUpdate,
   podDisruptionBudgetNeedsUpdate,
+  primaryServiceSelector,
+  readOnlyRoutingEnabled,
+  replicaServiceSelector,
   statefulSetNeedsUpdate,
+  CLUSTER_LABEL,
 } from '../utils/resources';
+import { computeReadRouting, podRoutingLabelPatch } from '../utils/routing';
+import { planVolumeExpansion } from '../utils/storage';
 import { validateClusterSpec } from '../utils/validation';
 import {
   API_GROUP,
@@ -43,7 +49,15 @@ import {
   FirebirdClusterCondition,
   FirebirdClusterStatus,
   RESOURCE_PLURAL,
+  VolumeStatus,
 } from '../types';
+
+/** Outcome of the read-only routing reconciliation */
+interface ReadRoutingResult {
+  primaryPod: string;
+  readRoutablePods: string[];
+  laggingReplicas: string[];
+}
 
 /**
  * FirebirdClusterController reconciles FirebirdCluster resources
@@ -104,9 +118,15 @@ export class FirebirdClusterController {
       });
 
       await this.reconcileConfigMap(cluster, log);
+      // Label pods before (re)pointing service selectors at the routing labels
+      const readRouting = await this.reconcileReadRouting(cluster, log);
       await this.reconcileHeadlessService(cluster, log);
       await this.reconcileService(cluster, log);
-      const { readyInstances, superuserSecretHash } = await this.reconcileStatefulSet(cluster, log);
+      const { readyInstances, superuserSecretHash, statefulSetExisted } =
+        await this.reconcileStatefulSet(cluster, log);
+      const volumes = statefulSetExisted
+        ? await this.reconcileVolumeExpansion(cluster, log)
+        : undefined;
 
       if (cluster.spec.replication?.enabled) {
         await this.reconcileReplicaService(cluster, log);
@@ -128,10 +148,16 @@ export class FirebirdClusterController {
 
       const replicationStatus = cluster.spec.replication?.enabled
         ? {
-            primaryPod: `${name}-0`,
+            primaryPod: readRouting?.primaryPod ?? `${name}-0`,
             activeReplicas: Math.max(0, readyInstances - 1),
             ...(cluster.spec.replication.mode === 'sync'
               ? { syncReplicas: Array.from({ length: Math.max(0, readyInstances - 1) }, (_, i) => `${name}-${i + 1}`) }
+              : {}),
+            ...(readRouting
+              ? {
+                  readRoutablePods: readRouting.readRoutablePods,
+                  laggingReplicas: readRouting.laggingReplicas,
+                }
               : {}),
           }
         : undefined;
@@ -145,6 +171,7 @@ export class FirebirdClusterController {
         readyInstances,
         replicationStatus,
         superuserSecretHash,
+        ...(volumes ? { volumes } : {}),
         conditions: [
           this.makeCondition(
             'Ready',
@@ -210,16 +237,18 @@ export class FirebirdClusterController {
     const { name, namespace = 'default' } = cluster.metadata;
     const desired = buildService(cluster);
 
+    let existing;
     try {
-      await this.coreApi.readNamespacedService({ name, namespace });
-      log.debug('Service already exists, skipping');
+      existing = await this.coreApi.readNamespacedService({ name, namespace });
     } catch {
       log.info('Creating cluster service');
       await this.coreApi.createNamespacedService({
         namespace,
         body: desired,
       });
+      return;
     }
+    await this.reconcileServiceSelector(name, namespace, existing?.spec?.selector, primaryServiceSelector(cluster), log);
   }
 
   /** Reconcile the read-replica service for replication-enabled clusters */
@@ -231,23 +260,140 @@ export class FirebirdClusterController {
     const replicaName = `${name}-replica`;
     const desired = buildReplicaService(cluster);
 
+    let existing;
     try {
-      await this.coreApi.readNamespacedService({ name: replicaName, namespace });
-      log.debug('Replica service already exists, skipping');
+      existing = await this.coreApi.readNamespacedService({ name: replicaName, namespace });
     } catch {
       log.info('Creating replica service');
       await this.coreApi.createNamespacedService({
         namespace,
         body: desired,
       });
+      return;
     }
+    await this.reconcileServiceSelector(replicaName, namespace, existing?.spec?.selector, replicaServiceSelector(cluster), log);
+  }
+
+  /** Patch a Service selector when it drifts from the desired routing selector */
+  private async reconcileServiceSelector(
+    serviceName: string,
+    namespace: string,
+    current: Record<string, string> | undefined,
+    desired: Record<string, string>,
+    log: Logger,
+  ): Promise<void> {
+    if (!current || JSON.stringify(sortKeys(current)) === JSON.stringify(sortKeys(desired))) {
+      log.debug({ service: serviceName }, 'Service already exists, skipping');
+      return;
+    }
+    log.info({ service: serviceName }, 'Updating service selector');
+    await this.coreApi.patchNamespacedService({
+      name: serviceName,
+      namespace,
+      body: [{ op: 'replace', path: '/spec/selector', value: desired }],
+    });
+  }
+
+  /**
+   * Label cluster pods with their role and read-routability so that the
+   * primary and `-replica` Services route traffic based on readiness and replication lag.
+   */
+  private async reconcileReadRouting(
+    cluster: FirebirdCluster,
+    log: Logger,
+  ): Promise<ReadRoutingResult | undefined> {
+    if (!readOnlyRoutingEnabled(cluster)) return undefined;
+    const { name, namespace = 'default' } = cluster.metadata;
+
+    let primaryPod = `${name}-0`;
+    try {
+      const lease = await this.coordinationApi.readNamespacedLease({ name: `${name}-lease`, namespace });
+      if (lease.spec?.holderIdentity) primaryPod = lease.spec.holderIdentity;
+    } catch {
+      log.debug('Leader lease not found, assuming ordinal 0 is primary');
+    }
+
+    const pods = await this.coreApi.listNamespacedPod({
+      namespace,
+      labelSelector: `${CLUSTER_LABEL}=${name}`,
+    });
+    const plan = computeReadRouting(pods.items, primaryPod, cluster.spec.replication!.readOnlyRouting!);
+
+    for (const decision of plan.decisions) {
+      const pod = pods.items.find((p) => p.metadata?.name === decision.name)!;
+      const patch = podRoutingLabelPatch(pod, decision);
+      if (patch.length === 0) continue;
+      log.info({ pod: decision.name, role: decision.role, readRoutable: decision.readRoutable }, 'Updating pod routing labels');
+      await this.coreApi.patchNamespacedPod({ name: decision.name, namespace, body: patch });
+    }
+
+    if (plan.laggingReplicas.length > 0) {
+      log.warn({ laggingReplicas: plan.laggingReplicas }, 'Replicas excluded from read-only routing due to replication lag');
+    }
+
+    return { primaryPod, readRoutablePods: plan.readRoutablePods, laggingReplicas: plan.laggingReplicas };
+  }
+
+  /**
+   * Expand instance PVCs when spec.storage.size grows. StatefulSet volumeClaimTemplates
+   * are immutable, so each existing PVC is patched in place (requires a StorageClass
+   * with allowVolumeExpansion). Returns undefined when PVCs cannot be listed.
+   */
+  private async reconcileVolumeExpansion(
+    cluster: FirebirdCluster,
+    log: Logger,
+  ): Promise<VolumeStatus[] | undefined> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    const desiredSize = cluster.spec.storage.size;
+
+    let pvcs;
+    try {
+      pvcs = await this.coreApi.listNamespacedPersistentVolumeClaim({
+        namespace,
+        labelSelector: `${CLUSTER_LABEL}=${name}`,
+      });
+    } catch (err) {
+      log.warn({ err }, 'Unable to list PersistentVolumeClaims for volume expansion');
+      return undefined;
+    }
+
+    const pattern = new RegExp(`^firebird-data-${name}-\\d+$`);
+    const statuses: VolumeStatus[] = [];
+    for (const pvc of pvcs.items.filter((p) => pattern.test(p.metadata?.name ?? ''))) {
+      const plan = planVolumeExpansion(pvc, desiredSize);
+      if (plan.expand) {
+        log.info({ pvc: plan.status.name, size: desiredSize }, 'Expanding PersistentVolumeClaim');
+        try {
+          await this.coreApi.patchNamespacedPersistentVolumeClaim({
+            name: plan.status.name,
+            namespace,
+            body: [{ op: 'replace', path: '/spec/resources/requests/storage', value: desiredSize }],
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          log.warn({ err, pvc: plan.status.name }, 'PersistentVolumeClaim expansion rejected');
+          statuses.push({
+            ...plan.status,
+            requestedSize: pvc.spec?.resources?.requests?.storage,
+            state: 'ResizeFailed',
+            message,
+          });
+          continue;
+        }
+      } else if (plan.status.state === 'ShrinkRejected') {
+        log.warn({ pvc: plan.status.name }, plan.status.message);
+      }
+      statuses.push(plan.status);
+    }
+
+    return statuses.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   }
 
   /** Reconcile the StatefulSet for the cluster and return ready replica count and secret hash */
   private async reconcileStatefulSet(
     cluster: FirebirdCluster,
     log: Logger,
-  ): Promise<{ readyInstances: number; superuserSecretHash?: string }> {
+  ): Promise<{ readyInstances: number; superuserSecretHash?: string; statefulSetExisted: boolean }> {
     const { name, namespace = 'default' } = cluster.metadata;
     let superuserSecretHash: string | undefined;
 
@@ -279,12 +425,17 @@ export class FirebirdClusterController {
       return {
         readyInstances: created.status?.readyReplicas ?? 0,
         superuserSecretHash,
+        statefulSetExisted: false,
       };
     }
 
     let current = existing;
     if (statefulSetNeedsUpdate(existing, desired)) {
       log.info('Updating StatefulSet');
+      // volumeClaimTemplates are immutable; storage growth is handled by PVC expansion
+      if (desired.spec && existing.spec?.volumeClaimTemplates) {
+        desired.spec.volumeClaimTemplates = existing.spec.volumeClaimTemplates;
+      }
       current = await this.appsApi.patchNamespacedStatefulSet({
         name,
         namespace,
@@ -297,6 +448,7 @@ export class FirebirdClusterController {
     return {
       readyInstances: current.status?.readyReplicas ?? 0,
       superuserSecretHash,
+      statefulSetExisted: true,
     };
   }
 
@@ -775,4 +927,9 @@ export class FirebirdClusterController {
       lastTransitionTime: new Date().toISOString(),
     };
   }
+}
+
+/** Returns a copy of a string map with keys in sorted order for stable comparison */
+function sortKeys(map: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(map).sort(([a], [b]) => a.localeCompare(b)));
 }

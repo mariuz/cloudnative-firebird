@@ -84,7 +84,7 @@ rules:
     verbs:
       - create
       - patch
-  # Pods (for status reporting)
+  # Pods (for status reporting and read-only routing labels)
   - apiGroups:
       - ""
     resources:
@@ -93,6 +93,7 @@ rules:
       - get
       - list
       - watch
+      - patch
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

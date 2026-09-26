@@ -278,3 +278,67 @@ describe('Operator – event handling', () => {
     });
   });
 });
+
+describe('Operator – periodic resync', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('re-reconciles known clusters on the resync interval', async () => {
+    const operator = new Operator(new KubeConfig(), 8080, 1000);
+    await operator.start();
+    const cluster = makeCluster();
+    capturedEventCallback!('ADDED', cluster);
+    expect(mockReconcile).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(mockReconcile).toHaveBeenCalledTimes(2);
+    expect(mockReconcile).toHaveBeenLastCalledWith(cluster);
+    operator.stop();
+  });
+
+  it('uses the latest observed cluster object and forgets deleted clusters', async () => {
+    const operator = new Operator(new KubeConfig(), 8080, 1000);
+    await operator.start();
+    const a = makeNamedCluster('a');
+    const aUpdated = makeNamedCluster('a', 'default', { instances: 3 });
+    const b = makeNamedCluster('b');
+    capturedEventCallback!('ADDED', a);
+    capturedEventCallback!('ADDED', b);
+    capturedEventCallback!('MODIFIED', aUpdated);
+    capturedEventCallback!('DELETED', b);
+    mockReconcile.mockClear();
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(mockReconcile).toHaveBeenCalledTimes(1);
+    expect(mockReconcile).toHaveBeenCalledWith(aUpdated);
+    operator.stop();
+  });
+
+  it('stops resyncing after stop()', async () => {
+    const operator = new Operator(new KubeConfig(), 8080, 1000);
+    await operator.start();
+    capturedEventCallback!('ADDED', makeCluster());
+    operator.stop();
+    mockReconcile.mockClear();
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(mockReconcile).not.toHaveBeenCalled();
+  });
+
+  it('disables resync when the interval is 0', async () => {
+    const operator = new Operator(new KubeConfig(), 8080, 0);
+    await operator.start();
+    capturedEventCallback!('ADDED', makeCluster());
+    mockReconcile.mockClear();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(mockReconcile).not.toHaveBeenCalled();
+    operator.stop();
+  });
+});

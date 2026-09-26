@@ -1,4 +1,5 @@
 import { FirebirdCluster, FirebirdBackup, FirebirdRestore } from '../types';
+import { parseQuantity } from './storage';
 
 export class ValidationError extends Error {
   constructor(message: string) {
@@ -33,6 +34,13 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     throw new ValidationError('Storage size is required (e.g. "1Gi")');
   }
 
+  const storageBytes = parseQuantity(spec.storage.size);
+  if (storageBytes === null || storageBytes <= 0) {
+    throw new ValidationError(
+      `Invalid storage size: "${spec.storage.size}". Must be a positive Kubernetes quantity (e.g. "10Gi").`,
+    );
+  }
+
   if (
     spec.superuserSecret &&
     (!spec.superuserSecret.name || spec.superuserSecret.name.trim() === '')
@@ -53,6 +61,17 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     if (spec.replication.mode && !['sync', 'async'].includes(spec.replication.mode)) {
       throw new ValidationError(
         `Invalid replication mode: ${spec.replication.mode}. Must be 'sync' or 'async'.`,
+      );
+    }
+    const routing = spec.replication.readOnlyRouting;
+    if (
+      routing?.maxLagSeconds !== undefined &&
+      (typeof routing.maxLagSeconds !== 'number' ||
+        !Number.isFinite(routing.maxLagSeconds) ||
+        routing.maxLagSeconds < 0)
+    ) {
+      throw new ValidationError(
+        `Invalid readOnlyRouting maxLagSeconds: ${routing.maxLagSeconds}. Must be a non-negative number.`,
       );
     }
     if (spec.replication.journalArchiveS3) {

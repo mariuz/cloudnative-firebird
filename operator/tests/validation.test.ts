@@ -28,6 +28,25 @@ describe('validateClusterSpec', () => {
     expect(() => validateClusterSpec(cluster)).not.toThrow();
   });
 
+  it.each(['10GB', 'lots', '0', '-5Gi'])('throws for invalid storage size %j', (size) => {
+    const cluster = makeCluster({ storage: { size } });
+    expect(() => validateClusterSpec(cluster)).toThrow(/Invalid storage size/);
+  });
+
+  it('accepts readOnlyRouting with a valid maxLagSeconds', () => {
+    const cluster = makeCluster({
+      replication: { enabled: true, readOnlyRouting: { enabled: true, maxLagSeconds: 0 } },
+    });
+    expect(() => validateClusterSpec(cluster)).not.toThrow();
+  });
+
+  it('throws for a negative readOnlyRouting maxLagSeconds', () => {
+    const cluster = makeCluster({
+      replication: { enabled: true, readOnlyRouting: { enabled: true, maxLagSeconds: -1 } },
+    });
+    expect(() => validateClusterSpec(cluster)).toThrow(/maxLagSeconds/);
+  });
+
   it('throws ValidationError if instances is less than 1', () => {
     const cluster = makeCluster({ instances: 0 });
     expect(() => validateClusterSpec(cluster)).toThrow(ValidationError);

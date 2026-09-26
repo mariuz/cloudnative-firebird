@@ -10,7 +10,8 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 
 - **Declarative cluster management** via `FirebirdCluster` CRD
 - **StatefulSet-based** deployment for stable pod identity and storage
-- **Persistent storage** via PersistentVolumeClaims
+- **Persistent storage** via PersistentVolumeClaims, with online volume expansion when `spec.storage.size` grows
+- **Lag-aware read-only routing** to replicas via the `<name>-replica` Service (`spec.replication.readOnlyRouting`)
 - **Secret-based** SYSDBA password management
 - **Automatic service creation** (ClusterIP + headless for StatefulSet DNS)
 - **Status reporting** with conditions and phase tracking
@@ -111,6 +112,8 @@ spec:
     name: my-firebird-secret
 
   # Storage configuration (required)
+  # Growing size expands existing PVCs in place (needs allowVolumeExpansion
+  # on the StorageClass); shrinking is rejected and reported in status.volumes.
   storage:
     size: 1Gi
     storageClass: standard   # optional
@@ -148,6 +151,21 @@ spec:
 | `instances` | Configured number of instances |
 | `readyInstances` | Number of ready instances |
 | `conditions` | Standard Kubernetes status conditions (`Ready`, `Progressing`, `Degraded`) |
+| `replicationStatus` | Primary pod, active/sync replicas, and with read-only routing the `readRoutablePods` and `laggingReplicas` |
+| `volumes` | Per-PVC requested size, capacity and expansion state (`Ready`, `Resizing`, `ResizeFailed`, `ShrinkRejected`) |
+
+### Read-Only Traffic Routing
+
+With `spec.replication.readOnlyRouting.enabled: true` the operator labels every pod with
+`firebird.cloudnative-firebird.io/role` (`primary` / `replica`) and
+`firebird.cloudnative-firebird.io/read-routable`. The primary Service selects only the
+primary pod, and the `<name>-replica` Service selects only ready replicas whose replication
+lag is within `maxLagSeconds` (default 30). Lag is read from the
+`firebird.cloudnative-firebird.io/replication-lag-seconds` pod annotation, published by the
+replication agent or metrics exporter; replicas without a lag report are routed on readiness
+alone. When no replica qualifies, reads fall back to the primary unless
+`fallbackToPrimary: false`. Clusters are re-reconciled every 30 seconds so routing follows
+readiness and lag changes.
 
 ## Development
 
@@ -162,7 +180,7 @@ cloudnative-firebird/
 │   │   ├── utils/          # Resource builders, logger
 │   │   ├── operator.ts     # Watch/event loop
 │   │   └── index.ts        # Entrypoint
-│   ├── tests/              # Unit tests (Jest)
+│   ├── tests/              # Unit tests (Vitest)
 │   ├── Dockerfile
 │   ├── package.json
 │   └── tsconfig.json

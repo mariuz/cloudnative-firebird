@@ -10,8 +10,13 @@ import {
   RESOURCE_PLURAL,
 } from './types';
 
+/** Default interval for periodic re-reconciliation of known clusters */
+export const DEFAULT_RESYNC_INTERVAL_MS = 30_000;
+
 /**
  * Operator watches for FirebirdCluster resources and triggers reconciliation.
+ * Known clusters are also re-reconciled periodically so that state outside the
+ * FirebirdCluster object (pod readiness, replication lag, PVC resize progress) converges.
  */
 export class Operator {
   private readonly kubeConfig: KubeConfig;
@@ -21,8 +26,12 @@ export class Operator {
   private readonly healthServer: HealthServer;
   private watchRequest: { abort: () => void } | null = null;
   private watchTimer: NodeJS.Timeout | null = null;
+  private resyncTimer: NodeJS.Timeout | null = null;
+  private readonly resyncIntervalMs: number;
+  private readonly knownClusters = new Map<string, FirebirdCluster>();
 
-  constructor(kubeConfig: KubeConfig, healthPort = 8080) {
+  constructor(kubeConfig: KubeConfig, healthPort = 8080, resyncIntervalMs = DEFAULT_RESYNC_INTERVAL_MS) {
+    this.resyncIntervalMs = resyncIntervalMs;
     this.kubeConfig = kubeConfig;
     this.controller = new FirebirdClusterController(kubeConfig);
     this.backupController = new FirebirdBackupController(kubeConfig);
@@ -38,6 +47,9 @@ export class Operator {
     logger.info('Starting cloudnative-firebird operator');
     this.healthServer.start();
     await this.startWatching();
+    if (this.resyncIntervalMs > 0) {
+      this.resyncTimer = setInterval(() => this.resync(), this.resyncIntervalMs);
+    }
     this.healthServer.setReady(true);
   }
 
@@ -51,6 +63,11 @@ export class Operator {
       clearTimeout(this.watchTimer);
       this.watchTimer = null;
     }
+    if (this.resyncTimer) {
+      clearInterval(this.resyncTimer);
+      this.resyncTimer = null;
+    }
+    this.knownClusters.clear();
     this.healthServer.stop();
   }
 
@@ -98,6 +115,16 @@ export class Operator {
     await restartWatch();
   }
 
+  /** Re-reconcile every known cluster with its latest observed spec */
+  private resync(): void {
+    for (const cluster of this.knownClusters.values()) {
+      const { name, namespace = 'default' } = cluster.metadata;
+      this.controller.reconcile(cluster).catch((err) => {
+        logger.error({ err, cluster: name, namespace }, 'Periodic resync reconcile failed');
+      });
+    }
+  }
+
   private async handleEvent(phase: string, cluster: FirebirdCluster): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const log = logger.child({ cluster: name, namespace, phase });
@@ -105,11 +132,13 @@ export class Operator {
     switch (phase) {
       case 'ADDED':
       case 'MODIFIED':
+        this.knownClusters.set(`${namespace}/${name}`, cluster);
         log.info('Received cluster event, reconciling');
         await this.controller.reconcile(cluster);
         break;
 
       case 'DELETED':
+        this.knownClusters.delete(`${namespace}/${name}`);
         log.info('FirebirdCluster deleted; owned resources will be garbage collected');
         break;
 
