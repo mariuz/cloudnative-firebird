@@ -85,6 +85,12 @@ spec:
                     name:
                       description: Name of the Secret resource
                       type: string
+                databaseName:
+                  description: >
+                    Database file created in each instance's data directory
+                    (/var/lib/firebird/data). Defaults to "mydb.fdb".
+                  type: string
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
                 storage:
                   description: Storage configuration for Firebird data files
                   type: object
@@ -261,7 +267,7 @@ spec:
                         - sync
                         - async
                     journalDirectory:
-                      description: Directory path for replication journal files (defaults to "/firebird/data/journals")
+                      description: Directory path for replication journal files (defaults to "/var/lib/firebird/data/journals")
                       type: string
                     archiveSchedule:
                       description: Cron schedule for archiving completed journal files to object storage
@@ -322,7 +328,7 @@ spec:
                       description: Cron schedule for sweep execution (defaults to "0 3 * * *")
                       type: string
                     databaseName:
-                      description: Database file name to sweep (defaults to "mydb.fdb")
+                      description: Database file name to sweep (defaults to spec.databaseName)
                       type: string
                 diagnostics:
                   description: Diagnostics configuration for online database integrity checks (gfix -v -full)
@@ -337,7 +343,7 @@ spec:
                       description: Cron schedule for diagnostic execution (defaults to "0 4 * * 0")
                       type: string
                     databaseName:
-                      description: Database file name to check (defaults to "mydb.fdb")
+                      description: Database file name to check (defaults to spec.databaseName)
                       type: string
                 config:
                   description: Custom firebird.conf configuration settings

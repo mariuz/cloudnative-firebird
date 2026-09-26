@@ -138,11 +138,25 @@ spec:
   monitoring:
     enablePodMonitor: true
 
+  # Database file created on each instance's PVC (optional, defaults to mydb.fdb)
+  databaseName: mydb.fdb
+
   # Additional container environment variables (optional)
   env:
-    - name: FIREBIRD_DATABASE
-      value: mydb.fdb
+    - name: TZ
+      value: UTC
 ```
+
+### Instance Runtime
+
+Instances run the official [`firebirdsql/firebird`](https://github.com/FirebirdSQL/firebird-docker)
+image. The PVC is mounted at the image data directory `/var/lib/firebird/data`, where the
+entrypoint creates `databaseName` on first start and runs `bootstrap.initSql`. The superuser
+Secret sets the SYSDBA password (`FIREBIRD_ROOT_PASSWORD`) and is exposed to client tools as
+`ISC_USER`/`ISC_PASSWORD`, and `config.settings` are applied through `FIREBIRD_CONF_<key>`
+environment variables, so changing them rolls the pods. Sweep and diagnostics Jobs connect to
+the primary through the read-write Service instead of mounting the instance PVC; diagnostics
+use online validation (`fbsvcmgr action_validate`), which works while clients are connected.
 
 ### Status Fields
 

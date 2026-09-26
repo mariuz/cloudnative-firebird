@@ -38,7 +38,10 @@ spec:
   monitoring:
     enablePodMonitor: true
 
+  # Database file created on each instance's PVC (defaults to mydb.fdb)
+  databaseName: mydb.fdb
+
   # Additional environment variables
   env:
-    - name: FIREBIRD_DATABASE
-      value: mydb.fdb
+    - name: TZ
+      value: UTC

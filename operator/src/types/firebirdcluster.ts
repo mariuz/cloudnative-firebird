@@ -129,7 +129,7 @@ export interface DiagnosticsConfiguration {
   enabled: boolean;
   /** Cron schedule for diagnostic execution (defaults to "0 4 * * 0") */
   schedule?: string;
-  /** Database file name to check (defaults to "mydb.fdb") */
+  /** Database file name to check (defaults to spec.databaseName) */
   databaseName?: string;
 }
 
@@ -163,7 +163,7 @@ export interface ReplicationConfiguration {
    * Defaults to 'async'.
    */
   mode?: 'sync' | 'async';
-  /** Directory path for replication journal files (defaults to "/firebird/data/journals") */
+  /** Directory path for replication journal files (defaults to "/var/lib/firebird/data/journals") */
   journalDirectory?: string;
   /** Cloud S3 storage configuration for continuous journal archiving (PITR) */
   journalArchiveS3?: S3BackupConfiguration;
@@ -198,7 +198,7 @@ export interface AutoSweepConfiguration {
   enabled: boolean;
   /** Cron schedule for sweep execution (defaults to "0 3 * * *") */
   schedule?: string;
-  /** Database file name to sweep (defaults to "mydb.fdb") */
+  /** Database file name to sweep (defaults to spec.databaseName) */
   databaseName?: string;
 }
 
@@ -255,6 +255,8 @@ export interface FirebirdClusterSpec {
   imageName?: string;
   /** Reference to the Secret containing the superuser password (SYSDBA) */
   superuserSecret?: SuperuserSecretRef;
+  /** Database file created in each instance's data directory (defaults to "mydb.fdb") */
+  databaseName?: string;
   /** Storage configuration for the Firebird data files */
   storage: StorageConfiguration;
   /** Resource requirements for each Firebird container */
