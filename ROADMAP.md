@@ -117,6 +117,29 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 
 ---
 
+### 7. Production Hardening & Cluster Lifecycle (Inspired by CloudNative-PG Operations)
+
+- [x] **Complete Operator RBAC** *(v0.7.0)*
+  - ClusterRole covers every resource the operator manages (CronJobs, Jobs, Leases, PDBs, NetworkPolicies, ConfigMaps, PodMonitors, Certificates, backup/restore CRDs).
+- [x] **Correct Patch Semantics** *(v0.7.0)*
+  - Whole-object updates are sent as JSON merge patches; Lease timestamps use `MicroTime` precision.
+- [x] **Event Filtering & Resync-Based Retry** *(v0.7.0)*
+  - Status-only watch events (unchanged `metadata.generation`) no longer trigger reconciles; failures retry on the periodic resync.
+- [x] **Declarative Hibernation** *(v0.7.0)*
+  - `spec.hibernated` scales the cluster to zero and suspends its CronJobs while retaining PVCs, Services and configuration.
+- [x] **API-Server Integration Coverage** *(v0.7.0)*
+  - kind-based CI exercises spec updates, PDB/Lease reconciliation, hibernation and resume against a real API server.
+- [ ] **Planned Switchover**
+  - Declarative promotion of a chosen replica (`gfix -replica none`) with Lease handover and demotion of the old primary.
+- [ ] **Instance Fencing**
+  - Isolate individual instances (stop Firebird, keep the pod and PVC) for troubleshooting.
+- [ ] **Rolling Updates with Primary Last**
+  - Update replicas first, then switch over before restarting the primary to minimise write downtime.
+- [ ] **Declarative Database Users & Roles**
+  - Manage Firebird users, roles and grants from the `FirebirdCluster` spec with Secret-backed passwords.
+
+---
+
 ## Feature Comparison: CloudNative-PG vs cloudnative-firebird
 
 | Feature Domain | CloudNative-PG (PostgreSQL) | cloudnative-firebird Status | Planned Release |
@@ -130,6 +153,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Bootstrap / Restore** | From Backup / Clone | Dedicated Restore & Bootstrap | **v0.5.0 (Done)** |
 | **Node Maintenance** | PDB / Drain Handling | PDB Reconciled | **v0.2.0 (Done)** |
 | **Volume Expansion** | PVC Resize | In-place PVC Expansion | **v0.6.0 (Done)** |
+| **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
+| **Switchover** | `kubectl cnpg promote` | Planned Switchover | Planned |
+| **Fencing** | Instance Fencing | Instance Fencing | Planned |
 | **Auto-Sweeping / Maintenance** | VACUUM Scheduling | `gfix -sweep` CronJob | **v0.3.0 (Done)** |
 | **Security & TLS** | cert-manager | WireCrypt & cert-manager | **v0.4.0 (Done)** |
 | **Metrics Exporter** | Built-in Exporter | Exporter Sidecar & PodMonitor | **v0.4.0 (Done)** |

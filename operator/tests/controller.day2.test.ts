@@ -250,3 +250,145 @@ describe('FirebirdClusterController – smart read-only routing', () => {
     expect(api('patchNamespacedService')).not.toHaveBeenCalled();
   });
 });
+
+/** Returns the Content-Type a patch call's request options would set */
+function patchContentType(options: unknown): string | undefined {
+  const middleware = (options as { middleware?: Array<{ pre: (req: unknown) => unknown }> })?.middleware ?? [];
+  let contentType: string | undefined;
+  const request = { setHeaderParam: (key: string, value: string) => { if (key === 'Content-Type') contentType = value; } };
+  middleware.forEach((m) => m.pre(request));
+  return contentType;
+}
+
+describe('FirebirdClusterController – patch semantics', () => {
+  it('sends whole-object StatefulSet patches as merge patches', async () => {
+    const cluster = makeCluster({ instances: 2 });
+    const { kubeConfig, api } = makeMockKubeConfig({
+      readNamespacedStatefulSet: vi.fn().mockResolvedValue(existingStatefulSet(makeCluster({ instances: 1 }))),
+      patchNamespacedStatefulSet: vi.fn().mockImplementation(async ({ body }) => body),
+    });
+
+    await new FirebirdClusterController(kubeConfig).reconcile(cluster);
+
+    const [, options] = api('patchNamespacedStatefulSet').mock.calls[0];
+    expect(patchContentType(options)).toBe('application/merge-patch+json');
+  });
+
+  it('sends whole-object CronJob patches as merge patches', async () => {
+    const cluster = makeCluster({ backup: { enabled: true, schedule: '0 1 * * *' } });
+    const { kubeConfig, api } = makeMockKubeConfig({
+      readNamespacedCronJob: vi.fn().mockResolvedValue({ spec: { schedule: '0 2 * * *' } }),
+    });
+
+    await new FirebirdClusterController(kubeConfig).reconcile(cluster);
+
+    const [, options] = api('patchNamespacedCronJob').mock.calls[0];
+    expect(patchContentType(options)).toBe('application/merge-patch+json');
+  });
+
+  it('keeps JSON Patch for operation-list patches', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig({
+      readNamespacedService: vi.fn().mockResolvedValue({ spec: { selector: clusterLabels('test-cluster') } }),
+    });
+
+    await new FirebirdClusterController(kubeConfig).reconcile(
+      makeCluster({ instances: 2, replication: { enabled: true, readOnlyRouting: { enabled: true } } }),
+    );
+
+    const call = api('patchNamespacedService').mock.calls[0];
+    expect(Array.isArray(call[0].body)).toBe(true);
+    expect(call[1]).toBeUndefined();
+  });
+});
+
+describe('FirebirdClusterController – hibernation', () => {
+  const hibernated = makeCluster({
+    instances: 3,
+    hibernated: true,
+    backup: { enabled: true },
+    autoSweep: { enabled: true },
+    replication: { enabled: true, readOnlyRouting: { enabled: true } },
+  });
+
+  it('scales the StatefulSet to zero', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig({
+      readNamespacedStatefulSet: vi.fn().mockResolvedValue(existingStatefulSet(makeCluster({ instances: 3 }))),
+      patchNamespacedStatefulSet: vi.fn().mockImplementation(async ({ body }) => ({ ...body, status: { readyReplicas: 0 } })),
+    });
+
+    await new FirebirdClusterController(kubeConfig).reconcile(hibernated);
+
+    expect(api('patchNamespacedStatefulSet').mock.calls[0][0].body.spec.replicas).toBe(0);
+  });
+
+  it('creates CronJobs suspended', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig();
+
+    await new FirebirdClusterController(kubeConfig).reconcile(hibernated);
+
+    const created = api('createNamespacedCronJob').mock.calls.map((c) => c[0].body);
+    expect(created.length).toBeGreaterThanOrEqual(2);
+    created.forEach((cj) => expect(cj.spec.suspend).toBe(true));
+  });
+
+  it('suspends existing CronJobs and resumes them when woken up', async () => {
+    const running = { spec: { schedule: '0 2 * * *', suspend: false } };
+    const { kubeConfig, api } = makeMockKubeConfig({
+      readNamespacedCronJob: vi.fn().mockResolvedValue(running),
+    });
+    await new FirebirdClusterController(kubeConfig).reconcile(
+      makeCluster({ hibernated: true, backup: { enabled: true, schedule: '0 2 * * *' } }),
+    );
+    expect(api('patchNamespacedCronJob').mock.calls[0][0].body.spec.suspend).toBe(true);
+
+    const suspended = { spec: { schedule: '0 2 * * *', suspend: true } };
+    const woken = makeMockKubeConfig({ readNamespacedCronJob: vi.fn().mockResolvedValue(suspended) });
+    await new FirebirdClusterController(woken.kubeConfig).reconcile(
+      makeCluster({ hibernated: false, backup: { enabled: true, schedule: '0 2 * * *' } }),
+    );
+    expect(woken.api('patchNamespacedCronJob').mock.calls[0][0].body.spec.suspend).toBe(false);
+  });
+
+  it('removes the PodDisruptionBudget and skips read routing', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig({
+      readNamespacedPodDisruptionBudget: vi.fn().mockResolvedValue({}),
+    });
+
+    await new FirebirdClusterController(kubeConfig).reconcile(hibernated);
+
+    expect(api('deleteNamespacedPodDisruptionBudget')).toHaveBeenCalledWith({
+      name: 'test-cluster-pdb',
+      namespace: 'default',
+    });
+    expect(api('createNamespacedPodDisruptionBudget')).not.toHaveBeenCalled();
+    expect(api('listNamespacedPod')).not.toHaveBeenCalled();
+  });
+
+  it('reports the Hibernated phase and condition', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig({
+      createNamespacedStatefulSet: vi.fn().mockImplementation(async ({ body }) => ({ ...body, status: { readyReplicas: 0 } })),
+    });
+
+    await new FirebirdClusterController(kubeConfig).reconcile(hibernated);
+
+    const final = statusPatches(api).at(-1)!;
+    expect(final.phase).toBe('Hibernated');
+    expect(final.phaseReason).toContain('PVCs are retained');
+    expect(final.replicationStatus).toBeUndefined();
+    expect(final.conditions).toEqual([
+      expect.objectContaining({ type: 'Hibernated', status: 'True' }),
+      expect.objectContaining({ type: 'Ready', status: 'False', reason: 'Hibernated' }),
+    ]);
+  });
+
+  it('reports pods still terminating while hibernating', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig({
+      readNamespacedStatefulSet: vi.fn().mockResolvedValue(existingStatefulSet(makeCluster({ instances: 3 }))),
+      patchNamespacedStatefulSet: vi.fn().mockImplementation(async ({ body }) => ({ ...body, status: { readyReplicas: 2 } })),
+    });
+
+    await new FirebirdClusterController(kubeConfig).reconcile(hibernated);
+
+    expect(statusPatches(api).at(-1)!.phaseReason).toBe('Hibernating: waiting for 2 pod(s) to terminate');
+  });
+});

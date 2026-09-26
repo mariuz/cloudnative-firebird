@@ -29,6 +29,8 @@ export class Operator {
   private resyncTimer: NodeJS.Timeout | null = null;
   private readonly resyncIntervalMs: number;
   private readonly knownClusters = new Map<string, FirebirdCluster>();
+  /** metadata.generation of the last successful reconcile, per cluster */
+  private readonly reconciledGenerations = new Map<string, number>();
 
   constructor(kubeConfig: KubeConfig, healthPort = 8080, resyncIntervalMs = DEFAULT_RESYNC_INTERVAL_MS) {
     this.resyncIntervalMs = resyncIntervalMs;
@@ -68,6 +70,7 @@ export class Operator {
       this.resyncTimer = null;
     }
     this.knownClusters.clear();
+    this.reconciledGenerations.clear();
     this.healthServer.stop();
   }
 
@@ -128,17 +131,33 @@ export class Operator {
   private async handleEvent(phase: string, cluster: FirebirdCluster): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const log = logger.child({ cluster: name, namespace, phase });
+    const key = `${namespace}/${name}`;
+    const generation = cluster.metadata.generation;
 
     switch (phase) {
       case 'ADDED':
       case 'MODIFIED':
-        this.knownClusters.set(`${namespace}/${name}`, cluster);
+        this.knownClusters.set(key, cluster);
+        // Status-only updates (including the operator's own) do not bump metadata.generation;
+        // skip them to avoid a reconcile → status patch → MODIFIED feedback loop.
+        // Periodic resync still converges anything observed outside the spec, and retries
+        // failed reconciles at the resync interval instead of in a tight event loop.
+        if (
+          phase === 'MODIFIED' &&
+          generation !== undefined &&
+          this.reconciledGenerations.get(key) === generation
+        ) {
+          log.debug({ generation }, 'Spec unchanged since last reconcile, skipping');
+          break;
+        }
         log.info('Received cluster event, reconciling');
+        if (generation !== undefined) this.reconciledGenerations.set(key, generation);
         await this.controller.reconcile(cluster);
         break;
 
       case 'DELETED':
-        this.knownClusters.delete(`${namespace}/${name}`);
+        this.knownClusters.delete(key);
+        this.reconciledGenerations.delete(key);
         log.info('FirebirdCluster deleted; owned resources will be garbage collected');
         break;
 
