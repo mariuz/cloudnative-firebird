@@ -15,7 +15,9 @@ spec:
   superuserSecret:
     name: my-firebird-secret
 
-  # Storage configuration
+  # Storage configuration.
+  # Increasing size later expands the existing PVCs in place
+  # (the StorageClass must set allowVolumeExpansion: true; shrinking is not supported).
   storage:
     size: 10Gi
     storageClass: fast-ssd
@@ -34,3 +36,10 @@ spec:
   replication:
     enabled: true
     mode: async
+    # Route read-only traffic (<name>-replica Service) only to ready replicas whose
+    # reported replication lag is within maxLagSeconds. The rw Service then targets
+    # the primary pod only.
+    readOnlyRouting:
+      enabled: true
+      maxLagSeconds: 30
+      fallbackToPrimary: true

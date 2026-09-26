@@ -169,6 +169,25 @@ export interface ReplicationConfiguration {
   journalArchiveS3?: S3BackupConfiguration;
   /** Cron schedule for archiving completed journal files to object storage */
   archiveSchedule?: string;
+  /** Replication lag and readiness-aware routing of read-only traffic to replicas */
+  readOnlyRouting?: ReadOnlyRoutingConfiguration;
+}
+
+/**
+ * Smart read-only traffic routing configuration.
+ * When enabled, the operator labels each pod with its role and routability and the
+ * `-replica` Service only selects ready replicas whose reported replication lag is
+ * within `maxLagSeconds`. Replication lag is read from the
+ * `firebird.cloudnative-firebird.io/replication-lag-seconds` pod annotation, published
+ * by the replication agent / metrics exporter.
+ */
+export interface ReadOnlyRoutingConfiguration {
+  /** Whether lag-aware read-only routing is enabled */
+  enabled: boolean;
+  /** Maximum replication lag (seconds) for a replica to receive read traffic (defaults to 30) */
+  maxLagSeconds?: number;
+  /** Route read-only traffic to the primary when no replica is eligible (defaults to true) */
+  fallbackToPrimary?: boolean;
 }
 
 /**
@@ -301,6 +320,32 @@ export interface ReplicationStatus {
   activeReplicas?: number;
   /** List of replica pod names operating in synchronous replication mode */
   syncReplicas?: string[];
+  /** Pods currently selected by the read-only `-replica` Service */
+  readRoutablePods?: string[];
+  /** Replicas excluded from read-only routing because of excessive replication lag */
+  laggingReplicas?: string[];
+}
+
+/**
+ * Per-instance storage status used to track PVC volume expansion.
+ */
+export interface VolumeStatus {
+  /** PersistentVolumeClaim name */
+  name: string;
+  /** Storage currently requested by the PVC */
+  requestedSize?: string;
+  /** Actual capacity reported by the bound volume */
+  capacity?: string;
+  /**
+   * Volume state:
+   * - Ready: capacity matches the desired size
+   * - Resizing: expansion requested and in progress
+   * - ResizeFailed: expansion was rejected (e.g. StorageClass without allowVolumeExpansion)
+   * - ShrinkRejected: desired size is smaller than the current request (PVCs cannot shrink)
+   */
+  state: 'Ready' | 'Resizing' | 'ResizeFailed' | 'ShrinkRejected';
+  /** Additional detail about the volume state */
+  message?: string;
 }
 
 /**
@@ -321,6 +366,8 @@ export interface FirebirdClusterStatus {
   replicationStatus?: ReplicationStatus;
   /** Hash digest of current superuser secret for password rotation tracking */
   superuserSecretHash?: string;
+  /** Per-instance PVC storage and volume expansion status */
+  volumes?: VolumeStatus[];
 }
 
 /**

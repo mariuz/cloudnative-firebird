@@ -17,6 +17,7 @@ import {
   API_GROUP,
   RESOURCE_KIND,
 } from '../types';
+import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
 
 /** The label key used to identify cluster resources */
 export const CLUSTER_LABEL = `${API_GROUP}/cluster`;
@@ -29,6 +30,29 @@ export function clusterLabels(name: string): Record<string, string> {
     'app.kubernetes.io/managed-by': 'cloudnative-firebird-operator',
     [CLUSTER_LABEL]: name,
   };
+}
+
+/** Returns true when lag-aware read-only routing is active for the cluster */
+export function readOnlyRoutingEnabled(cluster: FirebirdCluster): boolean {
+  return Boolean(cluster.spec.replication?.enabled && cluster.spec.replication.readOnlyRouting?.enabled);
+}
+
+/**
+ * Returns the pod selector for the primary (read-write) Service.
+ * With read-only routing enabled, only the pod labelled as primary receives write traffic.
+ */
+export function primaryServiceSelector(cluster: FirebirdCluster): Record<string, string> {
+  const labels = clusterLabels(cluster.metadata.name);
+  return readOnlyRoutingEnabled(cluster) ? { ...labels, [ROLE_LABEL]: 'primary' } : labels;
+}
+
+/**
+ * Returns the pod selector for the read-only `-replica` Service.
+ * With read-only routing enabled, only pods marked read-routable receive read traffic.
+ */
+export function replicaServiceSelector(cluster: FirebirdCluster): Record<string, string> {
+  const labels = clusterLabels(cluster.metadata.name);
+  return readOnlyRoutingEnabled(cluster) ? { ...labels, [READ_ROUTABLE_LABEL]: 'true' } : labels;
 }
 
 /**
@@ -338,7 +362,7 @@ export function buildService(cluster: FirebirdCluster): V1Service {
     },
     spec: {
       type: cluster.spec.serviceType ?? 'ClusterIP',
-      selector: labels,
+      selector: primaryServiceSelector(cluster),
       ports: [
         {
           name: 'firebird',
@@ -403,9 +427,9 @@ export function buildHeadlessService(cluster: FirebirdCluster): V1Service {
  * Builds the read-replica Service for a FirebirdCluster with replication enabled.
  * This service provides a dedicated endpoint for read-replica connections,
  * allowing clients to route read-only traffic separately from write traffic.
- * Note: the service selects the same pods as the primary service. Enforcing
- * read-only access at the pod level (e.g., via Firebird replica role assignment
- * or application-level routing) must be handled separately.
+ * Without `replication.readOnlyRouting` the service selects every cluster pod.
+ * With it enabled, only ready replicas within the replication lag threshold
+ * (labelled read-routable by the operator) are selected.
  */
 export function buildReplicaService(cluster: FirebirdCluster): V1Service {
   const { name, namespace = 'default' } = cluster.metadata;
@@ -435,7 +459,7 @@ export function buildReplicaService(cluster: FirebirdCluster): V1Service {
     },
     spec: {
       type: cluster.spec.serviceType ?? 'ClusterIP',
-      selector: labels,
+      selector: replicaServiceSelector(cluster),
       ports: [
         {
           name: 'firebird',

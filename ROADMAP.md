@@ -34,8 +34,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 - [x] **Firebird 4.0+ Journal-Based Replication Management & PITR Archiving** *(v0.5.0)*
   - Dynamic journal file sync, status tracking, and continuous archiving to S3.
   - Quorum management for synchronous replication (`mode: sync`).
-- [ ] **Smart Read-Only Traffic Routing**
+- [x] **Smart Read-Only Traffic Routing** *(v0.6.0)*
   - Pod readiness and replication lag-aware endpoint management for read replicas.
+  - Role-labelled pods: the rw Service targets the primary (leader Lease holder), the `-replica` Service targets eligible replicas.
+  - Configurable `maxLagSeconds` threshold and fallback to the primary when no replica qualifies.
 
 ---
 
@@ -82,8 +84,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 - [x] **Declarative `firebird.conf` Management** *(v0.3.0)*
   - ConfigMap projections for custom `firebird.conf` settings (`DefaultCacheMem`, `FileSystemCacheThreshold`, `LockHashSlots`).
   - Automatic pod reload notification on configuration updates.
-- [ ] **Volume Expansion Reconciliation**
+- [x] **Volume Expansion Reconciliation** *(v0.6.0)*
   - Storage PVC resizing support without cluster downtime.
+  - In-place PVC expansion on `spec.storage.size` growth, shrink protection, and per-volume resize status.
 
 ---
 
@@ -119,12 +122,14 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | Feature Domain | CloudNative-PG (PostgreSQL) | cloudnative-firebird Status | Planned Release |
 |---|---|---|---|
 | **Primary/Replica Setup** | Native Streaming Replication | Basic Replica Service | **v0.2.0 (Done)** |
+| **Read-Only Routing** | `-ro` / `-r` Services | Lag-aware `-replica` Service | **v0.6.0 (Done)** |
 | **Failover / Promotion** | Automated Failover | K8s Lease Leader Election | **v0.4.0 (Done)** |
 | **Physical Backup** | Barman Cloud / `pg_basebackup` | `nbackup` (Level 0-2) | **v0.3.0 (Done)** |
 | **Logical Backup** | `pg_dump` / CronJob | `gbak` CronJob & CRDs | **v0.1.0 (Done)** |
 | **PITR (Point-In-Time)** | Continuous Archiving | Journal Archiving to S3 | **v0.5.0 (Done)** |
 | **Bootstrap / Restore** | From Backup / Clone | Dedicated Restore & Bootstrap | **v0.5.0 (Done)** |
 | **Node Maintenance** | PDB / Drain Handling | PDB Reconciled | **v0.2.0 (Done)** |
+| **Volume Expansion** | PVC Resize | In-place PVC Expansion | **v0.6.0 (Done)** |
 | **Auto-Sweeping / Maintenance** | VACUUM Scheduling | `gfix -sweep` CronJob | **v0.3.0 (Done)** |
 | **Security & TLS** | cert-manager | WireCrypt & cert-manager | **v0.4.0 (Done)** |
 | **Metrics Exporter** | Built-in Exporter | Exporter Sidecar & PodMonitor | **v0.4.0 (Done)** |

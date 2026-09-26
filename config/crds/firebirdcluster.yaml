@@ -92,7 +92,10 @@ spec:
                     - size
                   properties:
                     size:
-                      description: Size of the PersistentVolumeClaim (e.g. "1Gi")
+                      description: >
+                        Size of the PersistentVolumeClaim (e.g. "1Gi"). Increasing this value
+                        expands existing PVCs in place (requires a StorageClass with
+                        allowVolumeExpansion); shrinking is not supported.
                       type: string
                     storageClass:
                       description: Optional StorageClass name for the PVC
@@ -263,6 +266,27 @@ spec:
                     archiveSchedule:
                       description: Cron schedule for archiving completed journal files to object storage
                       type: string
+                    readOnlyRouting:
+                      description: >
+                        Replication lag and readiness-aware routing of read-only traffic.
+                        When enabled, the -replica Service only selects ready replicas whose
+                        reported replication lag (pod annotation
+                        firebird.cloudnative-firebird.io/replication-lag-seconds) is within
+                        maxLagSeconds, and the primary Service only selects the primary pod.
+                      type: object
+                      required:
+                        - enabled
+                      properties:
+                        enabled:
+                          description: Whether lag-aware read-only routing is enabled
+                          type: boolean
+                        maxLagSeconds:
+                          description: Maximum replication lag in seconds for a replica to receive read traffic (defaults to 30)
+                          type: integer
+                          minimum: 0
+                        fallbackToPrimary:
+                          description: Route read-only traffic to the primary when no replica is eligible (defaults to true)
+                          type: boolean
                     journalArchiveS3:
                       description: Cloud S3 storage configuration for continuous journal archiving (PITR)
                       type: object
@@ -449,6 +473,40 @@ spec:
                     syncReplicas:
                       type: array
                       items:
+                        type: string
+                    readRoutablePods:
+                      description: Pods currently selected by the read-only -replica Service
+                      type: array
+                      items:
+                        type: string
+                    laggingReplicas:
+                      description: Replicas excluded from read-only routing because of replication lag
+                      type: array
+                      items:
+                        type: string
+                volumes:
+                  description: Per-instance PVC storage and volume expansion status
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - state
+                    properties:
+                      name:
+                        type: string
+                      requestedSize:
+                        type: string
+                      capacity:
+                        type: string
+                      state:
+                        type: string
+                        enum:
+                          - Ready
+                          - Resizing
+                          - ResizeFailed
+                          - ShrinkRejected
+                      message:
                         type: string
                 conditions:
                   description: List of status conditions

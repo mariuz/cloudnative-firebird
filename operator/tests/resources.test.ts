@@ -25,6 +25,9 @@ import {
   buildJournalArchiveCronJob,
   clusterLabels,
   statefulSetNeedsUpdate,
+  primaryServiceSelector,
+  replicaServiceSelector,
+  readOnlyRoutingEnabled,
 } from '../src/utils/resources';
 import { FirebirdCluster, FirebirdScheduledBackup, DEFAULT_FIREBIRD_IMAGE } from '../src/types';
 
@@ -412,6 +415,45 @@ describe('buildReplicaService', () => {
     const primarySvc = buildService(cluster);
     const replicaSvc = buildReplicaService(cluster);
     expect(replicaSvc.spec?.selector).toEqual(primarySvc.spec?.selector);
+  });
+});
+
+describe('read-only routing service selectors', () => {
+  const routed = makeCluster({
+    replication: { enabled: true, readOnlyRouting: { enabled: true } },
+  });
+
+  it('is disabled unless both replication and readOnlyRouting are enabled', () => {
+    expect(readOnlyRoutingEnabled(makeCluster())).toBe(false);
+    expect(readOnlyRoutingEnabled(makeCluster({ replication: { enabled: true } }))).toBe(false);
+    expect(
+      readOnlyRoutingEnabled(makeCluster({ replication: { enabled: false, readOnlyRouting: { enabled: true } } })),
+    ).toBe(false);
+    expect(readOnlyRoutingEnabled(routed)).toBe(true);
+  });
+
+  it('keeps plain cluster label selectors when routing is disabled', () => {
+    const cluster = makeCluster();
+    expect(primaryServiceSelector(cluster)).toEqual(clusterLabels('test-cluster'));
+    expect(replicaServiceSelector(cluster)).toEqual(clusterLabels('test-cluster'));
+  });
+
+  it('selects only the primary pod for the read-write service', () => {
+    expect(buildService(routed).spec?.selector).toEqual({
+      ...clusterLabels('test-cluster'),
+      'firebird.cloudnative-firebird.io/role': 'primary',
+    });
+  });
+
+  it('selects only read-routable pods for the replica service', () => {
+    expect(buildReplicaService(routed).spec?.selector).toEqual({
+      ...clusterLabels('test-cluster'),
+      'firebird.cloudnative-firebird.io/read-routable': 'true',
+    });
+  });
+
+  it('does not change the headless service selector', () => {
+    expect(buildHeadlessService(routed).spec?.selector).toEqual(clusterLabels('test-cluster'));
   });
 });
 
