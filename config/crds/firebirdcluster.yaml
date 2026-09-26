@@ -431,6 +431,12 @@ spec:
                 suspended:
                   description: Whether reconciliation is suspended for this cluster
                   type: boolean
+                hibernated:
+                  description: >
+                    Declarative hibernation. When true the StatefulSet is scaled to zero and
+                    operator-managed CronJobs are suspended, while PVCs, Services and
+                    configuration are retained. Set back to false to resume the cluster.
+                  type: boolean
                 serviceAnnotations:
                   description: Custom annotations to apply to primary and replica services
                   type: object
@@ -456,6 +462,7 @@ spec:
                     - Degraded
                     - Deleting
                     - Paused
+                    - Hibernated
                 phaseReason:
                   description: Human-readable message about the current phase
                   type: string

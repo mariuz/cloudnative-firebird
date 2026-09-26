@@ -279,6 +279,11 @@ export interface FirebirdClusterSpec {
   bootstrap?: BootstrapConfiguration;
   /** Whether the operator should suspend reconciliation for this cluster */
   suspended?: boolean;
+  /**
+   * Declarative hibernation: scales the cluster down to zero pods and suspends its
+   * CronJobs while retaining PVCs, Services and configuration. Set back to false to resume.
+   */
+  hibernated?: boolean;
   /** Additional environment variables to pass to the Firebird container */
   env?: Array<{ name: string; value?: string; valueFrom?: object }>;
   /** Node labels required for pod scheduling */
@@ -296,7 +301,7 @@ export interface FirebirdClusterSpec {
 /**
  * Condition types for the FirebirdCluster status.
  */
-export type ConditionType = 'Ready' | 'Progressing' | 'Degraded' | 'Paused';
+export type ConditionType = 'Ready' | 'Progressing' | 'Degraded' | 'Paused' | 'Hibernated';
 export type ConditionStatus = 'True' | 'False' | 'Unknown';
 
 /**
@@ -357,7 +362,7 @@ export interface FirebirdClusterStatus {
   /** Number of ready instances */
   readyInstances?: number;
   /** Current phase of the cluster */
-  phase?: 'Creating' | 'Running' | 'Updating' | 'Degraded' | 'Deleting' | 'Paused';
+  phase?: 'Creating' | 'Running' | 'Updating' | 'Degraded' | 'Deleting' | 'Paused' | 'Hibernated';
   /** Human-readable message about current status */
   phaseReason?: string;
   /** List of status conditions */
