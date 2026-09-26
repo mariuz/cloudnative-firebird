@@ -7,6 +7,7 @@ import {
   V1PodDisruptionBudget,
   V1ConfigMap,
   V1NetworkPolicy,
+  V1MicroTime,
 } from '@kubernetes/client-node';
 import {
   FirebirdCluster,
@@ -30,6 +31,15 @@ export function clusterLabels(name: string): Record<string, string> {
     'app.kubernetes.io/managed-by': 'cloudnative-firebird-operator',
     [CLUSTER_LABEL]: name,
   };
+}
+
+/**
+ * Applies the cluster hibernation state to an operator-managed CronJob:
+ * scheduled work is suspended while the cluster is hibernated.
+ */
+export function withHibernation<T extends V1CronJob>(cronJob: T, cluster: FirebirdCluster): T {
+  if (cronJob.spec) cronJob.spec.suspend = Boolean(cluster.spec.hibernated);
+  return cronJob;
 }
 
 /** Returns true when lag-aware read-only routing is active for the cluster */
@@ -283,7 +293,8 @@ export function buildStatefulSet(
     spec: {
       // Must reference the headless service for stable pod DNS
       serviceName: `${name}-headless`,
-      replicas: spec.instances,
+      // Hibernation scales to zero pods while keeping the PVCs
+      replicas: spec.hibernated ? 0 : spec.instances,
       selector: {
         matchLabels: labels,
       },
@@ -652,6 +663,7 @@ export function cronJobNeedsUpdate(existing: V1CronJob, desired: V1CronJob): boo
 
   if (!existingSpec || !desiredSpec) return true;
   if (existingSpec.schedule !== desiredSpec.schedule) return true;
+  if (Boolean(existingSpec.suspend) !== Boolean(desiredSpec.suspend)) return true;
 
   const existingContainer = existingSpec.jobTemplate?.spec?.template?.spec?.containers?.[0];
   const desiredContainer = desiredSpec.jobTemplate?.spec?.template?.spec?.containers?.[0];
@@ -785,7 +797,9 @@ export function buildLease(cluster: FirebirdCluster): V1Lease {
     spec: {
       holderIdentity: `${name}-0`,
       leaseDurationSeconds: 15,
-      renewTime: new Date(),
+      // Lease times are MicroTime (6 fractional digits); a plain Date serializes
+      // with milliseconds and is rejected by the API server
+      renewTime: new V1MicroTime(),
     },
   };
 }
@@ -1156,6 +1170,7 @@ export function autoSweepCronJobNeedsUpdate(existing: V1CronJob, desired: V1Cron
 
   if (!existingSpec || !desiredSpec) return true;
   if (existingSpec.schedule !== desiredSpec.schedule) return true;
+  if (Boolean(existingSpec.suspend) !== Boolean(desiredSpec.suspend)) return true;
 
   const existingContainer = existingSpec.jobTemplate?.spec?.template?.spec?.containers?.[0];
   const desiredContainer = desiredSpec.jobTemplate?.spec?.template?.spec?.containers?.[0];
@@ -1336,6 +1351,7 @@ export function diagnosticsCronJobNeedsUpdate(existing: V1CronJob, desired: V1Cr
   const desiredSpec = desired.spec;
   if (!existingSpec || !desiredSpec) return true;
   if (existingSpec.schedule !== desiredSpec.schedule) return true;
+  if (Boolean(existingSpec.suspend) !== Boolean(desiredSpec.suspend)) return true;
   return false;
 }
 

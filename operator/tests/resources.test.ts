@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { V1CronJob } from '@kubernetes/client-node';
 import {
   buildService,
   buildStatefulSet,
@@ -28,6 +29,8 @@ import {
   primaryServiceSelector,
   replicaServiceSelector,
   readOnlyRoutingEnabled,
+  withHibernation,
+  diagnosticsCronJobNeedsUpdate,
 } from '../src/utils/resources';
 import { FirebirdCluster, FirebirdScheduledBackup, DEFAULT_FIREBIRD_IMAGE } from '../src/types';
 
@@ -883,6 +886,12 @@ describe('Leader Election Lease', () => {
     expect(lease.metadata?.name).toBe('test-cluster-lease');
     expect(lease.spec?.holderIdentity).toBe('test-cluster-0');
   });
+
+  it('serializes renewTime with microsecond precision as required by the Lease API', () => {
+    const lease = buildLease(makeCluster());
+    const serialized = JSON.parse(JSON.stringify(lease)).spec.renewTime as string;
+    expect(serialized).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+  });
 });
 
 describe('FirebirdBackup & FirebirdRestore Job builders', () => {
@@ -945,8 +954,39 @@ describe('Diagnostics & Grafana Dashboard Builders', () => {
   });
 });
 
+describe('hibernation', () => {
+  it('scales the StatefulSet to zero replicas when hibernated', () => {
+    expect(buildStatefulSet(makeCluster({ instances: 3, hibernated: true })).spec?.replicas).toBe(0);
+    expect(buildStatefulSet(makeCluster({ instances: 3, hibernated: false })).spec?.replicas).toBe(3);
+  });
 
+  it('keeps the volumeClaimTemplates when hibernated', () => {
+    const sts = buildStatefulSet(makeCluster({ hibernated: true }));
+    expect(sts.spec?.volumeClaimTemplates?.[0]?.metadata?.name).toBe('firebird-data');
+  });
 
+  it('withHibernation sets spec.suspend from the cluster state', () => {
+    const on = makeCluster({ hibernated: true, backup: { enabled: true } });
+    const off = makeCluster({ backup: { enabled: true } });
+    expect(withHibernation(buildBackupCronJob(on), on).spec?.suspend).toBe(true);
+    expect(withHibernation(buildBackupCronJob(off), off).spec?.suspend).toBe(false);
+  });
 
-
-
+  it('CronJob needsUpdate helpers detect suspend changes', () => {
+    const cluster = makeCluster({
+      backup: { enabled: true },
+      autoSweep: { enabled: true },
+      diagnostics: { enabled: true },
+    });
+    const pairs: Array<[V1CronJob, (a: V1CronJob, b: V1CronJob) => boolean]> = [
+      [buildBackupCronJob(cluster), cronJobNeedsUpdate],
+      [buildAutoSweepCronJob(cluster), autoSweepCronJobNeedsUpdate],
+      [buildDiagnosticsCronJob(cluster), diagnosticsCronJobNeedsUpdate],
+    ];
+    for (const [cronJob, needsUpdate] of pairs) {
+      const suspended = { ...cronJob, spec: { ...cronJob.spec!, suspend: true } };
+      expect(needsUpdate(cronJob, cronJob)).toBe(false);
+      expect(needsUpdate(cronJob, suspended)).toBe(true);
+    }
+  });
+});

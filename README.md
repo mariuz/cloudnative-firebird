@@ -11,6 +11,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Declarative cluster management** via `FirebirdCluster` CRD
 - **StatefulSet-based** deployment for stable pod identity and storage
 - **Persistent storage** via PersistentVolumeClaims, with online volume expansion when `spec.storage.size` grows
+- **Declarative hibernation** (`spec.hibernated`) that scales to zero while keeping data
 - **Lag-aware read-only routing** to replicas via the `<name>-replica` Service (`spec.replication.readOnlyRouting`)
 - **Secret-based** SYSDBA password management
 - **Automatic service creation** (ClusterIP + headless for StatefulSet DNS)
@@ -147,12 +148,24 @@ spec:
 
 | Field | Description |
 |-------|-------------|
-| `phase` | Current cluster phase: `Creating`, `Running`, `Updating`, `Degraded`, `Deleting` |
+| `phase` | Current cluster phase: `Creating`, `Running`, `Updating`, `Degraded`, `Deleting`, `Paused`, `Hibernated` |
 | `instances` | Configured number of instances |
 | `readyInstances` | Number of ready instances |
 | `conditions` | Standard Kubernetes status conditions (`Ready`, `Progressing`, `Degraded`) |
 | `replicationStatus` | Primary pod, active/sync replicas, and with read-only routing the `readRoutablePods` and `laggingReplicas` |
 | `volumes` | Per-PVC requested size, capacity and expansion state (`Ready`, `Resizing`, `ResizeFailed`, `ShrinkRejected`) |
+
+### Hibernation
+
+Set `spec.hibernated: true` to stop a cluster without losing data: the StatefulSet is
+scaled to zero, backup/sweep/diagnostics/journal-archive CronJobs are suspended, and the
+PodDisruptionBudget is removed so node drains are not blocked. PVCs, Services and
+configuration are retained, and the cluster reports the `Hibernated` phase. Set it back
+to `false` to resume with the same volumes.
+
+```bash
+kubectl patch firebirdcluster my-cluster --type merge -p '{"spec":{"hibernated":true}}'
+```
 
 ### Read-Only Traffic Routing
 

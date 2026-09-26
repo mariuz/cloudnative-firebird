@@ -342,3 +342,69 @@ describe('Operator – periodic resync', () => {
     operator.stop();
   });
 });
+
+describe('Operator – generation-based event filtering', () => {
+  let operator: Operator;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    operator = new Operator(new KubeConfig(), 8080, 0);
+    await operator.start();
+  });
+
+  afterEach(() => operator.stop());
+
+  const withGeneration = (generation: number) => {
+    const cluster = makeCluster();
+    cluster.metadata.generation = generation;
+    return cluster;
+  };
+
+  it('skips MODIFIED events whose generation was already reconciled (status-only updates)', async () => {
+    capturedEventCallback!('ADDED', withGeneration(1));
+    await Promise.resolve();
+    capturedEventCallback!('MODIFIED', withGeneration(1));
+    await Promise.resolve();
+
+    expect(mockReconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconciles MODIFIED events with a new generation', async () => {
+    capturedEventCallback!('ADDED', withGeneration(1));
+    await Promise.resolve();
+    capturedEventCallback!('MODIFIED', withGeneration(2));
+    await Promise.resolve();
+
+    expect(mockReconcile).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry a failed generation from status-only events (resync retries instead)', async () => {
+    mockReconcile.mockRejectedValueOnce(new Error('boom'));
+    capturedEventCallback!('ADDED', withGeneration(1));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The Degraded status patch after the failure produces a MODIFIED event
+    capturedEventCallback!('MODIFIED', withGeneration(1));
+    await Promise.resolve();
+
+    expect(mockReconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it('always reconciles ADDED events (e.g. after a watch restart)', async () => {
+    capturedEventCallback!('ADDED', withGeneration(1));
+    await Promise.resolve();
+    capturedEventCallback!('ADDED', withGeneration(1));
+    await Promise.resolve();
+
+    expect(mockReconcile).toHaveBeenCalledTimes(2);
+  });
+
+  it('forgets the reconciled generation when the cluster is deleted', async () => {
+    capturedEventCallback!('ADDED', withGeneration(1));
+    await Promise.resolve();
+    capturedEventCallback!('DELETED', withGeneration(1));
+    capturedEventCallback!('MODIFIED', withGeneration(1));
+    await Promise.resolve();
+
+    expect(mockReconcile).toHaveBeenCalledTimes(2);
+  });
+});

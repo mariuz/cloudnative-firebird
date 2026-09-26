@@ -7,7 +7,9 @@ import {
   CustomObjectsApi,
   KubeConfig,
   NetworkingV1Api,
+  PatchStrategy,
   PolicyV1Api,
+  setHeaderOptions,
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
 import { logger } from '../utils/logger';
@@ -37,6 +39,7 @@ import {
   readOnlyRoutingEnabled,
   replicaServiceSelector,
   statefulSetNeedsUpdate,
+  withHibernation,
   CLUSTER_LABEL,
 } from '../utils/resources';
 import { computeReadRouting, podRoutingLabelPatch } from '../utils/routing';
@@ -51,6 +54,12 @@ import {
   RESOURCE_PLURAL,
   VolumeStatus,
 } from '../types';
+
+/**
+ * Request options for patches that send a whole desired object. The client defaults
+ * to JSON Patch (an array of operations), which the API server rejects for object bodies.
+ */
+const MERGE_PATCH = setHeaderOptions('Content-Type', PatchStrategy.MergePatch);
 
 /** Outcome of the read-only routing reconciliation */
 interface ReadRoutingResult {
@@ -142,6 +151,26 @@ export class FirebirdClusterController {
       await this.reconcileDiagnosticsCronJob(cluster, log);
       await this.reconcilePodMonitor(cluster, log);
       await this.reconcileGrafanaDashboard(cluster, log);
+
+      if (cluster.spec.hibernated) {
+        await this.updateStatus(cluster, {
+          phase: 'Hibernated',
+          phaseReason: readyInstances > 0
+            ? `Hibernating: waiting for ${readyInstances} pod(s) to terminate`
+            : 'Cluster is hibernated; PVCs are retained',
+          instances: cluster.spec.instances,
+          readyInstances,
+          replicationStatus: undefined,
+          superuserSecretHash,
+          ...(volumes ? { volumes } : {}),
+          conditions: [
+            this.makeCondition('Hibernated', 'True', 'HibernationRequested', 'spec.hibernated is true'),
+            this.makeCondition('Ready', 'False', 'Hibernated', 'Cluster is hibernated'),
+          ],
+        });
+        log.info('Cluster is hibernated');
+        return;
+      }
 
       const targetInstances = cluster.spec.instances;
       const isReady = readyInstances === targetInstances;
@@ -302,7 +331,7 @@ export class FirebirdClusterController {
     cluster: FirebirdCluster,
     log: Logger,
   ): Promise<ReadRoutingResult | undefined> {
-    if (!readOnlyRoutingEnabled(cluster)) return undefined;
+    if (!readOnlyRoutingEnabled(cluster) || cluster.spec.hibernated) return undefined;
     const { name, namespace = 'default' } = cluster.metadata;
 
     let primaryPod = `${name}-0`;
@@ -440,7 +469,7 @@ export class FirebirdClusterController {
         name,
         namespace,
         body: desired,
-      });
+      }, MERGE_PATCH);
     } else {
       log.debug('StatefulSet is up to date, skipping');
     }
@@ -461,8 +490,9 @@ export class FirebirdClusterController {
     const cronJobName = `${name}-journal-archive`;
 
     if (cluster.spec.replication?.enabled && cluster.spec.replication.journalArchiveS3) {
-      const desired = buildJournalArchiveCronJob(cluster);
-      if (!desired) return;
+      const built = buildJournalArchiveCronJob(cluster);
+      if (!built) return;
+      const desired = withHibernation(built, cluster);
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: cronJobName, namespace });
         if (cronJobNeedsUpdate(existing, desired)) {
@@ -471,7 +501,7 @@ export class FirebirdClusterController {
             name: cronJobName,
             namespace,
             body: desired,
-          });
+          }, MERGE_PATCH);
         } else {
           log.debug('Journal archive CronJob up to date, skipping');
         }
@@ -502,7 +532,7 @@ export class FirebirdClusterController {
     const backupName = `${name}-backup`;
 
     if (cluster.spec.backup?.enabled) {
-      const desired = buildBackupCronJob(cluster);
+      const desired = withHibernation(buildBackupCronJob(cluster), cluster);
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: backupName, namespace });
         if (cronJobNeedsUpdate(existing, desired)) {
@@ -511,7 +541,7 @@ export class FirebirdClusterController {
             name: backupName,
             namespace,
             body: desired,
-          });
+          }, MERGE_PATCH);
         } else {
           log.debug('Backup CronJob up to date, skipping');
         }
@@ -596,7 +626,8 @@ export class FirebirdClusterController {
     const { name, namespace = 'default' } = cluster.metadata;
     const pdbName = `${name}-pdb`;
 
-    if (cluster.spec.instances > 1) {
+    // A hibernated cluster has no pods to protect; drop the PDB so drains are not blocked
+    if (cluster.spec.instances > 1 && !cluster.spec.hibernated) {
       const desired = buildPodDisruptionBudget(cluster);
       try {
         const existing = await this.policyApi.readNamespacedPodDisruptionBudget({ name: pdbName, namespace });
@@ -606,7 +637,7 @@ export class FirebirdClusterController {
             name: pdbName,
             namespace,
             body: desired,
-          });
+          }, MERGE_PATCH);
         } else {
           log.debug('PodDisruptionBudget up to date, skipping');
         }
@@ -620,7 +651,7 @@ export class FirebirdClusterController {
     } else {
       try {
         await this.policyApi.readNamespacedPodDisruptionBudget({ name: pdbName, namespace });
-        log.info('Deleting PodDisruptionBudget for single instance cluster');
+        log.info('Deleting PodDisruptionBudget for single instance or hibernated cluster');
         await this.policyApi.deleteNamespacedPodDisruptionBudget({ name: pdbName, namespace });
       } catch {
         log.debug('PodDisruptionBudget does not exist, skipping deletion');
@@ -646,7 +677,7 @@ export class FirebirdClusterController {
             name: configName,
             namespace,
             body: desired,
-          });
+          }, MERGE_PATCH);
         } else {
           log.debug('ConfigMap is up to date, skipping');
         }
@@ -677,7 +708,7 @@ export class FirebirdClusterController {
     const sweepName = `${name}-sweep`;
 
     if (cluster.spec.autoSweep?.enabled) {
-      const desired = buildAutoSweepCronJob(cluster);
+      const desired = withHibernation(buildAutoSweepCronJob(cluster), cluster);
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: sweepName, namespace });
         if (autoSweepCronJobNeedsUpdate(existing, desired)) {
@@ -686,7 +717,7 @@ export class FirebirdClusterController {
             name: sweepName,
             namespace,
             body: desired,
-          });
+          }, MERGE_PATCH);
         } else {
           log.debug('AutoSweep CronJob up to date, skipping');
         }
@@ -726,7 +757,7 @@ export class FirebirdClusterController {
             name: npName,
             namespace,
             body: desired,
-          });
+          }, MERGE_PATCH);
         } else {
           log.debug('NetworkPolicy is up to date, skipping');
         }
@@ -809,7 +840,7 @@ export class FirebirdClusterController {
     const cronJobName = `${name}-diagnostics`;
 
     if (cluster.spec.diagnostics?.enabled) {
-      const desired = buildDiagnosticsCronJob(cluster);
+      const desired = withHibernation(buildDiagnosticsCronJob(cluster), cluster);
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: cronJobName, namespace });
         if (diagnosticsCronJobNeedsUpdate(existing, desired)) {
@@ -818,7 +849,7 @@ export class FirebirdClusterController {
             name: cronJobName,
             namespace,
             body: desired,
-          });
+          }, MERGE_PATCH);
         } else {
           log.debug('Diagnostics CronJob is up to date, skipping');
         }
@@ -858,7 +889,7 @@ export class FirebirdClusterController {
             name: cmName,
             namespace,
             body: desired,
-          });
+          }, MERGE_PATCH);
         } else {
           log.debug('Grafana Dashboard ConfigMap is up to date, skipping');
         }

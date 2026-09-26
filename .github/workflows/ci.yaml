@@ -109,6 +109,48 @@ jobs:
           timeout 60 bash -c \
             'until kubectl get service test-cluster-headless -n default 2>/dev/null; do sleep 3; done'
 
+      - name: Verify Lease and status are reconciled
+        run: |
+          timeout 60 bash -c \
+            'until kubectl get lease test-cluster-lease -n default 2>/dev/null; do sleep 3; done'
+          timeout 60 bash -c \
+            'until [ -n "$(kubectl get firebirdcluster test-cluster -o jsonpath={.status.phase})" ]; do sleep 3; done'
+          kubectl get firebirdcluster test-cluster -o jsonpath='{.status}'; echo
+
+      - name: Verify spec updates are patched onto the StatefulSet
+        run: |
+          kubectl patch firebirdcluster test-cluster --type merge -p '{"spec":{"instances":2}}'
+          timeout 90 bash -c \
+            'until [ "$(kubectl get statefulset test-cluster -o jsonpath={.spec.replicas})" = "2" ]; do sleep 3; done'
+          timeout 60 bash -c \
+            'until kubectl get pdb test-cluster-pdb -n default 2>/dev/null; do sleep 3; done'
+
+      - name: Verify declarative hibernation
+        run: |
+          kubectl patch firebirdcluster test-cluster --type merge -p '{"spec":{"hibernated":true}}'
+          timeout 90 bash -c \
+            'until [ "$(kubectl get statefulset test-cluster -o jsonpath={.spec.replicas})" = "0" ]; do sleep 3; done'
+          timeout 90 bash -c \
+            'until [ "$(kubectl get firebirdcluster test-cluster -o jsonpath={.status.phase})" = "Hibernated" ]; do sleep 3; done'
+          timeout 60 bash -c \
+            'while kubectl get pdb test-cluster-pdb -n default 2>/dev/null; do sleep 3; done'
+          # PVCs must survive hibernation
+          kubectl get pvc firebird-data-test-cluster-0 -n default
+
+      - name: Verify resuming from hibernation
+        run: |
+          kubectl patch firebirdcluster test-cluster --type merge -p '{"spec":{"hibernated":false}}'
+          timeout 90 bash -c \
+            'until [ "$(kubectl get statefulset test-cluster -o jsonpath={.spec.replicas})" = "2" ]; do sleep 3; done'
+
+      - name: Verify operator reconciled without API errors
+        run: |
+          logs=$(kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1)
+          # 400 (patch type) / 403 (RBAC) failures surface as these messages
+          if echo "$logs" | grep -E '"msg":"(Reconciliation failed|Failed to update cluster status)"'; then
+            echo "Operator reported reconcile/status errors"; exit 1
+          fi
+
       - name: Show cluster resources on failure
         if: failure()
         run: |
@@ -118,6 +160,10 @@ jobs:
           kubectl get statefulsets -A || true
           echo "=== Services ==="
           kubectl get services -A || true
+          echo "=== PDBs, Leases, PVCs ==="
+          kubectl get pdb,lease,pvc -n default || true
+          echo "=== FirebirdCluster status ==="
+          kubectl get firebirdcluster test-cluster -o yaml || true
           echo "=== Operator logs ==="
           kubectl logs -n cloudnative-firebird-system \
             -l app.kubernetes.io/name=cloudnative-firebird \
