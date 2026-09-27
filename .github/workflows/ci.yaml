@@ -117,6 +117,22 @@ jobs:
             'until [ -n "$(kubectl get firebirdcluster test-cluster -o jsonpath={.status.phase})" ]; do sleep 3; done'
           kubectl get firebirdcluster test-cluster -o jsonpath='{.status}'; echo
 
+      - name: Verify the Firebird instance persists data on its PVC
+        run: |
+          wait_ready() {
+            timeout 300 bash -c 'until kubectl get pod test-cluster-0 -n default >/dev/null 2>&1; do sleep 3; done'
+            kubectl wait pod/test-cluster-0 -n default --for=condition=Ready --timeout=300s
+          }
+          wait_ready
+          # The entrypoint created the cluster database on the PVC; ISC_USER/ISC_PASSWORD come from the pod env
+          kubectl exec test-cluster-0 -- bash -c \
+            'echo "create table ci_probe (id int); commit; insert into ci_probe values (1); commit;" | isql localhost:/var/lib/firebird/data/mydb.fdb'
+          kubectl delete pod test-cluster-0 -n default --wait=true
+          wait_ready
+          kubectl exec test-cluster-0 -- bash -c \
+            "echo \"select 'rows=' || count(*) from ci_probe;\" | isql localhost:/var/lib/firebird/data/mydb.fdb" | tee /tmp/probe.txt
+          grep -q 'rows=1' /tmp/probe.txt
+
       - name: Verify spec updates are patched onto the StatefulSet
         run: |
           kubectl patch firebirdcluster test-cluster --type merge -p '{"spec":{"instances":2}}'

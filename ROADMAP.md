@@ -4,6 +4,12 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
+> **Status note (v0.8.0):** runtime testing against the official `firebirdsql/firebird` image showed
+> that journal replication and the backup Jobs are not functional yet: replication settings were only
+> exported as environment variables the image ignores, and backup Jobs run `gbak`/`nbackup` against
+> `localhost` inside the Job pod. Those items are tracked as open work in section 7; the feature
+> checkboxes above describe the operator-side resources only.
+
 ---
 
 ## Roadmap Overview
@@ -129,6 +135,14 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `spec.hibernated` scales the cluster to zero and suspends its CronJobs while retaining PVCs, Services and configuration.
 - [x] **API-Server Integration Coverage** *(v0.7.0)*
   - kind-based CI exercises spec updates, PDB/Lease reconciliation, hibernation and resume against a real API server.
+- [x] **Official Image Runtime Alignment** *(v0.8.0)*
+  - PVC mounted at the image data directory, SYSDBA password via `FIREBIRD_ROOT_PASSWORD`, database created from `spec.databaseName`, `firebird.conf` via `FIREBIRD_CONF_*`.
+  - Sweep and online-validation Jobs reach the primary over the network instead of mounting its PVC.
+  - CI proves data survives a pod restart on a real kind cluster.
+- [ ] **Functional Journal Replication**
+  - Generate `replication.conf`, seed replicas from the primary and ship journal segments; prerequisite for switchover.
+- [ ] **Working Backups & Restores**
+  - Network/service-manager based `gbak`/`nbackup` Jobs and an image with S3 tooling for uploads.
 - [ ] **Planned Switchover**
   - Declarative promotion of a chosen replica (`gfix -replica none`) with Lease handover and demotion of the old primary.
 - [ ] **Instance Fencing**

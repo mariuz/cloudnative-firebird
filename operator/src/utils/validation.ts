@@ -41,6 +41,13 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     );
   }
 
+  // Interpolated into file paths and maintenance shell commands
+  if (spec.databaseName !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(spec.databaseName)) {
+    throw new ValidationError(
+      `Invalid databaseName: "${spec.databaseName}". Use a plain file name (letters, digits, ".", "_", "-").`,
+    );
+  }
+
   if (
     spec.superuserSecret &&
     (!spec.superuserSecret.name || spec.superuserSecret.name.trim() === '')

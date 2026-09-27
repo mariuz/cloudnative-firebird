@@ -42,6 +42,42 @@ export function withHibernation<T extends V1CronJob>(cronJob: T, cluster: Firebi
   return cronJob;
 }
 
+/** Data directory of the official firebirdsql/firebird image (FIREBIRD_DATA); the PVC is mounted here */
+export const FIREBIRD_DATA_DIR = '/var/lib/firebird/data';
+
+/** Default database file created in each instance */
+export const DEFAULT_DATABASE_NAME = 'mydb.fdb';
+
+/** Returns the database file name managed by the cluster */
+export function databaseName(cluster: FirebirdCluster): string {
+  return cluster.spec.databaseName ?? DEFAULT_DATABASE_NAME;
+}
+
+/**
+ * Returns the effective firebird.conf settings, including WireCrypt=Required when TLS is enabled.
+ */
+export function firebirdConfSettings(cluster: FirebirdCluster): Record<string, string> {
+  const settings = { ...(cluster.spec.config?.settings ?? {}) };
+  if (cluster.spec.tls?.enabled && !settings['WireCrypt']) {
+    settings['WireCrypt'] = 'Required';
+  }
+  return settings;
+}
+
+/**
+ * SYSDBA credentials for Firebird client tools (gfix, gbak, fbsvcmgr, isql), which read
+ * ISC_USER / ISC_PASSWORD from the environment so the password never appears in process args.
+ */
+export function superuserClientEnv(cluster: FirebirdCluster): Array<{ name: string; value?: string; valueFrom?: object }> {
+  const secret = cluster.spec.superuserSecret;
+  return [
+    { name: 'ISC_USER', value: 'SYSDBA' },
+    secret
+      ? { name: 'ISC_PASSWORD', valueFrom: { secretKeyRef: { name: secret.name, key: 'password' } } }
+      : { name: 'ISC_PASSWORD', value: 'masterkey' },
+  ];
+}
+
 /** Returns true when lag-aware read-only routing is active for the cluster */
 export function readOnlyRoutingEnabled(cluster: FirebirdCluster): boolean {
   return Boolean(cluster.spec.replication?.enabled && cluster.spec.replication.readOnlyRouting?.enabled);
@@ -80,20 +116,23 @@ export function buildStatefulSet(
   const secretHash = options?.superuserSecretHash ?? cluster.status?.superuserSecretHash;
 
   const env = [
-    // Enable Firebird SuperUser password from secret or default
-    ...(spec.superuserSecret
-      ? [
-          {
-            name: 'ISC_PASSWORD',
-            valueFrom: {
-              secretKeyRef: {
-                name: spec.superuserSecret.name,
-                key: 'password',
-              },
-            },
-          },
-        ]
-      : [{ name: 'ISC_PASSWORD', value: 'masterkey' }]),
+    // SYSDBA password consumed by the official image entrypoint
+    spec.superuserSecret
+      ? {
+          name: 'FIREBIRD_ROOT_PASSWORD',
+          valueFrom: { secretKeyRef: { name: spec.superuserSecret.name, key: 'password' } },
+        }
+      : { name: 'FIREBIRD_ROOT_PASSWORD', value: 'masterkey' },
+    // Credentials for client tools run inside the container (probes, kubectl exec)
+    ...superuserClientEnv(cluster),
+    // The entrypoint creates this database in FIREBIRD_DATA on first start
+    { name: 'FIREBIRD_DATABASE', value: databaseName(cluster) },
+    // firebird.conf settings are applied by the entrypoint from FIREBIRD_CONF_<key>;
+    // changing them updates the pod template and rolls the pods
+    ...Object.entries(firebirdConfSettings(cluster)).map(([key, value]) => ({
+      name: `FIREBIRD_CONF_${key}`,
+      value,
+    })),
     // Replication environment variables
     ...(spec.replication?.enabled
       ? [
@@ -107,7 +146,7 @@ export function buildStatefulSet(
           },
           {
             name: 'FIREBIRD_REPLICATION_JOURNAL_DIR',
-            value: spec.replication.journalDirectory ?? '/firebird/data/journals',
+            value: spec.replication.journalDirectory ?? '/var/lib/firebird/data/journals',
           },
         ]
       : []),
@@ -123,9 +162,9 @@ export function buildStatefulSet(
     if (recovery.s3) {
       const endpointOpt = recovery.s3.endpoint ? `--endpoint-url ${recovery.s3.endpoint}` : '';
       const prefix = recovery.s3.prefix ? `${recovery.s3.prefix.replace(/\/$/, '')}/` : '';
-      restoreCmd += `if [ ! -f /firebird/data/mydb.fdb ]; then aws ${endpointOpt} s3 cp s3://${recovery.s3.bucket}/${prefix}backup.fbk /tmp/backup.fbk && gbak -c -v /tmp/backup.fbk /firebird/data/mydb.fdb; fi`;
+      restoreCmd += `if [ ! -f /var/lib/firebird/data/mydb.fdb ]; then aws ${endpointOpt} s3 cp s3://${recovery.s3.bucket}/${prefix}backup.fbk /tmp/backup.fbk && gbak -c -v /tmp/backup.fbk /var/lib/firebird/data/mydb.fdb; fi`;
     } else if (recovery.sourcePath) {
-      restoreCmd += `if [ ! -f /firebird/data/mydb.fdb ]; then gbak -c -v ${recovery.sourcePath} /firebird/data/mydb.fdb; fi`;
+      restoreCmd += `if [ ! -f /var/lib/firebird/data/mydb.fdb ]; then gbak -c -v ${recovery.sourcePath} /var/lib/firebird/data/mydb.fdb; fi`;
     }
     initContainers.push({
       name: 'bootstrap-restore',
@@ -149,14 +188,14 @@ export function buildStatefulSet(
       volumeMounts: [
         {
           name: 'firebird-data',
-          mountPath: '/firebird/data',
+          mountPath: '/var/lib/firebird/data',
         },
       ],
     });
   } else if (spec.bootstrap?.clone) {
     const clone = spec.bootstrap.clone;
     const sourceNs = clone.namespace ?? namespace;
-    const cloneCmd = `if [ ! -f /firebird/data/mydb.fdb ]; then echo "Cloning database from ${clone.sourceCluster} in ${sourceNs}..."; nc -l -p 9999 | tar -xzf - -C /firebird/data/ || true; fi`;
+    const cloneCmd = `if [ ! -f /var/lib/firebird/data/mydb.fdb ]; then echo "Cloning database from ${clone.sourceCluster} in ${sourceNs}..."; nc -l -p 9999 | tar -xzf - -C /var/lib/firebird/data/ || true; fi`;
     initContainers.push({
       name: 'bootstrap-clone',
       image,
@@ -165,7 +204,7 @@ export function buildStatefulSet(
       volumeMounts: [
         {
           name: 'firebird-data',
-          mountPath: '/firebird/data',
+          mountPath: '/var/lib/firebird/data',
         },
       ],
     });
@@ -187,17 +226,8 @@ export function buildStatefulSet(
       volumeMounts: [
         {
           name: 'firebird-data',
-          mountPath: '/firebird/data',
+          mountPath: '/var/lib/firebird/data',
         },
-        ...(spec.config?.settings
-          ? [
-              {
-                name: 'cluster-config',
-                mountPath: '/firebird/etc/firebird.conf',
-                subPath: 'firebird.conf',
-              },
-            ]
-          : []),
         ...(spec.bootstrap?.initSql
           ? [
               {
@@ -250,7 +280,7 @@ export function buildStatefulSet(
   ];
 
   const volumes = [
-    ...(spec.config?.settings || spec.bootstrap?.initSql
+    ...(spec.bootstrap?.initSql
       ? [
           {
             name: 'cluster-config',
@@ -542,11 +572,11 @@ export function buildBackupCronJob(cluster: FirebirdCluster): V1CronJob {
 
   const baseCmd =
     backupType === 'physical'
-      ? `nbackup -L ${nbackupLevel} -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/mydb.fdb /firebird/data/${backupFileName}`
-      : `gbak -b -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/mydb.fdb /firebird/data/${backupFileName}`;
+      ? `nbackup -L ${nbackupLevel} -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/var/lib/firebird/data/mydb.fdb /var/lib/firebird/data/${backupFileName}`
+      : `gbak -b -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/var/lib/firebird/data/mydb.fdb /var/lib/firebird/data/${backupFileName}`;
 
   const s3Cmd = backup?.s3
-    ? ` && aws s3 cp /firebird/data/ s3://${backup.s3.bucket}/${backup.s3.prefix ? backup.s3.prefix + '/' : ''} --recursive --exclude "*"`
+    ? ` && aws s3 cp /var/lib/firebird/data/ s3://${backup.s3.bucket}/${backup.s3.prefix ? backup.s3.prefix + '/' : ''} --recursive --exclude "*"`
     : '';
 
   const backupCommand = baseCmd + s3Cmd;
@@ -631,7 +661,7 @@ export function buildBackupCronJob(cluster: FirebirdCluster): V1CronJob {
                   volumeMounts: [
                     {
                       name: 'firebird-data',
-                      mountPath: '/firebird/data',
+                      mountPath: '/var/lib/firebird/data',
                     },
                   ],
                 },
@@ -825,8 +855,8 @@ export function buildBackupJob(backup: FirebirdBackup, cluster: FirebirdCluster)
 
   const cmd =
     backupType === 'physical'
-      ? `nbackup -L ${nbackupLevel} -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/mydb.fdb /firebird/data/${fileName}`
-      : `gbak -b -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/mydb.fdb /firebird/data/${fileName}`;
+      ? `nbackup -L ${nbackupLevel} -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/var/lib/firebird/data/mydb.fdb /var/lib/firebird/data/${fileName}`
+      : `gbak -b -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/var/lib/firebird/data/mydb.fdb /var/lib/firebird/data/${fileName}`;
 
   return {
     apiVersion: 'batch/v1',
@@ -865,7 +895,7 @@ export function buildBackupJob(backup: FirebirdBackup, cluster: FirebirdCluster)
               volumeMounts: [
                 {
                   name: 'firebird-data',
-                  mountPath: '/firebird/data',
+                  mountPath: '/var/lib/firebird/data',
                 },
               ],
             },
@@ -898,12 +928,12 @@ export function buildRestoreJob(restore: FirebirdRestore, cluster: FirebirdClust
 
   const targetDb = restore.spec.targetDatabase ?? 'mydb.fdb';
   const restoreType = restore.spec.restoreType ?? 'logical';
-  const backupPath = restore.spec.backupPath ?? '/firebird/data/backup-restore.fbk';
+  const backupPath = restore.spec.backupPath ?? '/var/lib/firebird/data/backup-restore.fbk';
 
   const cmd =
     restoreType === 'physical'
-      ? `nbackup -R /firebird/data/${targetDb} ${backupPath}`
-      : `gbak -c -user SYSDBA -pas "\${ISC_PASSWORD}" ${backupPath} localhost:/firebird/data/${targetDb}`;
+      ? `nbackup -R /var/lib/firebird/data/${targetDb} ${backupPath}`
+      : `gbak -c -user SYSDBA -pas "\${ISC_PASSWORD}" ${backupPath} localhost:/var/lib/firebird/data/${targetDb}`;
 
   return {
     apiVersion: 'batch/v1',
@@ -942,7 +972,7 @@ export function buildRestoreJob(restore: FirebirdRestore, cluster: FirebirdClust
               volumeMounts: [
                 {
                   name: 'firebird-data',
-                  mountPath: '/firebird/data',
+                  mountPath: '/var/lib/firebird/data',
                 },
               ],
             },
@@ -1021,11 +1051,9 @@ export function buildConfigMap(cluster: FirebirdCluster): V1ConfigMap | null {
   const labels = clusterLabels(name);
   const data: Record<string, string> = {};
 
-  const settings = { ...(cluster.spec.config?.settings ?? {}) };
-  if (cluster.spec.tls?.enabled && !settings['WireCrypt']) {
-    settings['WireCrypt'] = 'Required';
-  }
+  const settings = firebirdConfSettings(cluster);
 
+  // Informational copy of the effective settings; they are applied via FIREBIRD_CONF_* env vars
   if (Object.keys(settings).length > 0) {
     const lines = Object.entries(settings).map(([key, val]) => `${key} = ${val}`);
     data['firebird.conf'] = lines.join('\n') + '\n';
@@ -1074,7 +1102,7 @@ export function buildAutoSweepCronJob(cluster: FirebirdCluster): V1CronJob {
   const spec = cluster.spec;
   const autoSweep = spec.autoSweep;
   const schedule = autoSweep?.schedule ?? '0 3 * * *';
-  const dbName = autoSweep?.databaseName ?? 'mydb.fdb';
+  const dbName = autoSweep?.databaseName ?? databaseName(cluster);
   const image = spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
   const labels = {
     ...clusterLabels(name),
@@ -1117,38 +1145,10 @@ export function buildAutoSweepCronJob(cluster: FirebirdCluster): V1CronJob {
                   name: 'firebird-sweep',
                   image,
                   command: ['/bin/sh', '-c'],
-                  args: [
-                    `gfix -sweep -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/${dbName}`,
-                  ],
-                  env: [
-                    ...(spec.superuserSecret
-                      ? [
-                          {
-                            name: 'ISC_PASSWORD',
-                            valueFrom: {
-                              secretKeyRef: {
-                                name: spec.superuserSecret.name,
-                                key: 'password',
-                              },
-                            },
-                          },
-                        ]
-                      : [{ name: 'ISC_PASSWORD', value: 'masterkey' }]),
-                  ],
-                  volumeMounts: [
-                    {
-                      name: 'firebird-data',
-                      mountPath: '/firebird/data',
-                    },
-                  ],
-                },
-              ],
-              volumes: [
-                {
-                  name: 'firebird-data',
-                  persistentVolumeClaim: {
-                    claimName: `firebird-data-${name}-0`,
-                  },
+                  // Sweep the primary over the network through the read-write Service;
+                  // the Job needs no access to the instance PVC
+                  args: [`gfix -sweep ${name}:${FIREBIRD_DATA_DIR}/${dbName}`],
+                  env: superuserClientEnv(cluster),
                 },
               ],
             },
@@ -1260,7 +1260,7 @@ export function buildDiagnosticsCronJob(cluster: FirebirdCluster): V1CronJob {
   const spec = cluster.spec;
   const diag = spec.diagnostics;
   const schedule = diag?.schedule ?? '0 4 * * 0';
-  const dbName = diag?.databaseName ?? 'mydb.fdb';
+  const dbName = diag?.databaseName ?? databaseName(cluster);
   const image = spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
   const labels = {
     ...clusterLabels(name),
@@ -1301,38 +1301,14 @@ export function buildDiagnosticsCronJob(cluster: FirebirdCluster): V1CronJob {
                   name: 'firebird-diagnostics',
                   image,
                   command: ['/bin/sh', '-c'],
+                  // Online validation through the service manager works while clients are
+                  // connected (gfix -v needs exclusive access); fail the Job on reported errors
                   args: [
-                    `gfix -v -full -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/${dbName}`,
+                    `out=$(fbsvcmgr ${name}:service_mgr action_validate dbname ${FIREBIRD_DATA_DIR}/${dbName} 2>&1); ` +
+                      `status=$?; echo "$out"; ` +
+                      `[ $status -eq 0 ] && ! echo "$out" | grep -qiE 'error|corrupt'`,
                   ],
-                  env: [
-                    ...(spec.superuserSecret
-                      ? [
-                          {
-                            name: 'ISC_PASSWORD',
-                            valueFrom: {
-                              secretKeyRef: {
-                                name: spec.superuserSecret.name,
-                                key: 'password',
-                              },
-                            },
-                          },
-                        ]
-                      : [{ name: 'ISC_PASSWORD', value: 'masterkey' }]),
-                  ],
-                  volumeMounts: [
-                    {
-                      name: 'firebird-data',
-                      mountPath: '/firebird/data',
-                    },
-                  ],
-                },
-              ],
-              volumes: [
-                {
-                  name: 'firebird-data',
-                  persistentVolumeClaim: {
-                    claimName: `firebird-data-${name}-0`,
-                  },
+                  env: superuserClientEnv(cluster),
                 },
               ],
             },
@@ -1442,8 +1418,8 @@ export function buildScheduledBackupCronJob(
 
   const cmd =
     backupType === 'physical'
-      ? `nbackup -L ${nbackupLevel} -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/mydb.fdb /firebird/data/${backupFileName}`
-      : `gbak -b -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/firebird/data/mydb.fdb /firebird/data/${backupFileName}`;
+      ? `nbackup -L ${nbackupLevel} -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/var/lib/firebird/data/mydb.fdb /var/lib/firebird/data/${backupFileName}`
+      : `gbak -b -user SYSDBA -pas "\${ISC_PASSWORD}" localhost:/var/lib/firebird/data/mydb.fdb /var/lib/firebird/data/${backupFileName}`;
 
   return {
     apiVersion: 'batch/v1',
@@ -1487,7 +1463,7 @@ export function buildScheduledBackupCronJob(
                   volumeMounts: [
                     {
                       name: 'firebird-data',
-                      mountPath: '/firebird/data',
+                      mountPath: '/var/lib/firebird/data',
                     },
                   ],
                 },
@@ -1520,7 +1496,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster): V1CronJob 
   }
 
   const schedule = cluster.spec.replication.archiveSchedule ?? '*/15 * * * *';
-  const journalDir = cluster.spec.replication.journalDirectory ?? '/firebird/data/journals';
+  const journalDir = cluster.spec.replication.journalDirectory ?? '/var/lib/firebird/data/journals';
   const cronJobName = `${name}-journal-archive`;
   const labels = clusterLabels(name);
   const prefix = s3.prefix ? `${s3.prefix.replace(/\/$/, '')}/` : '';
@@ -1574,7 +1550,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster): V1CronJob 
                   volumeMounts: [
                     {
                       name: 'firebird-data',
-                      mountPath: '/firebird/data',
+                      mountPath: '/var/lib/firebird/data',
                     },
                   ],
                 },

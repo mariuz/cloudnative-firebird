@@ -33,6 +33,14 @@ describe('validateClusterSpec', () => {
     expect(() => validateClusterSpec(cluster)).toThrow(/Invalid storage size/);
   });
 
+  it.each(['app.fdb', 'my_db-2.fdb'])('accepts databaseName %j', (databaseName) => {
+    expect(() => validateClusterSpec(makeCluster({ databaseName }))).not.toThrow();
+  });
+
+  it.each(['../etc/passwd', 'db.fdb; rm -rf /', '/abs/path.fdb', ''])('rejects databaseName %j', (databaseName) => {
+    expect(() => validateClusterSpec(makeCluster({ databaseName }))).toThrow(/Invalid databaseName/);
+  });
+
   it('accepts readOnlyRouting with a valid maxLagSeconds', () => {
     const cluster = makeCluster({
       replication: { enabled: true, readOnlyRouting: { enabled: true, maxLagSeconds: 0 } },

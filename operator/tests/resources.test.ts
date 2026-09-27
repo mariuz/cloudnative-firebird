@@ -373,7 +373,7 @@ describe('buildJournalArchiveCronJob', () => {
     expect(cronJob?.spec?.schedule).toBe('*/10 * * * *');
     const container = cronJob?.spec?.jobTemplate.spec?.template.spec?.containers[0];
     expect(container?.name).toBe('journal-archiver');
-    expect(container?.args?.[0]).toContain('aws --endpoint-url https://minio.local:9000 s3 sync /firebird/data/journals/ s3://journal-bucket/journals/ --delete');
+    expect(container?.args?.[0]).toContain('aws --endpoint-url https://minio.local:9000 s3 sync /var/lib/firebird/data/journals/ s3://journal-bucket/journals/ --delete');
   });
 });
 
@@ -695,8 +695,33 @@ describe('buildAutoSweepCronJob & autoSweepCronJobNeedsUpdate', () => {
     expect(cronJob.metadata?.name).toBe('test-cluster-sweep');
     expect(cronJob.spec?.schedule).toBe('0 3 * * *');
     const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
-    expect(container?.args?.[0]).toContain('gfix -sweep');
-    expect(container?.args?.[0]).toContain('localhost:/firebird/data/mydb.fdb');
+    expect(container?.args?.[0]).toBe('gfix -sweep test-cluster:/var/lib/firebird/data/mydb.fdb');
+  });
+
+  it('sweeps the primary over the network without mounting the instance PVC', () => {
+    const cronJob = buildAutoSweepCronJob(makeCluster({ autoSweep: { enabled: true } }));
+    const podSpec = cronJob.spec?.jobTemplate?.spec?.template?.spec;
+    expect(podSpec?.volumes).toBeUndefined();
+    expect(podSpec?.containers?.[0].volumeMounts).toBeUndefined();
+  });
+
+  it('passes SYSDBA credentials via ISC_USER/ISC_PASSWORD, not process args', () => {
+    const cronJob = buildAutoSweepCronJob(
+      makeCluster({ autoSweep: { enabled: true }, superuserSecret: { name: 'fb-secret' } }),
+    );
+    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
+    expect(container?.args?.[0]).not.toContain('ISC_PASSWORD');
+    expect(container?.env).toEqual([
+      { name: 'ISC_USER', value: 'SYSDBA' },
+      { name: 'ISC_PASSWORD', valueFrom: { secretKeyRef: { name: 'fb-secret', key: 'password' } } },
+    ]);
+  });
+
+  it('defaults the swept database to spec.databaseName', () => {
+    const cronJob = buildAutoSweepCronJob(makeCluster({ databaseName: 'app.fdb', autoSweep: { enabled: true } }));
+    expect(cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0].args?.[0]).toContain(
+      'test-cluster:/var/lib/firebird/data/app.fdb',
+    );
   });
 
   it('uses custom schedule and database name when provided', () => {
@@ -706,7 +731,7 @@ describe('buildAutoSweepCronJob & autoSweepCronJobNeedsUpdate', () => {
     const cronJob = buildAutoSweepCronJob(cluster);
     expect(cronJob.spec?.schedule).toBe('0 4 * * *');
     const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
-    expect(container?.args?.[0]).toContain('localhost:/firebird/data/custom.fdb');
+    expect(container?.args?.[0]).toContain('test-cluster:/var/lib/firebird/data/custom.fdb');
   });
 
   it('detects AutoSweep CronJob updates correctly', () => {
@@ -718,15 +743,23 @@ describe('buildAutoSweepCronJob & autoSweepCronJobNeedsUpdate', () => {
 });
 
 describe('buildStatefulSet (config & bootstrap volume mounting)', () => {
-  it('mounts firebird.conf volume when config settings are provided', () => {
+  it('applies firebird.conf settings as FIREBIRD_CONF_* env vars instead of a file mount', () => {
     const cluster = makeCluster({
       config: { settings: { DefaultCacheMem: '128M' } },
     });
     const sts = buildStatefulSet(cluster);
     const container = sts.spec?.template?.spec?.containers?.[0];
-    const mount = container?.volumeMounts?.find((vm) => vm.mountPath === '/firebird/etc/firebird.conf');
-    expect(mount).toBeDefined();
-    expect(mount?.subPath).toBe('firebird.conf');
+    expect(container?.env).toContainEqual({ name: 'FIREBIRD_CONF_DefaultCacheMem', value: '128M' });
+    expect(container?.volumeMounts?.some((vm) => vm.mountPath.endsWith('firebird.conf'))).toBe(false);
+    expect(sts.spec?.template?.spec?.volumes).toBeUndefined();
+  });
+
+  it('adds WireCrypt=Required to the conf env when TLS is enabled', () => {
+    const sts = buildStatefulSet(makeCluster({ tls: { enabled: true } }));
+    expect(sts.spec?.template?.spec?.containers?.[0].env).toContainEqual({
+      name: 'FIREBIRD_CONF_WireCrypt',
+      value: 'Required',
+    });
   });
 
   it('mounts init.sql volume when bootstrap initSql is provided', () => {
@@ -923,12 +956,18 @@ describe('FirebirdBackup & FirebirdRestore Job builders', () => {
 });
 
 describe('Diagnostics & Grafana Dashboard Builders', () => {
-  it('builds a Diagnostics CronJob (gfix -v -full)', () => {
+  it('builds a Diagnostics CronJob using online validation on the primary', () => {
     const cluster = makeCluster({ diagnostics: { enabled: true, schedule: '0 4 * * 0' } });
     const cronJob = buildDiagnosticsCronJob(cluster);
     expect(cronJob.metadata?.name).toBe('test-cluster-diagnostics');
     expect(cronJob.spec?.schedule).toBe('0 4 * * 0');
-    expect(cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0].args?.[0]).toContain('gfix -v -full');
+    const podSpec = cronJob.spec?.jobTemplate?.spec?.template?.spec;
+    // gfix -v needs exclusive access; online validation works with clients connected
+    expect(podSpec?.containers?.[0].args?.[0]).toContain(
+      'fbsvcmgr test-cluster:service_mgr action_validate dbname /var/lib/firebird/data/mydb.fdb',
+    );
+    expect(podSpec?.containers?.[0].args?.[0]).not.toContain('gfix -v');
+    expect(podSpec?.volumes).toBeUndefined();
   });
 
   it('builds a Grafana Dashboard ConfigMap', () => {
@@ -988,5 +1027,46 @@ describe('hibernation', () => {
       expect(needsUpdate(cronJob, cronJob)).toBe(false);
       expect(needsUpdate(cronJob, suspended)).toBe(true);
     }
+  });
+});
+
+describe('buildStatefulSet (official image runtime contract)', () => {
+  const envOf = (cluster: FirebirdCluster) => buildStatefulSet(cluster).spec?.template?.spec?.containers?.[0].env ?? [];
+
+  it('mounts the data PVC at the image data directory', () => {
+    const container = buildStatefulSet(makeCluster()).spec?.template?.spec?.containers?.[0];
+    expect(container?.volumeMounts).toContainEqual({ name: 'firebird-data', mountPath: '/var/lib/firebird/data' });
+  });
+
+  it('sets FIREBIRD_ROOT_PASSWORD and client credentials from the superuser Secret', () => {
+    const ref = { secretKeyRef: { name: 'fb-secret', key: 'password' } };
+    const env = envOf(makeCluster({ superuserSecret: { name: 'fb-secret' } }));
+    expect(env).toContainEqual({ name: 'FIREBIRD_ROOT_PASSWORD', valueFrom: ref });
+    expect(env).toContainEqual({ name: 'ISC_USER', value: 'SYSDBA' });
+    expect(env).toContainEqual({ name: 'ISC_PASSWORD', valueFrom: ref });
+  });
+
+  it('falls back to the masterkey password without a Secret', () => {
+    expect(envOf(makeCluster())).toContainEqual({ name: 'FIREBIRD_ROOT_PASSWORD', value: 'masterkey' });
+  });
+
+  it('asks the entrypoint to create the cluster database', () => {
+    expect(envOf(makeCluster())).toContainEqual({ name: 'FIREBIRD_DATABASE', value: 'mydb.fdb' });
+    expect(envOf(makeCluster({ databaseName: 'app.fdb' }))).toContainEqual({
+      name: 'FIREBIRD_DATABASE',
+      value: 'app.fdb',
+    });
+  });
+
+  it('lets spec.env override operator defaults (later entries win)', () => {
+    const env = envOf(makeCluster({ env: [{ name: 'FIREBIRD_DATABASE', value: 'other.fdb' }] }));
+    const last = [...env].reverse().find((e) => e.name === 'FIREBIRD_DATABASE');
+    expect(last?.value).toBe('other.fdb');
+  });
+
+  it('rolls pods when firebird.conf settings change', () => {
+    const a = buildStatefulSet(makeCluster({ config: { settings: { DefaultDbCachePages: '2048' } } }));
+    const b = buildStatefulSet(makeCluster({ config: { settings: { DefaultDbCachePages: '4096' } } }));
+    expect(statefulSetNeedsUpdate(a, b)).toBe(true);
   });
 });
