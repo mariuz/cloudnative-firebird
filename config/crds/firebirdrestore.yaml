@@ -48,8 +48,11 @@ spec:
                 - clusterName
               properties:
                 clusterName:
-                  description: Target FirebirdCluster name to restore into
+                  description: Target FirebirdCluster name to restore into (immutable)
                   type: string
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: clusterName is immutable
                 backupName:
                   description: FirebirdBackup custom resource name (a completed backup)
                   type: string

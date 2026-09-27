@@ -108,6 +108,9 @@ function makeMockKubeConfig({
     createNamespacedCronJob: createNamespacedCronJobImpl,
     patchNamespacedCronJob: patchNamespacedCronJobImpl,
     deleteNamespacedCronJob: deleteNamespacedCronJobImpl,
+    readNamespacedJob: vi.fn().mockRejectedValue(notFoundError),
+    createNamespacedJob: vi.fn().mockResolvedValue({}),
+    deleteNamespacedJob: vi.fn().mockResolvedValue({}),
   };
   const mockCustomApi = {
     getNamespacedCustomObject: getNamespacedCustomObjectImpl,

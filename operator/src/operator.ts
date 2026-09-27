@@ -3,6 +3,7 @@ import { logger } from './utils/logger';
 import { HealthServer } from './utils/health';
 import { FirebirdClusterController } from './controllers/firebirdcluster.controller';
 import { FirebirdBackupController } from './controllers/backup.controller';
+import { FENCED_INSTANCES_ANNOTATION } from './utils/fencing';
 import {
   API_GROUP,
   API_VERSION,
@@ -12,6 +13,11 @@ import {
   FirebirdScheduledBackup,
   RESOURCE_PLURAL,
 } from './types';
+
+/** The cluster's fencedInstances annotation */
+function fencingAnnotation(cluster: FirebirdCluster): string | undefined {
+  return cluster.metadata.annotations?.[FENCED_INSTANCES_ANNOTATION];
+}
 
 /** Kubernetes object fields the operator's event handling relies on */
 interface WatchedObject {
@@ -46,6 +52,8 @@ export class Operator {
   private resyncTimer: NodeJS.Timeout | null = null;
   private readonly resyncIntervalMs: number;
   private readonly knownClusters = new Map<string, FirebirdCluster>();
+  /** fencedInstances annotation at the last reconcile, per cluster */
+  private readonly reconciledFencing = new Map<string, string | undefined>();
   /** metadata.generation of the last successful reconcile, per cluster */
   private readonly reconciledGenerations = new Map<string, number>();
 
@@ -108,6 +116,7 @@ export class Operator {
     this.knownClusters.clear();
     this.knownBackupObjects.clear();
     this.reconciledGenerations.clear();
+    this.reconciledFencing.clear();
     this.healthServer.stop();
   }
 
@@ -177,6 +186,10 @@ export class Operator {
   }
 
   private async handleBackupEvent(kind: BackupKind, phase: string, obj: WatchedObject): Promise<void> {
+    if (phase === 'ERROR' || !obj?.metadata) {
+      logger.error({ phase, kind: kind.plural, event: obj }, 'Received error event from watch stream');
+      return;
+    }
     const { name, namespace = 'default', generation } = obj.metadata;
     const key = `${kind.plural}/${namespace}/${name}`;
     const log = logger.child({ kind: kind.plural, name, namespace, phase });
@@ -203,6 +216,11 @@ export class Operator {
   }
 
   private async handleEvent(phase: string, cluster: FirebirdCluster): Promise<void> {
+    // ERROR events carry a Status object, not a cluster
+    if (phase === 'ERROR' || !cluster?.metadata) {
+      logger.error({ phase, event: cluster }, 'Received error event from watch stream');
+      return;
+    }
     const { name, namespace = 'default' } = cluster.metadata;
     const log = logger.child({ cluster: name, namespace, phase });
     const key = `${namespace}/${name}`;
@@ -216,22 +234,26 @@ export class Operator {
         // skip them to avoid a reconcile → status patch → MODIFIED feedback loop.
         // Periodic resync still converges anything observed outside the spec, and retries
         // failed reconciles at the resync interval instead of in a tight event loop.
+        // Annotations do not bump the generation either; fencing is driven by one.
         if (
           phase === 'MODIFIED' &&
           generation !== undefined &&
-          this.reconciledGenerations.get(key) === generation
+          this.reconciledGenerations.get(key) === generation &&
+          this.reconciledFencing.get(key) === fencingAnnotation(cluster)
         ) {
           log.debug({ generation }, 'Spec unchanged since last reconcile, skipping');
           break;
         }
         log.info('Received cluster event, reconciling');
         if (generation !== undefined) this.reconciledGenerations.set(key, generation);
+        this.reconciledFencing.set(key, fencingAnnotation(cluster));
         await this.controller.reconcile(cluster);
         break;
 
       case 'DELETED':
         this.knownClusters.delete(key);
         this.reconciledGenerations.delete(key);
+        this.reconciledFencing.delete(key);
         log.info('FirebirdCluster deleted; owned resources will be garbage collected');
         break;
 

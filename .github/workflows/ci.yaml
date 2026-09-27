@@ -293,6 +293,40 @@ jobs:
           kubectl get firebirdrestore over-live -o jsonpath='{.status.error}' | grep -q 'cluster database'
           ! kubectl get job restore-over-live 2>/dev/null
 
+      - name: Verify instance fencing
+        run: |
+          ANN=firebird.cloudnative-firebird.io/fencedInstances
+          kubectl wait pod/test-cluster-1 -n default --for=condition=Ready --timeout=300s
+          kubectl annotate firebirdcluster test-cluster "$ANN=[\"test-cluster-1\"]" --overwrite
+          timeout 180 bash -c \
+            'until kubectl get firebirdcluster test-cluster -o jsonpath={.status.fencedInstances} | grep -q test-cluster-1; do sleep 3; done'
+          # a fenced instance keeps running but is not ready, and its database rejects clients
+          kubectl wait pod/test-cluster-1 -n default --for=condition=Ready=false --timeout=120s
+          [ "$(kubectl get pod test-cluster-1 -o jsonpath={.status.phase})" = "Running" ]
+          if kubectl exec test-cluster-1 -c firebird -- bash -c \
+            'echo "select 1 from rdb\$database;" | isql -q localhost:/var/lib/firebird/data/mydb.fdb' 2>&1 | grep -q shutdown; then
+            echo "fenced database rejects clients"
+          else
+            echo "fenced database accepted a client"; exit 1
+          fi
+          kubectl get firebirdcluster test-cluster -o jsonpath='{.status.conditions[?(@.type=="Fenced")].message}'; echo
+          # the instance is not a ready endpoint of the Service
+          ready_ips=$(kubectl get endpointslices -l kubernetes.io/service-name=test-cluster \
+            -o jsonpath='{range .items[*].endpoints[?(@.conditions.ready==true)]}{.addresses[0]}{" "}{end}')
+          echo "ready endpoints: $ready_ips"
+          ! echo " $ready_ips " | grep -q " $(kubectl get pod test-cluster-1 -o jsonpath={.status.podIP}) "
+          [ "$(kubectl get firebirdcluster test-cluster -o jsonpath={.status.phase})" = "Running" ]
+
+          kubectl annotate firebirdcluster test-cluster "$ANN=[]" --overwrite
+          kubectl wait pod/test-cluster-1 -n default --for=condition=Ready --timeout=180s
+          timeout 120 bash -c \
+            'while kubectl get firebirdcluster test-cluster -o jsonpath={.status.fencedInstances} | grep -q test-cluster-1; do sleep 3; done'
+          echo "fence lifted"
+
+          # scale subresource with a label selector (HPA / VPA targets)
+          kubectl get --raw /apis/firebird.cloudnative-firebird.io/v1/namespaces/default/firebirdclusters/test-cluster/scale \
+            | grep -q '"selector":"app.kubernetes.io/name=firebird'
+
       - name: Verify operator reconciled without API errors
         run: |
           logs=$(kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1)

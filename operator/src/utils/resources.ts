@@ -18,6 +18,7 @@ import {
 } from '../types';
 import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
 import { bootstrapVolumes, buildBootstrapInitContainers } from './backup';
+import { databaseOnlineCheck } from './fencing';
 import {
   PRIMARY_KEY,
   REPLICATION_SCRIPTS,
@@ -226,10 +227,15 @@ export function buildStatefulSet(
         periodSeconds: 10,
         failureThreshold: 5,
       },
+      // ready only while the local server answers the service manager and the database is not
+      // shut down, so a fenced instance leaves the Services (see utils/fencing.ts)
       readinessProbe: {
-        tcpSocket: { port: 3050 },
+        exec: {
+          command: ['/bin/sh', '-c', databaseOnlineCheck(`${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`)],
+        },
         initialDelaySeconds: 15,
         periodSeconds: 5,
+        timeoutSeconds: 5,
         failureThreshold: 3,
       },
     },
@@ -533,6 +539,13 @@ export function statefulSetNeedsUpdate(
   if (existingContainer.image !== desiredContainer.image) return true;
   if (JSON.stringify(existingContainer.resources) !== JSON.stringify(desiredContainer.resources)) return true;
   if (JSON.stringify(existingContainer.env) !== JSON.stringify(desiredContainer.env)) return true;
+  // the API server defaults other probe fields, so only the probe command is compared
+  if (
+    JSON.stringify(existingContainer.readinessProbe?.exec?.command) !==
+    JSON.stringify(desiredContainer.readinessProbe?.exec?.command)
+  ) {
+    return true;
+  }
 
   return false;
 }

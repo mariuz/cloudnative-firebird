@@ -15,6 +15,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Journal-based asynchronous replication** (Firebird 4.0+, experimental) with replicas seeded without locking the primary
 - **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
 - **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
+- **Instance fencing** via the `fencedInstances` annotation (CloudNativePG format): the database is shut down, the pod keeps running
 - **Lag-aware read-only routing** to replicas via the `<name>-replica` Service (`spec.replication.readOnlyRouting`)
 - **Secret-based** SYSDBA password management
 - **Automatic service creation** (ClusterIP + headless for StatefulSet DNS)
@@ -276,6 +277,33 @@ With replication enabled, only the primary bootstraps; replicas are then seeded 
 With `replication.journalArchiveS3`, a CronJob copies archived journal segments from the
 primary's segment server to `<prefix>/journals/` (replaying them for point-in-time recovery is
 not implemented yet; see TODO.md).
+
+### Fencing
+
+Fencing follows CloudNativePG: the `firebird.cloudnative-firebird.io/fencedInstances` annotation
+holds a JSON list of instance names, `["*"]` fences every instance, and `[]` (or removing the
+annotation) lifts the fence.
+
+```bash
+# fence one instance
+kubectl annotate firebirdcluster my-cluster \
+  'firebird.cloudnative-firebird.io/fencedInstances=["my-cluster-1"]' --overwrite
+# lift all fences
+kubectl annotate firebirdcluster my-cluster 'firebird.cloudnative-firebird.io/fencedInstances=[]' --overwrite
+```
+
+The Firebird server is the container's main process, so instead of stopping it the operator puts
+the instance's database into **full shutdown** (`gfix -shut full -force 0`, through the service
+manager) with a short Job: existing attachments are closed and no client, replica apply or backup
+can attach. The pod and its volume stay, so the files can be inspected (`kubectl exec`). The
+shutdown is stored in the database header and survives pod restarts. The readiness probe requires
+the database to be online, so a fenced instance is not Ready and leaves the Services, read routing
+and replica seeding. **A fenced primary is not failed over**: writes stop until the fence is
+lifted. A fenced replica stops applying segments and catches up once unfenced.
+
+`status.fencedInstances` lists the applied fences and the `Fenced` condition reports changes in
+progress or failed Jobs (retried on the next reconcile). Upgrading the operator rolls existing
+instances once, to switch them from the TCP readiness probe to the database-online probe.
 
 ### Read-Only Traffic Routing
 

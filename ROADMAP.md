@@ -4,9 +4,11 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.10.0):** journal replication (experimental) and backups/restores work against
-> the official `firebirdsql/firebird` image (section 7). Point-in-time recovery from archived
-> journal segments is not implemented yet, although segments are archived to S3.
+> **Status note (v0.11.0):** journal replication (experimental), backups/restores and instance
+> fencing work against the official `firebirdsql/firebird` image (section 7). Some items below
+> were marked done before they were implemented; they are annotated where that is the case
+> (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
+> (1.28 – 1.30.1) are reviewed in [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md).
 > Firebird-level problems found along the way are in [ISSUES.md](ISSUES.md), open work in
 > [TODO.md](TODO.md).
 
@@ -34,12 +36,14 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 
 - [x] **Basic Primary & Replica Service Split** *(v0.2.0)*
   - Dedicated `-replica` Service alongside primary ClusterIP service.
-- [x] **Automated Leader Election & Failover** *(v0.4.0)*
-  - Kubernetes Lease-based leader monitoring for primary instance failover.
-  - Automatic promotion of replica instances to primary role when primary pod fails.
-- [x] **Firebird 4.0+ Journal-Based Replication Management & PITR Archiving** *(v0.5.0)*
+- [ ] **Automated Leader Election & Failover** *(Lease object since v0.4.0; election and failover not implemented)*
+  - Kubernetes Lease-based leader monitoring for primary instance failover. Today the Lease is created
+    once, naming ordinal 0, and never renewed or moved.
+  - Automatic promotion of replica instances to primary role when primary pod fails. Planned on top of
+    planned switchover, with the Lease as promotion mutex as in CloudNativePG 1.30.
+- [x] **Firebird 4.0+ Journal-Based Replication Management & PITR Archiving** *(v0.5.0, working since v0.9.0)*
   - Dynamic journal file sync, status tracking, and continuous archiving to S3.
-  - Quorum management for synchronous replication (`mode: sync`).
+  - Quorum management for synchronous replication (`mode: sync`): not implemented, rejected by validation.
 - [x] **Smart Read-Only Traffic Routing** *(v0.6.0)*
   - Pod readiness and replication lag-aware endpoint management for read replicas.
   - Role-labelled pods: the rw Service targets the primary (leader Lease holder), the `-replica` Service targets eligible replicas.
@@ -56,9 +60,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 - [x] **Cloud Object Storage Support (S3, GCS, Azure Blob)** *(v0.4.0)*
   - Direct upload of backup archives (`gbak` / `nbackup`) to object storage.
   - Secret-based cloud credentials management (`AWS_ACCESS_KEY_ID`, `GCS_KEY`, etc.).
-- [x] **Point-In-Time Recovery (PITR) & Journal Archiving** *(v0.5.0)*
+- [x] **Point-In-Time Recovery (PITR) & Journal Archiving** *(archiving since v0.5.0, working since v0.10.0)*
   - Continuous archiving of Firebird 4.0+ replication journal files to object storage.
-  - Replay of archived journal segments on top of `nbackup` base backups for exact timestamp recovery.
+  - Replay of archived journal segments on top of `nbackup` base backups for exact timestamp recovery:
+    not implemented yet (TODO.md).
 - [x] **Dedicated Backup CRDs** *(v0.4.0)*
   - `FirebirdBackup`: On-demand backup custom resource.
   - `FirebirdScheduledBackup`: Cron-based scheduled backup custom resource with retention rules.
@@ -151,12 +156,22 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - Journal archive CronJob fetches segments from the primary's segment server instead of mounting its volume.
 - [ ] **Planned Switchover**
   - Declarative promotion of a chosen replica (`gfix -replica none`) with Lease handover and demotion of the old primary.
-- [ ] **Instance Fencing**
-  - Isolate individual instances (stop Firebird, keep the pod and PVC) for troubleshooting.
+- [x] **Instance Fencing** *(v0.11.0)*
+  - `firebird.cloudnative-firebird.io/fencedInstances` annotation in CloudNativePG's format (a JSON list of instances, `["*"]` for all).
+  - The fenced database is put into full shutdown through the service manager; the pod keeps running, is not Ready and leaves the Services. No failover.
+  - Readiness requires the database to be online; `status.fencedInstances` and a `Fenced` condition report the applied state.
+- [x] **CloudNativePG 1.30 alignment** *(v0.11.0)*
+  - Scale subresource label selector (`status.selector`) for HPA / VPA.
+  - Immutable `clusterName` on backup, scheduled backup and restore resources (CEL).
 - [ ] **Rolling Updates with Primary Last**
   - Update replicas first, then switch over before restarting the primary to minimise write downtime.
 - [ ] **Declarative Database Users & Roles**
-  - Manage Firebird users, roles and grants from the `FirebirdCluster` spec with Secret-backed passwords.
+  - Manage Firebird users, roles and grants with Secret-backed passwords, as a resource per user with a
+    reclaim policy (CloudNativePG 1.30 `DatabaseRole`).
+- [ ] **Replica re-creation** *(CloudNativePG 1.28 `unrecoverable`)*
+  - Annotate a broken replica to delete its pod and PVC and re-seed it from a ready replica.
+- [ ] **Kubernetes Events**
+  - Events for fencing, backups, restores, seeding and routing changes (CloudNativePG 1.29 / 1.30).
 
 ---
 
@@ -166,7 +181,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 |---|---|---|---|
 | **Primary/Replica Setup** | Native Streaming Replication | Basic Replica Service | **v0.2.0 (Done)** |
 | **Read-Only Routing** | `-ro` / `-r` Services | Lag-aware `-replica` Service | **v0.6.0 (Done)** |
-| **Failover / Promotion** | Automated Failover | K8s Lease Leader Election | **v0.4.0 (Done)** |
+| **Failover / Promotion** | Automated Failover | K8s Lease (static; no failover yet) | Planned |
 | **Physical Backup** | Barman Cloud / `pg_basebackup` | `nbackup` (Level 0-2) | **v0.3.0 (Done)** |
 | **Logical Backup** | `pg_dump` / CronJob | `gbak` CronJob & CRDs | **v0.1.0 (Done)** |
 | **PITR (Point-In-Time)** | Continuous Archiving | Journal Archiving to S3 | **v0.5.0 (Done)** |
@@ -175,7 +190,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Volume Expansion** | PVC Resize | In-place PVC Expansion | **v0.6.0 (Done)** |
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | Planned Switchover | Planned |
-| **Fencing** | Instance Fencing | Instance Fencing | Planned |
+| **Fencing** | Instance Fencing | `fencedInstances` annotation, database full shutdown | **v0.11.0 (Done)** |
 | **Auto-Sweeping / Maintenance** | VACUUM Scheduling | `gfix -sweep` CronJob | **v0.3.0 (Done)** |
 | **Security & TLS** | cert-manager | WireCrypt & cert-manager | **v0.4.0 (Done)** |
 | **Metrics Exporter** | Built-in Exporter | Exporter Sidecar & PodMonitor | **v0.4.0 (Done)** |

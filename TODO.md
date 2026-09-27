@@ -60,7 +60,12 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 - [ ] TLS: Firebird has no native TLS listener; decide between WireCrypt only, a TLS proxy
   sidecar, or dropping the `tls` mount.
-- [ ] Instance fencing.
+- [ ] **Failover**: the leader Lease is static. Implement switchover first, then failover with the
+  Lease as promotion mutex (CloudNativePG 1.30); a fenced primary must never be failed over.
+- [ ] Items from the CloudNativePG 1.28 – 1.30 review ([docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md)):
+  Kubernetes events, replica re-creation (`unrecoverable`), `serviceAccountName` for workload
+  identity (S3 without static keys), per-backup reconciliation pause, pod/container security
+  contexts.
 - [ ] Rolling updates with the primary last.
 - [ ] Declarative database users and roles.
 - [ ] Admission validation (CRD CEL rules or a webhook) so invalid specs are rejected at apply

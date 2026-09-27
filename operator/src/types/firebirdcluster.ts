@@ -329,7 +329,7 @@ export interface FirebirdClusterSpec {
 /**
  * Condition types for the FirebirdCluster status.
  */
-export type ConditionType = 'Ready' | 'Progressing' | 'Degraded' | 'Paused' | 'Hibernated';
+export type ConditionType = 'Ready' | 'Progressing' | 'Degraded' | 'Paused' | 'Hibernated' | 'Fenced';
 export type ConditionStatus = 'True' | 'False' | 'Unknown';
 
 /**
@@ -399,6 +399,13 @@ export interface FirebirdClusterStatus {
   superuserSecretHash?: string;
   /** Per-instance PVC storage and volume expansion status */
   volumes?: VolumeStatus[];
+  /**
+   * Instances whose database is fenced (in full shutdown), as applied from the
+   * fencedInstances annotation
+   */
+  fencedInstances?: string[];
+  /** Label selector of the instance pods, for the scale subresource (HPA / VPA) */
+  selector?: string;
 }
 
 /**

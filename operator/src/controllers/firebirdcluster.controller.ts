@@ -13,6 +13,12 @@ import {
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
 import { buildBackupCronJob, buildJournalArchiveCronJob } from '../utils/backup';
+import {
+  buildFencingJob,
+  desiredFencedInstances,
+  fencingJobName,
+  planFencing,
+} from '../utils/fencing';
 import { logger } from '../utils/logger';
 import {
   buildAutoSweepCronJob,
@@ -40,6 +46,7 @@ import {
   statefulSetNeedsUpdate,
   withHibernation,
   CLUSTER_LABEL,
+  clusterLabels,
 } from '../utils/resources';
 import { computeReadRouting, isPodReady, podRoutingLabelPatch } from '../utils/routing';
 import { replicationEnabled } from '../utils/replication';
@@ -60,6 +67,29 @@ import {
  * to JSON Patch (an array of operations), which the API server rejects for object bodies.
  */
 const MERGE_PATCH = setHeaderOptions('Content-Type', PatchStrategy.MergePatch);
+
+/** Outcome of the fencing reconciliation */
+interface FencingResult {
+  /** Instances whose database is fenced (full shutdown applied) */
+  fenced: string[];
+  /** Instances with a fencing change in progress */
+  pending: string[];
+  /** Instances whose last fencing Job failed (retried on the next reconcile) */
+  failed: string[];
+}
+
+/** Label selector string of the instance pods (status.selector, scale subresource) */
+function podSelector(cluster: FirebirdCluster): string {
+  return Object.entries(clusterLabels(cluster.metadata.name))
+    .map(([k, v]) => `${k}=${v}`)
+    .join(',');
+}
+
+/** Returns true for a Kubernetes API "not found" error */
+function isNotFound(err: unknown): boolean {
+  const e = err as { code?: number; statusCode?: number; response?: { statusCode?: number } };
+  return e?.code === 404 || e?.statusCode === 404 || e?.response?.statusCode === 404;
+}
 
 /** Outcome of the read-only routing reconciliation */
 interface ReadRoutingResult {
@@ -103,6 +133,7 @@ export class FirebirdClusterController {
 
     try {
       validateClusterSpec(cluster);
+      desiredFencedInstances(cluster); // rejects a malformed fencedInstances annotation
 
       if (cluster.spec.suspended) {
         log.info('Cluster reconciliation is suspended');
@@ -138,6 +169,7 @@ export class FirebirdClusterController {
       const volumes = statefulSetExisted
         ? await this.reconcileVolumeExpansion(cluster, log)
         : undefined;
+      const fencing = await this.reconcileFencing(cluster, log);
 
       if (cluster.spec.replication?.enabled) {
         await this.reconcileReplicaService(cluster, log);
@@ -164,6 +196,8 @@ export class FirebirdClusterController {
           readyInstances,
           replicationStatus: undefined,
           superuserSecretHash,
+          fencedInstances: fencing.fenced,
+          selector: podSelector(cluster),
           ...(volumes ? { volumes } : {}),
           conditions: [
             this.makeCondition('Hibernated', 'True', 'HibernationRequested', 'spec.hibernated is true'),
@@ -175,7 +209,10 @@ export class FirebirdClusterController {
       }
 
       const targetInstances = cluster.spec.instances;
-      const isReady = readyInstances === targetInstances;
+      // fenced instances are expected to be not ready
+      const fencedCount = fencing.fenced.filter((pod) => Number(pod.slice(name.length + 1)) < targetInstances).length;
+      const expectedReady = targetInstances - fencedCount;
+      const isReady = readyInstances >= expectedReady;
 
       const replicationStatus = cluster.spec.replication?.enabled
         ? {
@@ -193,20 +230,25 @@ export class FirebirdClusterController {
       await this.updateStatus(cluster, {
         phase: isReady ? 'Running' : 'Creating',
         phaseReason: isReady
-          ? 'All resources reconciled successfully'
-          : `Waiting for pods: ${readyInstances}/${targetInstances} ready`,
+          ? fencedCount > 0
+            ? `All resources reconciled; ${fencedCount} instance(s) fenced`
+            : 'All resources reconciled successfully'
+          : `Waiting for pods: ${readyInstances}/${expectedReady} ready`,
         instances: targetInstances,
         readyInstances,
         replicationStatus,
         superuserSecretHash,
+        fencedInstances: fencing.fenced,
+        selector: podSelector(cluster),
         ...(volumes ? { volumes } : {}),
         conditions: [
           this.makeCondition(
             'Ready',
             isReady ? 'True' : 'False',
             isReady ? 'ClusterReady' : 'PodsNotReady',
-            isReady ? 'Cluster is ready' : `${readyInstances}/${targetInstances} ready`,
+            isReady ? 'Cluster is ready' : `${readyInstances}/${expectedReady} ready`,
           ),
+          this.fencingCondition(fencing),
           this.makeCondition(
             'Progressing',
             isReady ? 'False' : 'True',
@@ -969,6 +1011,77 @@ export class FirebirdClusterController {
   }
 
   /** Helper to create a status condition */
+  private fencingCondition(fencing: FencingResult): FirebirdClusterCondition {
+    const parts = [
+      fencing.fenced.length ? `fenced: ${fencing.fenced.join(', ')}` : '',
+      fencing.pending.length ? `changing: ${fencing.pending.join(', ')}` : '',
+      fencing.failed.length ? `failed (retrying): ${fencing.failed.join(', ')}` : '',
+    ].filter(Boolean);
+    return this.makeCondition(
+      'Fenced',
+      fencing.fenced.length ? 'True' : 'False',
+      fencing.failed.length ? 'FencingFailed' : fencing.pending.length ? 'FencingInProgress' : 'FencingApplied',
+      parts.length ? parts.join('; ') : 'No instance is fenced',
+    );
+  }
+
+  /**
+   * Applies the fencedInstances annotation: one Job per instance puts its database into full
+   * shutdown or back online, and status.fencedInstances records what has been applied.
+   */
+  private async reconcileFencing(cluster: FirebirdCluster, log: Logger): Promise<FencingResult> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    const desired = new Set(desiredFencedInstances(cluster));
+    // entries for instances removed by scaling down are kept: their volumes stay shut down
+    const applied = new Set(cluster.status?.fencedInstances ?? []);
+    const result: FencingResult = { fenced: [], pending: [], failed: [] };
+    if (cluster.spec.hibernated) {
+      result.fenced = [...applied].sort();
+      return result;
+    }
+
+    for (let i = 0; i < cluster.spec.instances; i++) {
+      const pod = `${name}-${i}`;
+      const jobName = fencingJobName(pod);
+      let job;
+      try {
+        job = await this.batchApi.readNamespacedJob({ name: jobName, namespace });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+      const step = planFencing(desired.has(pod), applied.has(pod), job);
+      switch (step.kind) {
+        case 'create':
+          log.info({ pod, action: step.action }, 'Starting fencing Job');
+          try {
+            await this.batchApi.createNamespacedJob({ namespace, body: buildFencingJob(cluster, pod, step.action) });
+          } catch (err) {
+            // the previous Job of this instance is still being deleted; retried on the next reconcile
+            if ((err as { code?: number })?.code !== 409) throw err;
+          }
+          result.pending.push(pod);
+          break;
+        case 'wait':
+          result.pending.push(pod);
+          break;
+        case 'applied':
+          log.info({ pod, action: step.action }, step.action === 'fence' ? 'Instance fenced' : 'Instance unfenced');
+          if (step.action === 'fence') applied.add(pod);
+          else applied.delete(pod);
+          await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
+          if (desired.has(pod) !== applied.has(pod)) result.pending.push(pod);
+          break;
+        case 'failed':
+          log.warn({ pod, action: step.action }, 'Fencing Job failed; retrying on the next reconcile');
+          await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
+          result.failed.push(pod);
+          break;
+      }
+    }
+    result.fenced = [...applied].sort();
+    return result;
+  }
+
   private makeCondition(
     type: FirebirdClusterCondition['type'],
     status: FirebirdClusterCondition['status'],

@@ -26,6 +26,8 @@ spec:
         scale:
           specReplicasPath: .spec.instances
           statusReplicasPath: .status.instances
+          # lets the HorizontalPodAutoscaler / VerticalPodAutoscaler map the cluster to its pods
+          labelSelectorPath: .status.selector
       additionalPrinterColumns:
         - name: Age
           type: date
@@ -520,6 +522,14 @@ spec:
                 superuserSecretHash:
                   description: SHA-256 hash digest of superuser secret for password rotation tracking
                   type: string
+                selector:
+                  description: Label selector of the instance pods (scale subresource)
+                  type: string
+                fencedInstances:
+                  description: Instances whose database is fenced (full shutdown), applied from the fencedInstances annotation
+                  type: array
+                  items:
+                    type: string
                 replicationStatus:
                   description: Detailed replication status details
                   type: object

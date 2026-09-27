@@ -51,8 +51,11 @@ spec:
                 - clusterName
               properties:
                 clusterName:
-                  description: Target FirebirdCluster name
+                  description: Target FirebirdCluster name (immutable)
                   type: string
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: clusterName is immutable
                 type:
                   description: Backup type ('logical' or 'physical')
                   type: string
