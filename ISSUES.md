@@ -165,6 +165,13 @@ StatefulSet recreates it: "Your user name and password are not defined".
   `RDB$GET_CONTEXT('SYSTEM', 'REPLICATION_SEQUENCE')`), and take a replica's backup lock with
   `ALTER DATABASE BEGIN/END BACKUP` through its own server. `gstat` is only used on files no
   server has open.
+- **Replication sequence in the header.** A replica's header has no replication sequence (the
+  `HDR_repl_seq` clump), so a replica promoted as is starts its journal at segment 1 and the other
+  replicas, which applied the old primary's segments up to *S*, skip everything it ships. Planned
+  switchover therefore writes the clump (value *S*) into the target's header offline
+  (`set-repl-seq.pl`, following `PAG_set_repl_sequence` in `src/jrd/pag.cpp`) before enabling
+  publication; its journal then continues at *S + 1*. Verified with live writers: no rows lost,
+  no re-seeding, no replication errors.
 - **Replica control file.** Seeding writes Firebird's replica control file directly
   (`ControlFile::DataV1`, a 40-byte header plus `{tra_id, sequence}` entries, in
   `src/remote/server/ReplServer.cpp`). It is an internal format, not a public interface, so the

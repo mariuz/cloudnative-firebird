@@ -404,10 +404,27 @@ export interface FirebirdClusterStatus {
    * fencedInstances annotation
    */
   fencedInstances?: string[];
+  /** Planned switchover in progress or last completed / failed (targetPrimary annotation) */
+  switchover?: SwitchoverStatus;
   /** Replicas being re-seeded (reseed annotation) */
   reseedingInstances?: string[];
   /** Label selector of the instance pods, for the scale subresource (HPA / VPA) */
   selector?: string;
+}
+
+/** State of a planned switchover */
+export interface SwitchoverStatus {
+  /** Instance being promoted */
+  target: string;
+  /** Primary being demoted */
+  from: string;
+  phase: 'Stopping' | 'Promoting' | 'Completed' | 'Failed';
+  message?: string;
+  startTime?: string;
+  completionTime?: string;
+  /** Pod UIDs of the target and the old primary when they were restarted (directive tokens) */
+  targetToken?: string;
+  fromToken?: string;
 }
 
 /**

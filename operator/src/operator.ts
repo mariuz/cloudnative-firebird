@@ -5,6 +5,7 @@ import { FirebirdClusterController } from './controllers/firebirdcluster.control
 import { FirebirdBackupController } from './controllers/backup.controller';
 import { FirebirdUserController } from './controllers/user.controller';
 import { FENCED_INSTANCES_ANNOTATION } from './utils/fencing';
+import { TARGET_PRIMARY_ANNOTATION } from './utils/switchover';
 import {
   API_GROUP,
   API_VERSION,
@@ -16,9 +17,10 @@ import {
   RESOURCE_PLURAL,
 } from './types';
 
-/** The cluster's fencedInstances annotation */
-function fencingAnnotation(cluster: FirebirdCluster): string | undefined {
-  return cluster.metadata.annotations?.[FENCED_INSTANCES_ANNOTATION];
+/** Annotations that drive reconciliation (they do not bump the generation) */
+function drivingAnnotations(cluster: FirebirdCluster): string {
+  const annotations = cluster.metadata.annotations ?? {};
+  return JSON.stringify([annotations[FENCED_INSTANCES_ANNOTATION], annotations[TARGET_PRIMARY_ANNOTATION]]);
 }
 
 /** Kubernetes object fields the operator's event handling relies on */
@@ -55,8 +57,8 @@ export class Operator {
   private resyncTimer: NodeJS.Timeout | null = null;
   private readonly resyncIntervalMs: number;
   private readonly knownClusters = new Map<string, FirebirdCluster>();
-  /** fencedInstances annotation at the last reconcile, per cluster */
-  private readonly reconciledFencing = new Map<string, string | undefined>();
+  /** fencedInstances / targetPrimary annotations at the last reconcile, per cluster */
+  private readonly reconciledFencing = new Map<string, string>();
   /** metadata.generation of the last successful reconcile, per cluster */
   private readonly reconciledGenerations = new Map<string, number>();
 
@@ -242,19 +244,19 @@ export class Operator {
         // skip them to avoid a reconcile → status patch → MODIFIED feedback loop.
         // Periodic resync still converges anything observed outside the spec, and retries
         // failed reconciles at the resync interval instead of in a tight event loop.
-        // Annotations do not bump the generation either; fencing is driven by one.
+        // Annotations do not bump the generation either; fencing and switchover are driven by them.
         if (
           phase === 'MODIFIED' &&
           generation !== undefined &&
           this.reconciledGenerations.get(key) === generation &&
-          this.reconciledFencing.get(key) === fencingAnnotation(cluster)
+          this.reconciledFencing.get(key) === drivingAnnotations(cluster)
         ) {
           log.debug({ generation }, 'Spec unchanged since last reconcile, skipping');
           break;
         }
         log.info('Received cluster event, reconciling');
         if (generation !== undefined) this.reconciledGenerations.set(key, generation);
-        this.reconciledFencing.set(key, fencingAnnotation(cluster));
+        this.reconciledFencing.set(key, drivingAnnotations(cluster));
         await this.controller.reconcile(cluster);
         break;
 

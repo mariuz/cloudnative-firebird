@@ -23,6 +23,8 @@ import {
   PRIMARY_KEY,
   REPLICATION_SCRIPTS,
   RESEED_KEY,
+  PROMOTE_KEY,
+  DEMOTE_KEY,
   SEED_SOURCES_KEY,
   SEGMENT_PORT,
   buildReplicationConf,
@@ -827,7 +829,13 @@ export function podDisruptionBudgetNeedsUpdate(
  */
 export function buildConfigMap(
   cluster: FirebirdCluster,
-  options?: { primaryPod?: string; seedSourcePods?: string[]; reseed?: Record<string, string> },
+  options?: {
+    primaryPod?: string;
+    seedSourcePods?: string[];
+    reseed?: Record<string, string>;
+    promote?: Record<string, string>;
+    demote?: Record<string, string>;
+  },
 ): V1ConfigMap | null {
   const { name, namespace = 'default' } = cluster.metadata;
   const labels = clusterLabels(name);
@@ -853,10 +861,15 @@ export function buildConfigMap(
     // Ready replicas that can serve seed copies without locking the primary
     data[SEED_SOURCES_KEY] = (options?.seedSourcePods ?? []).map((pod) => `${instanceHost(cluster, pod)}\n`).join('');
     // Replicas to re-seed; always present so that a merge patch clears finished requests
-    data[RESEED_KEY] = Object.keys(options?.reseed ?? {})
-      .sort()
-      .map((pod) => `${pod} ${options!.reseed![pod]}\n`)
-      .join('');
+    const directives = (entries: Record<string, string> = {}) =>
+      Object.keys(entries)
+        .sort()
+        .map((pod) => `${pod} ${entries[pod]}\n`)
+        .join('');
+    data[RESEED_KEY] = directives(options?.reseed);
+    // planned switchover (always present, like reseed)
+    data[PROMOTE_KEY] = directives(options?.promote);
+    data[DEMOTE_KEY] = directives(options?.demote);
   }
 
   if (Object.keys(data).length === 0) return null;

@@ -10,9 +10,11 @@ import {
   PatchStrategy,
   PolicyV1Api,
   setHeaderOptions,
+  V1MicroTime,
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
 import { buildBackupCronJob, buildJournalArchiveCronJob } from '../utils/backup';
+import { TARGET_PRIMARY_ANNOTATION, buildSwitchoverJob, switchoverJobName } from '../utils/switchover';
 import {
   buildFencingJob,
   desiredFencedInstances,
@@ -58,6 +60,7 @@ import {
   FirebirdCluster,
   FirebirdClusterCondition,
   FirebirdClusterStatus,
+  SwitchoverStatus,
   RESOURCE_PLURAL,
   VolumeStatus,
 } from '../types';
@@ -67,6 +70,16 @@ import {
  * to JSON Patch (an array of operations), which the API server rejects for object bodies.
  */
 const MERGE_PATCH = setHeaderOptions('Content-Type', PatchStrategy.MergePatch);
+
+/** Outcome of the switchover reconciliation */
+interface SwitchoverResult {
+  primaryPod: string;
+  promote: Record<string, string>;
+  demote: Record<string, string>;
+  restart: string[];
+  reseed: Record<string, string>;
+  status?: SwitchoverStatus;
+}
 
 /** Outcome of the fencing reconciliation */
 interface FencingResult {
@@ -157,15 +170,17 @@ export class FirebirdClusterController {
         phaseReason: 'Reconciliation started',
       });
 
-      const primaryPod = await this.resolvePrimaryPod(cluster, log);
+      const switchover = await this.reconcileSwitchover(cluster, await this.resolvePrimaryPod(cluster, log), log);
+      const primaryPod = switchover.primaryPod;
       const reseed = await this.resolveReseeds(cluster, primaryPod, log);
+      Object.assign(reseed.requests, switchover.reseed);
       const seedSourcePods = (await this.resolveSeedSources(cluster, primaryPod)).filter(
-        (pod) => !(pod in reseed.requests),
+        (pod) => !(pod in reseed.requests) && !(pod in switchover.promote) && !(pod in switchover.demote),
       );
-      await this.reconcileConfigMap(cluster, primaryPod, seedSourcePods, reseed.requests, log);
-      // the ConfigMap lists the request before the pod restarts into its init container
-      for (const pod of reseed.restart) {
-        log.info({ pod }, 'Restarting replica to re-seed it');
+      await this.reconcileConfigMap(cluster, primaryPod, seedSourcePods, reseed.requests, log, switchover);
+      // the ConfigMap lists the requests before the pods restart into their init containers
+      for (const pod of [...new Set([...reseed.restart, ...switchover.restart])]) {
+        log.info({ pod }, 'Restarting instance into its init container');
         await this.coreApi.deleteNamespacedPod({ name: pod, namespace });
       }
       // Label pods before (re)pointing service selectors at the routing labels
@@ -249,6 +264,7 @@ export class FirebirdClusterController {
         fencedInstances: fencing.fenced,
         selector: podSelector(cluster),
         reseedingInstances: Object.keys(reseed.requests).sort(),
+        ...(switchover.status ? { switchover: switchover.status } : {}),
         ...(volumes ? { volumes } : {}),
         conditions: [
           this.makeCondition(
@@ -383,6 +399,144 @@ export class FirebirdClusterController {
       log.debug('Leader lease not found, assuming ordinal 0 is primary');
     }
     return `${name}-0`;
+  }
+
+  /**
+   * Planned switchover (targetPrimary annotation): see utils/switchover.ts. Returns the primary to
+   * use for this reconcile, the promote / demote directives, pods to restart and replicas to
+   * re-seed.
+   */
+  private async reconcileSwitchover(cluster: FirebirdCluster, primaryPod: string, log: Logger): Promise<SwitchoverResult> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    const result: SwitchoverResult = { primaryPod, promote: {}, demote: {}, restart: [], reseed: {} };
+    const state = cluster.status?.switchover;
+    const desired = cluster.metadata.annotations?.[TARGET_PRIMARY_ANNOTATION]?.trim();
+    const inFlight = state && (state.phase === 'Stopping' || state.phase === 'Promoting');
+    result.status = state;
+    if (!replicationEnabled(cluster) || cluster.spec.hibernated) return result;
+    if (!inFlight && (!desired || desired === primaryPod)) return result;
+    if (!inFlight && state?.phase === 'Failed' && state.target === desired && state.from === primaryPod) {
+      return result; // change the annotation to retry
+    }
+
+    const pods = await this.coreApi.listNamespacedPod({ namespace, labelSelector: `${CLUSTER_LABEL}=${name}` });
+    const podOf = (pod: string) => pods.items.find((p) => p.metadata?.name === pod);
+    const jobName = switchoverJobName(cluster);
+    const now = new Date().toISOString();
+
+    if (!inFlight) {
+      const target = desired!;
+      const index = Number(target.startsWith(`${name}-`) ? target.slice(name.length + 1) : NaN);
+      const fenced = cluster.status?.fencedInstances ?? [];
+      const problem = !Number.isInteger(index) || index < 0 || index >= cluster.spec.instances
+        ? `${target} is not an instance of this cluster`
+        : !podOf(target) || !isPodReady(podOf(target)!)
+          ? `${target} is not ready`
+          : !podOf(primaryPod) || !isPodReady(podOf(primaryPod)!)
+            ? `the current primary ${primaryPod} is not ready`
+            : fenced.includes(target) || fenced.includes(primaryPod)
+              ? 'the target or the current primary is fenced'
+              : undefined;
+      if (problem) {
+        log.warn({ target, problem }, 'Switchover refused');
+        result.status = { target, from: primaryPod, phase: 'Failed', message: problem, startTime: now, completionTime: now };
+        return result;
+      }
+      const replicas = pods.items
+        .filter((p) => p.metadata?.name && p.metadata.name !== primaryPod && p.metadata.name !== target && isPodReady(p))
+        .map((p) => p.metadata!.name!)
+        .sort();
+      log.info({ from: primaryPod, target, replicas }, 'Starting planned switchover');
+      try {
+        await this.batchApi.createNamespacedJob({
+          namespace,
+          body: buildSwitchoverJob(cluster, { from: primaryPod, target, replicas }),
+        });
+      } catch (err) {
+        if ((err as { code?: number })?.code !== 409) throw err;
+      }
+      result.status = { target, from: primaryPod, phase: 'Stopping', message: 'stopping writes on the primary', startTime: now };
+      return result;
+    }
+
+    const current = state!;
+    if (current.phase === 'Stopping') {
+      let job;
+      try {
+        job = await this.batchApi.readNamespacedJob({ name: jobName, namespace });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+      if (!job) {
+        await this.batchApi.createNamespacedJob({
+          namespace,
+          body: buildSwitchoverJob(cluster, { from: current.from, target: current.target, replicas: [] }),
+        });
+        return result;
+      }
+      const conditions = job.status?.conditions ?? [];
+      if (conditions.some((c) => c.type === 'Failed' && c.status === 'True')) {
+        log.warn({ target: current.target }, 'Switchover failed; bringing the primary back online');
+        await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
+        if (!(cluster.status?.fencedInstances ?? []).includes(current.from)) {
+          try {
+            await this.batchApi.createNamespacedJob({ namespace, body: buildFencingJob(cluster, current.from, 'unfence') });
+          } catch (err) {
+            if ((err as { code?: number })?.code !== 409) throw err;
+          }
+        }
+        result.status = {
+          ...current,
+          phase: 'Failed',
+          message: `switchover Job ${jobName} failed (see its logs); ${current.from} stays primary`,
+          completionTime: now,
+        };
+        return result;
+      }
+      if (!conditions.some((c) => c.type === 'Complete' && c.status === 'True')) return result;
+
+      // every ready replica has applied the old primary's last segment: move the primary
+      await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
+      await this.coordinationApi.patchNamespacedLease({
+        name: `${name}-lease`,
+        namespace,
+        body: [
+          { op: 'replace', path: '/spec/holderIdentity', value: current.target },
+          { op: 'replace', path: '/spec/renewTime', value: new V1MicroTime() },
+        ],
+      });
+      const targetToken = podOf(current.target)?.metadata?.uid ?? '';
+      const fromToken = podOf(current.from)?.metadata?.uid ?? '';
+      // replicas that were not ready may have missed segments of the old primary
+      for (const pod of pods.items) {
+        const podName = pod.metadata?.name;
+        if (!podName || podName === current.target || podName === current.from || isPodReady(pod)) continue;
+        result.reseed[podName] = pod.metadata?.uid ?? '';
+        result.restart.push(podName);
+      }
+      log.info({ primary: current.target, demoted: current.from }, 'Promoting the switchover target');
+      result.primaryPod = current.target;
+      result.promote = { [current.target]: targetToken };
+      result.demote = { [current.from]: fromToken };
+      result.restart.push(current.target, current.from);
+      result.status = { ...current, phase: 'Promoting', message: 'promoting the target and demoting the old primary', targetToken, fromToken };
+      return result;
+    }
+
+    // Promoting: the directives stay listed until both instances run again as new pods
+    result.primaryPod = current.target;
+    const restarted = (pod: string, token?: string) => {
+      const p = podOf(pod);
+      return Boolean(p && p.metadata?.uid !== token && isPodReady(p));
+    };
+    if (restarted(current.target, current.targetToken) && restarted(current.from, current.fromToken)) {
+      log.info({ primary: current.target }, 'Switchover completed');
+      result.status = { ...current, phase: 'Completed', message: `${current.target} is the primary`, completionTime: now };
+      return result;
+    }
+    result.promote = { [current.target]: current.targetToken ?? '' };
+    result.demote = { [current.from]: current.fromToken ?? '' };
+    return result;
   }
 
   /**
@@ -791,10 +945,17 @@ export class FirebirdClusterController {
     seedSourcePods: string[],
     reseed: Record<string, string>,
     log: Logger,
+    switchover?: { promote: Record<string, string>; demote: Record<string, string> },
   ): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const configName = `${name}-config`;
-    const desired = buildConfigMap(cluster, { primaryPod, seedSourcePods, reseed });
+    const desired = buildConfigMap(cluster, {
+      primaryPod,
+      seedSourcePods,
+      reseed,
+      promote: switchover?.promote,
+      demote: switchover?.demote,
+    });
 
     if (desired) {
       try {

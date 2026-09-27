@@ -22,19 +22,25 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Enable replication on an existing cluster.** Publication is enabled only when the
   database is created; an existing single-instance database needs `ALTER DATABASE ENABLE
   PUBLICATION` / `INCLUDE ALL TO PUBLICATION` on the primary before replicas can be added.
-- [ ] **Replication lag in status**: compare the primary's replication sequence with each
-  replica's control-file position and publish it (feeds `readOnlyRouting` via the
-  `replication-lag-seconds` annotation).
-- [ ] **Planned switchover and failover**: promote a replica (`gfix -replica none`, enable
-  publication), move the Lease and the `primary` ConfigMap entry, and demote or reseed the old
-  primary. Depends on the seeding and lag work above.
+- [ ] **Replication lag in status**: the segment servers now answer `POSITION` (a replica's
+  control-file position and pending segments); compare it with the primary's sequence and publish
+  it (feeds `readOnlyRouting` via the `replication-lag-seconds` annotation).
+- [ ] **Automatic failover**: planned switchover is done; failover needs the same promotion when
+  the primary is gone. Without the old primary the last archived segment is the one the most
+  advanced replica applied (POSITION); pick it, fence (or delete) the old primary so it cannot
+  come back as a second primary, and re-seed it later. Use the Lease as promotion mutex
+  (CloudNativePG 1.30).
+- [ ] **Switchover downtime**: writes stop from the primary shutdown until the target pod is ready
+  again (two pod restarts). Promoting online (replica mode none and publication on a running
+  replica) would need the replication sequence set without restarting.
 - [ ] **Synchronous mode** (`sync_replica`): currently rejected by validation. Needs replica
   credentials in a Secret-backed replication.conf.
 - [ ] **Encrypt segment shipping**: the segment server authenticates with the SYSDBA password
   but traffic is plain TCP inside the cluster (restricted by the NetworkPolicy when enabled).
-- [ ] **Replica control file dependency**: seeding writes Firebird's replica control file
-  (`ControlFile::DataV1` in `src/remote/server/ReplServer.cpp`). Re-verify the layout for every
-  supported Firebird major version, or replace it with a supported mechanism if one is added.
+- [ ] **Firebird internal formats**: seeding writes the replica control file
+  (`ControlFile::DataV1` in `src/remote/server/ReplServer.cpp`) and switchover writes the
+  `HDR_repl_seq` header clump (`src/jrd/ods.h`, ODS 13). Re-verify both for every supported
+  Firebird major version, or replace them with supported mechanisms if Firebird adds any.
 
 ## Backups and restore
 

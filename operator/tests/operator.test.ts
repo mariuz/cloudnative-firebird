@@ -432,6 +432,17 @@ describe('Operator – generation-based event filtering', () => {
     expect(mockReconcile).toHaveBeenCalledTimes(2);
   });
 
+  it('reconciles a targetPrimary annotation change although the generation is unchanged', async () => {
+    capturedEventCallback!('ADDED', withGeneration(1));
+    await Promise.resolve();
+    const switched = withGeneration(1);
+    switched.metadata.annotations = { 'firebird.cloudnative-firebird.io/targetPrimary': 'test-cluster-1' };
+    capturedEventCallback!('MODIFIED', switched);
+    await Promise.resolve();
+
+    expect(mockReconcile).toHaveBeenCalledTimes(2);
+  });
+
   it('always reconciles ADDED events (e.g. after a watch restart)', async () => {
     capturedEventCallback!('ADDED', withGeneration(1));
     await Promise.resolve();

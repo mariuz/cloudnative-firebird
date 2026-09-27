@@ -887,17 +887,21 @@ describe('buildConfigMap (replication)', () => {
     const cm = buildConfigMap(makeCluster({ replication: { enabled: true } }), { primaryPod: 'test-cluster-1' });
     expect(cm?.data?.primary).toBe('test-cluster-1.test-cluster-headless');
     expect(Object.keys(cm?.data ?? {}).sort()).toEqual([
+      'demote',
       'enable-publication.sql',
       'fetch-seed.pl',
       'fetch-segments.pl',
       'init-instance.sh',
       'primary',
+      'promote',
       'replica-control.pl',
       'replication.conf',
       'reseed',
       'seed-sources',
       'segment-puller.pl',
       'segment-server.pl',
+      'set-repl-seq.pl',
+      'switchover.pl',
     ]);
   });
 
