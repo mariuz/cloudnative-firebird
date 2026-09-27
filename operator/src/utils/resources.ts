@@ -23,6 +23,7 @@ import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
 import {
   PRIMARY_KEY,
   REPLICATION_SCRIPTS,
+  SEED_SOURCES_KEY,
   SEGMENT_PORT,
   buildReplicationConf,
   buildReplicationContainers,
@@ -1090,7 +1091,7 @@ export function podDisruptionBudgetNeedsUpdate(
  */
 export function buildConfigMap(
   cluster: FirebirdCluster,
-  options?: { primaryPod?: string },
+  options?: { primaryPod?: string; seedSourcePods?: string[] },
 ): V1ConfigMap | null {
   const { name, namespace = 'default' } = cluster.metadata;
   const labels = clusterLabels(name);
@@ -1113,6 +1114,8 @@ export function buildConfigMap(
     // Read by the replica seeding step and the segment puller on every poll, so it follows
     // the operator's view of the current primary without restarting pods
     data[PRIMARY_KEY] = instanceHost(cluster, options?.primaryPod ?? `${name}-0`);
+    // Ready replicas that can serve seed copies without locking the primary
+    data[SEED_SOURCES_KEY] = (options?.seedSourcePods ?? []).map((pod) => `${instanceHost(cluster, pod)}\n`).join('');
   }
 
   if (Object.keys(data).length === 0) return null;

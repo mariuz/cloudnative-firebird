@@ -12,6 +12,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **StatefulSet-based** deployment for stable pod identity and storage
 - **Persistent storage** via PersistentVolumeClaims, with online volume expansion when `spec.storage.size` grows
 - **Declarative hibernation** (`spec.hibernated`) that scales to zero while keeping data
+- **Journal-based asynchronous replication** (Firebird 4.0+, experimental) with replicas seeded without locking the primary
 - **Lag-aware read-only routing** to replicas via the `<name>-replica` Service (`spec.replication.readOnlyRouting`)
 - **Secret-based** SYSDBA password management
 - **Automatic service creation** (ClusterIP + headless for StatefulSet DNS)
@@ -166,7 +167,7 @@ use online validation (`fbsvcmgr action_validate`), which works while clients ar
 | `instances` | Configured number of instances |
 | `readyInstances` | Number of ready instances |
 | `conditions` | Standard Kubernetes status conditions (`Ready`, `Progressing`, `Degraded`) |
-| `replicationStatus` | Primary pod, active/sync replicas, and with read-only routing the `readRoutablePods` and `laggingReplicas` |
+| `replicationStatus` | Primary pod, number of active replicas, and with read-only routing the `readRoutablePods` and `laggingReplicas` |
 | `volumes` | Per-PVC requested size, capacity and expansion state (`Ready`, `Resizing`, `ResizeFailed`, `ShrinkRejected`) |
 
 ### Hibernation
@@ -180,6 +181,40 @@ to `false` to resume with the same volumes.
 ```bash
 kubectl patch firebirdcluster my-cluster --type merge -p '{"spec":{"hibernated":true}}'
 ```
+
+### Replication (experimental)
+
+> **Experimental.** On Firebird 5.0.4 (`firebirdsql/firebird:5`) a database that publishes to a
+> replication journal can hang when several clients connect, commit and disconnect concurrently
+> (one connection per transaction). Applications using connection pools were not affected in
+> testing. See [ISSUES.md](ISSUES.md), issue 1, before enabling replication in production.
+
+With `spec.replication.enabled: true` (asynchronous mode), instance 0 is the primary and the
+other instances are read-only replicas:
+
+- The primary's init container creates the database offline with publication enabled, runs
+  `bootstrap.initSql`, and keeps an **offline bootstrap seed** (a file copy taken before the
+  server starts). Full journal segments are archived on the primary's volume.
+- Two sidecars ship segments: `segment-server` serves the local archive and seed copies, and
+  `segment-puller` fetches new segments from the current primary into the replica's
+  `journal_source_directory`. They use only the Firebird image's perl, authenticate with the
+  SYSDBA password, and never open a live database file directly (all access goes through the
+  local server).
+- A new replica is seeded from a **ready replica** (locked through that replica's server), or
+  from the primary's offline bootstrap seed while every later segment is still archived. The
+  live primary is only locked when `replication.allowLiveSeedFromPrimary` is set, so seeding
+  adds no load to the primary.
+
+```yaml
+spec:
+  instances: 3
+  replication:
+    enabled: true
+    archiveTimeoutSeconds: 10     # ship partially filled segments after 10s
+    segmentRetentionHours: 24     # keep archived segments on the primary for 24h
+```
+
+Known issues and open work are tracked in [ISSUES.md](ISSUES.md) and [TODO.md](TODO.md).
 
 ### Read-Only Traffic Routing
 

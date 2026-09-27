@@ -30,6 +30,7 @@ import {
   replicaServiceSelector,
   readOnlyRoutingEnabled,
   withHibernation,
+  replicationConfigHash,
   diagnosticsCronJobNeedsUpdate,
 } from '../src/utils/resources';
 import { FirebirdCluster, FirebirdScheduledBackup, DEFAULT_FIREBIRD_IMAGE } from '../src/types';
@@ -256,17 +257,28 @@ describe('buildStatefulSet (replication)', () => {
     expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['bootstrap-restore', 'replication-init']);
   });
 
-  it('mounts replication.conf and the publication init script into the Firebird container', () => {
-    const mounts = podSpecOf(makeCluster({ replication: { enabled: true } }))?.containers?.[0].volumeMounts;
+  it('mounts replication.conf into the Firebird container; the init container creates the database', () => {
+    const podSpec = podSpecOf(makeCluster({ replication: { enabled: true } }));
+    const mounts = podSpec?.containers?.[0].volumeMounts;
     expect(mounts).toContainEqual({
       name: 'cluster-config',
       mountPath: '/opt/firebird/replication.conf',
       subPath: 'replication.conf',
     });
-    expect(mounts).toContainEqual({
-      name: 'cluster-config',
-      mountPath: '/docker-entrypoint-initdb.d/00-enable-publication.sql',
-      subPath: 'enable-publication.sql',
+    expect(mounts?.some((m) => m.mountPath.includes('enable-publication'))).toBe(false);
+    expect(podSpec?.initContainers?.[0].command).toEqual(['sh', '/etc/firebird-operator/init-instance.sh']);
+  });
+
+  it('passes seed sources and the live-seed opt-in to the replication containers', () => {
+    const env = podSpecOf(
+      makeCluster({ replication: { enabled: true, allowLiveSeedFromPrimary: true } }),
+    )?.initContainers?.[0].env;
+    expect(env).toContainEqual({ name: 'SEED_SOURCES_FILE', value: '/etc/firebird-operator/seed-sources' });
+    expect(env).toContainEqual({ name: 'ALLOW_LIVE_SEED', value: 'true' });
+    expect(env).toContainEqual({ name: 'REPLICATION_DIR', value: '/var/lib/firebird/data/replication' });
+    expect(podSpecOf(makeCluster({ replication: { enabled: true } }))?.initContainers?.[0].env).toContainEqual({
+      name: 'ALLOW_LIVE_SEED',
+      value: 'false',
     });
   });
 
@@ -1091,13 +1103,30 @@ describe('buildConfigMap (replication)', () => {
     expect(Object.keys(cm?.data ?? {}).sort()).toEqual([
       'enable-publication.sql',
       'fetch-seed.pl',
+      'init-instance.sh',
       'primary',
       'replica-control.pl',
       'replication.conf',
-      'seed-replica.sh',
+      'seed-sources',
       'segment-puller.pl',
       'segment-server.pl',
     ]);
+  });
+
+  it('lists ready replicas as seed sources, one host per line', () => {
+    const cm = buildConfigMap(makeCluster({ replication: { enabled: true } }), {
+      primaryPod: 'test-cluster-0',
+      seedSourcePods: ['test-cluster-1', 'test-cluster-2'],
+    });
+    expect(cm?.data?.['seed-sources']).toBe(
+      'test-cluster-1.test-cluster-headless\ntest-cluster-2.test-cluster-headless\n',
+    );
+  });
+
+  it('does not roll pods when seed sources change', () => {
+    const cluster = makeCluster({ replication: { enabled: true } });
+    expect(replicationConfigHash(cluster)).toBe(replicationConfigHash(cluster));
+    expect(Object.keys(buildConfigMap(cluster, { seedSourcePods: ['x'] })?.data ?? {})).toContain('seed-sources');
   });
 
   it('defaults the primary to ordinal 0', () => {

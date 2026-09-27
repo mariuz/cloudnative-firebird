@@ -36,6 +36,10 @@ spec:
   replication:
     enabled: true
     mode: async
+    # Partially filled journal segments are shipped to replicas after this many seconds
+    archiveTimeoutSeconds: 10
+    # Archived segments are kept on the primary for replicas to fetch
+    segmentRetentionHours: 24
     # Route read-only traffic (<name>-replica Service) only to ready replicas whose
     # reported replication lag is within maxLagSeconds. The rw Service then targets
     # the primary pod only.

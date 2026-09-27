@@ -21,18 +21,46 @@ describe('replication scripts shipped to instance pods', () => {
     },
   );
 
-  it('seed-replica.sh is valid POSIX sh', () => {
-    const file = join(dir, 'seed-replica.sh');
-    writeFileSync(file, REPLICATION_SCRIPTS['seed-replica.sh']);
+  it('init-instance.sh is valid POSIX sh', () => {
+    const file = join(dir, 'init-instance.sh');
+    writeFileSync(file, REPLICATION_SCRIPTS['init-instance.sh']);
     expect(() => execFileSync('sh', ['-n', file], { stdio: 'pipe' })).not.toThrow();
   });
 
-  it('seed-replica.sh moves the database into place only after it is a complete replica', () => {
-    const script = REPLICATION_SCRIPTS['seed-replica.sh'];
-    const lines = script.split('\n');
-    const moveLine = lines.findIndex((l) => l.startsWith('mv "$work" "$DATABASE_PATH"'));
-    expect(moveLine).toBeGreaterThan(lines.findIndex((l) => l.startsWith('gfix -replica read_only')));
-    expect(moveLine).toBeGreaterThan(lines.findIndex((l) => l.includes('replica-control.pl')));
+  it('init-instance.sh moves the database into place only after it is complete', () => {
+    const lines = REPLICATION_SCRIPTS['init-instance.sh'].split('\n');
+    const lastMove = lines.map((l, i) => (l.includes('mv "$work" "$DATABASE_PATH"') ? i : -1)).filter((i) => i >= 0);
+    expect(lastMove).toHaveLength(2); // primary bootstrap and replica seed
+    expect(lastMove[1]).toBeGreaterThan(lines.findIndex((l) => l.includes('gfix -replica read_only')));
+    expect(lastMove[1]).toBeGreaterThan(lines.findIndex((l) => l.includes('mv "$SOURCE_DIR/.control.tmp"')));
+  });
+
+  it('init-instance.sh prefers replica seed sources over the primary', () => {
+    expect(REPLICATION_SCRIPTS['init-instance.sh']).toContain('for source in $(cat "$SEED_SOURCES_FILE" 2>/dev/null || true) "$primary"');
+  });
+
+  it('replica-control.pl --adopt keeps the source position and rewrites db_sequence', () => {
+    if (!hasPerl) return;
+    const script = join(dir, 'replica-control.pl');
+    writeFileSync(script, REPLICATION_SCRIPTS['replica-control.pl']);
+    const source = join(dir, 'source.ctl');
+    const header = Buffer.alloc(40);
+    header.write('FBREPLCTL', 0, 'latin1');
+    header.writeUInt16LE(1, 10);
+    header.writeUInt32LE(1, 12);
+    header.writeBigUInt64LE(42n, 16);
+    header.writeBigUInt64LE(7n, 32);
+    const txn = Buffer.alloc(16);
+    txn.writeBigUInt64LE(900n, 0);
+    txn.writeBigUInt64LE(40n, 8);
+    writeFileSync(source, Buffer.concat([header, txn]));
+    const target = join(dir, 'adopted.ctl');
+    execFileSync('perl', [script, '--adopt', source, '9', target], { stdio: 'pipe' });
+    const out = readFileSync(target);
+    expect(out.length).toBe(56);
+    expect(out.readBigUInt64LE(16)).toBe(42n); // position kept
+    expect(out.readBigUInt64LE(32)).toBe(9n); // db_sequence rewritten
+    expect(out.readBigUInt64LE(40)).toBe(900n); // active transaction kept
   });
 
   it('replica-control.pl writes ControlFile::DataV1 with no transactions when there are no candidates', () => {

@@ -159,6 +159,64 @@ jobs:
           timeout 90 bash -c \
             'until [ "$(kubectl get statefulset test-cluster -o jsonpath={.spec.replicas})" = "2" ]; do sleep 3; done'
 
+      - name: Verify journal replication and seeding from a replica
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: repl
+            namespace: default
+          spec:
+            instances: 2
+            storage:
+              size: 1Gi
+            bootstrap:
+              initSql: "CREATE TABLE app (id INTEGER PRIMARY KEY, note VARCHAR(20)); COMMIT;"
+            replication:
+              enabled: true
+              archiveTimeoutSeconds: 3
+          EOF
+          ready() {
+            timeout 300 bash -c "until kubectl get pod $1 -n default >/dev/null 2>&1; do sleep 3; done"
+            kubectl wait pod/$1 -n default --for=condition=Ready --timeout=300s
+          }
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB"; }
+          count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          wait_count() {
+            for n in $(seq 1 36); do
+              [ "$(count "$1")" = "$2" ] && return 0
+              sleep 5
+            done
+            echo "$1 has $(count "$1") rows, expected $2"; return 1
+          }
+          ready repl-0
+          ready repl-1
+          kubectl logs repl-1 -c replication-init | tee /tmp/repl-1-init.log
+          grep -q 'offline seed' /tmp/repl-1-init.log
+
+          for i in $(seq 1 20); do sql repl-0 "insert into app values ($i, 'primary'); commit;"; done
+          wait_count repl-1 20
+          echo "replica applied 20 rows"
+
+          # replicas are read-only
+          if sql repl-1 "insert into app values (999, 'replica'); commit;" 2>&1 | grep -q 'read-only'; then
+            echo "replica rejects writes"
+          else
+            echo "replica accepted a write"; exit 1
+          fi
+
+          # the third instance is seeded from the ready replica, not from the primary
+          timeout 180 bash -c "until kubectl get configmap repl-config -o yaml | grep -A2 'seed-sources:' | grep -q repl-1.repl-headless; do sleep 5; done"
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"instances":3}}'
+          ready repl-2
+          kubectl logs repl-2 -c replication-init | tee /tmp/repl-2-init.log
+          grep -q 'from repl-1.repl-headless (replica seed)' /tmp/repl-2-init.log
+          for i in $(seq 21 30); do sql repl-0 "insert into app values ($i, 'primary'); commit;"; done
+          wait_count repl-2 30
+          echo "replica seeded from a replica applied all 30 rows"
+
       - name: Verify operator reconciled without API errors
         run: |
           logs=$(kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1)
@@ -179,7 +237,14 @@ jobs:
           echo "=== PDBs, Leases, PVCs ==="
           kubectl get pdb,lease,pvc -n default || true
           echo "=== FirebirdCluster status ==="
-          kubectl get firebirdcluster test-cluster -o yaml || true
+          kubectl get firebirdcluster -o yaml || true
+          echo "=== Replication init and sidecar logs ==="
+          for p in repl-0 repl-1 repl-2; do
+            for c in replication-init segment-server segment-puller; do
+              echo "--- $p/$c"; kubectl logs $p -c $c --tail=30 2>/dev/null || true
+            done
+            kubectl exec $p -c firebird -- tail -20 /opt/firebird/replication.log 2>/dev/null || true
+          done
           echo "=== Operator logs ==="
           kubectl logs -n cloudnative-firebird-system \
             -l app.kubernetes.io/name=cloudnative-firebird \

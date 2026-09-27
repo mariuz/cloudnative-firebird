@@ -28,7 +28,16 @@ sub request {
   return $sock;
 }
 
+my $pause_flag = $ENV{REPLICATION_DIR} ? "$ENV{REPLICATION_DIR}/.pause-pull" : '';
+my $pause_ack  = $ENV{REPLICATION_DIR} ? "$ENV{REPLICATION_DIR}/.pull-paused" : '';
+
 sub pull_once {
+  # the local segment server pauses pulling while it takes a seed copy of this replica
+  if ($pause_flag && -e $pause_flag) {
+    if (open(my $ack, '>', $pause_ack)) { close $ack; }
+    return;
+  }
+  unlink $pause_ack if $pause_ack;
   my $primary = slurp($primary_file);
   return if $primary eq '' || $primary =~ /^\Q$self\E(\.|$)/;   # we are the primary
   my $last = slurp($state);

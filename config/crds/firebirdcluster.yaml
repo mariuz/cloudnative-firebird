@@ -249,7 +249,10 @@ spec:
                         group:
                           type: string
                 replication:
-                  description: Replication configuration (requires Firebird 4.0+)
+                  description: >
+                    Journal-based asynchronous replication (Firebird 4.0+). Instance 0 is the
+                    bootstrap primary; the other instances are read-only replicas seeded from a
+                    ready replica or the primary's offline bootstrap seed. See ISSUES.md.
                   type: object
                   required:
                     - enabled
@@ -259,16 +262,34 @@ spec:
                       type: boolean
                     mode:
                       description: >
-                        Replication mode. 'sync' waits for replica acknowledgement before
-                        confirming writes (safer, slower). 'async' confirms writes immediately
-                        and lets replicas catch up (faster, less durable). Defaults to 'async'.
+                        Replication mode. Only 'async' (journal shipping) is supported; 'sync' is
+                        rejected until synchronous replication is implemented. Defaults to 'async'.
                       type: string
                       enum:
                         - sync
                         - async
                     journalDirectory:
-                      description: Directory path for replication journal files (defaults to "/var/lib/firebird/data/journals")
+                      description: >
+                        Base directory for replication files on each instance's volume; journal,
+                        archive and source directories are created below it. Must be below
+                        /var/lib/firebird/data (defaults to "/var/lib/firebird/data/replication").
                       type: string
+                      pattern: '^/var/lib/firebird/data/[A-Za-z0-9._/-]+$'
+                    archiveTimeoutSeconds:
+                      description: Seconds after which a partially filled journal segment is archived and shipped (defaults to 10)
+                      type: integer
+                      minimum: 1
+                    segmentRetentionHours:
+                      description: Hours archived segments are kept on the primary for replicas to fetch (defaults to 24)
+                      type: integer
+                      minimum: 1
+                    allowLiveSeedFromPrimary:
+                      description: >
+                        Allow seeding a replica with a locked copy of the live primary when no ready
+                        replica and no usable offline bootstrap seed exist. Off by default: seeding
+                        from replicas or the offline seed adds no load to the primary and avoids a
+                        suspected commit/lock window (ISSUES.md, issue 2).
+                      type: boolean
                     archiveSchedule:
                       description: Cron schedule for archiving completed journal files to object storage
                       type: string
@@ -483,10 +504,6 @@ spec:
                       type: string
                     activeReplicas:
                       type: integer
-                    syncReplicas:
-                      type: array
-                      items:
-                        type: string
                     readRoutablePods:
                       description: Pods currently selected by the read-only -replica Service
                       type: array

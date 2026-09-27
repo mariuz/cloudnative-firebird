@@ -1,7 +1,13 @@
 #!/usr/bin/perl
-# Writes the replica control file for a freshly seeded replica:
-#   replica-control.pl <primary-host> <S> <db-sequence> <control-file> [candidate-id ...]
+# Writes the replica control file for a freshly seeded replica.
 #
+#   replica-control.pl --adopt <source-control> <db-sequence> <control-file>
+#     Seed copied from another replica: keep that replica's position and active transactions
+#     (the copy was taken while it had applied everything it received) and set db_sequence to
+#     the copy's own header value.
+#
+#   replica-control.pl <primary-host> <S> <db-sequence> <control-file> [candidate-id ...]
+#     Seed copied from the primary (offline bootstrap seed, or a live locked copy):
 # The seed copy contains every change journaled in segments <= S, except transactions whose
 # commit was journaled before the nbackup lock but whose commit mark (TIP) was written after it
 # (Firebird journals the commit before setting the TIP state). Those, and transactions still
@@ -17,6 +23,24 @@
 use strict;
 use warnings;
 use IO::Socket::INET;
+
+if (@ARGV && $ARGV[0] eq '--adopt') {
+  my (undef, $from, $dbseq, $target) = @ARGV;
+  die "usage: replica-control.pl --adopt <source-control> <db-sequence> <control-file>\n" unless defined $target;
+  open(my $in, '<:raw', $from) or die "read $from: $!\n";
+  local $/;
+  my $data = <$in>;
+  close $in;
+  die "$from is not a replica control file\n" unless length($data) >= 40 && substr($data, 0, 9) eq 'FBREPLCTL';
+  substr($data, 32, 8) = pack('Q<', $dbseq);
+  open(my $out, '>:raw', "$target.tmp") or die "write $target.tmp: $!\n";
+  print $out $data;
+  close $out;
+  rename("$target.tmp", $target) or die "rename $target: $!\n";
+  my (undef, undef, $count, $seq) = unpack('a10 v V Q<', $data);
+  print "replica control: adopted position after segment $seq with $count active transaction(s)\n";
+  exit 0;
+}
 
 my ($host, $seq, $dbseq, $target, @candidates) = @ARGV;
 die "usage: replica-control.pl <host> <S> <db-sequence> <control-file> [ids...]\n" unless defined $target;

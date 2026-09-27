@@ -42,7 +42,8 @@ import {
   withHibernation,
   CLUSTER_LABEL,
 } from '../utils/resources';
-import { computeReadRouting, podRoutingLabelPatch } from '../utils/routing';
+import { computeReadRouting, isPodReady, podRoutingLabelPatch } from '../utils/routing';
+import { replicationEnabled } from '../utils/replication';
 import { planVolumeExpansion } from '../utils/storage';
 import { validateClusterSpec } from '../utils/validation';
 import {
@@ -127,7 +128,8 @@ export class FirebirdClusterController {
       });
 
       const primaryPod = await this.resolvePrimaryPod(cluster, log);
-      await this.reconcileConfigMap(cluster, primaryPod, log);
+      const seedSourcePods = await this.resolveSeedSources(cluster, primaryPod);
+      await this.reconcileConfigMap(cluster, primaryPod, seedSourcePods, log);
       // Label pods before (re)pointing service selectors at the routing labels
       const readRouting = await this.reconcileReadRouting(cluster, primaryPod, log);
       await this.reconcileHeadlessService(cluster, log);
@@ -331,6 +333,23 @@ export class FirebirdClusterController {
       log.debug('Leader lease not found, assuming ordinal 0 is primary');
     }
     return `${name}-0`;
+  }
+
+  /**
+   * Ready replicas that can serve seed copies to new replicas, so seeding does not lock or
+   * load the primary (see ISSUES.md, issue 2).
+   */
+  private async resolveSeedSources(cluster: FirebirdCluster, primaryPod: string): Promise<string[]> {
+    if (!replicationEnabled(cluster) || cluster.spec.hibernated) return [];
+    const { name, namespace = 'default' } = cluster.metadata;
+    const pods = await this.coreApi.listNamespacedPod({
+      namespace,
+      labelSelector: `${CLUSTER_LABEL}=${name}`,
+    });
+    return pods.items
+      .filter((pod) => pod.metadata?.name && pod.metadata.name !== primaryPod && isPodReady(pod))
+      .map((pod) => pod.metadata!.name!)
+      .sort();
   }
 
   /**
@@ -666,11 +685,12 @@ export class FirebirdClusterController {
   private async reconcileConfigMap(
     cluster: FirebirdCluster,
     primaryPod: string,
+    seedSourcePods: string[],
     log: Logger,
   ): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const configName = `${name}-config`;
-    const desired = buildConfigMap(cluster, { primaryPod });
+    const desired = buildConfigMap(cluster, { primaryPod, seedSourcePods });
 
     if (desired) {
       try {

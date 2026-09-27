@@ -170,6 +170,13 @@ export interface ReplicationConfiguration {
   archiveTimeoutSeconds?: number;
   /** Hours archived segments are kept on the primary for replicas to fetch (defaults to 24) */
   segmentRetentionHours?: number;
+  /**
+   * Allow seeding a new replica with a locked copy of the live primary when no ready replica
+   * and no usable offline bootstrap seed exist. Off by default: seeding from replicas or the
+   * offline seed adds no load to the primary and avoids a suspected commit/lock window
+   * (ISSUES.md, issue 2).
+   */
+  allowLiveSeedFromPrimary?: boolean;
   /** Cloud S3 storage configuration for continuous journal archiving (PITR) */
   journalArchiveS3?: S3BackupConfiguration;
   /** Cron schedule for archiving completed journal files to object storage */

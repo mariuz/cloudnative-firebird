@@ -7,13 +7,15 @@ import { FirebirdCluster } from '../types';
  * Journal-based asynchronous replication for Firebird 4+.
  *
  * Every instance gets the same replication.conf; its role follows from database state:
- * - the bootstrap primary creates the database with publication enabled, journals changes
- *   and archives full segments;
- * - replicas are seeded with a physical copy of the primary (seed-replica.sh), run in
- *   read-only replica mode and apply segments from journal_source_directory.
+ * - the bootstrap primary creates its database offline in the init container with
+ *   publication enabled, keeps an offline bootstrap seed, journals changes and archives
+ *   full segments;
+ * - replicas are seeded with a physical copy (init-instance.sh), preferably of a ready
+ *   replica, run in read-only replica mode and apply segments from journal_source_directory.
  * Segments are shipped by two sidecars running the Firebird image's perl: segment-server
  * serves the local archive (and seed copies) and segment-puller fetches new segments from
- * the current primary, whose address the operator publishes in the cluster ConfigMap.
+ * the current primary. The operator publishes the primary and the ready replicas (seed
+ * sources) in the cluster ConfigMap. Seeds avoid locking the primary: see ISSUES.md, issue 2.
  */
 
 /** Port of the segment server sidecar */
@@ -25,6 +27,9 @@ export const OPERATOR_CONFIG_DIR = '/etc/firebird-operator';
 /** ConfigMap key holding the address of the current primary instance */
 export const PRIMARY_KEY = 'primary';
 
+/** ConfigMap key listing ready replicas that can serve seed copies, one host per line */
+export const SEED_SOURCES_KEY = 'seed-sources';
+
 const SCRIPT_DIR = join(__dirname, '..', 'replication');
 
 /** Replication helper scripts shipped in the cluster ConfigMap, keyed by file name */
@@ -33,7 +38,7 @@ export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.from
     'segment-server.pl',
     'segment-puller.pl',
     'fetch-seed.pl',
-    'seed-replica.sh',
+    'init-instance.sh',
     'replica-control.pl',
     'enable-publication.sql',
   ].map(
@@ -101,12 +106,15 @@ function replicationEnv(
     ...credentials,
     { name: 'POD_NAME', valueFrom: { fieldRef: { fieldPath: 'metadata.name' } } },
     { name: 'DATA_DIR', value: dataDir },
+    { name: 'REPLICATION_DIR', value: dirs.base },
     { name: 'DATABASE_PATH', value: databasePath },
     { name: 'JOURNAL_DIR', value: dirs.journal },
     { name: 'ARCHIVE_DIR', value: dirs.archive },
     { name: 'SOURCE_DIR', value: dirs.source },
     { name: 'STATE_FILE', value: dirs.state },
     { name: 'PRIMARY_FILE', value: `${OPERATOR_CONFIG_DIR}/${PRIMARY_KEY}` },
+    { name: 'SEED_SOURCES_FILE', value: `${OPERATOR_CONFIG_DIR}/${SEED_SOURCES_KEY}` },
+    { name: 'ALLOW_LIVE_SEED', value: String(Boolean(cluster.spec.replication?.allowLiveSeedFromPrimary)) },
     { name: 'SCRIPT_DIR', value: OPERATOR_CONFIG_DIR },
     { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
     {
@@ -139,7 +147,7 @@ export function buildReplicationContainers(
     initContainer: {
       name: 'replication-init',
       image: options.image,
-      command: ['sh', `${OPERATOR_CONFIG_DIR}/seed-replica.sh`],
+      command: ['sh', `${OPERATOR_CONFIG_DIR}/init-instance.sh`],
       env,
       volumeMounts: [...mounts, confMount],
     },
@@ -160,13 +168,7 @@ export function buildReplicationContainers(
         volumeMounts: mounts,
       },
     ],
-    mainMounts: [
-      confMount,
-      {
-        name: 'cluster-config',
-        mountPath: '/docker-entrypoint-initdb.d/00-enable-publication.sql',
-        subPath: 'enable-publication.sql',
-      },
-    ],
+    // the database is created by the init container, so the entrypoint never runs initdb scripts
+    mainMounts: [confMount],
   };
 }

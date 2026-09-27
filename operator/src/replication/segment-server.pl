@@ -1,29 +1,47 @@
 #!/usr/bin/perl
-# Serves archived replication journal segments to replicas over a minimal line protocol:
-#   "<token> LIST\n"        -> one segment name per line, terminated by ".\n"
-#   "<token> GET <name>\n"  -> "OK <size>\n" followed by the file bytes, or "ERR <reason>\n"
-#   "<token> SEED\n"        -> a physical copy of the database, framed like GET. It is taken
-#                              with nbackup -L / copy / nbackup -N: locking switches the journal
-#                              to a new segment, so the copy's replication sequence marks exactly
-#                              the segments it contains. Replicas fix it up with "nbackup -SEQ -F"
-#                              and apply only later segments. (nbackup -B 0 records the new,
-#                              still-active segment instead, and replicas would skip its writes.)
-#   "<token> TXNS <S> <id,..>" -> "<id> <segment>" for every listed transaction that has blocks in
-#                              archived segments <= S (its first such segment), terminated by ".\n".
-#                              Replicas use it to replay transactions whose commit is journaled in
-#                              the seed copy's segments but whose commit mark missed the copy.
-# The token is the SYSDBA password (ISC_PASSWORD). Archived segments older than
-# SEGMENT_RETENTION_SECONDS are pruned.
+# Replication sidecar running on every instance. It serves the local journal archive to
+# replicas and seed copies to new replicas, over a minimal line protocol:
+#
+#   "<token> LIST\n"           -> archived segment names, one per line, then ".\n"
+#   "<token> GET <name>\n"     -> "OK <size>\n" + file bytes, or "ERR <reason>\n"
+#   "<token> SEED\n"           -> "OK <dbsize> <ctlsize> <kind>\n" + database bytes + control bytes
+#   "<token> TXNS <S> <ids>\n" -> "<id> <segment>" for each listed transaction with blocks in
+#                                 archived segments <= S (its first such segment), then ".\n"
+#
+# The token is the SYSDBA password (ISC_PASSWORD).
+#
+# The live database is only ever accessed through the local server (isql localhost:): opening
+# the file with an independent embedded engine and lock table (gstat or nbackup from this
+# sidecar container) is not a supported access pattern. Only files no server has open (seed
+# copies) are read with gstat.
+#
+# SEED depends on the role of this instance (seeds avoid locking the primary: ISSUES.md, issue 2):
+#   replica: pause the segment puller, wait until every received segment is applied, then take
+#            the copy under the backup lock together with the replica control file. Nothing
+#            commits on a replica, so the copy and the control file describe the same point.
+#            kind "replica"; the new replica adopts the control file.
+#   primary: serve the offline bootstrap seed written when the database was created, while every
+#            journal segment after it is still archived. kind "offline".
+#            Otherwise, only when ALLOW_LIVE_SEED=true, lock the live primary (kind "live"): the
+#            new replica then replays the copy's uncommitted transactions found via TXNS.
 use strict;
 use warnings;
 use IO::Socket::INET;
 
 my $dir       = $ENV{ARCHIVE_DIR} or die "ARCHIVE_DIR is required\n";
 my $database  = $ENV{DATABASE_PATH} or die "DATABASE_PATH is required\n";
-my $seed_file = "$dir/../seed.nbk";
+my $source    = $ENV{SOURCE_DIR} or die "SOURCE_DIR is required\n";
+my $base      = $ENV{REPLICATION_DIR} or die "REPLICATION_DIR is required\n";
+my $primary_file = $ENV{PRIMARY_FILE} or die "PRIMARY_FILE is required\n";
+my $self      = $ENV{POD_NAME} // '';
 my $token     = $ENV{ISC_PASSWORD} // '';
 my $port      = $ENV{SEGMENT_PORT} // 3051;
 my $retention = $ENV{SEGMENT_RETENTION_SECONDS} // 86400;
+my $allow_live = ($ENV{ALLOW_LIVE_SEED} // '') eq 'true';
+my $seed_file = "$base/seed.copy";
+my $bootstrap_seed = "$base/bootstrap-seed.fdb";
+my $pause_flag = "$base/.pause-pull";
+my $pause_ack  = "$base/.pull-paused";
 my $name_re   = qr/^[A-Za-z0-9._-]+\.journal-\d+$/;
 $| = 1;
 
@@ -31,22 +49,20 @@ my $server = IO::Socket::INET->new(LocalPort => $port, Listen => 16, ReuseAddr =
   or die "listen on $port: $!\n";
 print "segment server listening on $port, serving $dir\n";
 
-sub segments {
-  opendir(my $dh, $dir) or return ();
-  my @names = sort grep { $_ =~ $name_re && -f "$dir/$_" } readdir($dh);
-  closedir($dh);
-  return @names;
+sub slurp { my ($f) = @_; open(my $fh, '<', $f) or return ''; local $/; my $v = <$fh>; close $fh; $v //= ''; $v =~ s/\s+$//; return $v; }
+
+sub is_primary {
+  my $primary = slurp($primary_file);
+  return $primary eq '' || $primary =~ /^\Q$self\E(\.|$)/;
 }
 
-sub send_file {
-  my ($client, $path) = @_;
-  open(my $fh, '<:raw', $path) or return print $client "ERR cannot read\n";
-  my $size = -s $fh;
-  print $client "OK $size\n";
-  binmode $client;
-  my $buf;
-  while (read($fh, $buf, 65536)) { print $client $buf; }
-  close $fh;
+sub segments {
+  my ($path) = @_;
+  $path //= $dir;
+  opendir(my $dh, $path) or return ();
+  my @names = sort grep { $_ =~ $name_re && -f "$path/$_" } readdir($dh);
+  closedir($dh);
+  return @names;
 }
 
 # Segment file layout (src/jrd/replication/ChangeLog.h, Protocol.h): a 48-byte SegmentHeader
@@ -60,6 +76,10 @@ sub segment_sequence {
   return undef unless $n == 48 && substr($hdr, 0, 11) eq 'FBCHANGELOG';
   my (undef, undef, undef, undef, $seq) = unpack('a12 v v a16 Q<', $hdr);
   return $seq;
+}
+
+sub archived_sequences {
+  return sort { $a <=> $b } grep { defined } map { segment_sequence("$dir/$_") } segments();
 }
 
 sub first_segments {
@@ -84,13 +104,138 @@ sub first_segments {
   return \%first;
 }
 
-sub archived_upto {
-  my ($seq) = @_;
-  for my $name (segments()) {
-    my $s = segment_sequence("$dir/$name");
-    return 1 if defined $s && $s >= $seq;
+# One value from the live database, queried through the local server
+sub live_value {
+  my ($expression) = @_;
+  my $sql = "SET LIST ON; SELECT $expression AS V FROM MON\$DATABASE;";
+  $sql =~ s/([\\"`\$])/\\$1/g;   # quoted for the double-quoted shell string below
+  open(my $isql, '-|', 'sh', '-c', "echo \"$sql\" | isql -q localhost:$database")
+    or return undef;
+  my $value;
+  while (my $line = <$isql>) { $value = $1 if $line =~ /^V\s+(\S+)/; }
+  close $isql;
+  return $value;
+}
+
+sub live_sql {
+  my ($statement) = @_;
+  return system('sh', '-c', "echo '$statement' | isql -q -b localhost:$database") == 0;
+}
+
+# "Replication sequence" / "Database GUID" from the header page of a database file that no
+# server has open (seed copies only)
+sub header_field {
+  my ($path, $field) = @_;
+  open(my $gstat, '-|', 'gstat', '-h', $path) or return undef;
+  my $value;
+  while (my $line = <$gstat>) {
+    $value = $1 if $line =~ /^\s*\Q$field\E:?\s*(\S+)/;
   }
-  return 0;
+  close $gstat;
+  return $value;
+}
+
+# Replica control file (ControlFile::DataV1): {char[10], u16 version, u32 txn_count,
+# u64 sequence, u32 offset, pad, u64 db_sequence} + txn_count x {u64 tra_id, u64 sequence}
+sub read_control {
+  my ($path) = @_;
+  open(my $fh, '<:raw', $path) or return undef;
+  local $/;
+  my $data = <$fh>;
+  close $fh;
+  return undef unless defined $data && length($data) >= 40 && substr($data, 0, 9) eq 'FBREPLCTL';
+  my (undef, undef, $count, $seq, $offset) = unpack('a10 v V Q< V', $data);
+  return { data => $data, sequence => $seq, offset => $offset, count => $count };
+}
+
+sub send_seed {
+  my ($client, $db, $ctl, $kind) = @_;
+  open(my $fh, '<:raw', $db) or return print $client "ERR cannot read seed copy\n";
+  my $ctl_size = defined $ctl ? length($ctl) : 0;
+  print $client "OK " . (-s $fh) . " $ctl_size $kind\n";
+  binmode $client;
+  my $buf;
+  while (read($fh, $buf, 65536)) { print $client $buf; }
+  close $fh;
+  print $client $ctl if $ctl_size;
+}
+
+sub wait_for {
+  my ($seconds, $check) = @_;
+  my $deadline = time + $seconds;
+  until ($check->()) {
+    return 0 if time > $deadline;
+    sleep 1;
+  }
+  return 1;
+}
+
+sub locked_copy {
+  # the backup lock (what nbackup -L/-N do) is taken through the local server; writes go to the
+  # delta file while the main file is copied, and the database is always unlocked again
+  my ($on_locked) = @_;
+  unlink $seed_file;
+  my $locked = live_sql('ALTER DATABASE BEGIN BACKUP;');
+  my $copied = $locked && system('cp', $database, $seed_file) == 0;
+  $on_locked->() if $copied && $on_locked;
+  my $unlocked = !$locked || live_sql('ALTER DATABASE END BACKUP;');
+  print "locked copy: locked=$locked copied=$copied unlocked=$unlocked\n";
+  return $copied && $unlocked;
+}
+
+sub seed_from_replica {
+  my ($client) = @_;
+  my $guid = live_value('MON$GUID') // '';
+  my $control = "$source/$guid";
+  unlink $pause_ack;
+  if (open(my $flag, '>', $pause_flag)) { close $flag; }
+  my $ok = eval {
+    wait_for(60, sub { -e $pause_ack }) or die "segment puller did not pause\n";
+    # everything received has been applied: no segment beyond the control file position
+    wait_for(300, sub {
+      my $ctl = read_control($control) or return 0;
+      return 0 if $ctl->{offset};
+      return !grep { my $s = segment_sequence("$source/$_"); defined $s && $s > $ctl->{sequence} } segments($source);
+    }) or die "replica did not finish applying received segments\n";
+    my $ctl_data;
+    locked_copy(sub { $ctl_data = read_control($control)->{data} }) or die "locked copy failed\n";
+    send_seed($client, $seed_file, $ctl_data, 'replica');
+    print "served replica seed copy\n";
+    1;
+  };
+  unless ($ok) {
+    print $client "ERR $@";
+    print "replica seed refused: $@";
+  }
+  unlink $pause_flag, $seed_file;
+}
+
+sub seed_from_primary {
+  my ($client) = @_;
+  if (-f $bootstrap_seed) {
+    my $seed_seq = header_field($bootstrap_seed, 'Replication sequence') // 0;
+    my $current = live_value(q{RDB$GET_CONTEXT('SYSTEM', 'REPLICATION_SEQUENCE')}) // 0;
+    my @archived = archived_sequences();
+    # usable while every segment after the seed is still archived
+    if ($current <= $seed_seq || (@archived && $archived[0] <= $seed_seq + 1)) {
+      send_seed($client, $bootstrap_seed, undef, 'offline');
+      print "served offline bootstrap seed (sequence $seed_seq)\n";
+      return;
+    }
+    print "bootstrap seed (sequence $seed_seq) is older than the archived segments\n";
+  }
+  if (!$allow_live) {
+    print $client "ERR no safe seed source on the primary; add a replica seed source or set allowLiveSeedFromPrimary\n";
+    print "seed refused: no usable bootstrap seed and live seeding is not allowed\n";
+    return;
+  }
+  if (locked_copy()) {
+    send_seed($client, $seed_file, undef, 'live');
+    print "served live seed copy of the primary\n";
+  } else {
+    print $client "ERR seed copy failed\n";
+  }
+  unlink $seed_file;
 }
 
 sub prune {
@@ -106,7 +251,7 @@ while (1) {
   if (time - $last_prune > 60) { prune(); $last_prune = time; }
   $server->timeout(30);
   my $client = $server->accept or next;
-  $client->timeout(30);
+  $client->timeout(600);
   my $line = <$client>;
   if (!defined $line) { close $client; next; }
   $line =~ s/\r?\n$//;
@@ -117,13 +262,16 @@ while (1) {
     print $client "$_\n" for segments();
     print $client ".\n";
   } elsif ($cmd eq 'GET' && defined $arg && $arg =~ $name_re && -f "$dir/$arg") {
-    send_file($client, "$dir/$arg");
+    open(my $fh, '<:raw', "$dir/$arg") or do { print $client "ERR cannot read\n"; close $client; next };
+    print $client "OK " . (-s $fh) . "\n";
+    binmode $client;
+    my $buf;
+    while (read($fh, $buf, 65536)) { print $client $buf; }
+    close $fh;
   } elsif ($cmd eq 'TXNS' && defined $arg && $arg =~ /^(\d+) ([\d,]*)$/) {
     my ($upto, %wanted) = ($1, map { $_ => 1 } grep { length } split /,/, $2);
     # the segment active at lock time is archived shortly after the lock switched it out
-    my $deadline = time + 120;
-    sleep 1 until archived_upto($upto) || time > $deadline;
-    if (!archived_upto($upto)) {
+    if (!wait_for(120, sub { my @s = archived_sequences(); @s && $s[-1] >= $upto })) {
       print $client "ERR segment $upto not archived yet\n";
     } else {
       my $first = first_segments($upto, \%wanted);
@@ -131,20 +279,7 @@ while (1) {
       print $client ".\n";
     }
   } elsif ($cmd eq 'SEED') {
-    # nbackup locks through the local server (ISC_USER/ISC_PASSWORD); writes go to the
-    # delta file while the main file is copied, and the database is always unlocked again
-    unlink $seed_file;
-    my $locked = system('nbackup', '-L', $database) == 0;
-    my $copied = $locked && system('cp', $database, $seed_file) == 0;
-    my $unlocked = !$locked || system('nbackup', '-N', $database) == 0;
-    if ($copied && $unlocked) {
-      send_file($client, $seed_file);
-      print "served seed copy of $database\n";
-    } else {
-      print $client "ERR seed copy failed\n";
-      print "seed copy failed (locked=$locked copied=$copied unlocked=$unlocked)\n";
-    }
-    unlink $seed_file;
+    is_primary() ? seed_from_primary($client) : seed_from_replica($client);
   } else {
     print $client "ERR bad request\n";
   }

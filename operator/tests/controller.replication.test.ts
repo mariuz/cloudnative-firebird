@@ -79,6 +79,8 @@ function makeMockKubeConfig({
     createNamespacedConfigMap: vi.fn().mockResolvedValue({}),
     patchNamespacedConfigMap: vi.fn().mockResolvedValue({}),
     deleteNamespacedConfigMap: vi.fn().mockResolvedValue({}),
+    // replication publishes ready replicas as seed sources
+    listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }),
   };
 
   const mockAppsApi = {
@@ -225,7 +227,7 @@ describe('FirebirdClusterController – replication integration', () => {
       expect(configMap.data.primary).toBe('test-cluster-0.test-cluster-headless');
       expect(configMap.data['replication.conf']).toContain('journal_source_directory');
       expect(Object.keys(configMap.data)).toEqual(
-        expect.arrayContaining(['segment-server.pl', 'segment-puller.pl', 'seed-replica.sh']),
+        expect.arrayContaining(['segment-server.pl', 'segment-puller.pl', 'init-instance.sh']),
       );
     });
 

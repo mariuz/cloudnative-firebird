@@ -4,11 +4,10 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.8.0):** runtime testing against the official `firebirdsql/firebird` image showed
-> that journal replication and the backup Jobs are not functional yet: replication settings were only
-> exported as environment variables the image ignores, and backup Jobs run `gbak`/`nbackup` against
-> `localhost` inside the Job pod. Those items are tracked as open work in section 7; the feature
-> checkboxes above describe the operator-side resources only.
+> **Status note (v0.9.0):** journal replication works against the official `firebirdsql/firebird`
+> image (section 7). The backup Jobs are not functional yet: they run `gbak`/`nbackup` against
+> `localhost` inside the Job pod and lack S3 tooling. Firebird-level problems found along the way are
+> in [ISSUES.md](ISSUES.md), open work in [TODO.md](TODO.md).
 
 ---
 
@@ -139,8 +138,11 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - PVC mounted at the image data directory, SYSDBA password via `FIREBIRD_ROOT_PASSWORD`, database created from `spec.databaseName`, `firebird.conf` via `FIREBIRD_CONF_*`.
   - Sweep and online-validation Jobs reach the primary over the network instead of mounting its PVC.
   - CI proves data survives a pod restart on a real kind cluster.
-- [ ] **Functional Journal Replication**
-  - Generate `replication.conf`, seed replicas from the primary and ship journal segments; prerequisite for switchover.
+- [x] **Functional Journal Replication** *(v0.9.0)*
+  - Shared `replication.conf`, perl segment-shipping sidecars, offline bootstrap seed on the primary.
+  - Replicas seeded from ready replicas or the primary's offline seed; the live primary is not locked by default.
+  - Experimental: a publishing Firebird 5.0.4 server hangs under concurrent per-transaction connections (ISSUES.md issue 1).
+  - Follow-ups (lag reporting, seed refresh, retention by replica progress, sync mode) in TODO.md.
 - [ ] **Working Backups & Restores**
   - Network/service-manager based `gbak`/`nbackup` Jobs and an image with S3 tooling for uploads.
 - [ ] **Planned Switchover**
