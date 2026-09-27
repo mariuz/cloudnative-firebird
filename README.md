@@ -16,6 +16,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
 - **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
 - **Declarative users** (`FirebirdUser`, after CloudNativePG's `DatabaseRole`) with Secret-backed passwords, role grants and a reclaim policy; users persist across pod restarts
+- **Planned switchover** with the `targetPrimary` annotation: no data loss, the other replicas continue without re-seeding
 - **Replica re-seeding** with a pod annotation (CloudNativePG `unrecoverable`)
 - **Instance fencing** via the `fencedInstances` annotation (CloudNativePG format): the database is shut down, the pod keeps running
 - **Lag-aware read-only routing** to replicas via the `<name>-replica` Service (`spec.replication.readOnlyRouting`)
@@ -217,6 +218,48 @@ spec:
     archiveTimeoutSeconds: 10     # ship partially filled segments after 10s
     segmentRetentionHours: 24     # keep archived segments on the primary for 24h
 ```
+
+### Planned Switchover
+
+Promote a replica with the `targetPrimary` annotation (CloudNativePG's `kubectl cnpg promote`):
+
+```bash
+kubectl annotate firebirdcluster my-cluster firebird.cloudnative-firebird.io/targetPrimary=my-cluster-1 --overwrite
+kubectl get firebirdcluster my-cluster -o jsonpath='{.status.switchover}'
+```
+
+1. **Stopping**: a Job puts the primary's database into full shutdown (no more writes; clients are
+   disconnected), reads its last replication sequence *S*, and waits until segment *S* is archived
+   and every ready replica, the target included, has applied it (the segment servers report each
+   replica's control file position with a `POSITION` query).
+2. **Promoting**: the operator moves the leader Lease and the `primary` ConfigMap entry to the
+   target and restarts the target and the old primary. Their init containers work offline: the
+   target's header gets replication sequence *S* (so its journal continues at *S + 1* and the other
+   replicas keep applying without re-seeding), replica mode none and publication, plus a fresh
+   offline bootstrap seed; the old primary becomes a read-only replica positioned after *S*.
+   Replicas that were not ready are re-seeded.
+3. **Completed** once both restarted pods are ready.
+
+Writes are unavailable from the start of step 1 until the target is ready again (the Job plus two
+pod restarts). If the Job fails (for example a replica does not catch up within five minutes) the
+old primary is brought back online and stays primary; change the annotation to retry. There is
+no automatic failover yet; see TODO.md.
+
+### Re-seeding a Replica
+
+To re-seed a broken or lagging replica (after CloudNativePG's `unrecoverable` annotation),
+annotate its pod:
+
+```bash
+kubectl annotate pod my-cluster-2 firebird.cloudnative-firebird.io/reseed=true
+```
+
+Within a resync interval the operator lists the request in the cluster ConfigMap and restarts the
+pod; its replication init container discards the database and the replication state (not the
+security database, so users stay) and seeds it again from another ready replica or the primary's
+offline seed. The primary is never re-seeded. `status.reseedingInstances` lists requests until the
+new pod is ready. Unlike CloudNativePG, the PVC is kept: with a StatefulSet, deleting the claim of a
+pod that is immediately recreated can deadlock, and wiping the data achieves the same result.
 
 Known issues and open work are tracked in [ISSUES.md](ISSUES.md) and [TODO.md](TODO.md).
 

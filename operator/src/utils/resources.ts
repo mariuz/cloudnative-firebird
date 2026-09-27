@@ -23,6 +23,8 @@ import {
   PRIMARY_KEY,
   REPLICATION_SCRIPTS,
   RESEED_KEY,
+  PROMOTE_KEY,
+  DEMOTE_KEY,
   SEED_SOURCES_KEY,
   SEGMENT_PORT,
   buildReplicationConf,
@@ -42,6 +44,20 @@ export function clusterLabels(name: string): Record<string, string> {
     'app.kubernetes.io/managed-by': 'cloudnative-firebird-operator',
     [CLUSTER_LABEL]: name,
   };
+}
+
+/**
+ * Label selector for the cluster's instance pods. Job pods (backups, fencing, switchover, users)
+ * carry the cluster label too, with another component.
+ */
+export function instancePodSelector(name: string): string {
+  return `${CLUSTER_LABEL}=${name},app.kubernetes.io/component=database`;
+}
+
+/** Keeps the StatefulSet instance pods (`<cluster>-<ordinal>`) of a pod list */
+export function instancePods<T extends { metadata?: { name?: string } }>(items: T[], name: string): T[] {
+  const pattern = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d+$`);
+  return items.filter((p) => pattern.test(p.metadata?.name ?? ''));
 }
 
 /**
@@ -827,7 +843,13 @@ export function podDisruptionBudgetNeedsUpdate(
  */
 export function buildConfigMap(
   cluster: FirebirdCluster,
-  options?: { primaryPod?: string; seedSourcePods?: string[]; reseed?: Record<string, string> },
+  options?: {
+    primaryPod?: string;
+    seedSourcePods?: string[];
+    reseed?: Record<string, string>;
+    promote?: Record<string, string>;
+    demote?: Record<string, string>;
+  },
 ): V1ConfigMap | null {
   const { name, namespace = 'default' } = cluster.metadata;
   const labels = clusterLabels(name);
@@ -853,10 +875,15 @@ export function buildConfigMap(
     // Ready replicas that can serve seed copies without locking the primary
     data[SEED_SOURCES_KEY] = (options?.seedSourcePods ?? []).map((pod) => `${instanceHost(cluster, pod)}\n`).join('');
     // Replicas to re-seed; always present so that a merge patch clears finished requests
-    data[RESEED_KEY] = Object.keys(options?.reseed ?? {})
-      .sort()
-      .map((pod) => `${pod} ${options!.reseed![pod]}\n`)
-      .join('');
+    const directives = (entries: Record<string, string> = {}) =>
+      Object.keys(entries)
+        .sort()
+        .map((pod) => `${pod} ${entries[pod]}\n`)
+        .join('');
+    data[RESEED_KEY] = directives(options?.reseed);
+    // planned switchover (always present, like reseed)
+    data[PROMOTE_KEY] = directives(options?.promote);
+    data[DEMOTE_KEY] = directives(options?.demote);
   }
 
   if (Object.keys(data).length === 0) return null;

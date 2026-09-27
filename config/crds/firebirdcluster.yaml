@@ -535,6 +535,36 @@ spec:
                   type: array
                   items:
                     type: string
+                switchover:
+                  description: Planned switchover in progress, or the last one (targetPrimary annotation)
+                  type: object
+                  properties:
+                    target:
+                      type: string
+                    from:
+                      type: string
+                    phase:
+                      type: string
+                      enum:
+                        - Stopping
+                        - Promoting
+                        - Completed
+                        - Failed
+                    message:
+                      type: string
+                    startTime:
+                      type: string
+                    completionTime:
+                      type: string
+                    targetToken:
+                      type: string
+                    fromToken:
+                      type: string
+                    reseed:
+                      description: Replicas that were not ready when the primary moved (pod UIDs), re-seeded
+                      type: object
+                      additionalProperties:
+                        type: string
                 replicationStatus:
                   description: Detailed replication status details
                   type: object

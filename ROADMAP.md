@@ -4,8 +4,8 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.12.0):** journal replication (experimental) with replica re-seeding,
-> backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
+> **Status note (v0.13.0):** journal replication (experimental) with replica re-seeding and
+> planned switchover, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
 > (1.28 – 1.30.1) are reviewed in [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md).
@@ -154,8 +154,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `FirebirdBackup`, `FirebirdScheduledBackup` and `FirebirdRestore` are watched, and their status follows the Jobs; restores create a new database file.
   - Bootstrap from an S3 backup or by cloning a running cluster (`gbak` stream), primary-only with replication.
   - Journal archive CronJob fetches segments from the primary's segment server instead of mounting its volume.
-- [ ] **Planned Switchover**
-  - Declarative promotion of a chosen replica (`gfix -replica none`) with Lease handover and demotion of the old primary.
+- [x] **Planned Switchover** *(v0.13.0)*
+  - `targetPrimary` annotation (CloudNativePG `kubectl cnpg promote`): stop writes on the primary, wait until every ready replica applied its last segment, move the Lease and promote the target offline with the old primary's replication sequence, demote the old primary to a replica.
+  - No data loss; the other replicas continue without re-seeding; replicas that were not ready are re-seeded; a failed attempt leaves the old primary in place.
 - [x] **Instance Fencing** *(v0.11.0)*
   - `firebird.cloudnative-firebird.io/fencedInstances` annotation in CloudNativePG's format (a JSON list of instances, `["*"]` for all).
   - The fenced database is put into full shutdown through the service manager; the pod keeps running, is not Ready and leaves the Services. No failover.
@@ -190,7 +191,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Node Maintenance** | PDB / Drain Handling | PDB Reconciled | **v0.2.0 (Done)** |
 | **Volume Expansion** | PVC Resize | In-place PVC Expansion | **v0.6.0 (Done)** |
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
-| **Switchover** | `kubectl cnpg promote` | Planned Switchover | Planned |
+| **Switchover** | `kubectl cnpg promote` | `targetPrimary` annotation | **v0.13.0 (Done)** |
 | **Declarative Roles** | `DatabaseRole` / `managed.roles` | `FirebirdUser` | **v0.12.0 (Done)** |
 | **Fencing** | Instance Fencing | `fencedInstances` annotation, database full shutdown | **v0.11.0 (Done)** |
 | **Auto-Sweeping / Maintenance** | VACUUM Scheduling | `gfix -sweep` CronJob | **v0.3.0 (Done)** |

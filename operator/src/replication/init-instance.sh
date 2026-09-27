@@ -15,6 +15,67 @@ mkdir -p "$JOURNAL_DIR" "$ARCHIVE_DIR" "$SOURCE_DIR"
 chown firebird:firebird "$JOURNAL_DIR" "$ARCHIVE_DIR" "$SOURCE_DIR"
 primary=$(cat "$PRIMARY_FILE" 2>/dev/null || true)
 
+# gstat omits "Replication sequence" while it is 0 (e.g. a database created offline)
+seq_of() { s=$(gstat -h "$1" | sed -n 's/^[[:space:]]*Replication sequence:[[:space:]]*\([0-9]*\).*/\1/p'); echo "${s:-0}"; }
+field() { echo "$header" | sed -n "s/^[[:space:]]*$1:*[[:space:]]*\\([0-9{][0-9A-F{}-]*\\).*/\\1/p"; }
+# token of an operator directive ("<pod> <token>" lines) for this pod, if not applied yet
+pending() { t=$(awk -v p="$POD_NAME" '$1 == p { print $2 }' "$1" 2>/dev/null || true); [ -n "$t" ] && [ "$(cat "$2" 2>/dev/null || true)" != "$t" ] && echo "$t" || true; }
+wipe_replication_state() {
+  find "$SOURCE_DIR" "$JOURNAL_DIR" "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+  rm -f "$STATE_FILE"
+}
+
+# Planned switchover (targetPrimary annotation). The operator stops writes on the old primary,
+# waits until every ready replica has applied its last segment, then restarts the target with a
+# "promote" and the old primary with a "demote" directive. Both are applied offline to a work copy
+# (not journaled), can be resumed after a crash, and are recorded once complete.
+sw="$DATA_DIR/.switchover.fdb"
+promote_token=$(pending "${PROMOTE_FILE:-/dev/null}" "$REPLICATION_DIR/.promoted")
+if [ -n "$promote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
+  # the journal continues after the last segment this replica applied (its control file position)
+  if [ ! -f "$REPLICATION_DIR/.promote-seq" ]; then
+    ctl=$(find "$SOURCE_DIR" -maxdepth 1 -name '{*}' | head -n 1)
+    seq=0
+    if [ -n "$ctl" ]; then seq=$(od -An -tu8 -j16 -N8 "$ctl" | tr -d ' '); fi
+    echo "$seq" > "$REPLICATION_DIR/.promote-seq"
+  fi
+  seq=$(cat "$REPLICATION_DIR/.promote-seq")
+  echo "promoting this replica to primary; its journal continues after segment $seq"
+  if [ -f "$DATABASE_PATH" ]; then mv "$DATABASE_PATH" "$sw"; fi
+  perl "$SCRIPT_DIR/set-repl-seq.pl" "$sw" "$seq"
+  gfix -replica none "$sw"
+  isql -q -i "$SCRIPT_DIR/enable-publication.sql" "$sw"
+  wipe_replication_state
+  # offline copy: a consistent bootstrap seed for new replicas
+  cp "$sw" "$REPLICATION_DIR/bootstrap-seed.fdb.tmp"
+  mv "$REPLICATION_DIR/bootstrap-seed.fdb.tmp" "$REPLICATION_DIR/bootstrap-seed.fdb"
+  chown -R firebird:firebird "$DATA_DIR"
+  mv "$sw" "$DATABASE_PATH"
+  echo "$promote_token" > "$REPLICATION_DIR/.promoted"
+  rm -f "$REPLICATION_DIR/.promote-seq"
+  echo "promoted to primary"
+fi
+demote_token=$(pending "${DEMOTE_FILE:-/dev/null}" "$REPLICATION_DIR/.demoted")
+if [ -n "$demote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
+  echo "demoting the former primary to a read-only replica"
+  if [ -f "$DATABASE_PATH" ]; then mv "$DATABASE_PATH" "$sw"; fi
+  # the switchover shut it down to stop writes
+  gfix -online "$sw" 2>/dev/null || true
+  echo "ALTER DATABASE DISABLE PUBLICATION; COMMIT;" | isql -q "$sw"
+  gfix -replica read_only "$sw"
+  wipe_replication_state
+  rm -f "$REPLICATION_DIR/bootstrap-seed.fdb"
+  # its own last segment is where the new primary's journal continues
+  seq=$(seq_of "$sw")
+  guid=$(gstat -h "$sw" | sed -n 's/^[[:space:]]*Database GUID:[[:space:]]*\({[0-9A-F-]*}\).*/\1/p')
+  perl "$SCRIPT_DIR/replica-control.pl" none "$seq" "$seq" "$SOURCE_DIR/.control.tmp"
+  mv "$SOURCE_DIR/.control.tmp" "$SOURCE_DIR/$guid"
+  chown -R firebird:firebird "$DATA_DIR"
+  mv "$sw" "$DATABASE_PATH"
+  echo "$demote_token" > "$REPLICATION_DIR/.demoted"
+  echo "demoted to replica after segment $seq"
+fi
+
 # Re-seed request (reseed pod annotation): the operator lists "<pod> <token>" in RESEED_FILE and
 # deletes the pod. A replica discards its database and replication state (not its security
 # database) and is seeded again; the token is recorded only after a complete seed, so an
@@ -40,10 +101,6 @@ if [ -f "$DATABASE_PATH" ]; then
   echo "database exists, nothing to initialise"
   exit 0
 fi
-
-# gstat omits "Replication sequence" while it is 0 (e.g. a database created offline)
-seq_of() { s=$(gstat -h "$1" | sed -n 's/^[[:space:]]*Replication sequence:[[:space:]]*\([0-9]*\).*/\1/p'); echo "${s:-0}"; }
-field() { echo "$header" | sed -n "s/^[[:space:]]*$1:*[[:space:]]*\\([0-9{][0-9A-F{}-]*\\).*/\\1/p"; }
 
 # Everything happens on a work file that is moved into place only once it is complete, so a
 # failed attempt is retried from scratch rather than treated as initialised. The work path is

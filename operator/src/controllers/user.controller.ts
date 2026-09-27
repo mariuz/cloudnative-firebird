@@ -7,7 +7,7 @@ import {
   V1Job,
 } from '@kubernetes/client-node';
 import { logger } from '../utils/logger';
-import { CLUSTER_LABEL } from '../utils/resources';
+import { CLUSTER_LABEL, instancePodSelector } from '../utils/resources';
 import { replicationEnabled } from '../utils/replication';
 import { isPodReady } from '../utils/routing';
 import {
@@ -257,10 +257,9 @@ export class FirebirdUserController {
 
   private async instances(cluster: FirebirdCluster): Promise<Instance[]> {
     const { name, namespace = 'default' } = cluster.metadata;
-    const selector = `${CLUSTER_LABEL}=${name}`;
     const [pods, pvcs] = await Promise.all([
-      this.coreApi.listNamespacedPod({ namespace, labelSelector: selector }),
-      this.coreApi.listNamespacedPersistentVolumeClaim({ namespace, labelSelector: selector }),
+      this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) }),
+      this.coreApi.listNamespacedPersistentVolumeClaim({ namespace, labelSelector: `${CLUSTER_LABEL}=${name}` }),
     ]);
     return Array.from({ length: cluster.spec.instances }, (_, i) => {
       const pod = `${name}-${i}`;

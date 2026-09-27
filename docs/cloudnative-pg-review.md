@@ -23,7 +23,7 @@ Status: **done** (in this repository), **planned** (listed in [ROADMAP.md](../RO
 
 | CloudNativePG | What it means here |
 |---|---|
-| 1.30: primary `Lease` as a promotion mutex; the instance must hold it before acting as primary, and releases it on clean shutdown | The `<cluster>-lease` created since v0.4.0 is never renewed or moved: there is **no automatic failover** today (ROADMAP corrected). Switchover and failover should use the Lease the same way: the promoted instance takes the Lease before `gfix -replica none` and publication are enabled, and the old primary is fenced or demoted first. |
+| 1.30: primary `Lease` as a promotion mutex; the instance must hold it before acting as primary, and releases it on clean shutdown | Planned switchover (v0.13.0) moves the `<cluster>-lease` to the target before it is promoted, after the old primary has been shut down. There is still **no automatic failover**; it should use the Lease the same way. |
 | 1.29: Kubernetes events during reconciliation; 1.30: `PrimaryStatusCheckFailed` warning event | Emit events for fencing, backups, restores, seeding and routing changes. |
 | 1.29: shared `serviceAccountName` for workload identity (IRSA, Workload Identity) | Backup, restore and archive Jobs require an S3 `secretRef` today; a service account would allow cloud credentials without static keys. |
 | 1.29: `cnpg.io/reconciliationDisabled` on backups | Per-resource pause for `FirebirdBackup` / `FirebirdScheduledBackup` (clusters already have `spec.suspended`). |

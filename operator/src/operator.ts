@@ -5,6 +5,7 @@ import { FirebirdClusterController } from './controllers/firebirdcluster.control
 import { FirebirdBackupController } from './controllers/backup.controller';
 import { FirebirdUserController } from './controllers/user.controller';
 import { FENCED_INSTANCES_ANNOTATION } from './utils/fencing';
+import { TARGET_PRIMARY_ANNOTATION } from './utils/switchover';
 import {
   API_GROUP,
   API_VERSION,
@@ -16,9 +17,10 @@ import {
   RESOURCE_PLURAL,
 } from './types';
 
-/** The cluster's fencedInstances annotation */
-function fencingAnnotation(cluster: FirebirdCluster): string | undefined {
-  return cluster.metadata.annotations?.[FENCED_INSTANCES_ANNOTATION];
+/** Annotations that drive reconciliation (they do not bump the generation) */
+function drivingAnnotations(cluster: FirebirdCluster): string {
+  const annotations = cluster.metadata.annotations ?? {};
+  return JSON.stringify([annotations[FENCED_INSTANCES_ANNOTATION], annotations[TARGET_PRIMARY_ANNOTATION]]);
 }
 
 /** Kubernetes object fields the operator's event handling relies on */
@@ -55,8 +57,11 @@ export class Operator {
   private resyncTimer: NodeJS.Timeout | null = null;
   private readonly resyncIntervalMs: number;
   private readonly knownClusters = new Map<string, FirebirdCluster>();
-  /** fencedInstances annotation at the last reconcile, per cluster */
-  private readonly reconciledFencing = new Map<string, string | undefined>();
+  /** fencedInstances / targetPrimary annotations at the last reconcile, per cluster */
+  private readonly reconciledFencing = new Map<string, string>();
+  /** Reconcile in progress per cluster, and clusters to reconcile again once it finishes */
+  private readonly running = new Map<string, Promise<void>>();
+  private readonly rerun = new Set<string>();
   /** metadata.generation of the last successful reconcile, per cluster */
   private readonly reconciledGenerations = new Map<string, number>();
 
@@ -123,6 +128,7 @@ export class Operator {
     }
     this.knownClusters.clear();
     this.knownBackupObjects.clear();
+    this.rerun.clear();
     this.reconciledGenerations.clear();
     this.reconciledFencing.clear();
     this.healthServer.stop();
@@ -179,9 +185,9 @@ export class Operator {
    * scheduled backup and restore (their status follows Jobs and CronJobs the watch does not cover)
    */
   private resync(): void {
-    for (const cluster of this.knownClusters.values()) {
+    for (const [key, cluster] of this.knownClusters) {
       const { name, namespace = 'default' } = cluster.metadata;
-      this.controller.reconcile(cluster).catch((err) => {
+      this.reconcileCluster(key).catch((err) => {
         logger.error({ err, cluster: name, namespace }, 'Periodic resync reconcile failed');
       });
     }
@@ -223,6 +229,36 @@ export class Operator {
     }
   }
 
+  /**
+   * Reconciles a cluster, never concurrently with itself: a request that arrives while a reconcile
+   * runs is coalesced into one more run with the latest observed object. Overlapping reconciles
+   * of one cluster act on each other's stale status (e.g. a switchover phase).
+   */
+  private reconcileCluster(key: string): Promise<void> {
+    const inProgress = this.running.get(key);
+    if (inProgress) {
+      this.rerun.add(key);
+      return inProgress;
+    }
+    const run = (async () => {
+      let first: unknown;
+      do {
+        this.rerun.delete(key);
+        const cluster = this.knownClusters.get(key);
+        if (!cluster) break;
+        try {
+          await this.controller.reconcile(cluster);
+        } catch (err) {
+          if (first === undefined) first = err;
+          else logger.error({ err, cluster: key }, 'Reconcile failed');
+        }
+      } while (this.rerun.has(key));
+      if (first !== undefined) throw first;
+    })().finally(() => this.running.delete(key));
+    this.running.set(key, run);
+    return run;
+  }
+
   private async handleEvent(phase: string, cluster: FirebirdCluster): Promise<void> {
     // ERROR events carry a Status object, not a cluster
     if (phase === 'ERROR' || !cluster?.metadata) {
@@ -242,20 +278,20 @@ export class Operator {
         // skip them to avoid a reconcile → status patch → MODIFIED feedback loop.
         // Periodic resync still converges anything observed outside the spec, and retries
         // failed reconciles at the resync interval instead of in a tight event loop.
-        // Annotations do not bump the generation either; fencing is driven by one.
+        // Annotations do not bump the generation either; fencing and switchover are driven by them.
         if (
           phase === 'MODIFIED' &&
           generation !== undefined &&
           this.reconciledGenerations.get(key) === generation &&
-          this.reconciledFencing.get(key) === fencingAnnotation(cluster)
+          this.reconciledFencing.get(key) === drivingAnnotations(cluster)
         ) {
           log.debug({ generation }, 'Spec unchanged since last reconcile, skipping');
           break;
         }
         log.info('Received cluster event, reconciling');
         if (generation !== undefined) this.reconciledGenerations.set(key, generation);
-        this.reconciledFencing.set(key, fencingAnnotation(cluster));
-        await this.controller.reconcile(cluster);
+        this.reconciledFencing.set(key, drivingAnnotations(cluster));
+        await this.reconcileCluster(key);
         break;
 
       case 'DELETED':

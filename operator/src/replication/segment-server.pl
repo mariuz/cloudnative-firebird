@@ -7,6 +7,9 @@
 #   "<token> SEED\n"           -> "OK <dbsize> <ctlsize> <kind>\n" + database bytes + control bytes
 #   "<token> TXNS <S> <ids>\n" -> "<id> <segment>" for each listed transaction with blocks in
 #                                 archived segments <= S (its first such segment), then ".\n"
+#   "<token> POSITION\n"       -> replica: "OK <sequence> <offset> <pending>", the replica control
+#                                 file position and the number of received segments beyond it;
+#                                 primary: "OK primary" (used by planned switchover)
 #
 # The token is the SYSDBA password (ISC_PASSWORD).
 #
@@ -277,6 +280,23 @@ while (1) {
       my $first = first_segments($upto, \%wanted);
       print $client "$_ $first->{$_}\n" for sort { $a <=> $b } keys %$first;
       print $client ".\n";
+    }
+  } elsif ($cmd eq 'POSITION') {
+    if (is_primary()) {
+      print $client "OK primary\n";
+    } else {
+      # the control file is the only {GUID} file in the source directory; reading it needs no
+      # access to the (possibly shut down) database
+      opendir(my $dh, $source);
+      my ($ctl_name) = grep { /^\{[0-9A-Fa-f-]+\}$/ } readdir($dh);
+      closedir($dh);
+      my $ctl = defined $ctl_name ? read_control("$source/$ctl_name") : undef;
+      if (!$ctl) {
+        print $client "ERR no replica control file\n";
+      } else {
+        my $pending = grep { my $s = segment_sequence("$source/$_"); defined $s && $s > $ctl->{sequence} } segments($source);
+        print $client "OK $ctl->{sequence} $ctl->{offset} $pending\n";
+      }
     }
   } elsif ($cmd eq 'SEED') {
     is_primary() ? seed_from_primary($client) : seed_from_replica($client);

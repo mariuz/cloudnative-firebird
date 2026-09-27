@@ -92,6 +92,9 @@ import { KubeConfig } from '@kubernetes/client-node';
 import { Operator } from '../src/operator';
 import { makeCluster, makeNamedCluster } from './helpers/factories';
 
+/** Lets pending (coalesced) reconciles run */
+const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
 // Helpers
 function makeOperator(): { operator: Operator; mockKubeConfig: KubeConfig } {
   const mockKubeConfig = new KubeConfig();
@@ -342,6 +345,7 @@ describe('Operator – periodic resync', () => {
     capturedEventCallback!('ADDED', b);
     capturedEventCallback!('MODIFIED', aUpdated);
     capturedEventCallback!('DELETED', b);
+    await vi.advanceTimersByTimeAsync(0); // let the coalesced reconcile of a finish
     mockReconcile.mockClear();
 
     await vi.advanceTimersByTimeAsync(1000);
@@ -392,18 +396,18 @@ describe('Operator – generation-based event filtering', () => {
 
   it('skips MODIFIED events whose generation was already reconciled (status-only updates)', async () => {
     capturedEventCallback!('ADDED', withGeneration(1));
-    await Promise.resolve();
+    await flush();
     capturedEventCallback!('MODIFIED', withGeneration(1));
-    await Promise.resolve();
+    await flush();
 
     expect(mockReconcile).toHaveBeenCalledTimes(1);
   });
 
   it('reconciles MODIFIED events with a new generation', async () => {
     capturedEventCallback!('ADDED', withGeneration(1));
-    await Promise.resolve();
+    await flush();
     capturedEventCallback!('MODIFIED', withGeneration(2));
-    await Promise.resolve();
+    await flush();
 
     expect(mockReconcile).toHaveBeenCalledTimes(2);
   });
@@ -414,39 +418,50 @@ describe('Operator – generation-based event filtering', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     // The Degraded status patch after the failure produces a MODIFIED event
     capturedEventCallback!('MODIFIED', withGeneration(1));
-    await Promise.resolve();
+    await flush();
 
     expect(mockReconcile).toHaveBeenCalledTimes(1);
   });
 
   it('reconciles a fencedInstances annotation change although the generation is unchanged', async () => {
     capturedEventCallback!('ADDED', withGeneration(1));
-    await Promise.resolve();
+    await flush();
     const fenced = withGeneration(1);
     fenced.metadata.annotations = { 'firebird.cloudnative-firebird.io/fencedInstances': '["test-cluster-0"]' };
     capturedEventCallback!('MODIFIED', fenced);
-    await Promise.resolve();
+    await flush();
     capturedEventCallback!('MODIFIED', fenced);
-    await Promise.resolve();
+    await flush();
+
+    expect(mockReconcile).toHaveBeenCalledTimes(2);
+  });
+
+  it('reconciles a targetPrimary annotation change although the generation is unchanged', async () => {
+    capturedEventCallback!('ADDED', withGeneration(1));
+    await flush();
+    const switched = withGeneration(1);
+    switched.metadata.annotations = { 'firebird.cloudnative-firebird.io/targetPrimary': 'test-cluster-1' };
+    capturedEventCallback!('MODIFIED', switched);
+    await flush();
 
     expect(mockReconcile).toHaveBeenCalledTimes(2);
   });
 
   it('always reconciles ADDED events (e.g. after a watch restart)', async () => {
     capturedEventCallback!('ADDED', withGeneration(1));
-    await Promise.resolve();
+    await flush();
     capturedEventCallback!('ADDED', withGeneration(1));
-    await Promise.resolve();
+    await flush();
 
     expect(mockReconcile).toHaveBeenCalledTimes(2);
   });
 
   it('forgets the reconciled generation when the cluster is deleted', async () => {
     capturedEventCallback!('ADDED', withGeneration(1));
-    await Promise.resolve();
+    await flush();
     capturedEventCallback!('DELETED', withGeneration(1));
     capturedEventCallback!('MODIFIED', withGeneration(1));
-    await Promise.resolve();
+    await flush();
 
     expect(mockReconcile).toHaveBeenCalledTimes(2);
   });
@@ -501,6 +516,41 @@ describe('Operator – backup resources', () => {
     mockReconcileBackup.mockClear();
     await vi.advanceTimersByTimeAsync(1000);
     expect(mockReconcileBackup).not.toHaveBeenCalled();
+    operator.stop();
+  });
+});
+
+describe('Operator – reconcile serialization', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('never reconciles a cluster concurrently and coalesces requests into one run with the latest object', async () => {
+    const operator = new Operator(new KubeConfig(), 8080, 0);
+    await operator.start();
+    let active = 0;
+    let maxActive = 0;
+    const seen: unknown[] = [];
+    mockReconcile.mockImplementation(async (cluster: unknown) => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      seen.push(cluster);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active--;
+    });
+    const v = (generation: number) => {
+      const c = makeCluster();
+      c.metadata.generation = generation;
+      return c;
+    };
+    capturedEventCallback!('ADDED', v(1));
+    capturedEventCallback!('MODIFIED', v(2));
+    capturedEventCallback!('MODIFIED', v(3));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(maxActive).toBe(1);
+    expect(seen).toHaveLength(2);
+    expect((seen[1] as { metadata: { generation: number } }).metadata.generation).toBe(3);
+    mockReconcile.mockReset();
+    mockReconcile.mockResolvedValue(undefined);
     operator.stop();
   });
 });
