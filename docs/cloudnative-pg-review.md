@@ -15,14 +15,14 @@ Status: **done** (in this repository), **planned** (listed in [ROADMAP.md](../RO
 |---|---|---|
 | Fencing through `cnpg.io/fencedInstances` (a JSON list of instance names, `["*"]` for all) | `firebird.cloudnative-firebird.io/fencedInstances`, same format. The Firebird server is the container's main process, so instead of stopping it the database is put into full shutdown (`gfix -shut full` through the service manager); the pod keeps running, is not Ready, and no failover happens | done |
 | 1.30: the `Cluster` scale subresource exposes `status.selector` for HPA / VPA | `labelSelectorPath: .status.selector` on the `FirebirdCluster` scale subresource | done |
-| 1.30: the `cluster` reference of `ScheduledBackup`, `Database` and similar resources is immutable (CEL rule) | `clusterName` is immutable on `FirebirdBackup`, `FirebirdScheduledBackup` and `FirebirdRestore` | done |
+| 1.30: the `cluster` reference of `ScheduledBackup`, `Database` and similar resources is immutable (CEL rule) | `clusterName` is immutable on `FirebirdBackup`, `FirebirdScheduledBackup`, `FirebirdRestore` and `FirebirdUser` | done |
+| 1.30: `DatabaseRole` CRD with `databaseRoleReclaimPolicy: retain \| delete` | `FirebirdUser` (v0.12.0): Secret-backed password, `active`, `admin`, role grants, `reclaimPolicy`. Firebird users live in per-instance security databases, so they are applied to every instance; the security database was moved onto the instance volume first | done |
 
 ## Planned
 
 | CloudNativePG | What it means here |
 |---|---|
 | 1.30: primary `Lease` as a promotion mutex; the instance must hold it before acting as primary, and releases it on clean shutdown | The `<cluster>-lease` created since v0.4.0 is never renewed or moved: there is **no automatic failover** today (ROADMAP corrected). Switchover and failover should use the Lease the same way: the promoted instance takes the Lease before `gfix -replica none` and publication are enabled, and the old primary is fenced or demoted first. |
-| 1.30: `DatabaseRole` CRD (a role per Kubernetes object, `databaseRoleReclaimPolicy: retain \| delete`) and inline `managed.roles` | Shapes "Declarative database users and roles": a `FirebirdUser` resource with a password Secret, granted roles and a reclaim policy, applied with `CREATE/ALTER/DROP USER` on the primary. Passwords go into SQL text, so they may show in `MON$STATEMENTS` while running; prefer a dedicated connection and keep it short. |
 | 1.28: `alpha.cnpg.io/unrecoverable` removes a replica's pod and PVCs and recreates it | Cheap here: a replica is re-seeded from another ready replica without touching the primary. |
 | 1.29: Kubernetes events during reconciliation; 1.30: `PrimaryStatusCheckFailed` warning event | Emit events for fencing, backups, restores, seeding and routing changes. |
 | 1.29: shared `serviceAccountName` for workload identity (IRSA, Workload Identity) | Backup, restore and archive Jobs require an S3 `secretRef` today; a service account would allow cloud credentials without static keys. |

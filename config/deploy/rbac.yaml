@@ -49,6 +49,25 @@ rules:
       - get
       - update
       - patch
+  # Declarative users (the finalizer is managed on the object itself)
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdusers
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdusers/status
+    verbs:
+      - get
+      - update
+      - patch
   # StatefulSets
   - apiGroups:
       - apps

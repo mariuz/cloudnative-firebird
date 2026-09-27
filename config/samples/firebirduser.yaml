@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-user-password
+type: Opaque
+stringData:
+  password: change-me
+---
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdUser
+metadata:
+  name: app-user            # Firebird user APP_USER (or set spec.username)
+spec:
+  clusterName: my-cluster
+  passwordSecret:
+    name: app-user-password
+  roles: [reader]           # roles must exist in the database
+  reclaimPolicy: delete     # drop the Firebird user when this resource is deleted (default: retain)

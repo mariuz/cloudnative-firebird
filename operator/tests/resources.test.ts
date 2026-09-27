@@ -234,14 +234,14 @@ describe('buildStatefulSet (replication)', () => {
   it('adds no replication containers when replication is disabled or absent', () => {
     for (const cluster of [makeCluster({ replication: { enabled: false } }), makeCluster()]) {
       const podSpec = podSpecOf(cluster);
-      expect(podSpec?.initContainers).toBeUndefined();
+      expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['security-db-init']);
       expect(podSpec?.containers?.map((c) => c.name)).toEqual(['firebird']);
     }
   });
 
   it('seeds replicas in an init container and ships segments with two sidecars', () => {
     const podSpec = podSpecOf(makeCluster({ replication: { enabled: true } }));
-    expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['replication-init']);
+    expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['security-db-init', 'replication-init']);
     expect(podSpec?.containers?.map((c) => c.name)).toEqual(['firebird', 'segment-server', 'segment-puller']);
     expect(podSpec?.containers?.[1].ports).toEqual([{ name: 'segments', containerPort: 3051, protocol: 'TCP' }]);
   });
@@ -250,7 +250,7 @@ describe('buildStatefulSet (replication)', () => {
     const podSpec = podSpecOf(
       makeCluster({ replication: { enabled: true }, bootstrap: { recovery: { sourcePath: '/backup/db.fbk' } } }),
     );
-    expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['bootstrap-restore', 'replication-init']);
+    expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['security-db-init', 'bootstrap-restore', 'replication-init']);
   });
 
   it('mounts replication.conf into the Firebird container; the init container creates the database', () => {
@@ -262,17 +262,17 @@ describe('buildStatefulSet (replication)', () => {
       subPath: 'replication.conf',
     });
     expect(mounts?.some((m) => m.mountPath.includes('enable-publication'))).toBe(false);
-    expect(podSpec?.initContainers?.[0].command).toEqual(['sh', '/etc/firebird-operator/init-instance.sh']);
+    expect(podSpec?.initContainers?.find((c) => c.name === 'replication-init')?.command).toEqual(['sh', '/etc/firebird-operator/init-instance.sh']);
   });
 
   it('passes seed sources and the live-seed opt-in to the replication containers', () => {
     const env = podSpecOf(
       makeCluster({ replication: { enabled: true, allowLiveSeedFromPrimary: true } }),
-    )?.initContainers?.[0].env;
+    )?.initContainers?.find((c) => c.name === 'replication-init')?.env;
     expect(env).toContainEqual({ name: 'SEED_SOURCES_FILE', value: '/etc/firebird-operator/seed-sources' });
     expect(env).toContainEqual({ name: 'ALLOW_LIVE_SEED', value: 'true' });
     expect(env).toContainEqual({ name: 'REPLICATION_DIR', value: '/var/lib/firebird/data/replication' });
-    expect(podSpecOf(makeCluster({ replication: { enabled: true } }))?.initContainers?.[0].env).toContainEqual({
+    expect(podSpecOf(makeCluster({ replication: { enabled: true } }))?.initContainers?.find((c) => c.name === 'replication-init')?.env).toContainEqual({
       name: 'ALLOW_LIVE_SEED',
       value: 'false',
     });
@@ -298,7 +298,7 @@ describe('buildStatefulSet (replication)', () => {
 
   it('derives replication directories from journalDirectory', () => {
     const cluster = makeCluster({ replication: { enabled: true, journalDirectory: '/var/lib/firebird/data/repl' } });
-    const env = podSpecOf(cluster)?.initContainers?.[0].env;
+    const env = podSpecOf(cluster)?.initContainers?.find((c) => c.name === 'replication-init')?.env;
     expect(env).toContainEqual({ name: 'JOURNAL_DIR', value: '/var/lib/firebird/data/repl/journal' });
     expect(env).toContainEqual({ name: 'ARCHIVE_DIR', value: '/var/lib/firebird/data/repl/archive' });
   });

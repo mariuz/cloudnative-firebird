@@ -293,6 +293,55 @@ jobs:
           kubectl get firebirdrestore over-live -o jsonpath='{.status.error}' | grep -q 'cluster database'
           ! kubectl get job restore-over-live 2>/dev/null
 
+      - name: Verify declarative users
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          # logs in as the managed user with role READER; prints "APP_USER READER" on success
+          as_app() {
+            kubectl exec "$1" -c firebird -- env "PW=it's s3cret" bash -c \
+              'echo "select current_user, current_role from rdb\$database;" | isql -q -u app_user -p "$PW" -r reader localhost:/var/lib/firebird/data/mydb.fdb' 2>&1
+          }
+          wait_login() {
+            for n in $(seq 1 24); do
+              as_app "$1" | grep -qE 'APP_USER +READER' && return 0
+              sleep 5
+            done
+            as_app "$1"; return 1
+          }
+          kubectl exec repl-0 -c firebird -- bash -c "echo 'create role reader; commit;' | isql -q localhost:$DB"
+          kubectl create secret generic app-user-password --from-literal=password="it's s3cret"
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdUser
+          metadata:
+            name: app-user
+          spec:
+            clusterName: repl
+            passwordSecret:
+              name: app-user-password
+            roles: [reader]
+            reclaimPolicy: delete
+          EOF
+          timeout 300 bash -c \
+            'until [ "$(kubectl get firebirduser app-user -o jsonpath={.status.phase})" = "Applied" ]; do sleep 5; done' \
+            || { kubectl get firebirduser app-user -o yaml; kubectl logs job/fbuser-app-user || true; exit 1; }
+          kubectl get firebirduser app-user
+          # the user is in every instance's security database; the role grant replicates
+          for pod in repl-0 repl-1 repl-2; do wait_login $pod; done
+          echo "user applied on every instance"
+
+          # users live in the security database on the instance volume: they survive pod re-creation
+          kubectl delete pod repl-1 --wait=true
+          kubectl wait pod/repl-1 --for=condition=Ready --timeout=300s
+          wait_login repl-1
+          echo "user survived pod re-creation"
+
+          # reclaimPolicy delete drops the user before the resource goes away
+          kubectl delete firebirduser app-user --timeout=180s
+          if as_app repl-0 | grep -q 'APP_USER'; then echo "user still exists"; exit 1; fi
+          as_app repl-0 | grep -q 'not defined'
+          echo "user dropped"
+
       - name: Verify instance fencing
         run: |
           ANN=firebird.cloudnative-firebird.io/fencedInstances
@@ -347,7 +396,7 @@ jobs:
           echo "=== PDBs, Leases, PVCs ==="
           kubectl get pdb,lease,pvc -n default || true
           echo "=== Backups, restores and their Jobs ==="
-          kubectl get firebirdbackups,firebirdrestores,firebirdscheduledbackups -o yaml || true
+          kubectl get firebirdbackups,firebirdrestores,firebirdscheduledbackups,firebirdusers -o yaml || true
           kubectl get jobs,cronjobs -n default || true
           for j in $(kubectl get jobs -n default -o name 2>/dev/null); do
             echo "--- $j"; kubectl logs "$j" -n default --all-containers || true

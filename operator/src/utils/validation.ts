@@ -19,6 +19,13 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     throw new ValidationError('FirebirdCluster spec is required');
   }
 
+  const managedSettings = Object.keys(spec.config?.settings ?? {}).filter((k) => k.toLowerCase() === 'securitydatabase');
+  if (managedSettings.length > 0) {
+    throw new ValidationError(
+      'config.settings.SecurityDatabase is managed by the operator (the security database is kept on the instance volume)',
+    );
+  }
+
   if (
     typeof spec.instances !== 'number' ||
     !Number.isInteger(spec.instances) ||

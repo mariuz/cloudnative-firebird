@@ -55,6 +55,42 @@ export function withHibernation<T extends V1CronJob>(cronJob: T, cluster: Firebi
 /** Data directory of the official firebirdsql/firebird image (FIREBIRD_DATA); the PVC is mounted here */
 export const FIREBIRD_DATA_DIR = '/var/lib/firebird/data';
 
+/**
+ * The security database (users and their passwords) lives on the instance volume. The official
+ * image keeps it in /opt/firebird on the container filesystem, so every container restart would
+ * drop all users but SYSDBA (which the entrypoint recreates).
+ */
+export const SECURITY_DIR = `${FIREBIRD_DATA_DIR}/system`;
+export const SECURITY_DB_PATH = `${SECURITY_DIR}/security.fdb`;
+
+/**
+ * Init container that seeds the persistent security database from the image on first start and
+ * writes a databases.conf whose `security.db` alias (used by the image entrypoint to set the SYSDBA
+ * password) points at it. The server itself is pointed there with SecurityDatabase.
+ */
+export function buildSecurityDbInitContainer(image: string): V1Container {
+  return {
+    name: 'security-db-init',
+    image,
+    command: ['/bin/sh', '-c'],
+    args: [
+      [
+        'set -eu',
+        `d=${SECURITY_DIR}`,
+        'mkdir -p "$d"',
+        'if [ ! -f "$d/security.fdb" ]; then',
+        '  cp /opt/firebird/security[0-9]*.fdb "$d/security.fdb.tmp"',
+        '  mv "$d/security.fdb.tmp" "$d/security.fdb"',
+        '  echo "security database created from the image"',
+        'fi',
+        `printf '%s\n' 'security.db = ${SECURITY_DB_PATH}' '{' '    RemoteAccess = false' '    DefaultDbCachePages = 256' '}' > "$d/databases.conf"`,
+        'chown -R firebird:firebird "$d"',
+      ].join('\n'),
+    ],
+    volumeMounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }],
+  };
+}
+
 /** Default database file created in each instance */
 export const DEFAULT_DATABASE_NAME = 'mydb.fdb';
 
@@ -165,12 +201,18 @@ export function buildStatefulSet(
       name: `FIREBIRD_CONF_${key}`,
       value,
     })),
+    // users survive restarts: the security database is on the instance volume
+    { name: 'FIREBIRD_CONF_SecurityDatabase', value: SECURITY_DB_PATH },
     // Additional env vars from spec
     ...(spec.env ?? []),
   ];
 
-  // Bootstrap from a backup or another cluster, before the replication init
-  const initContainers: V1Container[] = buildBootstrapInitContainers(cluster);
+  // Persistent security database, then bootstrap from a backup or another cluster, before the
+  // replication init
+  const initContainers: V1Container[] = [
+    buildSecurityDbInitContainer(image),
+    ...buildBootstrapInitContainers(cluster),
+  ];
 
   const replication = replicationEnabled(cluster)
     ? buildReplicationContainers(cluster, {
@@ -200,6 +242,12 @@ export function buildStatefulSet(
         {
           name: 'firebird-data',
           mountPath: '/var/lib/firebird/data',
+        },
+        // written by the security-db-init container
+        {
+          name: 'firebird-data',
+          mountPath: '/opt/firebird/databases.conf',
+          subPath: 'system/databases.conf',
         },
         ...(spec.bootstrap?.initSql
           ? [

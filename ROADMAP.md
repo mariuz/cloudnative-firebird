@@ -4,8 +4,8 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.11.0):** journal replication (experimental), backups/restores and instance
-> fencing work against the official `firebirdsql/firebird` image (section 7). Some items below
+> **Status note (v0.12.0):** journal replication (experimental), backups/restores, instance
+> fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
 > (1.28 – 1.30.1) are reviewed in [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md).
@@ -165,9 +165,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - Immutable `clusterName` on backup, scheduled backup and restore resources (CEL).
 - [ ] **Rolling Updates with Primary Last**
   - Update replicas first, then switch over before restarting the primary to minimise write downtime.
-- [ ] **Declarative Database Users & Roles**
-  - Manage Firebird users, roles and grants with Secret-backed passwords, as a resource per user with a
-    reclaim policy (CloudNativePG 1.30 `DatabaseRole`).
+- [x] **Declarative Database Users & Roles** *(v0.12.0)*
+  - `FirebirdUser` resource per user (CloudNativePG 1.30 `DatabaseRole`): Secret-backed password, `active`, `admin`, role grants, `reclaimPolicy: retain | delete`.
+  - Applied to every instance's security database and the role grants to the cluster database; tracked per instance and volume.
+  - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [ ] **Replica re-creation** *(CloudNativePG 1.28 `unrecoverable`)*
   - Annotate a broken replica to delete its pod and PVC and re-seed it from a ready replica.
 - [ ] **Kubernetes Events**
@@ -190,6 +191,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Volume Expansion** | PVC Resize | In-place PVC Expansion | **v0.6.0 (Done)** |
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | Planned Switchover | Planned |
+| **Declarative Roles** | `DatabaseRole` / `managed.roles` | `FirebirdUser` | **v0.12.0 (Done)** |
 | **Fencing** | Instance Fencing | `fencedInstances` annotation, database full shutdown | **v0.11.0 (Done)** |
 | **Auto-Sweeping / Maintenance** | VACUUM Scheduling | `gfix -sweep` CronJob | **v0.3.0 (Done)** |
 | **Security & TLS** | cert-manager | WireCrypt & cert-manager | **v0.4.0 (Done)** |

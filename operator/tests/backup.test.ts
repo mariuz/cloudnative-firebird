@@ -283,6 +283,7 @@ describe('bootstrap init containers', () => {
   it('runs before the replication init container, which takes over the bootstrapped file', () => {
     const sts = buildStatefulSet(makeCluster({ replication: { enabled: true }, bootstrap: { recovery: { s3 } } }));
     expect(sts.spec?.template.spec?.initContainers?.map((c) => c.name)).toEqual([
+      'security-db-init',
       'bootstrap-download',
       'bootstrap-restore',
       'replication-init',

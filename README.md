@@ -15,6 +15,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Journal-based asynchronous replication** (Firebird 4.0+, experimental) with replicas seeded without locking the primary
 - **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
 - **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
+- **Declarative users** (`FirebirdUser`, after CloudNativePG's `DatabaseRole`) with Secret-backed passwords, role grants and a reclaim policy; users persist across pod restarts
 - **Instance fencing** via the `fencedInstances` annotation (CloudNativePG format): the database is shut down, the pod keeps running
 - **Lag-aware read-only routing** to replicas via the `<name>-replica` Service (`spec.replication.readOnlyRouting`)
 - **Secret-based** SYSDBA password management
@@ -277,6 +278,43 @@ With replication enabled, only the primary bootstraps; replicas are then seeded 
 With `replication.journalArchiveS3`, a CronJob copies archived journal segments from the
 primary's segment server to `<prefix>/journals/` (replaying them for point-in-time recovery is
 not implemented yet; see TODO.md).
+
+### Users
+
+Firebird users live in the **security database**, which the official image keeps on the container
+filesystem. The operator moves it to the instance volume (`system/security.fdb`, seeded from the
+image by the `security-db-init` container), so users survive pod restarts. SYSDBA is still managed
+through `spec.superuserSecret`.
+
+Users are declared as their own resources, like CloudNativePG's `DatabaseRole`:
+
+```yaml
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdUser
+metadata:
+  name: app-user            # Firebird user APP_USER (or set spec.username)
+spec:
+  clusterName: my-cluster
+  passwordSecret:
+    name: app-user-password # key "password" (or passwordSecret.key)
+  roles: [reader]           # granted in the cluster database; others are revoked
+  active: true              # false: the user cannot log in
+  admin: false              # true: RDB$ADMIN in the security database
+  reclaimPolicy: retain     # delete: drop the user when this resource is deleted
+```
+
+A Job applies the user to **every instance** (`CREATE OR ALTER USER`, each instance has its own
+security database, which replication does not ship) and the role grants to the cluster database
+(on the primary with replication, where they replicate; on every instance otherwise).
+`status.instances` records the applied state per instance and volume, so scaled-up, re-seeded or
+re-created instances get the user when they become ready, and a changed Secret is applied within
+a resync interval. A failed Job (for example a role that does not exist) is retried after five
+minutes; `kubectl logs job/fbuser-<name>` shows the error.
+
+Security notes: the password is read from the Secret inside the Job and only sent to the servers
+as SQL text, where it can briefly show in `MON$STATEMENTS` or a trace session. Users are not part
+of `gbak` backups; keep the `FirebirdUser` objects (for example in Git) to re-create them on a
+restored or cloned cluster.
 
 ### Fencing
 

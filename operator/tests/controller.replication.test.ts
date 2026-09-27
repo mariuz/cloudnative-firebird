@@ -211,7 +211,7 @@ describe('FirebirdClusterController – replication integration', () => {
       await controller.reconcile(cluster);
 
       const podSpec = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0].body.spec.template.spec;
-      expect(podSpec.initContainers.map((c: { name: string }) => c.name)).toEqual(['replication-init']);
+      expect(podSpec.initContainers.map((c: { name: string }) => c.name)).toEqual(['security-db-init', 'replication-init']);
       expect(podSpec.containers.map((c: { name: string }) => c.name)).toEqual([
         'firebird',
         'segment-server',
@@ -328,7 +328,7 @@ describe('FirebirdClusterController – replication integration', () => {
       const createdSts = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0]
         .body;
       const podSpec = createdSts.spec?.template?.spec;
-      expect(podSpec?.initContainers).toBeUndefined();
+      expect(podSpec?.initContainers?.map((c: { name: string }) => c.name)).toEqual(['security-db-init']);
       expect(podSpec?.containers?.map((c: { name: string }) => c.name)).toEqual(['firebird']);
     });
 

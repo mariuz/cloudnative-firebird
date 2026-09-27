@@ -56,6 +56,19 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   instances unless read-only routing labels the primary; point them at the primary instance
   like the backup Jobs.
 
+## Users
+
+- [ ] **Role management**: `FirebirdUser` grants roles that must already exist. Declaring roles
+  (and their privileges) would complete the picture, e.g. a `FirebirdRole` resource or a
+  `Database`-like resource as in CloudNativePG.
+- [ ] **Dropping users on unready instances**: with `reclaimPolicy: delete`, instances that are not
+  ready when the resource is deleted keep the user in their security database.
+- [ ] **Password without SQL text**: the services API (`action_modify_user`) would keep the
+  password out of `MON$STATEMENTS`, but takes it as a command-line argument; pick the lesser risk.
+- [ ] **Existing users on upgrade**: clusters created before v0.12.0 start with a fresh security
+  database seeded from the image (only SYSDBA); users created by applications before the upgrade
+  were already lost on every pod restart and must be re-created (ideally as `FirebirdUser`).
+
 ## Other roadmap items
 
 - [ ] TLS: Firebird has no native TLS listener; decide between WireCrypt only, a TLS proxy
