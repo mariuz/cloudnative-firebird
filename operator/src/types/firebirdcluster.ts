@@ -425,6 +425,8 @@ export interface SwitchoverStatus {
   /** Pod UIDs of the target and the old primary when they were restarted (directive tokens) */
   targetToken?: string;
   fromToken?: string;
+  /** Replicas that were not ready when the primary moved, with their pod UIDs: re-seeded */
+  reseed?: Record<string, string>;
 }
 
 /**

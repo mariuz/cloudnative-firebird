@@ -27,13 +27,14 @@ const pod = (name: string, uid: string, ready = true) => ({
   status: { phase: 'Running', conditions: [{ type: 'Ready', status: ready ? 'True' : 'False' }] },
 });
 
-function setup(opts: { pods?: object[]; job?: V1Job } = {}) {
+function setup(opts: { pods?: object[]; job?: V1Job; stored?: FirebirdCluster; lease?: string } = {}) {
   const notFound = Object.assign(new Error('Not Found'), { code: 404 });
   const api: Record<string, Mock> = {
     listNamespacedPod: vi.fn().mockResolvedValue({
       items: opts.pods ?? [pod('db-0', 'u0'), pod('db-1', 'u1'), pod('db-2', 'u2')],
     }),
-    readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: 'db-0' } }),
+    readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: opts.lease ?? 'db-0' } }),
+    getNamespacedCustomObject: opts.stored ? vi.fn().mockResolvedValue(opts.stored) : vi.fn().mockRejectedValue(notFound),
     readNamespacedJob: opts.job ? vi.fn().mockResolvedValue(opts.job) : vi.fn().mockRejectedValue(notFound),
     readNamespacedConfigMap: vi.fn().mockResolvedValue({ data: {} }),
   };
@@ -148,6 +149,48 @@ describe('planned switchover', () => {
     expect(finished.cmData().promote).toBe('');
     expect(finished.cmData().demote).toBe('');
     expect(finished.status().switchover).toMatchObject({ phase: 'Completed' });
+  });
+
+  it('acts on the stored switchover state, not on a stale copy of the cluster', async () => {
+    // a reconcile started with an old watch copy (Stopping) after the move to Promoting was stored
+    const stale = makeCluster('db-1', { switchover: { target: 'db-1', from: 'db-0', phase: 'Stopping' } });
+    const stored = makeCluster('db-1', {
+      switchover: { target: 'db-1', from: 'db-0', phase: 'Promoting', targetToken: 'u1', fromToken: 'u0' },
+    });
+    const s = setup({ stored, lease: 'db-1' });
+    await s.controller.reconcile(stale);
+    expect(s.created().some((j) => j.metadata?.name === 'db-switchover')).toBe(false);
+    expect(s.cmData().promote).toBe('db-1 u1\n');
+    expect(s.cmData().primary).toBe('db-1.db-headless');
+  });
+
+  it('stores each phase before acting on it', async () => {
+    const s = setup({ job: done('Complete') });
+    await s.controller.reconcile(makeCluster('db-1', { switchover: { target: 'db-1', from: 'db-0', phase: 'Stopping' } }));
+    const stored = s.fn('patchNamespacedCustomObjectStatus').mock.calls.findIndex(
+      (c) => c[0].body[0].path === '/status/switchover' && c[0].body[0].value.phase === 'Promoting',
+    );
+    expect(stored).toBeGreaterThanOrEqual(0);
+    const storedOrder = s.fn('patchNamespacedCustomObjectStatus').mock.invocationCallOrder[stored];
+    expect(storedOrder).toBeLessThan(s.fn('deleteNamespacedJob').mock.invocationCallOrder[0]);
+    expect(storedOrder).toBeLessThan(s.fn('patchNamespacedLease').mock.invocationCallOrder[0]);
+  });
+
+  it('resumes Promoting idempotently: moves the Lease and restarts pods that still run as before', async () => {
+    const promoting: SwitchoverStatus = { target: 'db-1', from: 'db-0', phase: 'Promoting', targetToken: 'u1', fromToken: 'u0' };
+    // the Lease was not moved and db-0 was not restarted yet (an earlier reconcile failed midway)
+    const s = setup({ pods: [pod('db-0', 'u0'), pod('db-1', 'new1'), pod('db-2', 'u2')] });
+    await s.controller.reconcile(makeCluster('db-1', { switchover: promoting }));
+    expect(s.fn('patchNamespacedLease')).toHaveBeenCalled();
+    expect(s.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name)).toEqual(['db-0']);
+  });
+
+  it('only considers instance pods, not Job pods of the cluster', async () => {
+    const jobPod = { ...pod('db-switchover-abcde', 'j1', false) };
+    const s = setup({ job: done('Complete'), pods: [pod('db-0', 'u0'), pod('db-1', 'u1'), pod('db-2', 'u2'), jobPod] });
+    await s.controller.reconcile(makeCluster('db-1', { switchover: { target: 'db-1', from: 'db-0', phase: 'Stopping' } }));
+    expect(s.cmData().reseed).toBe('');
+    expect(s.fn('listNamespacedPod').mock.calls[0][0].labelSelector).toContain('app.kubernetes.io/component=database');
   });
 
   it('needs replication', async () => {

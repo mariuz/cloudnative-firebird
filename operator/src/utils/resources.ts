@@ -47,6 +47,20 @@ export function clusterLabels(name: string): Record<string, string> {
 }
 
 /**
+ * Label selector for the cluster's instance pods. Job pods (backups, fencing, switchover, users)
+ * carry the cluster label too, with another component.
+ */
+export function instancePodSelector(name: string): string {
+  return `${CLUSTER_LABEL}=${name},app.kubernetes.io/component=database`;
+}
+
+/** Keeps the StatefulSet instance pods (`<cluster>-<ordinal>`) of a pod list */
+export function instancePods<T extends { metadata?: { name?: string } }>(items: T[], name: string): T[] {
+  const pattern = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-\\d+$`);
+  return items.filter((p) => pattern.test(p.metadata?.name ?? ''));
+}
+
+/**
  * Applies the cluster hibernation state to an operator-managed CronJob:
  * scheduled work is suspended while the cluster is hibernated.
  */

@@ -560,6 +560,11 @@ spec:
                       type: string
                     fromToken:
                       type: string
+                    reseed:
+                      description: Replicas that were not ready when the primary moved (pod UIDs), re-seeded
+                      type: object
+                      additionalProperties:
+                        type: string
                 replicationStatus:
                   description: Detailed replication status details
                   type: object
