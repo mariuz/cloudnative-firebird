@@ -894,6 +894,7 @@ describe('buildConfigMap (replication)', () => {
       'primary',
       'replica-control.pl',
       'replication.conf',
+      'reseed',
       'seed-sources',
       'segment-puller.pl',
       'segment-server.pl',

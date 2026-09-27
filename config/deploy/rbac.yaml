@@ -134,6 +134,8 @@ rules:
       - list
       - watch
       - patch
+      # restarts a replica into its init container to re-seed it (reseed annotation)
+      - delete
   # ConfigMaps (firebird.conf, init.sql, Grafana dashboards)
   - apiGroups:
       - ""

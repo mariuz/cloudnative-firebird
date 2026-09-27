@@ -22,6 +22,7 @@ import { databaseOnlineCheck } from './fencing';
 import {
   PRIMARY_KEY,
   REPLICATION_SCRIPTS,
+  RESEED_KEY,
   SEED_SOURCES_KEY,
   SEGMENT_PORT,
   buildReplicationConf,
@@ -826,7 +827,7 @@ export function podDisruptionBudgetNeedsUpdate(
  */
 export function buildConfigMap(
   cluster: FirebirdCluster,
-  options?: { primaryPod?: string; seedSourcePods?: string[] },
+  options?: { primaryPod?: string; seedSourcePods?: string[]; reseed?: Record<string, string> },
 ): V1ConfigMap | null {
   const { name, namespace = 'default' } = cluster.metadata;
   const labels = clusterLabels(name);
@@ -851,6 +852,11 @@ export function buildConfigMap(
     data[PRIMARY_KEY] = instanceHost(cluster, options?.primaryPod ?? `${name}-0`);
     // Ready replicas that can serve seed copies without locking the primary
     data[SEED_SOURCES_KEY] = (options?.seedSourcePods ?? []).map((pod) => `${instanceHost(cluster, pod)}\n`).join('');
+    // Replicas to re-seed; always present so that a merge patch clears finished requests
+    data[RESEED_KEY] = Object.keys(options?.reseed ?? {})
+      .sort()
+      .map((pod) => `${pod} ${options!.reseed![pod]}\n`)
+      .join('');
   }
 
   if (Object.keys(data).length === 0) return null;

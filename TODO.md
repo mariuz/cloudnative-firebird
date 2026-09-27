@@ -75,8 +75,13 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   sidecar, or dropping the `tls` mount.
 - [ ] **Failover**: the leader Lease is static. Implement switchover first, then failover with the
   Lease as promotion mutex (CloudNativePG 1.30); a fenced primary must never be failed over.
+- [ ] **Re-seeding reacts within a resync interval** (up to 30 s): pods are not watched. A pod
+  watch would also let fencing and routing react faster.
+- [ ] **Re-creating a replica's volume** (lost node with local storage): re-seeding keeps the PVC.
+  Deleting it needs the pod deleted repeatedly until the claim is gone, because the StatefulSet
+  recreates the pod against the terminating claim.
 - [ ] Items from the CloudNativePG 1.28 – 1.30 review ([docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md)):
-  Kubernetes events, replica re-creation (`unrecoverable`), `serviceAccountName` for workload
+  Kubernetes events, `serviceAccountName` for workload
   identity (S3 without static keys), per-backup reconciliation pause, pod/container security
   contexts.
 - [ ] Rolling updates with the primary last.

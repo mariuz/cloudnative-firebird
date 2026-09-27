@@ -29,6 +29,10 @@ export const PRIMARY_KEY = 'primary';
 
 /** ConfigMap key listing ready replicas that can serve seed copies, one host per line */
 export const SEED_SOURCES_KEY = 'seed-sources';
+/** ConfigMap key listing replicas to re-seed: "<pod> <token>" per line (token: the pod UID at request time) */
+export const RESEED_KEY = 'reseed';
+/** Pod annotation requesting that a replica discards its database and is seeded again */
+export const RESEED_ANNOTATION = 'firebird.cloudnative-firebird.io/reseed';
 
 const SCRIPT_DIR = join(__dirname, '..', 'replication');
 
@@ -115,6 +119,7 @@ function replicationEnv(
     { name: 'STATE_FILE', value: dirs.state },
     { name: 'PRIMARY_FILE', value: `${OPERATOR_CONFIG_DIR}/${PRIMARY_KEY}` },
     { name: 'SEED_SOURCES_FILE', value: `${OPERATOR_CONFIG_DIR}/${SEED_SOURCES_KEY}` },
+    { name: 'RESEED_FILE', value: `${OPERATOR_CONFIG_DIR}/${RESEED_KEY}` },
     { name: 'ALLOW_LIVE_SEED', value: String(Boolean(cluster.spec.replication?.allowLiveSeedFromPrimary)) },
     { name: 'SCRIPT_DIR', value: OPERATOR_CONFIG_DIR },
     { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },

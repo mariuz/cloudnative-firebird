@@ -13,12 +13,34 @@
 set -eu
 mkdir -p "$JOURNAL_DIR" "$ARCHIVE_DIR" "$SOURCE_DIR"
 chown firebird:firebird "$JOURNAL_DIR" "$ARCHIVE_DIR" "$SOURCE_DIR"
+primary=$(cat "$PRIMARY_FILE" 2>/dev/null || true)
+
+# Re-seed request (reseed pod annotation): the operator lists "<pod> <token>" in RESEED_FILE and
+# deletes the pod. A replica discards its database and replication state (not its security
+# database) and is seeded again; the token is recorded only after a complete seed, so an
+# interrupted attempt starts over. The primary never discards its database.
+reseed_token=$(awk -v p="$POD_NAME" '$1 == p { print $2 }' "${RESEED_FILE:-/dev/null}" 2>/dev/null || true)
+if [ -n "$reseed_token" ] && [ "$(cat "$REPLICATION_DIR/.reseeded" 2>/dev/null || true)" != "$reseed_token" ]; then
+  case "$primary" in
+    ""|"$POD_NAME"|"$POD_NAME".*)
+      echo "ignoring the re-seed request: this instance is the primary"
+      reseed_token=""
+      ;;
+    *)
+      echo "re-seed requested: discarding the database and replication state"
+      rm -f "$DATABASE_PATH" "$STATE_FILE"
+      find "$SOURCE_DIR" "$JOURNAL_DIR" "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+      ;;
+  esac
+else
+  reseed_token=""
+fi
+
 if [ -f "$DATABASE_PATH" ]; then
   echo "database exists, nothing to initialise"
   exit 0
 fi
 
-primary=$(cat "$PRIMARY_FILE" 2>/dev/null || true)
 # gstat omits "Replication sequence" while it is 0 (e.g. a database created offline)
 seq_of() { s=$(gstat -h "$1" | sed -n 's/^[[:space:]]*Replication sequence:[[:space:]]*\([0-9]*\).*/\1/p'); echo "${s:-0}"; }
 field() { echo "$header" | sed -n "s/^[[:space:]]*$1:*[[:space:]]*\\([0-9{][0-9A-F{}-]*\\).*/\\1/p"; }
@@ -108,4 +130,5 @@ mv "$SOURCE_DIR/.control.tmp" "$SOURCE_DIR/$guid"
 chown -R firebird:firebird "$DATA_DIR"
 rm -f "$work.ctl" "$work.kind"
 mv "$work" "$DATABASE_PATH"
+if [ -n "$reseed_token" ]; then echo "$reseed_token" > "$REPLICATION_DIR/.reseeded"; fi
 echo "seeded replica from $fetched ($kind seed)"

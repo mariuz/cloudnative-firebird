@@ -4,8 +4,8 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.12.0):** journal replication (experimental), backups/restores, instance
-> fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
+> **Status note (v0.12.0):** journal replication (experimental) with replica re-seeding,
+> backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
 > (1.28 – 1.30.1) are reviewed in [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md).
@@ -169,8 +169,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `FirebirdUser` resource per user (CloudNativePG 1.30 `DatabaseRole`): Secret-backed password, `active`, `admin`, role grants, `reclaimPolicy: retain | delete`.
   - Applied to every instance's security database and the role grants to the cluster database; tracked per instance and volume.
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
-- [ ] **Replica re-creation** *(CloudNativePG 1.28 `unrecoverable`)*
-  - Annotate a broken replica to delete its pod and PVC and re-seed it from a ready replica.
+- [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
+  - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
 - [ ] **Kubernetes Events**
   - Events for fencing, backups, restores, seeding and routing changes (CloudNativePG 1.29 / 1.30).
 

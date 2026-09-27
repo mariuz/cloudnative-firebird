@@ -49,7 +49,7 @@ import {
   clusterLabels,
 } from '../utils/resources';
 import { computeReadRouting, isPodReady, podRoutingLabelPatch } from '../utils/routing';
-import { replicationEnabled } from '../utils/replication';
+import { RESEED_ANNOTATION, RESEED_KEY, replicationEnabled } from '../utils/replication';
 import { planVolumeExpansion } from '../utils/storage';
 import { validateClusterSpec } from '../utils/validation';
 import {
@@ -158,8 +158,16 @@ export class FirebirdClusterController {
       });
 
       const primaryPod = await this.resolvePrimaryPod(cluster, log);
-      const seedSourcePods = await this.resolveSeedSources(cluster, primaryPod);
-      await this.reconcileConfigMap(cluster, primaryPod, seedSourcePods, log);
+      const reseed = await this.resolveReseeds(cluster, primaryPod, log);
+      const seedSourcePods = (await this.resolveSeedSources(cluster, primaryPod)).filter(
+        (pod) => !(pod in reseed.requests),
+      );
+      await this.reconcileConfigMap(cluster, primaryPod, seedSourcePods, reseed.requests, log);
+      // the ConfigMap lists the request before the pod restarts into its init container
+      for (const pod of reseed.restart) {
+        log.info({ pod }, 'Restarting replica to re-seed it');
+        await this.coreApi.deleteNamespacedPod({ name: pod, namespace });
+      }
       // Label pods before (re)pointing service selectors at the routing labels
       const readRouting = await this.reconcileReadRouting(cluster, primaryPod, log);
       await this.reconcileHeadlessService(cluster, log);
@@ -240,6 +248,7 @@ export class FirebirdClusterController {
         superuserSecretHash,
         fencedInstances: fencing.fenced,
         selector: podSelector(cluster),
+        reseedingInstances: Object.keys(reseed.requests).sort(),
         ...(volumes ? { volumes } : {}),
         conditions: [
           this.makeCondition(
@@ -374,6 +383,57 @@ export class FirebirdClusterController {
       log.debug('Leader lease not found, assuming ordinal 0 is primary');
     }
     return `${name}-0`;
+  }
+
+  /**
+   * Re-seed requests: replicas annotated with RESEED_ANNOTATION get a token (their pod UID) in the
+   * ConfigMap and are restarted; replication-init then discards the database and seeds again.
+   * A request stays listed until the instance is ready again as a new pod.
+   */
+  private async resolveReseeds(
+    cluster: FirebirdCluster,
+    primaryPod: string,
+    log: Logger,
+  ): Promise<{ requests: Record<string, string>; restart: string[] }> {
+    const result = { requests: {} as Record<string, string>, restart: [] as string[] };
+    if (!replicationEnabled(cluster) || cluster.spec.hibernated) return result;
+    const { name, namespace = 'default' } = cluster.metadata;
+
+    let current = '';
+    try {
+      const cm = await this.coreApi.readNamespacedConfigMap({ name: `${name}-config`, namespace });
+      current = cm.data?.[RESEED_KEY] ?? '';
+    } catch {
+      // not created yet
+    }
+    const pods = await this.coreApi.listNamespacedPod({ namespace, labelSelector: `${CLUSTER_LABEL}=${name}` });
+    const byName = new Map(pods.items.map((p) => [p.metadata?.name ?? '', p]));
+
+    for (const line of current.split('\n')) {
+      const [pod, token] = line.trim().split(/\s+/);
+      if (!pod || !token) continue;
+      const podObj = byName.get(pod);
+      // done once a new pod (another UID) is ready: its init container re-seeded it
+      if (podObj && podObj.metadata?.uid !== token && isPodReady(podObj)) {
+        log.info({ pod }, 'Replica re-seeded');
+        continue;
+      }
+      if (Number(pod.slice(name.length + 1)) >= cluster.spec.instances) continue; // scaled away
+      result.requests[pod] = token;
+    }
+
+    for (const pod of pods.items) {
+      const podName = pod.metadata?.name;
+      if (!podName || pod.metadata?.annotations?.[RESEED_ANNOTATION] !== 'true' || pod.metadata.deletionTimestamp) continue;
+      if (podName === primaryPod) {
+        log.warn({ pod: podName }, 'Ignoring the re-seed annotation on the primary');
+        continue;
+      }
+      if (result.requests[podName] === pod.metadata.uid) continue; // already requested, restart pending
+      result.requests[podName] = pod.metadata.uid ?? '';
+      result.restart.push(podName);
+    }
+    return result;
   }
 
   /**
@@ -729,11 +789,12 @@ export class FirebirdClusterController {
     cluster: FirebirdCluster,
     primaryPod: string,
     seedSourcePods: string[],
+    reseed: Record<string, string>,
     log: Logger,
   ): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const configName = `${name}-config`;
-    const desired = buildConfigMap(cluster, { primaryPod, seedSourcePods });
+    const desired = buildConfigMap(cluster, { primaryPod, seedSourcePods, reseed });
 
     if (desired) {
       try {

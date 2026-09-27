@@ -342,6 +342,24 @@ jobs:
           as_app repl-0 | grep -q 'not defined'
           echo "user dropped"
 
+      - name: Verify re-seeding a replica
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          count() { kubectl exec "$1" -c firebird -- bash -c "echo 'select count(*) from app;' | isql -q localhost:$DB" | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          old_uid=$(kubectl get pod repl-2 -o jsonpath={.metadata.uid})
+          kubectl annotate pod repl-2 firebird.cloudnative-firebird.io/reseed=true
+          # the operator lists the request and restarts the pod (within a resync interval)
+          timeout 180 bash -c "until [ -n \"\$(kubectl get pod repl-2 -o jsonpath={.metadata.uid} 2>/dev/null)\" ] && [ \"\$(kubectl get pod repl-2 -o jsonpath={.metadata.uid} 2>/dev/null)\" != '$old_uid' ]; do sleep 3; done"
+          kubectl wait pod/repl-2 --for=condition=Ready --timeout=300s
+          kubectl logs repl-2 -c replication-init | tee /tmp/repl-2-reseed.log
+          grep -q 're-seed requested' /tmp/repl-2-reseed.log
+          grep -q 'seeded replica from' /tmp/repl-2-reseed.log
+          kubectl exec repl-0 -c firebird -- bash -c "echo 'insert into app values (31, '\''after'\''); commit;' | isql -q localhost:$DB"
+          for n in $(seq 1 36); do [ "$(count repl-2)" = "31" ] && break; sleep 5; done
+          [ "$(count repl-2)" = "31" ]
+          timeout 120 bash -c 'while kubectl get firebirdcluster repl -o jsonpath={.status.reseedingInstances} | grep -q repl-2; do sleep 5; done'
+          echo "replica re-seeded and following the primary"
+
       - name: Verify instance fencing
         run: |
           ANN=firebird.cloudnative-firebird.io/fencedInstances
