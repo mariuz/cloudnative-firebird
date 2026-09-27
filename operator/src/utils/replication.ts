@@ -29,7 +29,14 @@ const SCRIPT_DIR = join(__dirname, '..', 'replication');
 
 /** Replication helper scripts shipped in the cluster ConfigMap, keyed by file name */
 export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
-  ['segment-server.pl', 'segment-puller.pl', 'fetch-seed.pl', 'seed-replica.sh', 'enable-publication.sql'].map(
+  [
+    'segment-server.pl',
+    'segment-puller.pl',
+    'fetch-seed.pl',
+    'seed-replica.sh',
+    'replica-control.pl',
+    'enable-publication.sql',
+  ].map(
     (name) => [name, readFileSync(join(SCRIPT_DIR, name), 'utf8')],
   ),
 );

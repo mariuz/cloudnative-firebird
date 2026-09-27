@@ -1092,6 +1092,7 @@ describe('buildConfigMap (replication)', () => {
       'enable-publication.sql',
       'fetch-seed.pl',
       'primary',
+      'replica-control.pl',
       'replication.conf',
       'seed-replica.sh',
       'segment-puller.pl',

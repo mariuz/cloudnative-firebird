@@ -24,27 +24,30 @@ done
 # the copy was taken while the primary was locked: fix it up, keeping the primary's
 # replication sequence
 nbackup -SEQ -F "$work"
-# The copy's replication sequence S is the last primary segment it contains. A commit can
-# be journaled in S while its pages went to the nbackup delta after the lock (missing from
-# the copy), so the replica must replay S rather than skip it.
 header=$(gstat -h "$work")
-seq=$(echo "$header" | sed -n 's/^[[:space:]]*Replication sequence:[[:space:]]*\([0-9]*\).*/\1/p')
-guid=$(echo "$header" | sed -n 's/^[[:space:]]*Database GUID:[[:space:]]*\({[0-9A-F-]*}\).*/\1/p')
+field() { echo "$header" | sed -n "s/^[[:space:]]*$1:*[[:space:]]*\\([0-9{][0-9A-F{}-]*\\).*/\\1/p"; }
+seq=$(field "Replication sequence")
+guid=$(field "Database GUID")
+oat=$(field "Oldest active")
+next=$(field "Next transaction")
+if [ -z "$seq" ] || [ "$seq" -eq 0 ] || [ -z "$guid" ] || [ -z "$oat" ] || [ -z "$next" ]; then
+  echo "cannot read replication sequence, GUID or transaction counters from the seed copy" >&2
+  exit 1
+fi
+# Transactions not committed in the copy: open at lock time, or committed on the primary with
+# the commit journaled before the lock but the commit mark written after it.
+candidates=$(printf '%s\n' 'SET TERM ^;' \
+  "EXECUTE BLOCK RETURNS (t BIGINT) AS BEGIN t = $oat; WHILE (t < $next) DO BEGIN
+     IF (COALESCE(RDB\$GET_TRANSACTION_CN(t), 0) <= 0) THEN SUSPEND; t = t + 1; END END^" |
+  isql -q "$work" | awk '$1 ~ /^[0-9]+$/ { print $1 }' | tr '\n' ' ')
 # The copy inherits "publication enabled"; a replica must not journal the changes it applies,
 # or its own sequence moves and the replica server treats it as a replaced database and
 # fast-forwards past every segment. (This DDL is itself journaled and bumps the header.)
 echo "ALTER DATABASE DISABLE PUBLICATION; COMMIT;" | isql -q "$work"
 gfix -replica read_only "$work"
 dbseq=$(gstat -h "$work" | sed -n 's/^[[:space:]]*Replication sequence:[[:space:]]*\([0-9]*\).*/\1/p')
-if [ -z "$seq" ] || [ "$seq" -eq 0 ] || [ -z "$guid" ] || [ -z "$dbseq" ]; then
-  echo "cannot read replication sequence/GUID from the seed copy" >&2
-  exit 1
-fi
-# Replica control file (ReplServer.cpp ControlFile::DataV1): "applied through S-1" so segment
-# S is replayed (row changes re-apply idempotently), and db_sequence = the copy's current
-# header value so the server does not fast-forward.
-perl -e 'print pack("a10 v V Q< V x4 Q<", "FBREPLCTL", 1, 0, $ARGV[0] - 1, 0, $ARGV[1])' "$seq" "$dbseq" > "$SOURCE_DIR/$guid"
-echo "replica will replay from primary segment $seq (local sequence $dbseq)"
+# shellcheck disable=SC2086 # candidates is a space-separated id list
+perl "$SCRIPT_DIR/replica-control.pl" "$primary" "$seq" "$dbseq" "$SOURCE_DIR/$guid" $candidates
 chown -R firebird:firebird "$DATA_DIR"
 mv "$work" "$DATABASE_PATH"
 echo "seeded replica from $primary"
