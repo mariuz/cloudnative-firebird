@@ -13,6 +13,8 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Persistent storage** via PersistentVolumeClaims, with online volume expansion when `spec.storage.size` grows
 - **Declarative hibernation** (`spec.hibernated`) that scales to zero while keeping data
 - **Journal-based asynchronous replication** (Firebird 4.0+, experimental) with replicas seeded without locking the primary
+- **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
+- **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
 - **Lag-aware read-only routing** to replicas via the `<name>-replica` Service (`spec.replication.readOnlyRouting`)
 - **Secret-based** SYSDBA password management
 - **Automatic service creation** (ClusterIP + headless for StatefulSet DNS)
@@ -56,10 +58,10 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - Kubernetes cluster (1.24+)
 - `kubectl` configured to point at your cluster
 
-### Install the CRD
+### Install the CRDs
 
 ```bash
-kubectl apply -f config/crds/firebirdcluster.yaml
+kubectl apply -f config/crds/
 ```
 
 ### Deploy the Operator
@@ -129,11 +131,10 @@ spec:
       cpu: "500m"
       memory: "512Mi"
 
-  # Backup configuration (optional)
+  # Scheduled backups (optional): see "Backups and Restores" below
   backup:
     enabled: true
     schedule: "0 2 * * *"
-    retentionPolicy: "7d"
 
   # Prometheus monitoring (optional)
   monitoring:
@@ -216,6 +217,66 @@ spec:
 
 Known issues and open work are tracked in [ISSUES.md](ISSUES.md) and [TODO.md](TODO.md).
 
+### Backups and Restores
+
+Backups and restores run as Jobs that reach the current primary over the network (the leader
+Lease holder, as `<pod>.<cluster>-headless`); they never mount an instance volume.
+
+| | Where the backup goes | How |
+|---|---|---|
+| logical (`gbak`), no `s3` | primary's data directory | service manager `action_backup` |
+| physical (`nbackup`, level 0-2), no `s3` | primary's data directory | service manager `action_nbak` |
+| logical with `s3` | S3 object `<prefix>/<file>` | `gbak` streams to the Job pod, an `aws` CLI container uploads it |
+
+Physical backups are written by the primary's server, so they cannot be uploaded to S3 (rejected
+by validation). The S3 client image defaults to `amazon/aws-cli` and can be changed with
+`s3.clientImage`. Server-side backups share the primary's volume, so they protect against logical
+errors, not against losing the volume. `retentionPolicy` is not enforced yet.
+
+```yaml
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdBackup          # one-off; FirebirdScheduledBackup takes a cron schedule
+metadata:
+  name: before-upgrade
+spec:
+  clusterName: my-cluster
+  s3:                         # optional; omit to keep the backup on the primary
+    bucket: firebird-backups
+    prefix: my-cluster
+    endpoint: https://s3.example.com
+    secretRef:
+      name: s3-credentials    # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+---
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRestore
+metadata:
+  name: inspect-before-upgrade
+spec:
+  clusterName: my-cluster
+  backupName: before-upgrade  # or backupPath (+ s3, or incrementalBackupPaths for nbackup chains)
+  targetDatabase: before-upgrade.fdb
+```
+
+The status of each resource follows its Job (`Running`/`Restoring`, then `Completed` or
+`Failed`); a backup reports its `location`. A restore always creates a **new database file**
+next to the cluster database (default `restore-<name>.fdb`) and refuses to overwrite the cluster
+database. To replace a database, bootstrap a new cluster from the backup:
+
+```yaml
+spec:
+  bootstrap:
+    recovery:                 # restore a gbak backup from S3 (sourcePath is the object key)
+      sourcePath: backup-before-upgrade.fbk
+      s3: { bucket: firebird-backups, prefix: my-cluster, secretRef: { name: s3-credentials } }
+    # or clone a running cluster by streaming gbak from its Service:
+    # clone: { sourceCluster: my-cluster, namespace: prod, superuserSecret: { name: prod-su } }
+```
+
+With replication enabled, only the primary bootstraps; replicas are then seeded by replication.
+With `replication.journalArchiveS3`, a CronJob copies archived journal segments from the
+primary's segment server to `<prefix>/journals/` (replaying them for point-in-time recovery is
+not implemented yet; see TODO.md).
+
 ### Read-Only Traffic Routing
 
 With `spec.replication.readOnlyRouting.enabled: true` the operator labels every pod with
@@ -238,7 +299,8 @@ cloudnative-firebird/
 ├── operator/               # TypeScript operator source
 │   ├── src/
 │   │   ├── types/          # CRD TypeScript type definitions
-│   │   ├── controllers/    # FirebirdCluster controller (reconcile logic)
+│   │   ├── controllers/    # FirebirdCluster and backup/restore controllers
+│   │   ├── replication/    # Scripts shipped to instance pods (replication, journal archive)
 │   │   ├── utils/          # Resource builders, logger
 │   │   ├── operator.ts     # Watch/event loop
 │   │   └── index.ts        # Entrypoint

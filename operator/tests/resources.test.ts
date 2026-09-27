@@ -5,7 +5,6 @@ import {
   buildStatefulSet,
   buildHeadlessService,
   buildReplicaService,
-  buildBackupCronJob,
   cronJobNeedsUpdate,
   buildPodMonitor,
   buildPodDisruptionBudget,
@@ -18,12 +17,8 @@ import {
   networkPolicyNeedsUpdate,
   buildCertificate,
   buildLease,
-  buildBackupJob,
-  buildRestoreJob,
   buildDiagnosticsCronJob,
   buildGrafanaDashboardConfigMap,
-  buildScheduledBackupCronJob,
-  buildJournalArchiveCronJob,
   clusterLabels,
   statefulSetNeedsUpdate,
   primaryServiceSelector,
@@ -33,7 +28,8 @@ import {
   replicationConfigHash,
   diagnosticsCronJobNeedsUpdate,
 } from '../src/utils/resources';
-import { FirebirdCluster, FirebirdScheduledBackup, DEFAULT_FIREBIRD_IMAGE } from '../src/types';
+import { buildBackupCronJob } from '../src/utils/backup';
+import { FirebirdCluster, DEFAULT_FIREBIRD_IMAGE } from '../src/types';
 
 const makeCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): FirebirdCluster => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
@@ -334,72 +330,6 @@ describe('buildStatefulSet (replication)', () => {
     expect(annotations?.['firebird.cloudnative-firebird.io/superuser-secret-hash']).toBe('abc123hash');
   });
 
-  it('creates bootstrap-restore init container when spec.bootstrap.recovery is specified with S3', () => {
-    const cluster = makeCluster({
-      bootstrap: {
-        recovery: {
-          s3: {
-            bucket: 'my-restore-bucket',
-            secretRef: { name: 's3-secret' },
-          },
-        },
-      },
-    });
-    const sts = buildStatefulSet(cluster);
-    const initContainers = sts.spec?.template?.spec?.initContainers;
-    expect(initContainers).toHaveLength(1);
-    expect(initContainers?.[0].name).toBe('bootstrap-restore');
-    expect(initContainers?.[0].args?.[0]).toContain('aws  s3 cp s3://my-restore-bucket/backup.fbk');
-  });
-
-  it('creates bootstrap-clone init container when spec.bootstrap.clone is specified', () => {
-    const cluster = makeCluster({
-      bootstrap: {
-        clone: {
-          sourceCluster: 'source-db',
-          namespace: 'prod',
-        },
-      },
-    });
-    const sts = buildStatefulSet(cluster);
-    const initContainers = sts.spec?.template?.spec?.initContainers;
-    expect(initContainers).toHaveLength(1);
-    expect(initContainers?.[0].name).toBe('bootstrap-clone');
-    expect(initContainers?.[0].args?.[0]).toContain('Cloning database from source-db in prod');
-  });
-});
-
-describe('buildJournalArchiveCronJob', () => {
-  it('returns null when replication is disabled', () => {
-    const cluster = makeCluster({ replication: { enabled: false } });
-    expect(buildJournalArchiveCronJob(cluster)).toBeNull();
-  });
-
-  it('returns null when journalArchiveS3 is not configured', () => {
-    const cluster = makeCluster({ replication: { enabled: true } });
-    expect(buildJournalArchiveCronJob(cluster)).toBeNull();
-  });
-
-  it('builds a valid CronJob when journalArchiveS3 is configured', () => {
-    const cluster = makeCluster({
-      replication: {
-        enabled: true,
-        journalArchiveS3: {
-          bucket: 'journal-bucket',
-          secretRef: { name: 's3-secret' },
-          endpoint: 'https://minio.local:9000',
-        },
-        archiveSchedule: '*/10 * * * *',
-      },
-    });
-    const cronJob = buildJournalArchiveCronJob(cluster);
-    expect(cronJob).not.toBeNull();
-    expect(cronJob?.metadata.name).toBe('test-cluster-journal-archive');
-    expect(cronJob?.spec?.schedule).toBe('*/10 * * * *');
-    const container = cronJob?.spec?.jobTemplate.spec?.template.spec?.containers[0];
-    expect(container?.name).toBe('journal-archiver');
-    expect(container?.args?.[0]).toContain('aws --endpoint-url https://minio.local:9000 s3 sync /var/lib/firebird/data/replication/archive/ s3://journal-bucket/journals/');
-  });
 });
 
 describe('buildReplicaService', () => {
@@ -482,68 +412,6 @@ describe('read-only routing service selectors', () => {
 
   it('does not change the headless service selector', () => {
     expect(buildHeadlessService(routed).spec?.selector).toEqual(clusterLabels('test-cluster'));
-  });
-});
-
-describe('buildBackupCronJob', () => {
-  it('creates a CronJob named <cluster>-backup', () => {
-    const cluster = makeCluster({ backup: { enabled: true } });
-    const cronJob = buildBackupCronJob(cluster);
-    expect(cronJob.metadata?.name).toBe('test-cluster-backup');
-    expect(cronJob.metadata?.namespace).toBe('default');
-  });
-
-  it('uses default schedule 0 2 * * * when not specified', () => {
-    const cluster = makeCluster({ backup: { enabled: true } });
-    const cronJob = buildBackupCronJob(cluster);
-    expect(cronJob.spec?.schedule).toBe('0 2 * * *');
-  });
-
-  it('uses custom schedule when specified', () => {
-    const cluster = makeCluster({ backup: { enabled: true, schedule: '0 4 * * *' } });
-    const cronJob = buildBackupCronJob(cluster);
-    expect(cronJob.spec?.schedule).toBe('0 4 * * *');
-  });
-
-  it('uses default ISC_PASSWORD when superuserSecret is not provided', () => {
-    const cluster = makeCluster({ backup: { enabled: true } });
-    const cronJob = buildBackupCronJob(cluster);
-    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
-    const passwordEnv = container?.env?.find((e: { name: string }) => e.name === 'ISC_PASSWORD');
-    expect(passwordEnv?.value).toBe('masterkey');
-  });
-
-  it('uses secret reference for ISC_PASSWORD when superuserSecret is provided', () => {
-    const cluster = makeCluster({
-      backup: { enabled: true },
-      superuserSecret: { name: 'backup-secret' },
-    });
-    const cronJob = buildBackupCronJob(cluster);
-    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
-    const passwordEnv = container?.env?.find((e: { name: string }) => e.name === 'ISC_PASSWORD');
-    expect(passwordEnv?.valueFrom?.secretKeyRef?.name).toBe('backup-secret');
-  });
-
-  it('includes FIREBIRD_RETENTION_POLICY when retentionPolicy is specified', () => {
-    const cluster = makeCluster({ backup: { enabled: true, retentionPolicy: '7d' } });
-    const cronJob = buildBackupCronJob(cluster);
-    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
-    const retentionEnv = container?.env?.find((e: { name: string }) => e.name === 'FIREBIRD_RETENTION_POLICY');
-    expect(retentionEnv?.value).toBe('7d');
-  });
-
-  it('sets ownerReference pointing to FirebirdCluster', () => {
-    const cluster = makeCluster({ backup: { enabled: true } });
-    const cronJob = buildBackupCronJob(cluster);
-    const ownerRef = cronJob.metadata?.ownerReferences?.[0];
-    expect(ownerRef?.kind).toBe('FirebirdCluster');
-    expect(ownerRef?.name).toBe('test-cluster');
-  });
-
-  it('sets backup component label', () => {
-    const cluster = makeCluster({ backup: { enabled: true } });
-    const cronJob = buildBackupCronJob(cluster);
-    expect(cronJob.metadata?.labels?.['app.kubernetes.io/component']).toBe('backup');
   });
 });
 
@@ -799,47 +667,6 @@ describe('buildStatefulSet (config & bootstrap volume mounting)', () => {
   });
 });
 
-describe('buildBackupCronJob (physical nbackup & S3 cloud support)', () => {
-  it('generates nbackup command when backup.type is physical', () => {
-    const cluster = makeCluster({ backup: { enabled: true, type: 'physical', level: 0 } });
-    const cronJob = buildBackupCronJob(cluster);
-    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
-    expect(container?.args?.[0]).toContain('nbackup -L 0');
-    expect(container?.args?.[0]).toContain('/firebird/data/mydb.fdb');
-  });
-
-  it('uses nbackup level 1 when specified', () => {
-    const cluster = makeCluster({ backup: { enabled: true, type: 'physical', level: 1 } });
-    const cronJob = buildBackupCronJob(cluster);
-    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
-    expect(container?.args?.[0]).toContain('nbackup -L 1');
-  });
-
-  it('injects S3 environment variables and upload command when S3 is configured', () => {
-    const cluster = makeCluster({
-      backup: {
-        enabled: true,
-        s3: {
-          bucket: 'my-firebird-backups',
-          secretRef: { name: 's3-credentials' },
-          prefix: 'production',
-        },
-      },
-    });
-    const cronJob = buildBackupCronJob(cluster);
-    const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
-    expect(container?.args?.[0]).toContain('aws s3 cp');
-    expect(container?.env).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          name: 'AWS_ACCESS_KEY_ID',
-          valueFrom: { secretKeyRef: { name: 's3-credentials', key: 'AWS_ACCESS_KEY_ID' } },
-        }),
-      ]),
-    );
-  });
-});
-
 describe('buildNetworkPolicy & networkPolicyNeedsUpdate', () => {
   it('creates NetworkPolicy with default ingress rule for port 3050', () => {
     const cluster = makeCluster({ networkPolicy: { enabled: true } });
@@ -952,34 +779,6 @@ describe('Leader Election Lease', () => {
   });
 });
 
-describe('FirebirdBackup & FirebirdRestore Job builders', () => {
-  it('builds a manual backup Job for FirebirdBackup', () => {
-    const cluster = makeCluster();
-    const backup = {
-      apiVersion: 'firebird.cloudnative-firebird.io/v1' as const,
-      kind: 'FirebirdBackup' as const,
-      metadata: { name: 'my-backup', namespace: 'default' },
-      spec: { clusterName: 'test-cluster', type: 'logical' as const },
-    };
-    const job = buildBackupJob(backup, cluster);
-    expect(job.metadata?.name).toBe('backup-my-backup');
-    expect(job.spec?.template?.spec?.containers?.[0].args?.[0]).toContain('gbak -b');
-  });
-
-  it('builds a restore Job for FirebirdRestore', () => {
-    const cluster = makeCluster();
-    const restore = {
-      apiVersion: 'firebird.cloudnative-firebird.io/v1' as const,
-      kind: 'FirebirdRestore' as const,
-      metadata: { name: 'my-restore', namespace: 'default' },
-      spec: { clusterName: 'test-cluster', restoreType: 'logical' as const, backupPath: '/firebird/data/dump.fbk' },
-    };
-    const job = buildRestoreJob(restore, cluster);
-    expect(job.metadata?.name).toBe('restore-my-restore');
-    expect(job.spec?.template?.spec?.containers?.[0].args?.[0]).toContain('gbak -c');
-  });
-});
-
 describe('Diagnostics & Grafana Dashboard Builders', () => {
   it('builds a Diagnostics CronJob using online validation on the primary', () => {
     const cluster = makeCluster({ diagnostics: { enabled: true, schedule: '0 4 * * 0' } });
@@ -1003,19 +802,6 @@ describe('Diagnostics & Grafana Dashboard Builders', () => {
     expect(cm.data?.['firebird-test-cluster.json']).toContain('Active Attachments');
   });
 
-  it('builds a CronJob for FirebirdScheduledBackup CRD', () => {
-    const cluster = makeCluster();
-    const scheduledBackup: FirebirdScheduledBackup = {
-      apiVersion: 'firebird.cloudnative-firebird.io/v1',
-      kind: 'FirebirdScheduledBackup',
-      metadata: { name: 'nightly-backup', namespace: 'default' },
-      spec: { clusterName: 'test-cluster', schedule: '0 1 * * *', type: 'physical', level: 0 },
-    };
-    const cronJob = buildScheduledBackupCronJob(scheduledBackup, cluster);
-    expect(cronJob.metadata?.name).toBe('sched-backup-nightly-backup');
-    expect(cronJob.spec?.schedule).toBe('0 1 * * *');
-    expect(cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0].args?.[0]).toContain('nbackup -L 0');
-  });
 });
 
 describe('hibernation', () => {
@@ -1103,6 +889,7 @@ describe('buildConfigMap (replication)', () => {
     expect(Object.keys(cm?.data ?? {}).sort()).toEqual([
       'enable-publication.sql',
       'fetch-seed.pl',
+      'fetch-segments.pl',
       'init-instance.sh',
       'primary',
       'replica-control.pl',

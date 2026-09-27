@@ -51,6 +51,8 @@ export interface S3BackupConfiguration {
   };
   /** Object key prefix/folder inside bucket */
   prefix?: string;
+  /** Image providing the `aws` CLI for uploads and downloads (default "amazon/aws-cli:2.37.4") */
+  clientImage?: string;
 }
 
 /**
@@ -74,9 +76,9 @@ export interface BackupConfiguration {
   level?: 0 | 1 | 2;
   /** Cron schedule for backups (e.g. "0 2 * * *") */
   schedule?: string;
-  /** Backup retention policy (e.g. "7d", "30d") */
+  /** Backup retention policy (e.g. "7d", "30d"). Not enforced yet. */
   retentionPolicy?: string;
-  /** Cloud object storage configuration for backup archive export */
+  /** Upload backups to S3 instead of the primary's data directory (logical backups only) */
   s3?: S3BackupConfiguration;
 }
 
@@ -226,7 +228,10 @@ export interface FirebirdConfig {
  * Cloud or file recovery settings for initial database bootstrapping.
  */
 export interface BackupRecoveryConfiguration {
-  /** Backup file path or object storage key */
+  /**
+   * gbak backup to restore: the object key relative to s3.prefix (default "backup.fbk") when s3
+   * is set, otherwise a file path readable from the init container (e.g. baked into imageName)
+   */
   sourcePath?: string;
   /** S3 cloud storage source configuration */
   s3?: S3BackupConfiguration;
@@ -240,6 +245,15 @@ export interface CloneConfiguration {
   sourceCluster: string;
   /** Namespace of the source FirebirdCluster (defaults to same namespace as target cluster) */
   namespace?: string;
+  /** Database file name in the source cluster (defaults to this cluster's databaseName) */
+  databaseName?: string;
+  /**
+   * Secret (key "password") in this namespace holding the source cluster's SYSDBA password.
+   * Defaults to this cluster's superuserSecret.
+   */
+  superuserSecret?: {
+    name: string;
+  };
 }
 
 /**

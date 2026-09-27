@@ -38,12 +38,23 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 ## Backups and restore
 
-- [ ] **Working backup Jobs**: run `gbak`/`nbackup` through the service manager against the
-  primary (not `localhost` in the Job pod), and ship an image with an S3 client for uploads.
-  Taking physical (`nbackup`) backups from a replica keeps the load off the primary.
-- [ ] **Restore and bootstrap recovery/clone** init containers still assume tools (`aws`, `nc`)
-  that the Firebird image does not ship.
-- [ ] **Journal archive CronJob**: same S3 tooling gap.
+- [ ] **Point-in-time recovery**: restore an `nbackup` base and replay the archived journal
+  segments from S3 up to a target time. Segments are archived, nothing replays them yet.
+- [ ] **Physical backups to S3**: `nbackup` runs in the primary's server and writes to its data
+  directory. Shipping the file needs a transfer path, e.g. a `BACKUP <file>` command on the
+  segment server, or taking the physical copy on a replica (which also keeps the load off the
+  primary).
+- [ ] **Retention**: `retentionPolicy` is accepted but not enforced, neither for server-side
+  files nor for S3 objects.
+- [ ] **Backups from a replica**: `gbak -b` works against a read-only replica (verified), which
+  would keep backup load off the primary; pick a ready replica when one exists.
+- [ ] **Backup verification**: optionally restore each backup into a scratch database and
+  validate it.
+- [ ] **Clone across NetworkPolicies**: a clone pod carries the target cluster's labels, so a
+  source cluster with `networkPolicy.enabled` rejects it unless its `ingressFrom` allows it.
+- [ ] **Sweep and diagnostics Jobs target the `<name>` Service**, which balances across all
+  instances unless read-only routing labels the primary; point them at the primary instance
+  like the backup Jobs.
 
 ## Other roadmap items
 

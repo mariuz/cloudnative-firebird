@@ -41,6 +41,7 @@ export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.from
     'init-instance.sh',
     'replica-control.pl',
     'enable-publication.sql',
+    'fetch-segments.pl',
   ].map(
     (name) => [name, readFileSync(join(SCRIPT_DIR, name), 'utf8')],
   ),

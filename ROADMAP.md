@@ -4,10 +4,11 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.9.0):** journal replication works against the official `firebirdsql/firebird`
-> image (section 7). The backup Jobs are not functional yet: they run `gbak`/`nbackup` against
-> `localhost` inside the Job pod and lack S3 tooling. Firebird-level problems found along the way are
-> in [ISSUES.md](ISSUES.md), open work in [TODO.md](TODO.md).
+> **Status note (v0.10.0):** journal replication (experimental) and backups/restores work against
+> the official `firebirdsql/firebird` image (section 7). Point-in-time recovery from archived
+> journal segments is not implemented yet, although segments are archived to S3.
+> Firebird-level problems found along the way are in [ISSUES.md](ISSUES.md), open work in
+> [TODO.md](TODO.md).
 
 ---
 
@@ -143,8 +144,11 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - Replicas seeded from ready replicas or the primary's offline seed; the live primary is not locked by default.
   - Experimental: a publishing Firebird 5.0.4 server hangs under concurrent per-transaction connections (ISSUES.md issue 1).
   - Follow-ups (lag reporting, seed refresh, retention by replica progress, sync mode) in TODO.md.
-- [ ] **Working Backups & Restores**
-  - Network/service-manager based `gbak`/`nbackup` Jobs and an image with S3 tooling for uploads.
+- [x] **Working Backups & Restores** *(v0.10.0)*
+  - `gbak`/`nbackup` through the primary's service manager; logical backups streamed to the Job pod and uploaded by an `aws` CLI container.
+  - `FirebirdBackup`, `FirebirdScheduledBackup` and `FirebirdRestore` are watched, and their status follows the Jobs; restores create a new database file.
+  - Bootstrap from an S3 backup or by cloning a running cluster (`gbak` stream), primary-only with replication.
+  - Journal archive CronJob fetches segments from the primary's segment server instead of mounting its volume.
 - [ ] **Planned Switchover**
   - Declarative promotion of a chosen replica (`gfix -replica none`) with Lease handover and demotion of the old primary.
 - [ ] **Instance Fencing**

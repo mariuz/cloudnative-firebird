@@ -66,8 +66,8 @@ jobs:
       - name: Load operator image into kind
         run: kind load docker-image cloudnative-firebird:ci --name firebird-test
 
-      - name: Install CRD
-        run: kubectl apply -f config/crds/firebirdcluster.yaml
+      - name: Install CRDs
+        run: kubectl apply -f config/crds/
 
       - name: Deploy operator
         run: |
@@ -217,6 +217,82 @@ jobs:
           wait_count repl-2 30
           echo "replica seeded from a replica applied all 30 rows"
 
+      - name: Verify backups and restores through the operator
+        run: |
+          DB_DIR=/var/lib/firebird/data
+          wait_phase() {
+            for n in $(seq 1 60); do
+              phase=$(kubectl get "$1" "$2" -o jsonpath='{.status.phase}')
+              [ "$phase" = "$3" ] && return 0
+              [ "$phase" = "Failed" ] && break
+              sleep 5
+            done
+            kubectl get "$1" "$2" -o yaml; kubectl logs "job/$4" --all-containers || true; return 1
+          }
+          count() {
+            kubectl exec repl-0 -c firebird -- bash -c \
+              "echo 'select count(*) from app;' | isql -q localhost:$DB_DIR/$1" | awk '$1 ~ /^[0-9]+$/ { print $1 }'
+          }
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: repl-logical
+          spec:
+            clusterName: repl
+          ---
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: repl-physical
+          spec:
+            clusterName: repl
+            type: physical
+            level: 0
+          EOF
+          wait_phase firebirdbackup repl-logical Completed backup-repl-logical
+          wait_phase firebirdbackup repl-physical Completed backup-repl-physical
+          kubectl get firebirdbackups
+
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: from-logical
+          spec:
+            clusterName: repl
+            backupName: repl-logical
+          ---
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: from-physical
+          spec:
+            clusterName: repl
+            restoreType: physical
+            backupPath: nbackup-l0-repl-physical.nbk
+          EOF
+          wait_phase firebirdrestore from-logical Completed restore-from-logical
+          wait_phase firebirdrestore from-physical Completed restore-from-physical
+          [ "$(count restore-from-logical.fdb)" = "30" ]
+          [ "$(count restore-from-physical.fdb)" = "30" ]
+          echo "both restores contain all 30 rows"
+
+          # restoring over the cluster database is refused
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: over-live
+          spec:
+            clusterName: repl
+            backupName: repl-logical
+            targetDatabase: mydb.fdb
+          EOF
+          wait_phase firebirdrestore over-live Failed restore-over-live
+          kubectl get firebirdrestore over-live -o jsonpath='{.status.error}' | grep -q 'cluster database'
+          ! kubectl get job restore-over-live 2>/dev/null
+
       - name: Verify operator reconciled without API errors
         run: |
           logs=$(kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1)
@@ -236,6 +312,12 @@ jobs:
           kubectl get services -A || true
           echo "=== PDBs, Leases, PVCs ==="
           kubectl get pdb,lease,pvc -n default || true
+          echo "=== Backups, restores and their Jobs ==="
+          kubectl get firebirdbackups,firebirdrestores,firebirdscheduledbackups -o yaml || true
+          kubectl get jobs,cronjobs -n default || true
+          for j in $(kubectl get jobs -n default -o name 2>/dev/null); do
+            echo "--- $j"; kubectl logs "$j" -n default --all-containers || true
+          done
           echo "=== FirebirdCluster status ==="
           kubectl get firebirdcluster -o yaml || true
           echo "=== Replication init and sidecar logs ==="

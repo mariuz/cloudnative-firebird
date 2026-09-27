@@ -148,7 +148,7 @@ spec:
                       description: Cron schedule for backups (e.g. "0 2 * * *")
                       type: string
                     retentionPolicy:
-                      description: Backup retention policy (e.g. "7d")
+                      description: Backup retention policy (e.g. "7d"). Not enforced yet.
                       type: string
                     s3:
                       description: Cloud object storage configuration for backup archive export
@@ -164,6 +164,9 @@ spec:
                         region:
                           type: string
                         prefix:
+                          type: string
+                        clientImage:
+                          description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
                           type: string
                         secretRef:
                           type: object
@@ -329,6 +332,9 @@ spec:
                           type: string
                         prefix:
                           type: string
+                        clientImage:
+                          description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                          type: string
                         secretRef:
                           type: object
                           required:
@@ -386,6 +392,10 @@ spec:
                       type: object
                       properties:
                         sourcePath:
+                          description: >-
+                            gbak backup to restore: the object key relative to s3.prefix (default
+                            backup.fbk) when s3 is set, otherwise a file path readable from the
+                            init container
                           type: string
                         s3:
                           type: object
@@ -400,6 +410,9 @@ spec:
                             region:
                               type: string
                             prefix:
+                              type: string
+                            clientImage:
+                              description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
                               type: string
                             secretRef:
                               type: object
@@ -418,6 +431,17 @@ spec:
                           type: string
                         namespace:
                           type: string
+                        databaseName:
+                          description: Database file name in the source cluster (defaults to this cluster's databaseName)
+                          type: string
+                        superuserSecret:
+                          description: Secret (key "password") in this namespace with the source cluster's SYSDBA password; defaults to superuserSecret
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
                 env:
                   description: Additional environment variables for the Firebird container
                   type: array

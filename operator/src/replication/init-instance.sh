@@ -1,9 +1,10 @@
 #!/bin/sh
 # Replication init container for every instance.
 #
-# Primary, first start: create the database offline (no server running, nothing attached),
-#   enable publication, run bootstrap.initSql, and keep a plain file copy as the offline
-#   bootstrap seed for the first replicas. No nbackup lock is taken on the primary.
+# Primary, first start: create the database offline (no server running, nothing attached) and
+#   run bootstrap.initSql, or take the database restored or cloned by the bootstrap init
+#   container ($DATA_DIR/.bootstrap.fdb); enable publication, and keep a plain file copy as the
+#   offline bootstrap seed for the first replicas. No nbackup lock is taken on the primary.
 # Replica, empty volume: fetch a seed copy (from a ready replica first, then from the primary),
 #   turn it into a read-only replica and write its replica control file.
 # Existing database: nothing to do.
@@ -30,9 +31,15 @@ rm -f "$work" "$work.ctl" "$work.kind"
 
 case "$primary" in
   ""|"$POD_NAME"|"$POD_NAME".*)
-    echo "CREATE DATABASE '$work'; COMMIT;" | isql -q
+    if [ -f "$DATA_DIR/.bootstrap.fdb" ]; then
+      mv "$DATA_DIR/.bootstrap.fdb" "$work"
+      origin="bootstrapped"
+    else
+      echo "CREATE DATABASE '$work'; COMMIT;" | isql -q
+      origin="created"
+    fi
     isql -q -i "$SCRIPT_DIR/enable-publication.sql" "$work"
-    if [ -f "$SCRIPT_DIR/init.sql" ]; then
+    if [ "$origin" = created ] && [ -f "$SCRIPT_DIR/init.sql" ]; then
       isql -q -i "$SCRIPT_DIR/init.sql" "$work"
     fi
     # offline copy: consistent because nothing is attached
@@ -40,7 +47,7 @@ case "$primary" in
     mv "$REPLICATION_DIR/bootstrap-seed.fdb.tmp" "$REPLICATION_DIR/bootstrap-seed.fdb"
     chown -R firebird:firebird "$DATA_DIR"
     mv "$work" "$DATABASE_PATH"
-    echo "created primary database and offline bootstrap seed"
+    echo "$origin primary database and offline bootstrap seed"
     exit 0
     ;;
 esac

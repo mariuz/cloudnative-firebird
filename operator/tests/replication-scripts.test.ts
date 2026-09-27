@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync, spawn, spawnSync } from 'child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { createServer } from 'net';
 import { REPLICATION_SCRIPTS } from '../src/utils/replication';
 
 const hasPerl = spawnSync('perl', ['-v']).status === 0;
@@ -113,4 +114,43 @@ describe('replication scripts shipped to instance pods', () => {
     expect(out.readBigUInt64LE(56)).toBe(30n);
     expect(out.readBigUInt64LE(64)).toBe(7n);
   });
+
+  it('fetch-segments.pl fetches archived segments that are not uploaded yet', async () => {
+    if (!hasPerl) return;
+    const segments: Record<string, string> = {
+      'mydb.fdb.journal-0000000001': 'one',
+      'mydb.fdb.journal-0000000002': 'two',
+      'mydb.fdb.journal-0000000003': 'three',
+    };
+    const requests: string[] = [];
+    const server = createServer((sock) => {
+      sock.once('data', (buf) => {
+        const line = buf.toString().trim();
+        requests.push(line);
+        const [, cmd, name] = line.split(' ');
+        if (cmd === 'LIST') sock.end(Object.keys(segments).join('\n') + '\nnot-a-segment\n.\n');
+        else sock.end(`OK ${segments[name].length}\n${segments[name]}`);
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as { port: number }).port;
+    const script = join(dir, 'fetch-segments.pl');
+    writeFileSync(script, REPLICATION_SCRIPTS['fetch-segments.pl']);
+    const out = mkdtempSync(join(tmpdir(), 'fb-segments-'));
+    const skip = join(out, 'uploaded');
+    writeFileSync(skip, 'mydb.fdb.journal-0000000001\n');
+    const segDir = join(out, 'segments');
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('perl', [script], {
+        env: { ...process.env, FIREBIRD_HOST: '127.0.0.1', SEGMENT_PORT: String(port), ISC_PASSWORD: 'tok', OUT_DIR: segDir, SKIP_FILE: skip },
+      });
+      child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`exit ${code}`))));
+    });
+    server.close();
+
+    expect(requests).toEqual(['tok LIST', 'tok GET mydb.fdb.journal-0000000002', 'tok GET mydb.fdb.journal-0000000003']);
+    expect(readdirSync(segDir).sort()).toEqual(['mydb.fdb.journal-0000000002', 'mydb.fdb.journal-0000000003']);
+    expect(readFileSync(join(segDir, 'mydb.fdb.journal-0000000003'), 'utf8')).toBe('three');
+  });
 });
+

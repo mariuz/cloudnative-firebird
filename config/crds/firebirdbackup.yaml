@@ -25,6 +25,9 @@ spec:
         - name: Phase
           type: string
           jsonPath: .status.phase
+        - name: Location
+          type: string
+          jsonPath: .status.location
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -62,6 +65,7 @@ spec:
                   minimum: 0
                   maximum: 2
                 s3:
+                  description: Upload the backup to S3 instead of the primary's data directory (logical backups only)
                   type: object
                   required:
                     - bucket
@@ -74,6 +78,9 @@ spec:
                     region:
                       type: string
                     prefix:
+                      type: string
+                    clientImage:
+                      description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
                       type: string
                     secretRef:
                       type: object
@@ -100,6 +107,12 @@ spec:
                   type: string
                   format: date-time
                 backupFileName:
+                  description: Backup file name (in the primary's data directory, or the object key relative to s3.prefix)
+                  type: string
+                location:
+                  description: Full location of the backup, a path on the primary or an s3:// URI
+                  type: string
+                jobName:
                   type: string
                 error:
                   type: string

@@ -12,16 +12,15 @@ import {
   setHeaderOptions,
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
+import { buildBackupCronJob, buildJournalArchiveCronJob } from '../utils/backup';
 import { logger } from '../utils/logger';
 import {
   buildAutoSweepCronJob,
-  buildBackupCronJob,
   buildCertificate,
   buildConfigMap,
   buildDiagnosticsCronJob,
   buildGrafanaDashboardConfigMap,
   buildHeadlessService,
-  buildJournalArchiveCronJob,
   buildLease,
   buildNetworkPolicy,
   buildPodDisruptionBudget,
@@ -144,12 +143,12 @@ export class FirebirdClusterController {
         await this.reconcileReplicaService(cluster, log);
       }
 
-      await this.reconcileJournalArchiveCronJob(cluster, log);
+      await this.reconcileJournalArchiveCronJob(cluster, primaryPod, log);
       await this.reconcileLease(cluster, log);
       await this.reconcileCertificate(cluster, log);
       await this.reconcilePodDisruptionBudget(cluster, log);
       await this.reconcileNetworkPolicy(cluster, log);
-      await this.reconcileBackupCronJob(cluster, log);
+      await this.reconcileBackupCronJob(cluster, primaryPod, log);
       await this.reconcileAutoSweepCronJob(cluster, log);
       await this.reconcileDiagnosticsCronJob(cluster, log);
       await this.reconcilePodMonitor(cluster, log);
@@ -506,13 +505,14 @@ export class FirebirdClusterController {
   /** Reconcile CronJob for replication journal continuous archiving to S3 */
   private async reconcileJournalArchiveCronJob(
     cluster: FirebirdCluster,
+    primaryPod: string,
     log: Logger,
   ): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const cronJobName = `${name}-journal-archive`;
 
     if (cluster.spec.replication?.enabled && cluster.spec.replication.journalArchiveS3) {
-      const built = buildJournalArchiveCronJob(cluster);
+      const built = buildJournalArchiveCronJob(cluster, primaryPod);
       if (!built) return;
       const desired = withHibernation(built, cluster);
       try {
@@ -548,13 +548,14 @@ export class FirebirdClusterController {
   /** Reconcile the CronJob resource for database backups */
   private async reconcileBackupCronJob(
     cluster: FirebirdCluster,
+    primaryPod: string,
     log: Logger,
   ): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const backupName = `${name}-backup`;
 
     if (cluster.spec.backup?.enabled) {
-      const desired = withHibernation(buildBackupCronJob(cluster), cluster);
+      const desired = withHibernation(buildBackupCronJob(cluster, primaryPod), cluster);
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: backupName, namespace });
         if (cronJobNeedsUpdate(existing, desired)) {
