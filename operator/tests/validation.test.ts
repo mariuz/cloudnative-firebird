@@ -141,9 +141,37 @@ describe('validateClusterSpec', () => {
     expect(() => validateClusterSpec(makeCluster({ serviceType: 'LoadBalancer' }))).not.toThrow();
   });
 
-  it('passes validation for valid replication modes', () => {
-    expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, mode: 'sync' } }))).not.toThrow();
+  it('accepts async replication and rejects sync until it is implemented', () => {
     expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, mode: 'async' } }))).not.toThrow();
+    expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, mode: 'sync' } }))).toThrow(
+      /'sync' is not supported yet/,
+    );
+  });
+
+  it.each(['/var/lib/firebird/data/repl', '/var/lib/firebird/data/a/b_c-1'])(
+    'accepts journalDirectory %j on the data volume',
+    (journalDirectory) => {
+      expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, journalDirectory } }))).not.toThrow();
+    },
+  );
+
+  it.each(['/tmp/journals', '/var/lib/firebird/data', '/var/lib/firebird/data/x; rm -rf /'])(
+    'rejects journalDirectory %j',
+    (journalDirectory) => {
+      expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, journalDirectory } }))).toThrow(
+        /journalDirectory/,
+      );
+    },
+  );
+
+  it.each([
+    ['archiveTimeoutSeconds', 0],
+    ['segmentRetentionHours', -1],
+    ['archiveTimeoutSeconds', 1.5],
+  ])('rejects replication %s = %s', (field, value) => {
+    expect(() =>
+      validateClusterSpec(makeCluster({ replication: { enabled: true, [field]: value } })),
+    ).toThrow(new RegExp(field));
   });
 
   it('throws ValidationError when replication journalArchiveS3 bucket is empty', () => {

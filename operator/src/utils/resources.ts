@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import {
   V1StatefulSet,
   V1Service,
@@ -19,6 +20,16 @@ import {
   RESOURCE_KIND,
 } from '../types';
 import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
+import {
+  PRIMARY_KEY,
+  REPLICATION_SCRIPTS,
+  SEGMENT_PORT,
+  buildReplicationConf,
+  buildReplicationContainers,
+  instanceHost,
+  replicationDirectories,
+  replicationEnabled,
+} from './replication';
 
 /** The label key used to identify cluster resources */
 export const CLUSTER_LABEL = `${API_GROUP}/cluster`;
@@ -78,6 +89,28 @@ export function superuserClientEnv(cluster: FirebirdCluster): Array<{ name: stri
   ];
 }
 
+/** Pod template annotation carrying the hash of the replication configuration */
+export const REPLICATION_CONFIG_HASH_ANNOTATION = `${API_GROUP}/replication-config-hash`;
+
+/** Replication entries of the cluster ConfigMap that are fixed for the pod's lifetime */
+function replicationConfigData(cluster: FirebirdCluster): Record<string, string> {
+  return {
+    'replication.conf': buildReplicationConf(
+      cluster,
+      `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`,
+      FIREBIRD_DATA_DIR,
+    ),
+    ...REPLICATION_SCRIPTS,
+  };
+}
+
+/** Hash of replication.conf and the replication scripts (not the current primary) */
+export function replicationConfigHash(cluster: FirebirdCluster): string {
+  const data = replicationConfigData(cluster);
+  const canonical = Object.keys(data).sort().map((key) => `${key}\0${data[key]}`).join('\0');
+  return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+}
+
 /** Returns true when lag-aware read-only routing is active for the cluster */
 export function readOnlyRoutingEnabled(cluster: FirebirdCluster): boolean {
   return Boolean(cluster.spec.replication?.enabled && cluster.spec.replication.readOnlyRouting?.enabled);
@@ -133,23 +166,6 @@ export function buildStatefulSet(
       name: `FIREBIRD_CONF_${key}`,
       value,
     })),
-    // Replication environment variables
-    ...(spec.replication?.enabled
-      ? [
-          {
-            name: 'FIREBIRD_REPLICATION_ENABLED',
-            value: 'true',
-          },
-          {
-            name: 'FIREBIRD_REPLICATION_MODE',
-            value: spec.replication.mode ?? 'async',
-          },
-          {
-            name: 'FIREBIRD_REPLICATION_JOURNAL_DIR',
-            value: spec.replication.journalDirectory ?? '/var/lib/firebird/data/journals',
-          },
-        ]
-      : []),
     // Additional env vars from spec
     ...(spec.env ?? []),
   ];
@@ -210,6 +226,17 @@ export function buildStatefulSet(
     });
   }
 
+  const replication = replicationEnabled(cluster)
+    ? buildReplicationContainers(cluster, {
+        image,
+        databasePath: `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`,
+        dataDir: FIREBIRD_DATA_DIR,
+        credentials: superuserClientEnv(cluster),
+      })
+    : undefined;
+  if (replication) initContainers.push(replication.initContainer);
+  const usesConfigVolume = Boolean(spec.bootstrap?.initSql || replication);
+
   const containers = [
     {
       name: 'firebird',
@@ -237,6 +264,7 @@ export function buildStatefulSet(
               },
             ]
           : []),
+        ...(replication?.mainMounts ?? []),
         ...(spec.tls?.enabled
           ? [
               {
@@ -277,10 +305,11 @@ export function buildStatefulSet(
           },
         ]
       : []),
+    ...(replication?.sidecars ?? []),
   ];
 
   const volumes = [
-    ...(spec.bootstrap?.initSql
+    ...(usesConfigVolume
       ? [
           {
             name: 'cluster-config',
@@ -331,10 +360,13 @@ export function buildStatefulSet(
       template: {
         metadata: {
           labels,
-          ...(secretHash
+          ...(secretHash || replication
             ? {
                 annotations: {
-                  'firebird.cloudnative-firebird.io/superuser-secret-hash': secretHash,
+                  ...(secretHash ? { 'firebird.cloudnative-firebird.io/superuser-secret-hash': secretHash } : {}),
+                  // replication.conf is mounted via subPath, which does not follow ConfigMap
+                  // updates; hashing it into the template rolls the pods when it changes
+                  ...(replication ? { [REPLICATION_CONFIG_HASH_ANNOTATION]: replicationConfigHash(cluster) } : {}),
                 },
               }
             : {}),
@@ -529,6 +561,12 @@ export function statefulSetNeedsUpdate(
   if (!existingSpec || !desiredSpec) return true;
 
   if (existingSpec.replicas !== desiredSpec.replicas) return true;
+  // Only operator-set annotations are compared; others (e.g. kubectl restartedAt) are kept
+  const existingAnnotations = existingSpec.template?.metadata?.annotations ?? {};
+  const desiredAnnotations = desiredSpec.template?.metadata?.annotations ?? {};
+  if (Object.entries(desiredAnnotations).some(([key, value]) => existingAnnotations[key] !== value)) {
+    return true;
+  }
 
   const existingPodSpec = existingSpec.template?.spec;
   const desiredPodSpec = desiredSpec.template?.spec;
@@ -537,6 +575,10 @@ export function statefulSetNeedsUpdate(
   if (JSON.stringify(existingPodSpec.nodeSelector) !== JSON.stringify(desiredPodSpec.nodeSelector)) return true;
   if (JSON.stringify(existingPodSpec.affinity) !== JSON.stringify(desiredPodSpec.affinity)) return true;
   if (JSON.stringify(existingPodSpec.tolerations) !== JSON.stringify(desiredPodSpec.tolerations)) return true;
+
+  const names = (list?: Array<{ name: string }>) => (list ?? []).map((c) => c.name).join(',');
+  if (names(existingPodSpec.containers) !== names(desiredPodSpec.containers)) return true;
+  if (names(existingPodSpec.initContainers) !== names(desiredPodSpec.initContainers)) return true;
 
   const existingContainer = existingPodSpec.containers?.[0];
   const desiredContainer = desiredPodSpec.containers?.[0];
@@ -1046,7 +1088,10 @@ export function podDisruptionBudgetNeedsUpdate(
 /**
  * Builds the ConfigMap for custom firebird.conf settings or bootstrap init.sql.
  */
-export function buildConfigMap(cluster: FirebirdCluster): V1ConfigMap | null {
+export function buildConfigMap(
+  cluster: FirebirdCluster,
+  options?: { primaryPod?: string },
+): V1ConfigMap | null {
   const { name, namespace = 'default' } = cluster.metadata;
   const labels = clusterLabels(name);
   const data: Record<string, string> = {};
@@ -1061,6 +1106,13 @@ export function buildConfigMap(cluster: FirebirdCluster): V1ConfigMap | null {
 
   if (cluster.spec.bootstrap?.initSql) {
     data['init.sql'] = cluster.spec.bootstrap.initSql;
+  }
+
+  if (replicationEnabled(cluster)) {
+    Object.assign(data, replicationConfigData(cluster));
+    // Read by the replica seeding step and the segment puller on every poll, so it follows
+    // the operator's view of the current primary without restarting pods
+    data[PRIMARY_KEY] = instanceHost(cluster, options?.primaryPod ?? `${name}-0`);
   }
 
   if (Object.keys(data).length === 0) return null;
@@ -1211,6 +1263,17 @@ export function buildNetworkPolicy(cluster: FirebirdCluster): V1NetworkPolicy {
       ],
     },
   ];
+
+  // The cluster's own pods (instances and maintenance Jobs share the cluster label) reach
+  // the database over the network, and replicas fetch journal segments from the primary
+  const intraClusterRule = {
+    from: [{ podSelector: { matchLabels: { [CLUSTER_LABEL]: name } } }],
+    ports: [
+      { protocol: 'TCP', port: 3050 },
+      ...(replicationEnabled(cluster) ? [{ protocol: 'TCP', port: SEGMENT_PORT }] : []),
+    ],
+  };
+  ingressRules.push(intraClusterRule);
 
   const networkPolicy: V1NetworkPolicy = {
     apiVersion: 'networking.k8s.io/v1',
@@ -1496,13 +1559,15 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster): V1CronJob 
   }
 
   const schedule = cluster.spec.replication.archiveSchedule ?? '*/15 * * * *';
-  const journalDir = cluster.spec.replication.journalDirectory ?? '/var/lib/firebird/data/journals';
+  const archiveDir = replicationDirectories(cluster, FIREBIRD_DATA_DIR).archive;
   const cronJobName = `${name}-journal-archive`;
   const labels = clusterLabels(name);
   const prefix = s3.prefix ? `${s3.prefix.replace(/\/$/, '')}/` : '';
   const endpointOpt = s3.endpoint ? `--endpoint-url ${s3.endpoint}` : '';
 
-  const archiveCmd = `aws ${endpointOpt} s3 sync ${journalDir}/ s3://${s3.bucket}/${prefix}journals/ --delete`;
+  // No --delete: the primary prunes shipped segments locally after segmentRetentionHours,
+  // while the object store keeps the full history for point-in-time recovery
+  const archiveCmd = `aws ${endpointOpt} s3 sync ${archiveDir}/ s3://${s3.bucket}/${prefix}journals/`;
 
   const cronJob: V1CronJob = {
     apiVersion: 'batch/v1',

@@ -126,9 +126,10 @@ export class FirebirdClusterController {
         phaseReason: 'Reconciliation started',
       });
 
-      await this.reconcileConfigMap(cluster, log);
+      const primaryPod = await this.resolvePrimaryPod(cluster, log);
+      await this.reconcileConfigMap(cluster, primaryPod, log);
       // Label pods before (re)pointing service selectors at the routing labels
-      const readRouting = await this.reconcileReadRouting(cluster, log);
+      const readRouting = await this.reconcileReadRouting(cluster, primaryPod, log);
       await this.reconcileHeadlessService(cluster, log);
       await this.reconcileService(cluster, log);
       const { readyInstances, superuserSecretHash, statefulSetExisted } =
@@ -177,11 +178,8 @@ export class FirebirdClusterController {
 
       const replicationStatus = cluster.spec.replication?.enabled
         ? {
-            primaryPod: readRouting?.primaryPod ?? `${name}-0`,
+            primaryPod,
             activeReplicas: Math.max(0, readyInstances - 1),
-            ...(cluster.spec.replication.mode === 'sync'
-              ? { syncReplicas: Array.from({ length: Math.max(0, readyInstances - 1) }, (_, i) => `${name}-${i + 1}`) }
-              : {}),
             ...(readRouting
               ? {
                   readRoutablePods: readRouting.readRoutablePods,
@@ -323,24 +321,29 @@ export class FirebirdClusterController {
     });
   }
 
+  /** The current primary instance: the leader Lease holder, or ordinal 0 before one exists */
+  private async resolvePrimaryPod(cluster: FirebirdCluster, log: Logger): Promise<string> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    try {
+      const lease = await this.coordinationApi.readNamespacedLease({ name: `${name}-lease`, namespace });
+      if (lease.spec?.holderIdentity) return lease.spec.holderIdentity;
+    } catch {
+      log.debug('Leader lease not found, assuming ordinal 0 is primary');
+    }
+    return `${name}-0`;
+  }
+
   /**
    * Label cluster pods with their role and read-routability so that the
    * primary and `-replica` Services route traffic based on readiness and replication lag.
    */
   private async reconcileReadRouting(
     cluster: FirebirdCluster,
+    primaryPod: string,
     log: Logger,
   ): Promise<ReadRoutingResult | undefined> {
     if (!readOnlyRoutingEnabled(cluster) || cluster.spec.hibernated) return undefined;
     const { name, namespace = 'default' } = cluster.metadata;
-
-    let primaryPod = `${name}-0`;
-    try {
-      const lease = await this.coordinationApi.readNamespacedLease({ name: `${name}-lease`, namespace });
-      if (lease.spec?.holderIdentity) primaryPod = lease.spec.holderIdentity;
-    } catch {
-      log.debug('Leader lease not found, assuming ordinal 0 is primary');
-    }
 
     const pods = await this.coreApi.listNamespacedPod({
       namespace,
@@ -662,11 +665,12 @@ export class FirebirdClusterController {
   /** Reconcile custom firebird.conf settings or init.sql script ConfigMap */
   private async reconcileConfigMap(
     cluster: FirebirdCluster,
+    primaryPod: string,
     log: Logger,
   ): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const configName = `${name}-config`;
-    const desired = buildConfigMap(cluster);
+    const desired = buildConfigMap(cluster, { primaryPod });
 
     if (desired) {
       try {

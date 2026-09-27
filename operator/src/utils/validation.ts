@@ -70,6 +70,30 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
         `Invalid replication mode: ${spec.replication.mode}. Must be 'sync' or 'async'.`,
       );
     }
+    if (spec.replication.mode === 'sync') {
+      throw new ValidationError(
+        "Replication mode 'sync' is not supported yet; use 'async' (journal shipping).",
+      );
+    }
+    // Must live on the instance volume (shared with the replication sidecars) and is written
+    // into replication.conf and shell environment
+    if (
+      spec.replication.journalDirectory !== undefined &&
+      !/^\/var\/lib\/firebird\/data\/[A-Za-z0-9._/-]+$/.test(spec.replication.journalDirectory)
+    ) {
+      throw new ValidationError(
+        `Invalid replication journalDirectory: "${spec.replication.journalDirectory}". ` +
+          'It must be a path below /var/lib/firebird/data.',
+      );
+    }
+    for (const [field, value] of [
+      ['archiveTimeoutSeconds', spec.replication.archiveTimeoutSeconds],
+      ['segmentRetentionHours', spec.replication.segmentRetentionHours],
+    ] as const) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+        throw new ValidationError(`Invalid replication ${field}: ${value}. Must be a positive integer.`);
+      }
+    }
     const routing = spec.replication.readOnlyRouting;
     if (
       routing?.maxLagSeconds !== undefined &&

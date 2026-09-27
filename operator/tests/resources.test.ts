@@ -232,74 +232,87 @@ describe('statefulSetNeedsUpdate', () => {
 });
 
 describe('buildStatefulSet (replication)', () => {
-  it('does not set replication env vars when replication is disabled', () => {
-    const cluster = makeCluster({ replication: { enabled: false } });
-    const sts = buildStatefulSet(cluster);
-    const container = sts.spec?.template?.spec?.containers?.[0];
-    const replicationEnv = container?.env?.find(
-      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_ENABLED',
-    );
-    expect(replicationEnv).toBeUndefined();
+  const podSpecOf = (cluster: FirebirdCluster) => buildStatefulSet(cluster).spec?.template?.spec;
+
+  it('adds no replication containers when replication is disabled or absent', () => {
+    for (const cluster of [makeCluster({ replication: { enabled: false } }), makeCluster()]) {
+      const podSpec = podSpecOf(cluster);
+      expect(podSpec?.initContainers).toBeUndefined();
+      expect(podSpec?.containers?.map((c) => c.name)).toEqual(['firebird']);
+    }
   });
 
-  it('does not set replication env vars when replication spec is absent', () => {
-    const cluster = makeCluster();
-    const sts = buildStatefulSet(cluster);
-    const container = sts.spec?.template?.spec?.containers?.[0];
-    const replicationEnv = container?.env?.find(
-      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_ENABLED',
-    );
-    expect(replicationEnv).toBeUndefined();
+  it('seeds replicas in an init container and ships segments with two sidecars', () => {
+    const podSpec = podSpecOf(makeCluster({ replication: { enabled: true } }));
+    expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['replication-init']);
+    expect(podSpec?.containers?.map((c) => c.name)).toEqual(['firebird', 'segment-server', 'segment-puller']);
+    expect(podSpec?.containers?.[1].ports).toEqual([{ name: 'segments', containerPort: 3051, protocol: 'TCP' }]);
   });
 
-  it('sets FIREBIRD_REPLICATION_ENABLED=true when replication is enabled', () => {
-    const cluster = makeCluster({ replication: { enabled: true } });
-    const sts = buildStatefulSet(cluster);
-    const container = sts.spec?.template?.spec?.containers?.[0];
-    const replicationEnv = container?.env?.find(
-      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_ENABLED',
+  it('runs the replication init after bootstrap recovery', () => {
+    const podSpec = podSpecOf(
+      makeCluster({ replication: { enabled: true }, bootstrap: { recovery: { sourcePath: '/backup/db.fbk' } } }),
     );
-    expect(replicationEnv?.value).toBe('true');
+    expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['bootstrap-restore', 'replication-init']);
   });
 
-  it('defaults FIREBIRD_REPLICATION_MODE to async when mode is not specified', () => {
-    const cluster = makeCluster({ replication: { enabled: true } });
-    const sts = buildStatefulSet(cluster);
-    const container = sts.spec?.template?.spec?.containers?.[0];
-    const modeEnv = container?.env?.find(
-      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_MODE',
-    );
-    expect(modeEnv?.value).toBe('async');
+  it('mounts replication.conf and the publication init script into the Firebird container', () => {
+    const mounts = podSpecOf(makeCluster({ replication: { enabled: true } }))?.containers?.[0].volumeMounts;
+    expect(mounts).toContainEqual({
+      name: 'cluster-config',
+      mountPath: '/opt/firebird/replication.conf',
+      subPath: 'replication.conf',
+    });
+    expect(mounts).toContainEqual({
+      name: 'cluster-config',
+      mountPath: '/docker-entrypoint-initdb.d/00-enable-publication.sql',
+      subPath: 'enable-publication.sql',
+    });
   });
 
-  it('sets FIREBIRD_REPLICATION_MODE to sync when mode is sync', () => {
-    const cluster = makeCluster({ replication: { enabled: true, mode: 'sync' } });
-    const sts = buildStatefulSet(cluster);
-    const container = sts.spec?.template?.spec?.containers?.[0];
-    const modeEnv = container?.env?.find(
-      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_MODE',
-    );
-    expect(modeEnv?.value).toBe('sync');
+  it('gives the sidecars the data volume, the scripts and SYSDBA credentials', () => {
+    const cluster = makeCluster({ superuserSecret: { name: 'fb-secret' }, replication: { enabled: true } });
+    const puller = podSpecOf(cluster)?.containers?.find((c) => c.name === 'segment-puller');
+    expect(puller?.command).toEqual(['perl', '/etc/firebird-operator/segment-puller.pl']);
+    expect(puller?.volumeMounts).toContainEqual({ name: 'firebird-data', mountPath: '/var/lib/firebird/data' });
+    expect(puller?.volumeMounts).toContainEqual({
+      name: 'cluster-config',
+      mountPath: '/etc/firebird-operator',
+      readOnly: true,
+    });
+    expect(puller?.env).toContainEqual({
+      name: 'ISC_PASSWORD',
+      valueFrom: { secretKeyRef: { name: 'fb-secret', key: 'password' } },
+    });
+    expect(puller?.env).toContainEqual({ name: 'SOURCE_DIR', value: '/var/lib/firebird/data/replication/source' });
+    expect(puller?.env).toContainEqual({ name: 'PRIMARY_FILE', value: '/etc/firebird-operator/primary' });
   });
 
-  it('sets FIREBIRD_REPLICATION_MODE to async when mode is explicitly async', () => {
-    const cluster = makeCluster({ replication: { enabled: true, mode: 'async' } });
-    const sts = buildStatefulSet(cluster);
-    const container = sts.spec?.template?.spec?.containers?.[0];
-    const modeEnv = container?.env?.find(
-      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_MODE',
-    );
-    expect(modeEnv?.value).toBe('async');
+  it('derives replication directories from journalDirectory', () => {
+    const cluster = makeCluster({ replication: { enabled: true, journalDirectory: '/var/lib/firebird/data/repl' } });
+    const env = podSpecOf(cluster)?.initContainers?.[0].env;
+    expect(env).toContainEqual({ name: 'JOURNAL_DIR', value: '/var/lib/firebird/data/repl/journal' });
+    expect(env).toContainEqual({ name: 'ARCHIVE_DIR', value: '/var/lib/firebird/data/repl/archive' });
   });
 
-  it('sets FIREBIRD_REPLICATION_JOURNAL_DIR when replication is enabled', () => {
-    const cluster = makeCluster({ replication: { enabled: true, journalDirectory: '/custom/journals' } });
-    const sts = buildStatefulSet(cluster);
-    const container = sts.spec?.template?.spec?.containers?.[0];
-    const journalEnv = container?.env?.find(
-      (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_JOURNAL_DIR',
-    );
-    expect(journalEnv?.value).toBe('/custom/journals');
+  it('rolls pods when the replication configuration changes, but not the ConfigMap primary', () => {
+    const a = buildStatefulSet(makeCluster({ replication: { enabled: true } }));
+    const b = buildStatefulSet(makeCluster({ replication: { enabled: true, archiveTimeoutSeconds: 30 } }));
+    expect(statefulSetNeedsUpdate(a, b)).toBe(true);
+    expect(statefulSetNeedsUpdate(a, buildStatefulSet(makeCluster({ replication: { enabled: true } })))).toBe(false);
+  });
+
+  it('detects enabling replication on an existing cluster', () => {
+    const before = buildStatefulSet(makeCluster());
+    const after = buildStatefulSet(makeCluster({ replication: { enabled: true } }));
+    expect(statefulSetNeedsUpdate(before, after)).toBe(true);
+  });
+
+  it('ignores annotations added by other tools when comparing pod templates', () => {
+    const desired = buildStatefulSet(makeCluster({ replication: { enabled: true } }));
+    const existing = JSON.parse(JSON.stringify(desired));
+    existing.spec.template.metadata.annotations['kubectl.kubernetes.io/restartedAt'] = '2026-01-01T00:00:00Z';
+    expect(statefulSetNeedsUpdate(existing, desired)).toBe(false);
   });
 
   it('adds secret hash annotation to pod template when superuserSecretHash is provided', () => {
@@ -373,7 +386,7 @@ describe('buildJournalArchiveCronJob', () => {
     expect(cronJob?.spec?.schedule).toBe('*/10 * * * *');
     const container = cronJob?.spec?.jobTemplate.spec?.template.spec?.containers[0];
     expect(container?.name).toBe('journal-archiver');
-    expect(container?.args?.[0]).toContain('aws --endpoint-url https://minio.local:9000 s3 sync /var/lib/firebird/data/journals/ s3://journal-bucket/journals/ --delete');
+    expect(container?.args?.[0]).toContain('aws --endpoint-url https://minio.local:9000 s3 sync /var/lib/firebird/data/replication/archive/ s3://journal-bucket/journals/');
   });
 });
 
@@ -1068,5 +1081,62 @@ describe('buildStatefulSet (official image runtime contract)', () => {
     const a = buildStatefulSet(makeCluster({ config: { settings: { DefaultDbCachePages: '2048' } } }));
     const b = buildStatefulSet(makeCluster({ config: { settings: { DefaultDbCachePages: '4096' } } }));
     expect(statefulSetNeedsUpdate(a, b)).toBe(true);
+  });
+});
+
+describe('buildConfigMap (replication)', () => {
+  it('publishes replication.conf, the scripts and the current primary', () => {
+    const cm = buildConfigMap(makeCluster({ replication: { enabled: true } }), { primaryPod: 'test-cluster-1' });
+    expect(cm?.data?.primary).toBe('test-cluster-1.test-cluster-headless');
+    expect(Object.keys(cm?.data ?? {}).sort()).toEqual([
+      'enable-publication.sql',
+      'fetch-seed.pl',
+      'primary',
+      'replication.conf',
+      'seed-replica.sh',
+      'segment-puller.pl',
+      'segment-server.pl',
+    ]);
+  });
+
+  it('defaults the primary to ordinal 0', () => {
+    expect(buildConfigMap(makeCluster({ replication: { enabled: true } }))?.data?.primary).toBe(
+      'test-cluster-0.test-cluster-headless',
+    );
+  });
+
+  it('writes primary and replica settings for the cluster database into replication.conf', () => {
+    const conf = buildConfigMap(makeCluster({ databaseName: 'app.fdb', replication: { enabled: true } }))?.data?.[
+      'replication.conf'
+    ];
+    expect(conf).toContain('database = /var/lib/firebird/data/app.fdb');
+    expect(conf).toContain('journal_directory = /var/lib/firebird/data/replication/journal');
+    expect(conf).toContain('journal_archive_directory = /var/lib/firebird/data/replication/archive');
+    expect(conf).toContain('journal_source_directory = /var/lib/firebird/data/replication/source');
+    expect(conf).toContain('journal_archive_timeout = 10');
+  });
+});
+
+describe('buildNetworkPolicy (intra-cluster traffic)', () => {
+  it('lets the cluster pods reach the database and, with replication, the segment port', () => {
+    const np = buildNetworkPolicy(
+      makeCluster({
+        networkPolicy: { enabled: true, ingressFrom: [{ podSelector: { app: 'client' } }] },
+        replication: { enabled: true },
+      }),
+    );
+    expect(np.spec?.ingress).toContainEqual({
+      from: [{ podSelector: { matchLabels: { 'firebird.cloudnative-firebird.io/cluster': 'test-cluster' } } }],
+      ports: [
+        { protocol: 'TCP', port: 3050 },
+        { protocol: 'TCP', port: 3051 },
+      ],
+    });
+  });
+
+  it('does not open the segment port without replication', () => {
+    const np = buildNetworkPolicy(makeCluster({ networkPolicy: { enabled: true } }));
+    const ports = (np.spec?.ingress ?? []).flatMap((rule) => rule.ports ?? []).map((p) => p.port);
+    expect(ports).not.toContain(3051);
   });
 });

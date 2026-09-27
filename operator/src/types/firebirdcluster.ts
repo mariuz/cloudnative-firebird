@@ -157,14 +157,19 @@ export interface ReplicationConfiguration {
   /** Whether replication is enabled */
   enabled: boolean;
   /**
-   * Replication mode.
-   * - sync: writes are confirmed only after replica acknowledges (safer, slower)
-   * - async: writes are confirmed immediately, replica catches up (faster, less durable)
-   * Defaults to 'async'.
+   * Replication mode. Only 'async' (journal shipping) is supported; 'sync' is rejected
+   * by validation until synchronous replication is implemented. Defaults to 'async'.
    */
   mode?: 'sync' | 'async';
-  /** Directory path for replication journal files (defaults to "/var/lib/firebird/data/journals") */
+  /**
+   * Base directory for replication files on each instance's volume; journal, archive and
+   * source directories are created below it (defaults to "/var/lib/firebird/data/replication")
+   */
   journalDirectory?: string;
+  /** Seconds after which a partially filled journal segment is archived and shipped (defaults to 10) */
+  archiveTimeoutSeconds?: number;
+  /** Hours archived segments are kept on the primary for replicas to fetch (defaults to 24) */
+  segmentRetentionHours?: number;
   /** Cloud S3 storage configuration for continuous journal archiving (PITR) */
   journalArchiveS3?: S3BackupConfiguration;
   /** Cron schedule for archiving completed journal files to object storage */
@@ -325,8 +330,6 @@ export interface ReplicationStatus {
   primaryPod?: string;
   /** Number of active replicating secondary instances */
   activeReplicas?: number;
-  /** List of replica pod names operating in synchronous replication mode */
-  syncReplicas?: string[];
   /** Pods currently selected by the read-only `-replica` Service */
   readRoutablePods?: string[];
   /** Replicas excluded from read-only routing because of excessive replication lag */
