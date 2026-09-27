@@ -530,6 +530,11 @@ spec:
                   type: array
                   items:
                     type: string
+                reseedingInstances:
+                  description: Replicas being re-seeded (reseed pod annotation)
+                  type: array
+                  items:
+                    type: string
                 replicationStatus:
                   description: Detailed replication status details
                   type: object

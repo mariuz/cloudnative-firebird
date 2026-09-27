@@ -15,6 +15,7 @@ own containers and removes them when it finishes.
 | 3 | A physical copy inherits publication; a publishing replica fast-forwards past segments | Expected behaviour, handled | Yes, always |
 | 4 | `nbackup -B 0` copies record the still-active segment | Expected behaviour, handled | Yes, always |
 | 5 | `gstat -h` omits "Replication sequence" while it is 0 | Minor | Yes, always |
+| 6 | The official image keeps the security database on the container filesystem | Image behaviour, handled | Yes, always |
 
 ---
 
@@ -136,6 +137,23 @@ restored from it with `-SEQ` treats that segment as already applied.
 before anything was journaled) has no "Replication sequence" line in `gstat -h` output.
 
 **Handling.** The init scripts treat a missing value as 0.
+
+---
+
+## 6. The official image keeps the security database on the container filesystem
+
+**What happens.** `firebirdsql/firebird:5` stores users in `/opt/firebird/security5.fdb`, inside
+the image, and only `/var/lib/firebird/data` is meant to be a volume. In Kubernetes every
+container restart starts from the image again, so users created with `CREATE USER` disappear;
+only SYSDBA survives because the entrypoint recreates its password on every start.
+
+**Reproduce.** Create a user in a pod, delete the pod, and log in as that user after the
+StatefulSet recreates it: "Your user name and password are not defined".
+
+**Handling.** The `security-db-init` container copies the image's security database to
+`/var/lib/firebird/data/system/security.fdb` on first start and writes a `databases.conf` whose
+`security.db` alias (used by the entrypoint for SYSDBA) points there; the server uses it through
+`SecurityDatabase`. Users are managed with `FirebirdUser` (README, "Users").
 
 ---
 

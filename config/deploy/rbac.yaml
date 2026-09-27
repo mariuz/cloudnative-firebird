@@ -49,6 +49,25 @@ rules:
       - get
       - update
       - patch
+  # Declarative users (the finalizer is managed on the object itself)
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdusers
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdusers/status
+    verbs:
+      - get
+      - update
+      - patch
   # StatefulSets
   - apiGroups:
       - apps
@@ -115,6 +134,8 @@ rules:
       - list
       - watch
       - patch
+      # restarts a replica into its init container to re-seed it (reseed annotation)
+      - delete
   # ConfigMaps (firebird.conf, init.sql, Grafana dashboards)
   - apiGroups:
       - ""

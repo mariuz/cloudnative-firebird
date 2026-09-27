@@ -56,14 +56,32 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   instances unless read-only routing labels the primary; point them at the primary instance
   like the backup Jobs.
 
+## Users
+
+- [ ] **Role management**: `FirebirdUser` grants roles that must already exist. Declaring roles
+  (and their privileges) would complete the picture, e.g. a `FirebirdRole` resource or a
+  `Database`-like resource as in CloudNativePG.
+- [ ] **Dropping users on unready instances**: with `reclaimPolicy: delete`, instances that are not
+  ready when the resource is deleted keep the user in their security database.
+- [ ] **Password without SQL text**: the services API (`action_modify_user`) would keep the
+  password out of `MON$STATEMENTS`, but takes it as a command-line argument; pick the lesser risk.
+- [ ] **Existing users on upgrade**: clusters created before v0.12.0 start with a fresh security
+  database seeded from the image (only SYSDBA); users created by applications before the upgrade
+  were already lost on every pod restart and must be re-created (ideally as `FirebirdUser`).
+
 ## Other roadmap items
 
 - [ ] TLS: Firebird has no native TLS listener; decide between WireCrypt only, a TLS proxy
   sidecar, or dropping the `tls` mount.
 - [ ] **Failover**: the leader Lease is static. Implement switchover first, then failover with the
   Lease as promotion mutex (CloudNativePG 1.30); a fenced primary must never be failed over.
+- [ ] **Re-seeding reacts within a resync interval** (up to 30 s): pods are not watched. A pod
+  watch would also let fencing and routing react faster.
+- [ ] **Re-creating a replica's volume** (lost node with local storage): re-seeding keeps the PVC.
+  Deleting it needs the pod deleted repeatedly until the claim is gone, because the StatefulSet
+  recreates the pod against the terminating claim.
 - [ ] Items from the CloudNativePG 1.28 – 1.30 review ([docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md)):
-  Kubernetes events, replica re-creation (`unrecoverable`), `serviceAccountName` for workload
+  Kubernetes events, `serviceAccountName` for workload
   identity (S3 without static keys), per-backup reconciliation pause, pod/container security
   contexts.
 - [ ] Rolling updates with the primary last.

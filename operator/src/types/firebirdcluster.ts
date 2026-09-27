@@ -404,6 +404,8 @@ export interface FirebirdClusterStatus {
    * fencedInstances annotation
    */
   fencedInstances?: string[];
+  /** Replicas being re-seeded (reseed annotation) */
+  reseedingInstances?: string[];
   /** Label selector of the instance pods, for the scale subresource (HPA / VPA) */
   selector?: string;
 }

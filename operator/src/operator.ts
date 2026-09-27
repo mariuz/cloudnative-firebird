@@ -3,6 +3,7 @@ import { logger } from './utils/logger';
 import { HealthServer } from './utils/health';
 import { FirebirdClusterController } from './controllers/firebirdcluster.controller';
 import { FirebirdBackupController } from './controllers/backup.controller';
+import { FirebirdUserController } from './controllers/user.controller';
 import { FENCED_INSTANCES_ANNOTATION } from './utils/fencing';
 import {
   API_GROUP,
@@ -11,6 +12,7 @@ import {
   FirebirdCluster,
   FirebirdRestore,
   FirebirdScheduledBackup,
+  FirebirdUser,
   RESOURCE_PLURAL,
 } from './types';
 
@@ -24,7 +26,7 @@ interface WatchedObject {
   metadata: { name: string; namespace?: string; generation?: number };
 }
 
-/** A watched backup-related resource kind and how to reconcile it */
+/** A watched resource kind other than FirebirdCluster (backups, restores, users) and how to reconcile it */
 interface BackupKind {
   plural: string;
   reconcile: (obj: WatchedObject) => Promise<void>;
@@ -42,6 +44,7 @@ export class Operator {
   private readonly kubeConfig: KubeConfig;
   private readonly controller: FirebirdClusterController;
   private readonly backupController: FirebirdBackupController;
+  private readonly userController: FirebirdUserController;
   private readonly watch: Watch;
   private readonly healthServer: HealthServer;
   private readonly watchRequests = new Map<string, { abort: () => void }>();
@@ -62,6 +65,7 @@ export class Operator {
     this.kubeConfig = kubeConfig;
     this.controller = new FirebirdClusterController(kubeConfig);
     this.backupController = new FirebirdBackupController(kubeConfig);
+    this.userController = new FirebirdUserController(kubeConfig);
     this.backupKinds = [
       {
         plural: 'firebirdbackups',
@@ -74,6 +78,10 @@ export class Operator {
       {
         plural: 'firebirdrestores',
         reconcile: (obj) => this.backupController.reconcileRestore(obj as FirebirdRestore),
+      },
+      {
+        plural: 'firebirdusers',
+        reconcile: (obj) => this.userController.reconcileUser(obj as FirebirdUser),
       },
     ];
     this.watch = new Watch(kubeConfig);

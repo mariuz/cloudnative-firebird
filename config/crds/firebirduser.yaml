@@ -1,0 +1,136 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: firebirdusers.firebird.cloudnative-firebird.io
+spec:
+  group: firebird.cloudnative-firebird.io
+  names:
+    kind: FirebirdUser
+    listKind: FirebirdUserList
+    plural: firebirdusers
+    singular: firebirduser
+    shortNames:
+      - fbu
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterName
+        - name: User
+          type: string
+          jsonPath: .status.username
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          description: >-
+            FirebirdUser manages a Firebird login and its role grants as a standalone object
+            (after CloudNativePG's DatabaseRole). Users are applied to every instance's security
+            database; role grants to the cluster database.
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - clusterName
+                - passwordSecret
+              properties:
+                clusterName:
+                  description: FirebirdCluster name (immutable)
+                  type: string
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: clusterName is immutable
+                username:
+                  description: >-
+                    Firebird user name, a regular identifier stored in upper case (default: the
+                    resource name with "-" replaced by "_"). Immutable.
+                  type: string
+                  pattern: '^[A-Za-z][A-Za-z0-9_$]{0,62}$'
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: username is immutable
+                passwordSecret:
+                  description: Secret holding the password
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                    key:
+                      description: Key in the Secret (default "password")
+                      type: string
+                active:
+                  description: Whether the user can log in (default true)
+                  type: boolean
+                admin:
+                  description: Grant the RDB$ADMIN role in the security database
+                  type: boolean
+                roles:
+                  description: >-
+                    Roles granted in the cluster database. They must exist; roles granted
+                    earlier and no longer listed are revoked.
+                  type: array
+                  items:
+                    type: string
+                    pattern: '^[A-Za-z][A-Za-z0-9_$]{0,62}$'
+                reclaimPolicy:
+                  description: >-
+                    "retain" (default) keeps the Firebird user when this resource is deleted;
+                    "delete" drops it and revokes its privileges
+                  type: string
+                  enum:
+                    - retain
+                    - delete
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Applying
+                    - Applied
+                    - Failed
+                message:
+                  type: string
+                username:
+                  type: string
+                jobName:
+                  type: string
+                lastFailureTime:
+                  type: string
+                  format: date-time
+                failedHash:
+                  type: string
+                instances:
+                  description: Instances the current spec has been applied to
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      hash:
+                        type: string
+                      volume:
+                        type: string

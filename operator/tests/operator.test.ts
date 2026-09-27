@@ -71,6 +71,11 @@ vi.mock('../src/controllers/backup.controller', () => ({
   })),
 }));
 
+const mockReconcileUser = vi.fn().mockResolvedValue(undefined);
+vi.mock('../src/controllers/user.controller', () => ({
+  FirebirdUserController: vi.fn().mockImplementation(() => ({ reconcileUser: mockReconcileUser })),
+}));
+
 // Mock the health server so no real HTTP port is opened during tests
 const mockHealthStart = vi.fn();
 const mockHealthStop = vi.fn();
@@ -108,7 +113,7 @@ describe('Operator – lifecycle', () => {
       expect(mockHealthStart).toHaveBeenCalledTimes(1);
     });
 
-    it('watches FirebirdCluster, FirebirdBackup, FirebirdScheduledBackup and FirebirdRestore resources', async () => {
+    it('watches FirebirdCluster, backup, restore and user resources', async () => {
       const { operator } = makeOperator();
       await operator.start();
       expect(mockWatchFn.mock.calls.map((c) => c[0])).toEqual([
@@ -116,6 +121,7 @@ describe('Operator – lifecycle', () => {
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdbackups',
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdscheduledbackups',
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdrestores',
+        '/apis/firebird.cloudnative-firebird.io/v1/firebirdusers',
       ]);
     });
 
@@ -151,7 +157,7 @@ describe('Operator – lifecycle', () => {
       const { operator } = makeOperator();
       await operator.start();
       operator.stop();
-      expect(mockWatchAbort).toHaveBeenCalledTimes(4);
+      expect(mockWatchAbort).toHaveBeenCalledTimes(5);
     });
 
     it('marks the operator as not ready', async () => {
@@ -472,6 +478,8 @@ describe('Operator – backup resources', () => {
     emit('firebirdbackups', 'ADDED', backup(1));
     emit('firebirdscheduledbackups', 'ADDED', backup(1, 's1'));
     emit('firebirdrestores', 'ADDED', backup(1, 'r1'));
+    emit('firebirdusers', 'ADDED', backup(1, 'u1'));
+    expect(mockReconcileUser).toHaveBeenCalledTimes(1);
     expect(mockReconcileBackup).toHaveBeenCalledTimes(1);
     expect(mockReconcileScheduledBackup).toHaveBeenCalledTimes(1);
     expect(mockReconcileRestore).toHaveBeenCalledTimes(1);
