@@ -889,6 +889,7 @@ describe('buildConfigMap (replication)', () => {
     expect(Object.keys(cm?.data ?? {}).sort()).toEqual([
       'demote',
       'enable-publication.sql',
+      'failover.pl',
       'fetch-seed.pl',
       'fetch-segments.pl',
       'init-instance.sh',

@@ -75,3 +75,70 @@ export function buildSwitchoverJob(
     },
   };
 }
+
+/** How long the election waits for replicas to apply the segments they already received */
+export const FAILOVER_SETTLE_SECONDS = 60;
+export const DEFAULT_FAILOVER_DELAY_SECONDS = 30;
+
+export function failoverJobName(cluster: FirebirdCluster): string {
+  return `${cluster.metadata.name}-failover`;
+}
+
+/**
+ * Election Job for an automatic failover: reports the most advanced ready replica in its
+ * termination message (failover.pl). It changes nothing, so it can be discarded if the primary
+ * recovers.
+ */
+export function buildFailoverJob(cluster: FirebirdCluster, candidates: string[]): V1Job {
+  const { name, namespace = 'default', uid } = cluster.metadata;
+  const labels = { ...clusterLabels(name), 'app.kubernetes.io/component': 'failover' };
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: failoverJobName(cluster),
+      namespace,
+      labels,
+      ownerReferences: [
+        { apiVersion: `${API_GROUP}/v1`, kind: 'FirebirdCluster', name, uid: uid ?? '', controller: true, blockOwnerDeletion: true },
+      ],
+    },
+    spec: {
+      backoffLimit: 0,
+      ttlSecondsAfterFinished: 3600,
+      template: {
+        metadata: { labels },
+        spec: {
+          restartPolicy: 'Never',
+          containers: [
+            {
+              name: 'failover',
+              image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+              command: ['perl', `${OPERATOR_CONFIG_DIR}/failover.pl`],
+              env: [
+                ...superuserClientEnv(cluster),
+                { name: 'CANDIDATES', value: candidates.map((p) => instanceHost(cluster, p)).join(' ') },
+                { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
+                { name: 'SETTLE_SECONDS', value: String(FAILOVER_SETTLE_SECONDS) },
+              ],
+              volumeMounts: [{ name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }],
+            },
+          ],
+          volumes: [{ name: 'cluster-config', configMap: { name: `${name}-config` } }],
+        },
+      },
+    },
+  };
+}
+
+/** Parses the election result ("target=<host> sequence=<S> positions=<host>:<seq>,...") */
+export function parseElection(message: string): { target: string; sequence: number; positions: Record<string, number> } | undefined {
+  const m = /target=(\S+) sequence=(\d+) positions=(\S*)/.exec(message ?? '');
+  if (!m) return undefined;
+  const positions: Record<string, number> = {};
+  for (const entry of m[3].split(',').filter(Boolean)) {
+    const i = entry.lastIndexOf(':');
+    positions[entry.slice(0, i)] = Number(entry.slice(i + 1));
+  }
+  return { target: m[1], sequence: Number(m[2]), positions };
+}

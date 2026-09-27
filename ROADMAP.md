@@ -4,8 +4,8 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.13.0):** journal replication (experimental) with replica re-seeding and
-> planned switchover, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
+> **Status note (v0.14.0):** journal replication (experimental) with replica re-seeding,
+> planned switchover and automatic failover, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
 > (1.28 – 1.30.1) are reviewed in [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md).
@@ -36,11 +36,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 
 - [x] **Basic Primary & Replica Service Split** *(v0.2.0)*
   - Dedicated `-replica` Service alongside primary ClusterIP service.
-- [ ] **Automated Leader Election & Failover** *(Lease object since v0.4.0; election and failover not implemented)*
-  - Kubernetes Lease-based leader monitoring for primary instance failover. Today the Lease is created
-    once, naming ordinal 0, and never renewed or moved.
-  - Automatic promotion of replica instances to primary role when primary pod fails. Planned on top of
-    planned switchover, with the Lease as promotion mutex as in CloudNativePG 1.30.
+- [x] **Automated Failover** *(Lease since v0.4.0; failover v0.14.0)*
+  - Opt-in `replication.failover`: when the primary has not been ready for `delaySeconds`, an election Job asks every ready replica for its applied position and the most advanced one is promoted (same offline promotion as a planned switchover); the Lease and the `targetPrimary` annotation move to it.
+  - Replicas behind it and the old primary (when it returns) are re-seeded. Asynchronous replication: unshipped transactions are lost. A fenced primary is never failed over.
 - [x] **Firebird 4.0+ Journal-Based Replication Management & PITR Archiving** *(v0.5.0, working since v0.9.0)*
   - Dynamic journal file sync, status tracking, and continuous archiving to S3.
   - Quorum management for synchronous replication (`mode: sync`): not implemented, rejected by validation.
@@ -183,7 +181,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 |---|---|---|---|
 | **Primary/Replica Setup** | Native Streaming Replication | Basic Replica Service | **v0.2.0 (Done)** |
 | **Read-Only Routing** | `-ro` / `-r` Services | Lag-aware `-replica` Service | **v0.6.0 (Done)** |
-| **Failover / Promotion** | Automated Failover | K8s Lease (static; no failover yet) | Planned |
+| **Failover / Promotion** | Automated Failover | Election of the most advanced replica (opt-in) | **v0.14.0 (Done)** |
 | **Physical Backup** | Barman Cloud / `pg_basebackup` | `nbackup` (Level 0-2) | **v0.3.0 (Done)** |
 | **Logical Backup** | `pg_dump` / CronJob | `gbak` CronJob & CRDs | **v0.1.0 (Done)** |
 | **PITR (Point-In-Time)** | Continuous Archiving | Journal Archiving to S3 | **v0.5.0 (Done)** |

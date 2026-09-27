@@ -25,11 +25,12 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Replication lag in status**: the segment servers now answer `POSITION` (a replica's
   control-file position and pending segments); compare it with the primary's sequence and publish
   it (feeds `readOnlyRouting` via the `replication-lag-seconds` annotation).
-- [ ] **Automatic failover**: planned switchover is done; failover needs the same promotion when
-  the primary is gone. Without the old primary the last archived segment is the one the most
-  advanced replica applied (POSITION); pick it, fence (or delete) the old primary so it cannot
-  come back as a second primary, and re-seed it later. Use the Lease as promotion mutex
-  (CloudNativePG 1.30).
+- [ ] **Failover safety**: the Lease is moved by the operator, not held and renewed by the
+  instances (CloudNativePG 1.30's promotion mutex). A primary that is alive but unready (e.g.
+  overloaded) is restarted and re-seeded after a failover; one that is partitioned from the other
+  pods but still ready to the kubelet is not failed over at all. Instance-side self-fencing
+  (shut the database down when the Lease is lost) would close both gaps.
+- [ ] **Synchronous replication** would make failover lossless; see below.
 - [ ] **Switchover downtime**: writes stop from the primary shutdown until the target pod is ready
   again (two pod restarts). Promoting online (replica mode none and publication on a running
   replica) would need the replication sequence set without restarting.

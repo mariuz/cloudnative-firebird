@@ -14,7 +14,15 @@ import {
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
 import { buildBackupCronJob, buildJournalArchiveCronJob } from '../utils/backup';
-import { TARGET_PRIMARY_ANNOTATION, buildSwitchoverJob, switchoverJobName } from '../utils/switchover';
+import {
+  DEFAULT_FAILOVER_DELAY_SECONDS,
+  TARGET_PRIMARY_ANNOTATION,
+  buildFailoverJob,
+  buildSwitchoverJob,
+  failoverJobName,
+  parseElection,
+  switchoverJobName,
+} from '../utils/switchover';
 import {
   buildFencingJob,
   desiredFencedInstances,
@@ -53,7 +61,7 @@ import {
   instancePods,
 } from '../utils/resources';
 import { computeReadRouting, isPodReady, podRoutingLabelPatch } from '../utils/routing';
-import { RESEED_ANNOTATION, RESEED_KEY, replicationEnabled } from '../utils/replication';
+import { RESEED_ANNOTATION, RESEED_KEY, instanceHost, replicationEnabled } from '../utils/replication';
 import { planVolumeExpansion } from '../utils/storage';
 import { validateClusterSpec } from '../utils/validation';
 import {
@@ -81,6 +89,7 @@ interface SwitchoverResult {
   restart: string[];
   reseed: Record<string, string>;
   status?: SwitchoverStatus;
+  primaryNotReadySince?: string;
 }
 
 /** Outcome of the fencing reconciliation */
@@ -271,6 +280,7 @@ export class FirebirdClusterController {
         selector: podSelector(cluster),
         reseedingInstances: Object.keys(reseed.requests).sort(),
         ...(switchover.status ? { switchover: switchover.status } : {}),
+        primaryNotReadySince: switchover.primaryNotReadySince,
         ...(volumes ? { volumes } : {}),
         conditions: [
           this.makeCondition(
@@ -434,12 +444,17 @@ export class FirebirdClusterController {
     }
     const state = current.status?.switchover;
     const desired = current.metadata.annotations?.[TARGET_PRIMARY_ANNOTATION]?.trim();
-    const inFlight = state && (state.phase === 'Stopping' || state.phase === 'Promoting');
+    const inFlight = state && (state.phase === 'Electing' || state.phase === 'Stopping' || state.phase === 'Promoting');
+    const failover = cluster.spec.replication?.failover;
     result.status = state;
-    if (!inFlight && (!desired || desired === primaryPod)) return result;
-    if (!inFlight && state?.phase === 'Failed' && state.target === desired && state.from === primaryPod) {
-      return result; // change the annotation to retry
-    }
+    // the unavailability timer only runs while automatic failover is enabled
+    result.primaryNotReadySince = failover?.enabled ? current.status?.primaryNotReadySince : undefined;
+    const wantsSwitchover =
+      desired !== undefined &&
+      desired !== '' &&
+      desired !== primaryPod &&
+      !(state?.phase === 'Failed' && state.kind !== 'failover' && state.target === desired && state.from === primaryPod);
+    if (!inFlight && !wantsSwitchover && !failover?.enabled) return result;
 
     const pods = {
       items: instancePods(
@@ -449,7 +464,10 @@ export class FirebirdClusterController {
     };
     const podOf = (pod: string) => pods.items.find((p) => p.metadata?.name === pod);
     const jobName = switchoverJobName(cluster);
+    const electionJob = failoverJobName(cluster);
     const now = new Date().toISOString();
+    const fenced = current.status?.fencedInstances ?? [];
+    const primaryReady = Boolean(podOf(primaryPod) && isPodReady(podOf(primaryPod)!));
     // each phase change is stored before it is acted upon, so a failed or concurrent reconcile
     // resumes the phase instead of repeating the previous one
     const persist = async (status: SwitchoverStatus) => {
@@ -463,6 +481,47 @@ export class FirebirdClusterController {
       });
       result.status = status;
     };
+
+    // Automatic failover: the primary has not been ready for failover.delaySeconds
+    if (!inFlight && failover?.enabled) {
+      if (primaryReady || fenced.includes(primaryPod)) {
+        result.primaryNotReadySince = undefined; // a fenced primary is never failed over
+      } else {
+        const since = current.status?.primaryNotReadySince ?? now;
+        result.primaryNotReadySince = since;
+        const delayMs = (failover.delaySeconds ?? DEFAULT_FAILOVER_DELAY_SECONDS) * 1000;
+        const recentFailure =
+          state?.kind === 'failover' && state.phase === 'Failed' && state.from === primaryPod &&
+          Date.now() - Date.parse(state.completionTime ?? now) < delayMs;
+        if (Date.now() - Date.parse(since) >= delayMs && !recentFailure) {
+          const candidates = pods.items
+            .filter((p) => p.metadata?.name !== primaryPod && isPodReady(p) && !fenced.includes(p.metadata?.name ?? ''))
+            .map((p) => p.metadata!.name!)
+            .sort();
+          if (candidates.length === 0) {
+            log.warn({ primary: primaryPod }, 'Primary unavailable and no ready replica to promote');
+            return result;
+          }
+          log.warn({ primary: primaryPod, since, candidates }, 'Primary unavailable: starting automatic failover');
+          await persist({
+            kind: 'failover',
+            target: '',
+            from: primaryPod,
+            phase: 'Electing',
+            message: `primary unavailable since ${since}: electing the most advanced replica`,
+            startTime: now,
+          });
+          try {
+            await this.batchApi.createNamespacedJob({ namespace, body: buildFailoverJob(cluster, candidates) });
+          } catch (err) {
+            if ((err as { code?: number })?.code !== 409) throw err;
+          }
+          return result;
+        }
+      }
+    }
+
+    if (!inFlight && !wantsSwitchover) return result;
 
     if (!inFlight) {
       const target = desired!;
@@ -500,6 +559,86 @@ export class FirebirdClusterController {
     }
 
     let phase = state!;
+    if (phase.phase === 'Electing') {
+      if (primaryReady) {
+        // nothing was changed yet: the primary came back, discard the election
+        log.info({ primary: phase.from }, 'Primary recovered; automatic failover cancelled');
+        await persist({ ...phase, phase: 'Failed', message: `${phase.from} recovered before a replica was promoted`, completionTime: now });
+        await this.batchApi.deleteNamespacedJob({ name: electionJob, namespace, propagationPolicy: 'Background' }).catch(() => undefined);
+        result.primaryNotReadySince = undefined;
+        return result;
+      }
+      let job;
+      try {
+        job = await this.batchApi.readNamespacedJob({ name: electionJob, namespace });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+      const candidates = pods.items
+        .filter((p) => p.metadata?.name !== phase.from && isPodReady(p) && !fenced.includes(p.metadata?.name ?? ''))
+        .map((p) => p.metadata!.name!)
+        .sort();
+      if (!job) {
+        if (candidates.length) {
+          await this.batchApi.createNamespacedJob({ namespace, body: buildFailoverJob(cluster, candidates) });
+        }
+        return result;
+      }
+      const conditions = job.status?.conditions ?? [];
+      const failed = conditions.some((c) => c.type === 'Failed' && c.status === 'True');
+      const complete = conditions.some((c) => c.type === 'Complete' && c.status === 'True');
+      if (!failed && !complete) return result;
+      let election;
+      if (complete) {
+        const jobPods = await this.coreApi.listNamespacedPod({ namespace, labelSelector: `job-name=${electionJob}` });
+        const message = jobPods.items
+          .map((p) => p.status?.containerStatuses?.[0]?.state?.terminated?.message ?? '')
+          .find((m) => m.includes('target='));
+        election = message ? parseElection(message) : undefined;
+      }
+      const target = election ? election.target.split('.')[0] : undefined;
+      if (!election || !target || !podOf(target)) {
+        log.warn({ primary: phase.from }, 'Failover election failed');
+        await persist({ ...phase, phase: 'Failed', message: `election Job ${electionJob} failed (see its logs)`, completionTime: now });
+        await this.batchApi.deleteNamespacedJob({ name: electionJob, namespace, propagationPolicy: 'Background' });
+        return result;
+      }
+
+      // replicas behind the elected one, unready ones and the old primary are re-seeded
+      const reseed: Record<string, string> = {};
+      for (const pod of pods.items) {
+        const podName = pod.metadata!.name!;
+        if (podName === target || podName === phase.from) continue;
+        const seq = election.positions[instanceHost(cluster, podName)];
+        if (seq === undefined || seq < election.sequence) reseed[podName] = pod.metadata?.uid ?? '';
+      }
+      reseed[phase.from] = podOf(phase.from)?.metadata?.uid ?? `failover-${Date.parse(now)}`;
+      phase = {
+        ...phase,
+        target,
+        phase: 'Promoting',
+        message: `promoting ${target} (applied up to segment ${election.sequence}); ${phase.from} will be re-seeded`,
+        targetToken: podOf(target)?.metadata?.uid ?? '',
+        reseed,
+      };
+      await persist(phase);
+      await this.batchApi.deleteNamespacedJob({ name: electionJob, namespace, propagationPolicy: 'Background' });
+      // a stale targetPrimary annotation must not switch back to the failed primary
+      await this.customApi.patchNamespacedCustomObject(
+        {
+          group: API_GROUP,
+          version: API_VERSION,
+          namespace,
+          plural: RESOURCE_PLURAL,
+          name,
+          body: { metadata: { annotations: { [TARGET_PRIMARY_ANNOTATION]: target } } },
+        },
+        MERGE_PATCH,
+      );
+      result.primaryNotReadySince = undefined;
+      log.warn({ primary: target, failed: phase.from, sequence: election.sequence, reseed: Object.keys(reseed) }, 'Failing over');
+    }
+
     if (phase.phase === 'Stopping') {
       let job;
       try {
@@ -573,19 +712,24 @@ export class FirebirdClusterController {
       const p = podOf(pod);
       return Boolean(p && p.metadata?.uid !== token && isPodReady(p));
     };
-    if (restarted(phase.target, phase.targetToken) && restarted(phase.from, phase.fromToken)) {
+    const isFailover = phase.kind === 'failover';
+    if (restarted(phase.target, phase.targetToken) && (isFailover || restarted(phase.from, phase.fromToken))) {
       log.info({ primary: phase.target }, 'Switchover completed');
       await persist({ ...phase, phase: 'Completed', message: `${phase.target} is the primary`, completionTime: now });
       return result;
     }
     result.promote = { [phase.target]: phase.targetToken ?? '' };
-    result.demote = { [phase.from]: phase.fromToken ?? '' };
+    // after a failover the old primary diverged (its unshipped transactions): it is re-seeded
+    result.demote = isFailover ? {} : { [phase.from]: phase.fromToken ?? '' };
     // pods still running with the UID they had when the primary moved (not yet restarted)
     const stillOld = (pod: string, token?: string) => {
       const p = podOf(pod);
       return Boolean(p && p.metadata?.uid === token && !p.metadata?.deletionTimestamp);
     };
-    for (const [pod, token] of [[phase.target, phase.targetToken], [phase.from, phase.fromToken]] as const) {
+    const restartable: Array<[string, string | undefined]> = isFailover
+      ? [[phase.target, phase.targetToken]]
+      : [[phase.target, phase.targetToken], [phase.from, phase.fromToken]];
+    for (const [pod, token] of restartable) {
       if (stillOld(pod, token)) result.restart.push(pod);
     }
     for (const [pod, token] of Object.entries(phase.reseed ?? {})) {
