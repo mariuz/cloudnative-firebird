@@ -1,0 +1,604 @@
+import {
+  V1Container,
+  V1CronJob,
+  V1EnvVar,
+  V1Job,
+  V1OwnerReference,
+  V1PodSpec,
+  V1Volume,
+  V1VolumeMount,
+} from '@kubernetes/client-node';
+import {
+  API_GROUP,
+  DEFAULT_FIREBIRD_IMAGE,
+  FirebirdBackup,
+  FirebirdCluster,
+  FirebirdRestore,
+  FirebirdScheduledBackup,
+  RESOURCE_KIND,
+  S3BackupConfiguration,
+} from '../types';
+import {
+  clusterLabels,
+  databaseName,
+  FIREBIRD_DATA_DIR,
+  superuserClientEnv,
+  withTemplateHash,
+} from './resources';
+import {
+  instanceHost,
+  OPERATOR_CONFIG_DIR,
+  PRIMARY_KEY,
+  replicationEnabled,
+  SEGMENT_PORT,
+} from './replication';
+
+/**
+ * Backups and restores run as Jobs that reach the primary over the network; nothing mounts an
+ * instance volume (it is ReadWriteOnce and belongs to the running instance).
+ *
+ * - Without S3, the primary's server writes the backup through the service manager
+ *   (`gbak -se` / `nbackup` service actions) into its own data directory. The service manager
+ *   cannot create directories, so backup files sit next to the database file.
+ * - With S3 (logical backups only), `gbak` streams the backup to the Job pod, and a separate
+ *   S3 client container uploads it. The Firebird image ships no S3 client.
+ */
+
+/** Image providing the `aws` CLI for S3 uploads and downloads */
+export const DEFAULT_S3_CLIENT_IMAGE = 'amazon/aws-cli:2.37.4';
+
+/** Scratch directory shared by the containers of a backup or restore pod */
+const WORK_DIR = '/work';
+
+/** Shell expression for a UTC timestamp used in scheduled backup file names */
+const TIMESTAMP = '$(date -u +%Y%m%dT%H%M%SZ)';
+
+export type BackupType = 'logical' | 'physical';
+
+/** A backup source resolved for a restore */
+export interface BackupSource {
+  type: BackupType;
+  /** Backup file: relative to the data directory (or absolute within it), or the S3 object key relative to s3.prefix */
+  path: string;
+  /** Further nbackup files (levels 1, 2) applied on top of `path` by a physical restore */
+  incrementalPaths?: string[];
+  s3?: S3BackupConfiguration;
+}
+
+/** Prefix for S3 object keys, with a trailing slash when set */
+export function s3KeyPrefix(s3: S3BackupConfiguration): string {
+  return s3.prefix ? `${s3.prefix.replace(/^\/+|\/+$/g, '')}/` : '';
+}
+
+/** `s3://bucket/prefix/key` */
+export function s3Uri(s3: S3BackupConfiguration, key: string): string {
+  return `s3://${s3.bucket}/${s3KeyPrefix(s3)}${key}`;
+}
+
+/** Shell-quotes a value for /bin/sh */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function awsCommand(s3: S3BackupConfiguration): string {
+  return s3.endpoint ? `aws --endpoint-url ${shellQuote(s3.endpoint)}` : 'aws';
+}
+
+/** Environment for the S3 client container */
+export function s3ClientEnv(s3: S3BackupConfiguration): V1EnvVar[] {
+  return [
+    {
+      name: 'AWS_ACCESS_KEY_ID',
+      valueFrom: { secretKeyRef: { name: s3.secretRef.name, key: 'AWS_ACCESS_KEY_ID' } },
+    },
+    {
+      name: 'AWS_SECRET_ACCESS_KEY',
+      valueFrom: { secretKeyRef: { name: s3.secretRef.name, key: 'AWS_SECRET_ACCESS_KEY' } },
+    },
+    { name: 'AWS_DEFAULT_REGION', value: s3.region ?? 'us-east-1' },
+  ];
+}
+
+function s3ClientImage(s3: S3BackupConfiguration): string {
+  return s3.clientImage ?? DEFAULT_S3_CLIENT_IMAGE;
+}
+
+/** Resolves a server-side backup path against the data directory */
+export function serverPath(path: string): string {
+  return path.startsWith('/') ? path : `${FIREBIRD_DATA_DIR}/${path}`;
+}
+
+function ownerReference(kind: string, name: string, uid: string | undefined): V1OwnerReference {
+  return {
+    apiVersion: `${API_GROUP}/v1`,
+    kind,
+    name,
+    uid: uid ?? '',
+    controller: true,
+    blockOwnerDeletion: true,
+  };
+}
+
+const workVolume: V1Volume = { name: 'work', emptyDir: {} };
+const workMount: V1VolumeMount = { name: 'work', mountPath: WORK_DIR };
+
+/**
+ * Pod spec that takes one backup of the primary. `fileName` may contain shell expressions
+ * (a timestamp for scheduled backups); it is evaluated once, when the backup starts.
+ */
+export function buildBackupPodSpec(
+  cluster: FirebirdCluster,
+  options: { primaryHost: string; type: BackupType; level?: number; fileName: string; s3?: S3BackupConfiguration },
+): V1PodSpec {
+  const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const env: V1EnvVar[] = [
+    ...superuserClientEnv(cluster),
+    { name: 'FIREBIRD_HOST', value: options.primaryHost },
+    { name: 'DATABASE_PATH', value: `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}` },
+  ];
+
+  if (!options.s3) {
+    const action =
+      options.type === 'physical'
+        ? `action_nbak dbname "$DATABASE_PATH" nbk_file "${FIREBIRD_DATA_DIR}/$f" nbk_level ${options.level ?? 0}`
+        : `action_backup dbname "$DATABASE_PATH" bkp_file "${FIREBIRD_DATA_DIR}/$f"`;
+    return {
+      restartPolicy: 'Never',
+      containers: [
+        {
+          name: 'firebird-backup',
+          image,
+          command: ['/bin/sh', '-c'],
+          args: [
+            `set -eu; f="${options.fileName}"; ` +
+              `fbsvcmgr "$FIREBIRD_HOST:service_mgr" ${action}; ` +
+              `echo "backup written to ${FIREBIRD_DATA_DIR}/$f on $FIREBIRD_HOST"`,
+          ],
+          env,
+        },
+      ],
+    };
+  }
+
+  // logical backup streamed to this pod, then uploaded
+  const s3 = options.s3;
+  return {
+    restartPolicy: 'Never',
+    initContainers: [
+      {
+        name: 'firebird-backup',
+        image,
+        command: ['/bin/sh', '-c'],
+        args: [
+          `set -eu; f="${options.fileName}"; ` +
+            `gbak -b "$FIREBIRD_HOST:$DATABASE_PATH" "${WORK_DIR}/$f"; echo "$f" > ${WORK_DIR}/.name`,
+        ],
+        env,
+        volumeMounts: [workMount],
+      },
+    ],
+    containers: [
+      {
+        name: 'upload',
+        image: s3ClientImage(s3),
+        command: ['/bin/sh', '-c'],
+        args: [
+          `set -eu; f=$(cat ${WORK_DIR}/.name); ` +
+            `${awsCommand(s3)} s3 cp "${WORK_DIR}/$f" "s3://${s3.bucket}/${s3KeyPrefix(s3)}$f"`,
+        ],
+        env: s3ClientEnv(s3),
+        volumeMounts: [workMount],
+      },
+    ],
+    volumes: [workVolume],
+  };
+}
+
+/** Where a backup with a fixed file name ends up */
+export function backupLocation(fileName: string, s3?: S3BackupConfiguration): string {
+  return s3 ? s3Uri(s3, fileName) : `${FIREBIRD_DATA_DIR}/${fileName}`;
+}
+
+/** File name of the backup taken for a FirebirdBackup */
+export function onDemandBackupFileName(backup: FirebirdBackup): string {
+  return backup.spec.type === 'physical'
+    ? `nbackup-l${backup.spec.level ?? 0}-${backup.metadata.name}.nbk`
+    : `backup-${backup.metadata.name}.fbk`;
+}
+
+function scheduledFileName(prefix: string, type: BackupType, level?: number): string {
+  return type === 'physical'
+    ? `nbackup-l${level ?? 0}-${prefix}-${TIMESTAMP}.nbk`
+    : `backup-${prefix}-${TIMESTAMP}.fbk`;
+}
+
+function cronJob(
+  metadata: V1CronJob['metadata'],
+  schedule: string,
+  labels: Record<string, string>,
+  podSpec: V1PodSpec,
+  suspend?: boolean,
+): V1CronJob {
+  return withTemplateHash({
+    apiVersion: 'batch/v1',
+    kind: 'CronJob',
+    metadata,
+    spec: {
+      schedule,
+      ...(suspend !== undefined ? { suspend } : {}),
+      concurrencyPolicy: 'Forbid',
+      successfulJobsHistoryLimit: 3,
+      failedJobsHistoryLimit: 1,
+      jobTemplate: {
+        spec: {
+          backoffLimit: 2,
+          template: { metadata: { labels }, spec: podSpec },
+        },
+      },
+    },
+  });
+}
+
+/**
+ * Builds the CronJob for the cluster's `spec.backup` schedule.
+ */
+export function buildBackupCronJob(cluster: FirebirdCluster, primaryPod?: string): V1CronJob {
+  const { name, namespace = 'default' } = cluster.metadata;
+  const backup = cluster.spec.backup;
+  const type = backup?.type ?? 'logical';
+  const labels = { ...clusterLabels(name), 'app.kubernetes.io/component': 'backup' };
+  return cronJob(
+    {
+      name: `${name}-backup`,
+      namespace,
+      labels,
+      ownerReferences: [ownerReference(RESOURCE_KIND, name, cluster.metadata.uid)],
+    },
+    backup?.schedule ?? '0 2 * * *',
+    labels,
+    buildBackupPodSpec(cluster, {
+      primaryHost: instanceHost(cluster, primaryPod ?? `${name}-0`),
+      type,
+      level: backup?.level,
+      fileName: scheduledFileName(name, type, backup?.level),
+      s3: backup?.s3,
+    }),
+  );
+}
+
+/**
+ * Builds the CronJob for a FirebirdScheduledBackup.
+ */
+export function buildScheduledBackupCronJob(
+  scheduledBackup: FirebirdScheduledBackup,
+  cluster: FirebirdCluster,
+  primaryPod?: string,
+): V1CronJob {
+  const { name: sbName, namespace = 'default', uid } = scheduledBackup.metadata;
+  const spec = scheduledBackup.spec;
+  const type = spec.type ?? 'logical';
+  const labels = { ...clusterLabels(spec.clusterName), 'app.kubernetes.io/component': 'scheduled-backup' };
+  return cronJob(
+    {
+      name: `sched-backup-${sbName}`,
+      namespace,
+      labels,
+      ownerReferences: [ownerReference('FirebirdScheduledBackup', sbName, uid)],
+    },
+    spec.schedule,
+    labels,
+    buildBackupPodSpec(cluster, {
+      primaryHost: instanceHost(cluster, primaryPod ?? `${spec.clusterName}-0`),
+      type,
+      level: spec.level,
+      fileName: scheduledFileName(sbName, type, spec.level),
+      s3: spec.s3,
+    }),
+    (spec.suspend ?? false) || Boolean(cluster.spec.hibernated),
+  );
+}
+
+/**
+ * Builds the Job for an on-demand FirebirdBackup.
+ */
+export function buildBackupJob(backup: FirebirdBackup, cluster: FirebirdCluster, primaryPod?: string): V1Job {
+  const { name: backupName, namespace = 'default', uid } = backup.metadata;
+  const clusterName = backup.spec.clusterName;
+  const labels = { ...clusterLabels(clusterName), 'app.kubernetes.io/component': 'on-demand-backup' };
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: `backup-${backupName}`,
+      namespace,
+      labels,
+      ownerReferences: [ownerReference('FirebirdBackup', backupName, uid)],
+    },
+    spec: {
+      backoffLimit: 2,
+      template: {
+        metadata: { labels },
+        spec: buildBackupPodSpec(cluster, {
+          primaryHost: instanceHost(cluster, primaryPod ?? `${clusterName}-0`),
+          type: backup.spec.type ?? 'logical',
+          level: backup.spec.level,
+          fileName: onDemandBackupFileName(backup),
+          s3: backup.spec.s3,
+        }),
+      },
+    },
+  };
+}
+
+/** Target database file of a FirebirdRestore */
+export function restoreTargetDatabase(restore: FirebirdRestore): string {
+  return restore.spec.targetDatabase ?? `restore-${restore.metadata.name}.fdb`;
+}
+
+/**
+ * Builds the Job for a FirebirdRestore. The backup is restored into a new database file
+ * (`targetDatabase`) on the primary; the cluster database is never overwritten.
+ */
+export function buildRestoreJob(
+  restore: FirebirdRestore,
+  cluster: FirebirdCluster,
+  source: BackupSource,
+  primaryPod?: string,
+): V1Job {
+  const { name: restoreName, namespace = 'default', uid } = restore.metadata;
+  const clusterName = restore.spec.clusterName;
+  const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const labels = { ...clusterLabels(clusterName), 'app.kubernetes.io/component': 'restore' };
+  const env: V1EnvVar[] = [
+    ...superuserClientEnv(cluster),
+    { name: 'FIREBIRD_HOST', value: instanceHost(cluster, primaryPod ?? `${clusterName}-0`) },
+    { name: 'TARGET_PATH', value: `${FIREBIRD_DATA_DIR}/${restoreTargetDatabase(restore)}` },
+  ];
+
+  let podSpec: V1PodSpec;
+  if (source.s3) {
+    const s3 = source.s3;
+    podSpec = {
+      restartPolicy: 'Never',
+      initContainers: [
+        {
+          name: 'download',
+          image: s3ClientImage(s3),
+          command: ['/bin/sh', '-c'],
+          args: [`set -eu; ${awsCommand(s3)} s3 cp ${shellQuote(s3Uri(s3, source.path))} ${WORK_DIR}/backup.fbk`],
+          env: s3ClientEnv(s3),
+          volumeMounts: [workMount],
+        },
+      ],
+      containers: [
+        {
+          name: 'firebird-restore',
+          image,
+          command: ['/bin/sh', '-c'],
+          args: [`set -eu; gbak -c ${WORK_DIR}/backup.fbk "$FIREBIRD_HOST:$TARGET_PATH"; echo "restored into $TARGET_PATH"`],
+          env,
+          volumeMounts: [workMount],
+        },
+      ],
+      volumes: [workVolume],
+    };
+  } else {
+    const action =
+      source.type === 'physical'
+        ? `action_nrest dbname "$TARGET_PATH" ` +
+          [source.path, ...(source.incrementalPaths ?? [])]
+            .map((p) => `nbk_file ${shellQuote(serverPath(p))}`)
+            .join(' ')
+        : `action_restore bkp_file ${shellQuote(serverPath(source.path))} dbname "$TARGET_PATH"`;
+    podSpec = {
+      restartPolicy: 'Never',
+      containers: [
+        {
+          name: 'firebird-restore',
+          image,
+          command: ['/bin/sh', '-c'],
+          args: [`set -eu; fbsvcmgr "$FIREBIRD_HOST:service_mgr" ${action}; echo "restored into $TARGET_PATH"`],
+          env,
+        },
+      ],
+    };
+  }
+
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: `restore-${restoreName}`,
+      namespace,
+      labels,
+      ownerReferences: [ownerReference('FirebirdRestore', restoreName, uid)],
+    },
+    spec: { backoffLimit: 2, template: { metadata: { labels }, spec: podSpec } },
+  };
+}
+
+/** Outcome of a Job from its status conditions */
+export function jobOutcome(job: V1Job): 'Running' | 'Completed' | 'Failed' {
+  const conditions = job.status?.conditions ?? [];
+  if (conditions.some((c) => c.type === 'Complete' && c.status === 'True')) return 'Completed';
+  if (conditions.some((c) => c.type === 'Failed' && c.status === 'True')) return 'Failed';
+  return 'Running';
+}
+
+/**
+ * Builds the CronJob that ships the primary's archived journal segments to S3 for PITR.
+ * Segments are fetched from the primary's segment server (the archive lives on its volume);
+ * only segments not yet in the bucket are fetched and uploaded.
+ */
+export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?: string): V1CronJob | null {
+  const { name, namespace = 'default' } = cluster.metadata;
+  const s3 = cluster.spec.replication?.journalArchiveS3;
+  if (!replicationEnabled(cluster) || !s3) return null;
+
+  const labels = { ...clusterLabels(name), 'app.kubernetes.io/component': 'journal-archive' };
+  const journals = s3Uri(s3, 'journals/');
+  const podSpec: V1PodSpec = {
+    restartPolicy: 'Never',
+    initContainers: [
+      {
+        name: 'list-uploaded',
+        image: s3ClientImage(s3),
+        command: ['/bin/sh', '-c'],
+        // an empty or missing prefix lists nothing (and exits non-zero)
+        args: [
+          `${awsCommand(s3)} s3 ls ${shellQuote(journals)} > ${WORK_DIR}/listing || true; ` +
+            `awk '{ print $4 }' ${WORK_DIR}/listing > ${WORK_DIR}/uploaded`,
+        ],
+        env: s3ClientEnv(s3),
+        volumeMounts: [workMount],
+      },
+      {
+        name: 'fetch-segments',
+        image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+        command: ['perl', `${OPERATOR_CONFIG_DIR}/fetch-segments.pl`],
+        env: [
+          ...superuserClientEnv(cluster),
+          { name: 'FIREBIRD_HOST', value: instanceHost(cluster, primaryPod ?? `${name}-0`) },
+          { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
+          { name: 'OUT_DIR', value: `${WORK_DIR}/segments` },
+          { name: 'SKIP_FILE', value: `${WORK_DIR}/uploaded` },
+        ],
+        volumeMounts: [workMount, { name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }],
+      },
+    ],
+    containers: [
+      {
+        name: 'upload',
+        image: s3ClientImage(s3),
+        command: ['/bin/sh', '-c'],
+        // no --delete: the primary prunes segments locally after segmentRetentionHours, while
+        // the object store keeps the full history for point-in-time recovery
+        args: [`set -eu; ${awsCommand(s3)} s3 sync ${WORK_DIR}/segments/ ${shellQuote(journals)}`],
+        env: s3ClientEnv(s3),
+        volumeMounts: [workMount],
+      },
+    ],
+    volumes: [workVolume, { name: 'cluster-config', configMap: { name: `${name}-config` } }],
+  };
+
+  return cronJob(
+    {
+      name: `${name}-journal-archive`,
+      namespace,
+      labels,
+      ownerReferences: [ownerReference(RESOURCE_KIND, name, cluster.metadata.uid)],
+    },
+    cluster.spec.replication?.archiveSchedule ?? '*/15 * * * *',
+    labels,
+    podSpec,
+  );
+}
+
+/**
+ * Init containers that bootstrap a new cluster's database from a backup or another cluster.
+ *
+ * The database is restored to a temporary file and moved into place only when complete. With
+ * replication, only the primary bootstraps: the restored file is left at `.bootstrap.fdb` for
+ * the replication init container, which enables publication and keeps the offline seed; replicas
+ * are then seeded by replication.
+ */
+export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Container[] {
+  const bootstrap = cluster.spec.bootstrap;
+  if (!bootstrap?.recovery && !bootstrap?.clone) return [];
+
+  const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const replicated = replicationEnabled(cluster);
+  const target = replicated
+    ? `${FIREBIRD_DATA_DIR}/.bootstrap.fdb`
+    : `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`;
+  const env: V1EnvVar[] = [
+    { name: 'POD_NAME', valueFrom: { fieldRef: { fieldPath: 'metadata.name' } } },
+    { name: 'DATABASE_PATH', value: `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}` },
+    { name: 'TARGET_PATH', value: target },
+    ...(replicated ? [{ name: 'PRIMARY_FILE', value: `${OPERATOR_CONFIG_DIR}/${PRIMARY_KEY}` }] : []),
+  ];
+  const mounts: V1VolumeMount[] = [
+    { name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR },
+    ...(replicated ? [{ name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }] : []),
+  ];
+  // skip when initialised already, or on a replica (replication seeds it)
+  const guard =
+    'set -eu; ' +
+    'if [ -f "$DATABASE_PATH" ] || [ -f "$TARGET_PATH" ]; then echo "database exists, skipping bootstrap"; exit 0; fi; ' +
+    'if [ -n "${PRIMARY_FILE:-}" ]; then p=$(cat "$PRIMARY_FILE" 2>/dev/null || true); ' +
+    'case "$p" in ""|"$POD_NAME"|"$POD_NAME".*) ;; *) echo "replica: seeded by replication, skipping bootstrap"; exit 0 ;; esac; fi; ';
+  const finish =
+    'chown firebird:firebird "$TARGET_PATH.tmp"; mv "$TARGET_PATH.tmp" "$TARGET_PATH"; ';
+
+  if (!bootstrap.recovery) {
+    const clone = bootstrap.clone!;
+    const sourceHost = clone.namespace ? `${clone.sourceCluster}.${clone.namespace}` : clone.sourceCluster;
+    const secret = clone.superuserSecret ?? cluster.spec.superuserSecret;
+    return [
+      {
+        name: 'bootstrap-clone',
+        image,
+        command: ['/bin/sh', '-c'],
+        // gbak streams a logical backup of the source straight into a local restore
+        args: [
+          guard +
+            'rm -f "$TARGET_PATH.tmp"; ' +
+            'gbak -b "$SOURCE_HOST:$SOURCE_DATABASE" stdout | gbak -c stdin "$TARGET_PATH.tmp"; ' +
+            finish +
+            'echo "cloned $SOURCE_DATABASE from $SOURCE_HOST"',
+        ],
+        env: [
+          ...env,
+          { name: 'ISC_USER', value: 'SYSDBA' },
+          secret
+            ? { name: 'ISC_PASSWORD', valueFrom: { secretKeyRef: { name: secret.name, key: 'password' } } }
+            : { name: 'ISC_PASSWORD', value: 'masterkey' },
+          { name: 'SOURCE_HOST', value: sourceHost },
+          {
+            name: 'SOURCE_DATABASE',
+            value: `${FIREBIRD_DATA_DIR}/${clone.databaseName ?? databaseName(cluster)}`,
+          },
+        ],
+        volumeMounts: mounts,
+      },
+    ];
+  }
+
+  const recovery = bootstrap.recovery;
+  const restore = (backupFile: string, extraMounts: V1VolumeMount[]): V1Container => ({
+    name: 'bootstrap-restore',
+    image,
+    command: ['/bin/sh', '-c'],
+    args: [
+      guard +
+        'rm -f "$TARGET_PATH.tmp"; ' +
+        `gbak -c ${shellQuote(backupFile)} "$TARGET_PATH.tmp"; ` +
+        finish +
+        `echo "restored database from ${backupFile.replace(/"/g, '')}"`,
+    ],
+    env: [...env, ...superuserClientEnv(cluster)],
+    volumeMounts: [...mounts, ...extraMounts],
+  });
+
+  if (recovery.s3) {
+    const s3 = recovery.s3;
+    const key = recovery.sourcePath ?? 'backup.fbk';
+    return [
+      {
+        name: 'bootstrap-download',
+        image: s3ClientImage(s3),
+        command: ['/bin/sh', '-c'],
+        args: [guard + `${awsCommand(s3)} s3 cp ${shellQuote(s3Uri(s3, key))} ${WORK_DIR}/backup.fbk`],
+        env: [...env, ...s3ClientEnv(s3)],
+        volumeMounts: [...mounts, workMount],
+      },
+      restore(`${WORK_DIR}/backup.fbk`, [workMount]),
+    ];
+  }
+  return [restore(recovery.sourcePath ?? '', [])];
+}
+
+/** Volumes needed by the bootstrap init containers, beyond the data and config volumes */
+export function bootstrapVolumes(cluster: FirebirdCluster): V1Volume[] {
+  return cluster.spec.bootstrap?.recovery?.s3 ? [workVolume] : [];
+}

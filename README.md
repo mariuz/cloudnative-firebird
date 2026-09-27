@@ -12,6 +12,10 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **StatefulSet-based** deployment for stable pod identity and storage
 - **Persistent storage** via PersistentVolumeClaims, with online volume expansion when `spec.storage.size` grows
 - **Declarative hibernation** (`spec.hibernated`) that scales to zero while keeping data
+- **Journal-based asynchronous replication** (Firebird 4.0+, experimental) with replicas seeded without locking the primary
+- **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
+- **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
+- **Instance fencing** via the `fencedInstances` annotation (CloudNativePG format): the database is shut down, the pod keeps running
 - **Lag-aware read-only routing** to replicas via the `<name>-replica` Service (`spec.replication.readOnlyRouting`)
 - **Secret-based** SYSDBA password management
 - **Automatic service creation** (ClusterIP + headless for StatefulSet DNS)
@@ -55,10 +59,10 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - Kubernetes cluster (1.24+)
 - `kubectl` configured to point at your cluster
 
-### Install the CRD
+### Install the CRDs
 
 ```bash
-kubectl apply -f config/crds/firebirdcluster.yaml
+kubectl apply -f config/crds/
 ```
 
 ### Deploy the Operator
@@ -128,11 +132,10 @@ spec:
       cpu: "500m"
       memory: "512Mi"
 
-  # Backup configuration (optional)
+  # Scheduled backups (optional): see "Backups and Restores" below
   backup:
     enabled: true
     schedule: "0 2 * * *"
-    retentionPolicy: "7d"
 
   # Prometheus monitoring (optional)
   monitoring:
@@ -166,7 +169,7 @@ use online validation (`fbsvcmgr action_validate`), which works while clients ar
 | `instances` | Configured number of instances |
 | `readyInstances` | Number of ready instances |
 | `conditions` | Standard Kubernetes status conditions (`Ready`, `Progressing`, `Degraded`) |
-| `replicationStatus` | Primary pod, active/sync replicas, and with read-only routing the `readRoutablePods` and `laggingReplicas` |
+| `replicationStatus` | Primary pod, number of active replicas, and with read-only routing the `readRoutablePods` and `laggingReplicas` |
 | `volumes` | Per-PVC requested size, capacity and expansion state (`Ready`, `Resizing`, `ResizeFailed`, `ShrinkRejected`) |
 
 ### Hibernation
@@ -180,6 +183,127 @@ to `false` to resume with the same volumes.
 ```bash
 kubectl patch firebirdcluster my-cluster --type merge -p '{"spec":{"hibernated":true}}'
 ```
+
+### Replication (experimental)
+
+> **Experimental.** On Firebird 5.0.4 (`firebirdsql/firebird:5`) a database that publishes to a
+> replication journal can hang when several clients connect, commit and disconnect concurrently
+> (one connection per transaction). Applications using connection pools were not affected in
+> testing. See [ISSUES.md](ISSUES.md), issue 1, before enabling replication in production.
+
+With `spec.replication.enabled: true` (asynchronous mode), instance 0 is the primary and the
+other instances are read-only replicas:
+
+- The primary's init container creates the database offline with publication enabled, runs
+  `bootstrap.initSql`, and keeps an **offline bootstrap seed** (a file copy taken before the
+  server starts). Full journal segments are archived on the primary's volume.
+- Two sidecars ship segments: `segment-server` serves the local archive and seed copies, and
+  `segment-puller` fetches new segments from the current primary into the replica's
+  `journal_source_directory`. They use only the Firebird image's perl, authenticate with the
+  SYSDBA password, and never open a live database file directly (all access goes through the
+  local server).
+- A new replica is seeded from a **ready replica** (locked through that replica's server), or
+  from the primary's offline bootstrap seed while every later segment is still archived. The
+  live primary is only locked when `replication.allowLiveSeedFromPrimary` is set, so seeding
+  adds no load to the primary.
+
+```yaml
+spec:
+  instances: 3
+  replication:
+    enabled: true
+    archiveTimeoutSeconds: 10     # ship partially filled segments after 10s
+    segmentRetentionHours: 24     # keep archived segments on the primary for 24h
+```
+
+Known issues and open work are tracked in [ISSUES.md](ISSUES.md) and [TODO.md](TODO.md).
+
+### Backups and Restores
+
+Backups and restores run as Jobs that reach the current primary over the network (the leader
+Lease holder, as `<pod>.<cluster>-headless`); they never mount an instance volume.
+
+| | Where the backup goes | How |
+|---|---|---|
+| logical (`gbak`), no `s3` | primary's data directory | service manager `action_backup` |
+| physical (`nbackup`, level 0-2), no `s3` | primary's data directory | service manager `action_nbak` |
+| logical with `s3` | S3 object `<prefix>/<file>` | `gbak` streams to the Job pod, an `aws` CLI container uploads it |
+
+Physical backups are written by the primary's server, so they cannot be uploaded to S3 (rejected
+by validation). The S3 client image defaults to `amazon/aws-cli` and can be changed with
+`s3.clientImage`. Server-side backups share the primary's volume, so they protect against logical
+errors, not against losing the volume. `retentionPolicy` is not enforced yet.
+
+```yaml
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdBackup          # one-off; FirebirdScheduledBackup takes a cron schedule
+metadata:
+  name: before-upgrade
+spec:
+  clusterName: my-cluster
+  s3:                         # optional; omit to keep the backup on the primary
+    bucket: firebird-backups
+    prefix: my-cluster
+    endpoint: https://s3.example.com
+    secretRef:
+      name: s3-credentials    # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+---
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRestore
+metadata:
+  name: inspect-before-upgrade
+spec:
+  clusterName: my-cluster
+  backupName: before-upgrade  # or backupPath (+ s3, or incrementalBackupPaths for nbackup chains)
+  targetDatabase: before-upgrade.fdb
+```
+
+The status of each resource follows its Job (`Running`/`Restoring`, then `Completed` or
+`Failed`); a backup reports its `location`. A restore always creates a **new database file**
+next to the cluster database (default `restore-<name>.fdb`) and refuses to overwrite the cluster
+database. To replace a database, bootstrap a new cluster from the backup:
+
+```yaml
+spec:
+  bootstrap:
+    recovery:                 # restore a gbak backup from S3 (sourcePath is the object key)
+      sourcePath: backup-before-upgrade.fbk
+      s3: { bucket: firebird-backups, prefix: my-cluster, secretRef: { name: s3-credentials } }
+    # or clone a running cluster by streaming gbak from its Service:
+    # clone: { sourceCluster: my-cluster, namespace: prod, superuserSecret: { name: prod-su } }
+```
+
+With replication enabled, only the primary bootstraps; replicas are then seeded by replication.
+With `replication.journalArchiveS3`, a CronJob copies archived journal segments from the
+primary's segment server to `<prefix>/journals/` (replaying them for point-in-time recovery is
+not implemented yet; see TODO.md).
+
+### Fencing
+
+Fencing follows CloudNativePG: the `firebird.cloudnative-firebird.io/fencedInstances` annotation
+holds a JSON list of instance names, `["*"]` fences every instance, and `[]` (or removing the
+annotation) lifts the fence.
+
+```bash
+# fence one instance
+kubectl annotate firebirdcluster my-cluster \
+  'firebird.cloudnative-firebird.io/fencedInstances=["my-cluster-1"]' --overwrite
+# lift all fences
+kubectl annotate firebirdcluster my-cluster 'firebird.cloudnative-firebird.io/fencedInstances=[]' --overwrite
+```
+
+The Firebird server is the container's main process, so instead of stopping it the operator puts
+the instance's database into **full shutdown** (`gfix -shut full -force 0`, through the service
+manager) with a short Job: existing attachments are closed and no client, replica apply or backup
+can attach. The pod and its volume stay, so the files can be inspected (`kubectl exec`). The
+shutdown is stored in the database header and survives pod restarts. The readiness probe requires
+the database to be online, so a fenced instance is not Ready and leaves the Services, read routing
+and replica seeding. **A fenced primary is not failed over**: writes stop until the fence is
+lifted. A fenced replica stops applying segments and catches up once unfenced.
+
+`status.fencedInstances` lists the applied fences and the `Fenced` condition reports changes in
+progress or failed Jobs (retried on the next reconcile). Upgrading the operator rolls existing
+instances once, to switch them from the TCP readiness probe to the database-online probe.
 
 ### Read-Only Traffic Routing
 
@@ -203,7 +327,8 @@ cloudnative-firebird/
 ├── operator/               # TypeScript operator source
 │   ├── src/
 │   │   ├── types/          # CRD TypeScript type definitions
-│   │   ├── controllers/    # FirebirdCluster controller (reconcile logic)
+│   │   ├── controllers/    # FirebirdCluster and backup/restore controllers
+│   │   ├── replication/    # Scripts shipped to instance pods (replication, journal archive)
 │   │   ├── utils/          # Resource builders, logger
 │   │   ├── operator.ts     # Watch/event loop
 │   │   └── index.ts        # Entrypoint

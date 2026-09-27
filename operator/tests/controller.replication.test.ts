@@ -74,6 +74,13 @@ function makeMockKubeConfig({
   const mockCoreApi = {
     readNamespacedService: readNamespacedServiceImpl,
     createNamespacedService: createNamespacedServiceImpl,
+    // replication ships its configuration and scripts in the cluster ConfigMap
+    readNamespacedConfigMap: vi.fn().mockRejectedValue(notFoundError),
+    createNamespacedConfigMap: vi.fn().mockResolvedValue({}),
+    patchNamespacedConfigMap: vi.fn().mockResolvedValue({}),
+    deleteNamespacedConfigMap: vi.fn().mockResolvedValue({}),
+    // replication publishes ready replicas as seed sources
+    listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }),
   };
 
   const mockAppsApi = {
@@ -87,6 +94,9 @@ function makeMockKubeConfig({
     createNamespacedCronJob: createNamespacedCronJobImpl,
     patchNamespacedCronJob: patchNamespacedCronJobImpl,
     deleteNamespacedCronJob: deleteNamespacedCronJobImpl,
+    readNamespacedJob: vi.fn().mockRejectedValue(notFoundError),
+    createNamespacedJob: vi.fn().mockResolvedValue({}),
+    deleteNamespacedJob: vi.fn().mockResolvedValue({}),
   };
 
   const mockCustomApi = {
@@ -190,7 +200,7 @@ describe('FirebirdClusterController – replication integration', () => {
       expect(createdNames).not.toContain('test-cluster-replica');
     });
 
-    it('creates a StatefulSet with FIREBIRD_REPLICATION_ENABLED=true', async () => {
+    it('creates a StatefulSet with the replication init container and sidecars', async () => {
       const createNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
         createNamespacedStatefulSetImpl,
@@ -200,70 +210,38 @@ describe('FirebirdClusterController – replication integration', () => {
 
       await controller.reconcile(cluster);
 
-      const createdSts = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0]
-        .body;
-      const container = createdSts.spec?.template?.spec?.containers?.[0];
-      const replicationEnv = container?.env?.find(
-        (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_ENABLED',
-      );
-      expect(replicationEnv?.value).toBe('true');
+      const podSpec = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0].body.spec.template.spec;
+      expect(podSpec.initContainers.map((c: { name: string }) => c.name)).toEqual(['replication-init']);
+      expect(podSpec.containers.map((c: { name: string }) => c.name)).toEqual([
+        'firebird',
+        'segment-server',
+        'segment-puller',
+      ]);
     });
 
-    it('creates a StatefulSet with FIREBIRD_REPLICATION_MODE=async by default', async () => {
-      const createNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
-      const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
-        createNamespacedStatefulSetImpl,
-      });
+    it('publishes replication.conf, the scripts and the current primary in the cluster ConfigMap', async () => {
+      const { mockKubeConfig, mockCoreApi } = makeMockKubeConfig();
       const controller = new FirebirdClusterController(mockKubeConfig);
-      const cluster = makeCluster({ replication: { enabled: true } });
 
-      await controller.reconcile(cluster);
+      await controller.reconcile(makeCluster({ replication: { enabled: true } }));
 
-      const createdSts = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0]
-        .body;
-      const container = createdSts.spec?.template?.spec?.containers?.[0];
-      const modeEnv = container?.env?.find(
-        (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_MODE',
+      const configMap = (mockCoreApi.createNamespacedConfigMap as Mock).mock.calls[0][0].body;
+      expect(configMap.metadata.name).toBe('test-cluster-config');
+      expect(configMap.data.primary).toBe('test-cluster-0.test-cluster-headless');
+      expect(configMap.data['replication.conf']).toContain('journal_source_directory');
+      expect(Object.keys(configMap.data)).toEqual(
+        expect.arrayContaining(['segment-server.pl', 'segment-puller.pl', 'init-instance.sh']),
       );
-      expect(modeEnv?.value).toBe('async');
     });
 
-    it('creates a StatefulSet with FIREBIRD_REPLICATION_MODE=sync when mode is sync', async () => {
-      const createNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
-      const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
-        createNamespacedStatefulSetImpl,
-      });
+    it('rejects synchronous replication, which is not implemented yet', async () => {
+      const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
+      const { mockKubeConfig } = makeMockKubeConfig({ patchNamespacedCustomObjectStatusImpl });
       const controller = new FirebirdClusterController(mockKubeConfig);
-      const cluster = makeCluster({ replication: { enabled: true, mode: 'sync' } });
 
-      await controller.reconcile(cluster);
-
-      const createdSts = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0]
-        .body;
-      const container = createdSts.spec?.template?.spec?.containers?.[0];
-      const modeEnv = container?.env?.find(
-        (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_MODE',
-      );
-      expect(modeEnv?.value).toBe('sync');
-    });
-
-    it('creates a StatefulSet with FIREBIRD_REPLICATION_MODE=async when mode is explicitly async', async () => {
-      const createNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
-      const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
-        createNamespacedStatefulSetImpl,
-      });
-      const controller = new FirebirdClusterController(mockKubeConfig);
-      const cluster = makeCluster({ replication: { enabled: true, mode: 'async' } });
-
-      await controller.reconcile(cluster);
-
-      const createdSts = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0]
-        .body;
-      const container = createdSts.spec?.template?.spec?.containers?.[0];
-      const modeEnv = container?.env?.find(
-        (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_MODE',
-      );
-      expect(modeEnv?.value).toBe('async');
+      await expect(
+        controller.reconcile(makeCluster({ replication: { enabled: true, mode: 'sync' } })),
+      ).rejects.toThrow(/'sync' is not supported yet/);
     });
 
     it('updates status to Running after successful reconciliation with replication', async () => {
@@ -337,7 +315,7 @@ describe('FirebirdClusterController – replication integration', () => {
       expect(createdNames).toContain('test-cluster');
     });
 
-    it('does not inject replication env vars when replication is disabled', async () => {
+    it('does not add replication containers when replication is disabled', async () => {
       const createNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
         createNamespacedStatefulSetImpl,
@@ -349,11 +327,9 @@ describe('FirebirdClusterController – replication integration', () => {
 
       const createdSts = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0]
         .body;
-      const container = createdSts.spec?.template?.spec?.containers?.[0];
-      const replicationEnv = container?.env?.find(
-        (e: { name: string }) => e.name === 'FIREBIRD_REPLICATION_ENABLED',
-      );
-      expect(replicationEnv).toBeUndefined();
+      const podSpec = createdSts.spec?.template?.spec;
+      expect(podSpec?.initContainers).toBeUndefined();
+      expect(podSpec?.containers?.map((c: { name: string }) => c.name)).toEqual(['firebird']);
     });
 
     it('updates status to Running after successful reconciliation without replication', async () => {
@@ -563,7 +539,6 @@ describe('FirebirdClusterController – replication integration', () => {
         instances: 3,
         replication: {
           enabled: true,
-          mode: 'sync',
         },
       });
 
@@ -575,7 +550,6 @@ describe('FirebirdClusterController – replication integration', () => {
       expect(statusValue.replicationStatus).toEqual({
         primaryPod: 'test-cluster-0',
         activeReplicas: 2,
-        syncReplicas: ['test-cluster-1', 'test-cluster-2'],
       });
     });
   });

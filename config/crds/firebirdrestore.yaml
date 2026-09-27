@@ -48,14 +48,25 @@ spec:
                 - clusterName
               properties:
                 clusterName:
-                  description: Target FirebirdCluster name to restore into
+                  description: Target FirebirdCluster name to restore into (immutable)
                   type: string
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: clusterName is immutable
                 backupName:
-                  description: FirebirdBackup custom resource name
+                  description: FirebirdBackup custom resource name (a completed backup)
                   type: string
                 backupPath:
-                  description: Direct path to backup file
+                  description: >-
+                    Backup file to restore from when backupName is not set: a path in the
+                    primary's data directory (relative, or absolute within it), or the object key
+                    relative to s3.prefix
                   type: string
+                incrementalBackupPaths:
+                  description: nbackup level 1 and 2 files applied on top of backupPath by a physical restore
+                  type: array
+                  items:
+                    type: string
                 restoreType:
                   description: Restore strategy ('logical' or 'physical')
                   type: string
@@ -63,8 +74,11 @@ spec:
                     - logical
                     - physical
                 targetDatabase:
-                  description: Target database file name
+                  description: >-
+                    New database file created in the primary's data directory (default
+                    restore-<name>.fdb). It must not exist yet and cannot be the cluster database.
                   type: string
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
                 s3:
                   type: object
                   required:
@@ -78,6 +92,9 @@ spec:
                     region:
                       type: string
                     prefix:
+                      type: string
+                    clientImage:
+                      description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
                       type: string
                     secretRef:
                       type: object
@@ -97,8 +114,15 @@ spec:
                     - Restoring
                     - Completed
                     - Failed
+                startTime:
+                  type: string
+                  format: date-time
                 completionTime:
                   type: string
                   format: date-time
+                targetPath:
+                  type: string
+                jobName:
+                  type: string
                 error:
                   type: string

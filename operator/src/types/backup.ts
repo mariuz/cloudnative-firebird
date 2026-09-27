@@ -18,7 +18,10 @@ export interface FirebirdBackupSpec {
    * 1, 2: Incremental physical backup
    */
   level?: 0 | 1 | 2;
-  /** Optional S3 cloud storage export configuration */
+  /**
+   * Upload the backup to S3 instead of keeping it in the primary's data directory.
+   * Logical backups only.
+   */
   s3?: S3BackupConfiguration;
 }
 
@@ -32,8 +35,12 @@ export interface FirebirdBackupStatus {
   startTime?: string;
   /** Timestamp when backup execution completed */
   completionTime?: string;
-  /** Resulting backup file path/name */
+  /** Backup file name (in the primary's data directory, or the object key relative to s3.prefix) */
   backupFileName?: string;
+  /** Full location of the backup: a path on the primary or an s3:// URI */
+  location?: string;
+  /** Job taking the backup */
+  jobName?: string;
   /** Error message if backup failed */
   error?: string;
 }
@@ -65,17 +72,25 @@ export interface FirebirdRestoreSpec {
   clusterName: string;
   /** Name of a FirebirdBackup custom resource to restore from */
   backupName?: string;
-  /** Direct backup file path or S3 key to restore from */
+  /**
+   * Backup file to restore from, when backupName is not set: a path in the primary's data
+   * directory (relative, or absolute within it), or the object key relative to s3.prefix
+   */
   backupPath?: string;
+  /** nbackup level 1 and 2 files applied on top of backupPath by a physical restore */
+  incrementalBackupPaths?: string[];
   /**
    * Restore strategy:
    * - 'logical': uses gbak tool
    * - 'physical': uses nbackup tool
    */
   restoreType?: 'logical' | 'physical';
-  /** Target database file name (defaults to "mydb.fdb") */
+  /**
+   * New database file created in the primary's data directory (defaults to
+   * "restore-<name>.fdb"). It must not exist yet and cannot be the cluster database.
+   */
   targetDatabase?: string;
-  /** Optional S3 source configuration */
+  /** S3 source for backupPath (logical backups only) */
   s3?: S3BackupConfiguration;
 }
 
@@ -85,6 +100,12 @@ export interface FirebirdRestoreSpec {
 export interface FirebirdRestoreStatus {
   /** Phase of the restore execution */
   phase?: 'Pending' | 'Restoring' | 'Completed' | 'Failed';
+  /** Timestamp when restore started */
+  startTime?: string;
+  /** Path of the restored database on the primary */
+  targetPath?: string;
+  /** Job running the restore */
+  jobName?: string;
   /** Timestamp when restore completed */
   completionTime?: string;
   /** Error message if restore failed */
@@ -124,9 +145,9 @@ export interface FirebirdScheduledBackupSpec {
   type?: 'logical' | 'physical';
   /** Physical backup level (0, 1, 2) */
   level?: 0 | 1 | 2;
-  /** Backup retention policy (e.g. "7d", "30d") */
+  /** Backup retention policy (e.g. "7d", "30d"). Not enforced yet. */
   retentionPolicy?: string;
-  /** S3 cloud storage export configuration */
+  /** Upload backups to S3 instead of the primary's data directory (logical backups only) */
   s3?: S3BackupConfiguration;
 }
 
@@ -134,12 +155,12 @@ export interface FirebirdScheduledBackupSpec {
  * Status of a FirebirdScheduledBackup resource.
  */
 export interface FirebirdScheduledBackupStatus {
-  /** Timestamp of the last scheduled backup execution */
+  /** Timestamp of the last scheduled backup execution (from the CronJob) */
   lastScheduleTime?: string;
-  /** Timestamp when last backup completed */
+  /** Timestamp when the last backup completed successfully (from the CronJob) */
   lastSuccessfulTime?: string;
-  /** Total count of backups executed by this scheduled backup */
-  backupCount?: number;
+  /** Name of the CronJob running the backups */
+  cronJobName?: string;
 }
 
 /**

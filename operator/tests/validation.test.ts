@@ -141,9 +141,37 @@ describe('validateClusterSpec', () => {
     expect(() => validateClusterSpec(makeCluster({ serviceType: 'LoadBalancer' }))).not.toThrow();
   });
 
-  it('passes validation for valid replication modes', () => {
-    expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, mode: 'sync' } }))).not.toThrow();
+  it('accepts async replication and rejects sync until it is implemented', () => {
     expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, mode: 'async' } }))).not.toThrow();
+    expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, mode: 'sync' } }))).toThrow(
+      /'sync' is not supported yet/,
+    );
+  });
+
+  it.each(['/var/lib/firebird/data/repl', '/var/lib/firebird/data/a/b_c-1'])(
+    'accepts journalDirectory %j on the data volume',
+    (journalDirectory) => {
+      expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, journalDirectory } }))).not.toThrow();
+    },
+  );
+
+  it.each(['/tmp/journals', '/var/lib/firebird/data', '/var/lib/firebird/data/x; rm -rf /'])(
+    'rejects journalDirectory %j',
+    (journalDirectory) => {
+      expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, journalDirectory } }))).toThrow(
+        /journalDirectory/,
+      );
+    },
+  );
+
+  it.each([
+    ['archiveTimeoutSeconds', 0],
+    ['segmentRetentionHours', -1],
+    ['archiveTimeoutSeconds', 1.5],
+  ])('rejects replication %s = %s', (field, value) => {
+    expect(() =>
+      validateClusterSpec(makeCluster({ replication: { enabled: true, [field]: value } })),
+    ).toThrow(new RegExp(field));
   });
 
   it('throws ValidationError when replication journalArchiveS3 bucket is empty', () => {
@@ -237,6 +265,69 @@ describe('validateBackupSpec & validateRestoreSpec', () => {
       spec: { clusterName: 'test-cluster', schedule: 'invalid cron' },
     };
     expect(() => validateScheduledBackupSpec(scheduledBackup)).toThrow(/Invalid scheduled backup schedule/);
+  });
+});
+
+describe('backup destinations and restore sources', () => {
+  const s3 = { bucket: 'b', secretRef: { name: 's' } };
+  const backup = (spec: object) => ({
+    apiVersion: 'firebird.cloudnative-firebird.io/v1' as const,
+    kind: 'FirebirdBackup' as const,
+    metadata: { name: 'b' },
+    spec: { clusterName: 'c', ...spec },
+  });
+  const restore = (spec: object) => ({
+    apiVersion: 'firebird.cloudnative-firebird.io/v1' as const,
+    kind: 'FirebirdRestore' as const,
+    metadata: { name: 'r' },
+    spec: { clusterName: 'c', ...spec },
+  });
+
+  it('rejects S3 upload of physical backups everywhere', () => {
+    expect(() => validateBackupSpec(backup({ type: 'physical', s3 }))).toThrow(/logical backups only/);
+    expect(() =>
+      validateScheduledBackupSpec({ spec: { clusterName: 'c', schedule: '0 1 * * *', type: 'physical', s3 } }),
+    ).toThrow(/logical backups only/);
+    expect(() => validateClusterSpec(makeCluster({ backup: { enabled: true, type: 'physical', s3 } }))).toThrow(
+      /logical backups only/,
+    );
+    expect(() => validateBackupSpec(backup({ type: 'logical', s3 }))).not.toThrow();
+  });
+
+  it('requires a bucket and credentials for S3', () => {
+    expect(() => validateBackupSpec(backup({ s3: { bucket: '', secretRef: { name: 's' } } }))).toThrow(/bucket/);
+  });
+
+  it('requires exactly one of backupName and backupPath', () => {
+    expect(() => validateRestoreSpec(restore({}))).toThrow(/backupName or backupPath/);
+    expect(() => validateRestoreSpec(restore({ backupName: 'x', backupPath: 'y' }))).toThrow(/mutually exclusive/);
+    expect(() => validateRestoreSpec(restore({ backupName: 'x' }))).not.toThrow();
+  });
+
+  it('only accepts a plain file name as targetDatabase', () => {
+    expect(() => validateRestoreSpec(restore({ backupName: 'x', targetDatabase: '../etc/x.fdb' }))).toThrow(/targetDatabase/);
+    expect(() => validateRestoreSpec(restore({ backupName: 'x', targetDatabase: 'copy.fdb' }))).not.toThrow();
+  });
+
+  it('keeps server-side backup paths inside the data directory', () => {
+    expect(() => validateRestoreSpec(restore({ backupPath: '../x.fbk' }))).toThrow(/\.\./);
+    expect(() => validateRestoreSpec(restore({ backupPath: '/etc/passwd' }))).toThrow(/inside/);
+    expect(() => validateRestoreSpec(restore({ backupPath: '/var/lib/firebird/data/x.fbk' }))).not.toThrow();
+    expect(() => validateRestoreSpec(restore({ backupPath: 'nightly/x.fbk', s3 }))).not.toThrow();
+  });
+
+  it('rejects physical restores from S3 and misplaced incremental paths', () => {
+    expect(() => validateRestoreSpec(restore({ restoreType: 'physical', backupPath: 'x.nbk', s3 }))).toThrow(/logical restores only/);
+    expect(() => validateRestoreSpec(restore({ backupPath: 'x.fbk', incrementalBackupPaths: ['y'] }))).toThrow(/physical/);
+    expect(() =>
+      validateRestoreSpec(restore({ restoreType: 'physical', backupPath: 'l0.nbk', incrementalBackupPaths: ['l1.nbk'] })),
+    ).not.toThrow();
+  });
+
+  it('rejects bootstrap recovery combined with clone', () => {
+    expect(() =>
+      validateClusterSpec(makeCluster({ bootstrap: { recovery: { sourcePath: '/x.fbk' }, clone: { sourceCluster: 'src' } } })),
+    ).toThrow(/mutually exclusive/);
   });
 });
 

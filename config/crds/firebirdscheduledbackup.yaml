@@ -52,8 +52,11 @@ spec:
                 - schedule
               properties:
                 clusterName:
-                  description: Target FirebirdCluster name
+                  description: Target FirebirdCluster name (immutable)
                   type: string
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: clusterName is immutable
                 schedule:
                   description: Cron schedule expression (e.g. "0 2 * * *")
                   type: string
@@ -72,7 +75,7 @@ spec:
                   minimum: 0
                   maximum: 2
                 retentionPolicy:
-                  description: Backup retention policy (e.g. "7d")
+                  description: Backup retention policy (e.g. "7d"). Not enforced yet.
                   type: string
                 s3:
                   type: object
@@ -87,6 +90,9 @@ spec:
                     region:
                       type: string
                     prefix:
+                      type: string
+                    clientImage:
+                      description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
                       type: string
                     secretRef:
                       type: object
@@ -105,5 +111,5 @@ spec:
                 lastSuccessfulTime:
                   type: string
                   format: date-time
-                backupCount:
-                  type: integer
+                cronJobName:
+                  type: string

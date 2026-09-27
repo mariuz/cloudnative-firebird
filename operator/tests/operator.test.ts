@@ -8,8 +8,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Capture the watch callback so tests can simulate incoming events.
+// capturedEventCallback / capturedDoneCallback belong to the FirebirdCluster watch; every
+// watch's callbacks are kept by path.
 let capturedEventCallback: ((phase: string, obj: unknown) => void) | null = null;
 let capturedDoneCallback: ((err: unknown) => void) | null = null;
+const eventCallbacks = new Map<string, (phase: string, obj: unknown) => void>();
+const CLUSTERS_PATH = '/apis/firebird.cloudnative-firebird.io/v1/firebirdclusters';
 const mockWatchAbort = vi.fn();
 const mockWatchFn = vi
   .fn()
@@ -20,8 +24,11 @@ const mockWatchFn = vi
       eventCb: (phase: string, obj: unknown) => void,
       doneCb: (err: unknown) => void,
     ) => {
-      capturedEventCallback = eventCb;
-      capturedDoneCallback = doneCb;
+      eventCallbacks.set(_path, eventCb);
+      if (_path === CLUSTERS_PATH) {
+        capturedEventCallback = eventCb;
+        capturedDoneCallback = doneCb;
+      }
       return Promise.resolve({ abort: mockWatchAbort });
     },
   );
@@ -49,6 +56,18 @@ const mockReconcile = vi.fn().mockResolvedValue(undefined);
 vi.mock('../src/controllers/firebirdcluster.controller', () => ({
   FirebirdClusterController: vi.fn().mockImplementation(() => ({
     reconcile: mockReconcile,
+  })),
+}));
+
+// Mock the backup controller so backup watch events can be observed
+const mockReconcileBackup = vi.fn().mockResolvedValue(undefined);
+const mockReconcileScheduledBackup = vi.fn().mockResolvedValue(undefined);
+const mockReconcileRestore = vi.fn().mockResolvedValue(undefined);
+vi.mock('../src/controllers/backup.controller', () => ({
+  FirebirdBackupController: vi.fn().mockImplementation(() => ({
+    reconcileBackup: mockReconcileBackup,
+    reconcileScheduledBackup: mockReconcileScheduledBackup,
+    reconcileRestore: mockReconcileRestore,
   })),
 }));
 
@@ -89,10 +108,15 @@ describe('Operator – lifecycle', () => {
       expect(mockHealthStart).toHaveBeenCalledTimes(1);
     });
 
-    it('calls watch.watch() to begin watching FirebirdCluster resources', async () => {
+    it('watches FirebirdCluster, FirebirdBackup, FirebirdScheduledBackup and FirebirdRestore resources', async () => {
       const { operator } = makeOperator();
       await operator.start();
-      expect(mockWatchFn).toHaveBeenCalledTimes(1);
+      expect(mockWatchFn.mock.calls.map((c) => c[0])).toEqual([
+        CLUSTERS_PATH,
+        '/apis/firebird.cloudnative-firebird.io/v1/firebirdbackups',
+        '/apis/firebird.cloudnative-firebird.io/v1/firebirdscheduledbackups',
+        '/apis/firebird.cloudnative-firebird.io/v1/firebirdrestores',
+      ]);
     });
 
     it('watches the correct API path for FirebirdCluster resources', async () => {
@@ -123,11 +147,11 @@ describe('Operator – lifecycle', () => {
   });
 
   describe('stop()', () => {
-    it('aborts the active watch request', async () => {
+    it('aborts every active watch request', async () => {
       const { operator } = makeOperator();
       await operator.start();
       operator.stop();
-      expect(mockWatchAbort).toHaveBeenCalledTimes(1);
+      expect(mockWatchAbort).toHaveBeenCalledTimes(4);
     });
 
     it('marks the operator as not ready', async () => {
@@ -389,6 +413,19 @@ describe('Operator – generation-based event filtering', () => {
     expect(mockReconcile).toHaveBeenCalledTimes(1);
   });
 
+  it('reconciles a fencedInstances annotation change although the generation is unchanged', async () => {
+    capturedEventCallback!('ADDED', withGeneration(1));
+    await Promise.resolve();
+    const fenced = withGeneration(1);
+    fenced.metadata.annotations = { 'firebird.cloudnative-firebird.io/fencedInstances': '["test-cluster-0"]' };
+    capturedEventCallback!('MODIFIED', fenced);
+    await Promise.resolve();
+    capturedEventCallback!('MODIFIED', fenced);
+    await Promise.resolve();
+
+    expect(mockReconcile).toHaveBeenCalledTimes(2);
+  });
+
   it('always reconciles ADDED events (e.g. after a watch restart)', async () => {
     capturedEventCallback!('ADDED', withGeneration(1));
     await Promise.resolve();
@@ -406,5 +443,56 @@ describe('Operator – generation-based event filtering', () => {
     await Promise.resolve();
 
     expect(mockReconcile).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('Operator – backup resources', () => {
+  const backup = (generation: number, name = 'b1') => ({
+    apiVersion: 'firebird.cloudnative-firebird.io/v1',
+    kind: 'FirebirdBackup',
+    metadata: { name, namespace: 'default', generation },
+    spec: { clusterName: 'c' },
+  });
+  const emit = (plural: string, phase: string, obj: unknown) =>
+    eventCallbacks.get(`/apis/firebird.cloudnative-firebird.io/v1/${plural}`)!(phase, obj);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    eventCallbacks.clear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('routes each kind to its reconcile method', async () => {
+    const operator = new Operator(new KubeConfig(), 8080, 0);
+    await operator.start();
+    emit('firebirdbackups', 'ADDED', backup(1));
+    emit('firebirdscheduledbackups', 'ADDED', backup(1, 's1'));
+    emit('firebirdrestores', 'ADDED', backup(1, 'r1'));
+    expect(mockReconcileBackup).toHaveBeenCalledTimes(1);
+    expect(mockReconcileScheduledBackup).toHaveBeenCalledTimes(1);
+    expect(mockReconcileRestore).toHaveBeenCalledTimes(1);
+    expect(mockReconcile).not.toHaveBeenCalled();
+    operator.stop();
+  });
+
+  it('leaves status-only updates to the resync, which follows Job progress', async () => {
+    const operator = new Operator(new KubeConfig(), 8080, 1000);
+    await operator.start();
+    emit('firebirdbackups', 'ADDED', backup(1));
+    emit('firebirdbackups', 'MODIFIED', backup(1));
+    expect(mockReconcileBackup).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(mockReconcileBackup).toHaveBeenCalledTimes(2);
+
+    emit('firebirdbackups', 'DELETED', backup(1));
+    mockReconcileBackup.mockClear();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(mockReconcileBackup).not.toHaveBeenCalled();
+    operator.stop();
   });
 });

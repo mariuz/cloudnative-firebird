@@ -26,6 +26,8 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 # Copy built files
 COPY --from=builder /app/dist ./dist
+# Replication scripts are shipped to instance pods via the cluster ConfigMap
+COPY --from=builder /app/src/replication ./dist/replication
 
 # Use non-root user
 USER nonroot

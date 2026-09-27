@@ -51,6 +51,8 @@ export interface S3BackupConfiguration {
   };
   /** Object key prefix/folder inside bucket */
   prefix?: string;
+  /** Image providing the `aws` CLI for uploads and downloads (default "amazon/aws-cli:2.37.4") */
+  clientImage?: string;
 }
 
 /**
@@ -74,9 +76,9 @@ export interface BackupConfiguration {
   level?: 0 | 1 | 2;
   /** Cron schedule for backups (e.g. "0 2 * * *") */
   schedule?: string;
-  /** Backup retention policy (e.g. "7d", "30d") */
+  /** Backup retention policy (e.g. "7d", "30d"). Not enforced yet. */
   retentionPolicy?: string;
-  /** Cloud object storage configuration for backup archive export */
+  /** Upload backups to S3 instead of the primary's data directory (logical backups only) */
   s3?: S3BackupConfiguration;
 }
 
@@ -157,14 +159,26 @@ export interface ReplicationConfiguration {
   /** Whether replication is enabled */
   enabled: boolean;
   /**
-   * Replication mode.
-   * - sync: writes are confirmed only after replica acknowledges (safer, slower)
-   * - async: writes are confirmed immediately, replica catches up (faster, less durable)
-   * Defaults to 'async'.
+   * Replication mode. Only 'async' (journal shipping) is supported; 'sync' is rejected
+   * by validation until synchronous replication is implemented. Defaults to 'async'.
    */
   mode?: 'sync' | 'async';
-  /** Directory path for replication journal files (defaults to "/var/lib/firebird/data/journals") */
+  /**
+   * Base directory for replication files on each instance's volume; journal, archive and
+   * source directories are created below it (defaults to "/var/lib/firebird/data/replication")
+   */
   journalDirectory?: string;
+  /** Seconds after which a partially filled journal segment is archived and shipped (defaults to 10) */
+  archiveTimeoutSeconds?: number;
+  /** Hours archived segments are kept on the primary for replicas to fetch (defaults to 24) */
+  segmentRetentionHours?: number;
+  /**
+   * Allow seeding a new replica with a locked copy of the live primary when no ready replica
+   * and no usable offline bootstrap seed exist. Off by default: seeding from replicas or the
+   * offline seed adds no load to the primary and avoids a suspected commit/lock window
+   * (ISSUES.md, issue 2).
+   */
+  allowLiveSeedFromPrimary?: boolean;
   /** Cloud S3 storage configuration for continuous journal archiving (PITR) */
   journalArchiveS3?: S3BackupConfiguration;
   /** Cron schedule for archiving completed journal files to object storage */
@@ -214,7 +228,10 @@ export interface FirebirdConfig {
  * Cloud or file recovery settings for initial database bootstrapping.
  */
 export interface BackupRecoveryConfiguration {
-  /** Backup file path or object storage key */
+  /**
+   * gbak backup to restore: the object key relative to s3.prefix (default "backup.fbk") when s3
+   * is set, otherwise a file path readable from the init container (e.g. baked into imageName)
+   */
   sourcePath?: string;
   /** S3 cloud storage source configuration */
   s3?: S3BackupConfiguration;
@@ -228,6 +245,15 @@ export interface CloneConfiguration {
   sourceCluster: string;
   /** Namespace of the source FirebirdCluster (defaults to same namespace as target cluster) */
   namespace?: string;
+  /** Database file name in the source cluster (defaults to this cluster's databaseName) */
+  databaseName?: string;
+  /**
+   * Secret (key "password") in this namespace holding the source cluster's SYSDBA password.
+   * Defaults to this cluster's superuserSecret.
+   */
+  superuserSecret?: {
+    name: string;
+  };
 }
 
 /**
@@ -303,7 +329,7 @@ export interface FirebirdClusterSpec {
 /**
  * Condition types for the FirebirdCluster status.
  */
-export type ConditionType = 'Ready' | 'Progressing' | 'Degraded' | 'Paused' | 'Hibernated';
+export type ConditionType = 'Ready' | 'Progressing' | 'Degraded' | 'Paused' | 'Hibernated' | 'Fenced';
 export type ConditionStatus = 'True' | 'False' | 'Unknown';
 
 /**
@@ -325,8 +351,6 @@ export interface ReplicationStatus {
   primaryPod?: string;
   /** Number of active replicating secondary instances */
   activeReplicas?: number;
-  /** List of replica pod names operating in synchronous replication mode */
-  syncReplicas?: string[];
   /** Pods currently selected by the read-only `-replica` Service */
   readRoutablePods?: string[];
   /** Replicas excluded from read-only routing because of excessive replication lag */
@@ -375,6 +399,13 @@ export interface FirebirdClusterStatus {
   superuserSecretHash?: string;
   /** Per-instance PVC storage and volume expansion status */
   volumes?: VolumeStatus[];
+  /**
+   * Instances whose database is fenced (in full shutdown), as applied from the
+   * fencedInstances annotation
+   */
+  fencedInstances?: string[];
+  /** Label selector of the instance pods, for the scale subresource (HPA / VPA) */
+  selector?: string;
 }
 
 /**

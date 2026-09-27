@@ -1,4 +1,4 @@
-import { FirebirdCluster, FirebirdBackup, FirebirdRestore } from '../types';
+import { FirebirdCluster, FirebirdBackup, FirebirdRestore, S3BackupConfiguration } from '../types';
 import { parseQuantity } from './storage';
 
 export class ValidationError extends Error {
@@ -70,6 +70,30 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
         `Invalid replication mode: ${spec.replication.mode}. Must be 'sync' or 'async'.`,
       );
     }
+    if (spec.replication.mode === 'sync') {
+      throw new ValidationError(
+        "Replication mode 'sync' is not supported yet; use 'async' (journal shipping).",
+      );
+    }
+    // Must live on the instance volume (shared with the replication sidecars) and is written
+    // into replication.conf and shell environment
+    if (
+      spec.replication.journalDirectory !== undefined &&
+      !/^\/var\/lib\/firebird\/data\/[A-Za-z0-9._/-]+$/.test(spec.replication.journalDirectory)
+    ) {
+      throw new ValidationError(
+        `Invalid replication journalDirectory: "${spec.replication.journalDirectory}". ` +
+          'It must be a path below /var/lib/firebird/data.',
+      );
+    }
+    for (const [field, value] of [
+      ['archiveTimeoutSeconds', spec.replication.archiveTimeoutSeconds],
+      ['segmentRetentionHours', spec.replication.segmentRetentionHours],
+    ] as const) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+        throw new ValidationError(`Invalid replication ${field}: ${value}. Must be a positive integer.`);
+      }
+    }
     const routing = spec.replication.readOnlyRouting;
     if (
       routing?.maxLagSeconds !== undefined &&
@@ -89,6 +113,10 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
         throw new ValidationError('Replication journalArchiveS3 secretRef name is required');
       }
     }
+  }
+
+  if (spec.bootstrap?.clone && spec.bootstrap.recovery) {
+    throw new ValidationError('Bootstrap recovery and clone are mutually exclusive');
   }
 
   if (spec.bootstrap?.clone) {
@@ -145,6 +173,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
         throw new ValidationError('S3 backup secretRef name is required');
       }
     }
+    validateBackupDestination('spec.backup', spec.backup.type, spec.backup.s3);
   }
 
   if (spec.monitoring?.exporter?.enabled) {
@@ -178,6 +207,38 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
 }
 
 /**
+ * Physical (nbackup) backups are taken by the primary's server into its own data directory, so
+ * they cannot be streamed to a Job for upload.
+ */
+function validateBackupDestination(field: string, type?: string, s3?: S3BackupConfiguration): void {
+  if (type === 'physical' && s3) {
+    throw new ValidationError(
+      `${field}: physical backups are stored in the primary's data directory; S3 upload is supported for logical backups only`,
+    );
+  }
+}
+
+/** A bucket and credentials Secret are required for S3 sources and destinations */
+function validateS3(field: string, s3?: S3BackupConfiguration): void {
+  if (!s3) return;
+  if (!s3.bucket || s3.bucket.trim() === '') throw new ValidationError(`${field}.s3.bucket is required`);
+  if (!s3.secretRef?.name || s3.secretRef.name.trim() === '') {
+    throw new ValidationError(`${field}.s3.secretRef.name is required`);
+  }
+}
+
+/** Database file names created on the primary: a plain file name */
+const DATABASE_FILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** Server-side backup paths: inside the data directory, no parent references */
+function validateServerPath(field: string, path: string): void {
+  if (path.split('/').includes('..')) throw new ValidationError(`${field} must not contain ".."`);
+  if (path.startsWith('/') && !path.startsWith('/var/lib/firebird/data/')) {
+    throw new ValidationError(`${field} must be inside /var/lib/firebird/data`);
+  }
+}
+
+/**
  * Validates a FirebirdBackup custom resource specification.
  */
 export function validateBackupSpec(backup: FirebirdBackup): void {
@@ -190,6 +251,8 @@ export function validateBackupSpec(backup: FirebirdBackup): void {
   if (backup.spec.level !== undefined && ![0, 1, 2].includes(backup.spec.level)) {
     throw new ValidationError(`Invalid physical backup level: ${backup.spec.level}. Must be 0, 1, or 2.`);
   }
+  validateS3('spec', backup.spec.s3);
+  validateBackupDestination('spec', backup.spec.type, backup.spec.s3);
 }
 
 /**
@@ -199,15 +262,42 @@ export function validateRestoreSpec(restore: FirebirdRestore): void {
   if (!restore.spec?.clusterName || restore.spec.clusterName.trim() === '') {
     throw new ValidationError('FirebirdRestore clusterName is required');
   }
-  if (restore.spec.restoreType && !['logical', 'physical'].includes(restore.spec.restoreType)) {
-    throw new ValidationError(`Invalid restoreType: ${restore.spec.restoreType}. Must be 'logical' or 'physical'.`);
+  const spec = restore.spec;
+  if (spec.restoreType && !['logical', 'physical'].includes(spec.restoreType)) {
+    throw new ValidationError(`Invalid restoreType: ${spec.restoreType}. Must be 'logical' or 'physical'.`);
+  }
+  if (!spec.backupName && !spec.backupPath) {
+    throw new ValidationError('FirebirdRestore requires backupName or backupPath');
+  }
+  if (spec.backupName && spec.backupPath) {
+    throw new ValidationError('FirebirdRestore backupName and backupPath are mutually exclusive');
+  }
+  if (spec.targetDatabase !== undefined && !DATABASE_FILE_PATTERN.test(spec.targetDatabase)) {
+    throw new ValidationError(
+      `Invalid targetDatabase "${spec.targetDatabase}": must be a file name (letters, digits, ".", "_", "-")`,
+    );
+  }
+  validateS3('spec', spec.s3);
+  if (spec.backupPath) {
+    if (spec.restoreType === 'physical' && spec.s3) {
+      throw new ValidationError('Physical restores read nbackup files from the primary\'s data directory; S3 sources are supported for logical restores only');
+    }
+    if (!spec.s3) validateServerPath('backupPath', spec.backupPath);
+  }
+  if (spec.incrementalBackupPaths?.length) {
+    if (spec.restoreType !== 'physical' || spec.backupName) {
+      throw new ValidationError('incrementalBackupPaths applies to physical restores from backupPath only');
+    }
+    spec.incrementalBackupPaths.forEach((p, i) => validateServerPath(`incrementalBackupPaths[${i}]`, p));
   }
 }
 
 /**
  * Validates a FirebirdScheduledBackup custom resource specification.
  */
-export function validateScheduledBackupSpec(scheduledBackup: { spec: { clusterName: string; schedule: string; type?: string; level?: number } }): void {
+export function validateScheduledBackupSpec(scheduledBackup: {
+  spec: { clusterName: string; schedule: string; type?: string; level?: number; s3?: S3BackupConfiguration };
+}): void {
   if (!scheduledBackup.spec?.clusterName || scheduledBackup.spec.clusterName.trim() === '') {
     throw new ValidationError('FirebirdScheduledBackup clusterName is required');
   }
@@ -220,5 +310,7 @@ export function validateScheduledBackupSpec(scheduledBackup: { spec: { clusterNa
   if (scheduledBackup.spec.level !== undefined && ![0, 1, 2].includes(scheduledBackup.spec.level)) {
     throw new ValidationError(`Invalid physical backup level: ${scheduledBackup.spec.level}. Must be 0, 1, or 2.`);
   }
+  validateS3('spec', scheduledBackup.spec.s3);
+  validateBackupDestination('spec', scheduledBackup.spec.type, scheduledBackup.spec.s3);
 }
 

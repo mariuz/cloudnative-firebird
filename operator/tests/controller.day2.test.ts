@@ -245,7 +245,7 @@ describe('FirebirdClusterController – smart read-only routing', () => {
       makeCluster({ instances: 2, replication: { enabled: true } }),
     );
 
-    expect(api('listNamespacedPod')).not.toHaveBeenCalled();
+    // pods are listed for replication seed sources, but never relabelled
     expect(api('patchNamespacedPod')).not.toHaveBeenCalled();
     expect(api('patchNamespacedService')).not.toHaveBeenCalled();
   });
@@ -390,5 +390,49 @@ describe('FirebirdClusterController – hibernation', () => {
     await new FirebirdClusterController(kubeConfig).reconcile(hibernated);
 
     expect(statusPatches(api).at(-1)!.phaseReason).toBe('Hibernating: waiting for 2 pod(s) to terminate');
+  });
+});
+
+describe('FirebirdClusterController – replication seed sources', () => {
+  const pod = (name: string, ready: boolean): V1Pod => ({
+    metadata: { name, labels: clusterLabels('test-cluster') },
+    status: { phase: 'Running', conditions: [{ type: 'Ready', status: ready ? 'True' : 'False' }] },
+  });
+
+  it('publishes ready replicas, never the primary, as seed sources', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig({
+      listNamespacedPod: vi.fn().mockResolvedValue({
+        items: [pod('test-cluster-0', true), pod('test-cluster-2', true), pod('test-cluster-1', false)],
+      }),
+    });
+
+    await new FirebirdClusterController(kubeConfig).reconcile(
+      makeCluster({ instances: 3, replication: { enabled: true } }),
+    );
+
+    const configMap = api('createNamespacedConfigMap').mock.calls[0][0].body;
+    expect(configMap.data['seed-sources']).toBe('test-cluster-2.test-cluster-headless\n');
+    expect(configMap.data.primary).toBe('test-cluster-0.test-cluster-headless');
+  });
+
+  it('follows the leader lease when choosing which pod is the primary', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig({
+      readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: 'test-cluster-1' } }),
+      listNamespacedPod: vi.fn().mockResolvedValue({ items: [pod('test-cluster-0', true), pod('test-cluster-1', true)] }),
+    });
+
+    await new FirebirdClusterController(kubeConfig).reconcile(
+      makeCluster({ instances: 2, replication: { enabled: true } }),
+    );
+
+    const configMap = api('createNamespacedConfigMap').mock.calls[0][0].body;
+    expect(configMap.data['seed-sources']).toBe('test-cluster-0.test-cluster-headless\n');
+    expect(configMap.data.primary).toBe('test-cluster-1.test-cluster-headless');
+  });
+
+  it('does not list pods for seed sources without replication', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig();
+    await new FirebirdClusterController(kubeConfig).reconcile(makeCluster({ instances: 2 }));
+    expect(api('listNamespacedPod')).not.toHaveBeenCalled();
   });
 });

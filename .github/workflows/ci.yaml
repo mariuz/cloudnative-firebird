@@ -66,8 +66,8 @@ jobs:
       - name: Load operator image into kind
         run: kind load docker-image cloudnative-firebird:ci --name firebird-test
 
-      - name: Install CRD
-        run: kubectl apply -f config/crds/firebirdcluster.yaml
+      - name: Install CRDs
+        run: kubectl apply -f config/crds/
 
       - name: Deploy operator
         run: |
@@ -159,6 +159,174 @@ jobs:
           timeout 90 bash -c \
             'until [ "$(kubectl get statefulset test-cluster -o jsonpath={.spec.replicas})" = "2" ]; do sleep 3; done'
 
+      - name: Verify journal replication and seeding from a replica
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: repl
+            namespace: default
+          spec:
+            instances: 2
+            storage:
+              size: 1Gi
+            bootstrap:
+              initSql: "CREATE TABLE app (id INTEGER PRIMARY KEY, note VARCHAR(20)); COMMIT;"
+            replication:
+              enabled: true
+              archiveTimeoutSeconds: 3
+          EOF
+          ready() {
+            timeout 300 bash -c "until kubectl get pod $1 -n default >/dev/null 2>&1; do sleep 3; done"
+            kubectl wait pod/$1 -n default --for=condition=Ready --timeout=300s
+          }
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB"; }
+          count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          wait_count() {
+            for n in $(seq 1 36); do
+              [ "$(count "$1")" = "$2" ] && return 0
+              sleep 5
+            done
+            echo "$1 has $(count "$1") rows, expected $2"; return 1
+          }
+          ready repl-0
+          ready repl-1
+          kubectl logs repl-1 -c replication-init | tee /tmp/repl-1-init.log
+          grep -q 'offline seed' /tmp/repl-1-init.log
+
+          for i in $(seq 1 20); do sql repl-0 "insert into app values ($i, 'primary'); commit;"; done
+          wait_count repl-1 20
+          echo "replica applied 20 rows"
+
+          # replicas are read-only
+          if sql repl-1 "insert into app values (999, 'replica'); commit;" 2>&1 | grep -q 'read-only'; then
+            echo "replica rejects writes"
+          else
+            echo "replica accepted a write"; exit 1
+          fi
+
+          # the third instance is seeded from the ready replica, not from the primary
+          timeout 180 bash -c "until kubectl get configmap repl-config -o yaml | grep -A2 'seed-sources:' | grep -q repl-1.repl-headless; do sleep 5; done"
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"instances":3}}'
+          ready repl-2
+          kubectl logs repl-2 -c replication-init | tee /tmp/repl-2-init.log
+          grep -q 'from repl-1.repl-headless (replica seed)' /tmp/repl-2-init.log
+          for i in $(seq 21 30); do sql repl-0 "insert into app values ($i, 'primary'); commit;"; done
+          wait_count repl-2 30
+          echo "replica seeded from a replica applied all 30 rows"
+
+      - name: Verify backups and restores through the operator
+        run: |
+          DB_DIR=/var/lib/firebird/data
+          wait_phase() {
+            for n in $(seq 1 60); do
+              phase=$(kubectl get "$1" "$2" -o jsonpath='{.status.phase}')
+              [ "$phase" = "$3" ] && return 0
+              [ "$phase" = "Failed" ] && break
+              sleep 5
+            done
+            kubectl get "$1" "$2" -o yaml; kubectl logs "job/$4" --all-containers || true; return 1
+          }
+          count() {
+            kubectl exec repl-0 -c firebird -- bash -c \
+              "echo 'select count(*) from app;' | isql -q localhost:$DB_DIR/$1" | awk '$1 ~ /^[0-9]+$/ { print $1 }'
+          }
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: repl-logical
+          spec:
+            clusterName: repl
+          ---
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: repl-physical
+          spec:
+            clusterName: repl
+            type: physical
+            level: 0
+          EOF
+          wait_phase firebirdbackup repl-logical Completed backup-repl-logical
+          wait_phase firebirdbackup repl-physical Completed backup-repl-physical
+          kubectl get firebirdbackups
+
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: from-logical
+          spec:
+            clusterName: repl
+            backupName: repl-logical
+          ---
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: from-physical
+          spec:
+            clusterName: repl
+            restoreType: physical
+            backupPath: nbackup-l0-repl-physical.nbk
+          EOF
+          wait_phase firebirdrestore from-logical Completed restore-from-logical
+          wait_phase firebirdrestore from-physical Completed restore-from-physical
+          [ "$(count restore-from-logical.fdb)" = "30" ]
+          [ "$(count restore-from-physical.fdb)" = "30" ]
+          echo "both restores contain all 30 rows"
+
+          # restoring over the cluster database is refused
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: over-live
+          spec:
+            clusterName: repl
+            backupName: repl-logical
+            targetDatabase: mydb.fdb
+          EOF
+          wait_phase firebirdrestore over-live Failed restore-over-live
+          kubectl get firebirdrestore over-live -o jsonpath='{.status.error}' | grep -q 'cluster database'
+          ! kubectl get job restore-over-live 2>/dev/null
+
+      - name: Verify instance fencing
+        run: |
+          ANN=firebird.cloudnative-firebird.io/fencedInstances
+          kubectl wait pod/test-cluster-1 -n default --for=condition=Ready --timeout=300s
+          kubectl annotate firebirdcluster test-cluster "$ANN=[\"test-cluster-1\"]" --overwrite
+          timeout 180 bash -c \
+            'until kubectl get firebirdcluster test-cluster -o jsonpath={.status.fencedInstances} | grep -q test-cluster-1; do sleep 3; done'
+          # a fenced instance keeps running but is not ready, and its database rejects clients
+          kubectl wait pod/test-cluster-1 -n default --for=condition=Ready=false --timeout=120s
+          [ "$(kubectl get pod test-cluster-1 -o jsonpath={.status.phase})" = "Running" ]
+          if kubectl exec test-cluster-1 -c firebird -- bash -c \
+            'echo "select 1 from rdb\$database;" | isql -q localhost:/var/lib/firebird/data/mydb.fdb' 2>&1 | grep -q shutdown; then
+            echo "fenced database rejects clients"
+          else
+            echo "fenced database accepted a client"; exit 1
+          fi
+          kubectl get firebirdcluster test-cluster -o jsonpath='{.status.conditions[?(@.type=="Fenced")].message}'; echo
+          # the instance is not a ready endpoint of the Service
+          ready_ips=$(kubectl get endpointslices -l kubernetes.io/service-name=test-cluster \
+            -o jsonpath='{range .items[*].endpoints[?(@.conditions.ready==true)]}{.addresses[0]}{" "}{end}')
+          echo "ready endpoints: $ready_ips"
+          ! echo " $ready_ips " | grep -q " $(kubectl get pod test-cluster-1 -o jsonpath={.status.podIP}) "
+          [ "$(kubectl get firebirdcluster test-cluster -o jsonpath={.status.phase})" = "Running" ]
+
+          kubectl annotate firebirdcluster test-cluster "$ANN=[]" --overwrite
+          kubectl wait pod/test-cluster-1 -n default --for=condition=Ready --timeout=180s
+          timeout 120 bash -c \
+            'while kubectl get firebirdcluster test-cluster -o jsonpath={.status.fencedInstances} | grep -q test-cluster-1; do sleep 3; done'
+          echo "fence lifted"
+
+          # scale subresource with a label selector (HPA / VPA targets)
+          kubectl get --raw /apis/firebird.cloudnative-firebird.io/v1/namespaces/default/firebirdclusters/test-cluster/scale \
+            | grep -q '"selector":"app.kubernetes.io/name=firebird'
+
       - name: Verify operator reconciled without API errors
         run: |
           logs=$(kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1)
@@ -178,8 +346,21 @@ jobs:
           kubectl get services -A || true
           echo "=== PDBs, Leases, PVCs ==="
           kubectl get pdb,lease,pvc -n default || true
+          echo "=== Backups, restores and their Jobs ==="
+          kubectl get firebirdbackups,firebirdrestores,firebirdscheduledbackups -o yaml || true
+          kubectl get jobs,cronjobs -n default || true
+          for j in $(kubectl get jobs -n default -o name 2>/dev/null); do
+            echo "--- $j"; kubectl logs "$j" -n default --all-containers || true
+          done
           echo "=== FirebirdCluster status ==="
-          kubectl get firebirdcluster test-cluster -o yaml || true
+          kubectl get firebirdcluster -o yaml || true
+          echo "=== Replication init and sidecar logs ==="
+          for p in repl-0 repl-1 repl-2; do
+            for c in replication-init segment-server segment-puller; do
+              echo "--- $p/$c"; kubectl logs $p -c $c --tail=30 2>/dev/null || true
+            done
+            kubectl exec $p -c firebird -- tail -20 /opt/firebird/replication.log 2>/dev/null || true
+          done
           echo "=== Operator logs ==="
           kubectl logs -n cloudnative-firebird-system \
             -l app.kubernetes.io/name=cloudnative-firebird \

@@ -12,16 +12,21 @@ import {
   setHeaderOptions,
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
+import { buildBackupCronJob, buildJournalArchiveCronJob } from '../utils/backup';
+import {
+  buildFencingJob,
+  desiredFencedInstances,
+  fencingJobName,
+  planFencing,
+} from '../utils/fencing';
 import { logger } from '../utils/logger';
 import {
   buildAutoSweepCronJob,
-  buildBackupCronJob,
   buildCertificate,
   buildConfigMap,
   buildDiagnosticsCronJob,
   buildGrafanaDashboardConfigMap,
   buildHeadlessService,
-  buildJournalArchiveCronJob,
   buildLease,
   buildNetworkPolicy,
   buildPodDisruptionBudget,
@@ -41,8 +46,10 @@ import {
   statefulSetNeedsUpdate,
   withHibernation,
   CLUSTER_LABEL,
+  clusterLabels,
 } from '../utils/resources';
-import { computeReadRouting, podRoutingLabelPatch } from '../utils/routing';
+import { computeReadRouting, isPodReady, podRoutingLabelPatch } from '../utils/routing';
+import { replicationEnabled } from '../utils/replication';
 import { planVolumeExpansion } from '../utils/storage';
 import { validateClusterSpec } from '../utils/validation';
 import {
@@ -60,6 +67,29 @@ import {
  * to JSON Patch (an array of operations), which the API server rejects for object bodies.
  */
 const MERGE_PATCH = setHeaderOptions('Content-Type', PatchStrategy.MergePatch);
+
+/** Outcome of the fencing reconciliation */
+interface FencingResult {
+  /** Instances whose database is fenced (full shutdown applied) */
+  fenced: string[];
+  /** Instances with a fencing change in progress */
+  pending: string[];
+  /** Instances whose last fencing Job failed (retried on the next reconcile) */
+  failed: string[];
+}
+
+/** Label selector string of the instance pods (status.selector, scale subresource) */
+function podSelector(cluster: FirebirdCluster): string {
+  return Object.entries(clusterLabels(cluster.metadata.name))
+    .map(([k, v]) => `${k}=${v}`)
+    .join(',');
+}
+
+/** Returns true for a Kubernetes API "not found" error */
+function isNotFound(err: unknown): boolean {
+  const e = err as { code?: number; statusCode?: number; response?: { statusCode?: number } };
+  return e?.code === 404 || e?.statusCode === 404 || e?.response?.statusCode === 404;
+}
 
 /** Outcome of the read-only routing reconciliation */
 interface ReadRoutingResult {
@@ -103,6 +133,7 @@ export class FirebirdClusterController {
 
     try {
       validateClusterSpec(cluster);
+      desiredFencedInstances(cluster); // rejects a malformed fencedInstances annotation
 
       if (cluster.spec.suspended) {
         log.info('Cluster reconciliation is suspended');
@@ -126,9 +157,11 @@ export class FirebirdClusterController {
         phaseReason: 'Reconciliation started',
       });
 
-      await this.reconcileConfigMap(cluster, log);
+      const primaryPod = await this.resolvePrimaryPod(cluster, log);
+      const seedSourcePods = await this.resolveSeedSources(cluster, primaryPod);
+      await this.reconcileConfigMap(cluster, primaryPod, seedSourcePods, log);
       // Label pods before (re)pointing service selectors at the routing labels
-      const readRouting = await this.reconcileReadRouting(cluster, log);
+      const readRouting = await this.reconcileReadRouting(cluster, primaryPod, log);
       await this.reconcileHeadlessService(cluster, log);
       await this.reconcileService(cluster, log);
       const { readyInstances, superuserSecretHash, statefulSetExisted } =
@@ -136,17 +169,18 @@ export class FirebirdClusterController {
       const volumes = statefulSetExisted
         ? await this.reconcileVolumeExpansion(cluster, log)
         : undefined;
+      const fencing = await this.reconcileFencing(cluster, log);
 
       if (cluster.spec.replication?.enabled) {
         await this.reconcileReplicaService(cluster, log);
       }
 
-      await this.reconcileJournalArchiveCronJob(cluster, log);
+      await this.reconcileJournalArchiveCronJob(cluster, primaryPod, log);
       await this.reconcileLease(cluster, log);
       await this.reconcileCertificate(cluster, log);
       await this.reconcilePodDisruptionBudget(cluster, log);
       await this.reconcileNetworkPolicy(cluster, log);
-      await this.reconcileBackupCronJob(cluster, log);
+      await this.reconcileBackupCronJob(cluster, primaryPod, log);
       await this.reconcileAutoSweepCronJob(cluster, log);
       await this.reconcileDiagnosticsCronJob(cluster, log);
       await this.reconcilePodMonitor(cluster, log);
@@ -162,6 +196,8 @@ export class FirebirdClusterController {
           readyInstances,
           replicationStatus: undefined,
           superuserSecretHash,
+          fencedInstances: fencing.fenced,
+          selector: podSelector(cluster),
           ...(volumes ? { volumes } : {}),
           conditions: [
             this.makeCondition('Hibernated', 'True', 'HibernationRequested', 'spec.hibernated is true'),
@@ -173,15 +209,15 @@ export class FirebirdClusterController {
       }
 
       const targetInstances = cluster.spec.instances;
-      const isReady = readyInstances === targetInstances;
+      // fenced instances are expected to be not ready
+      const fencedCount = fencing.fenced.filter((pod) => Number(pod.slice(name.length + 1)) < targetInstances).length;
+      const expectedReady = targetInstances - fencedCount;
+      const isReady = readyInstances >= expectedReady;
 
       const replicationStatus = cluster.spec.replication?.enabled
         ? {
-            primaryPod: readRouting?.primaryPod ?? `${name}-0`,
+            primaryPod,
             activeReplicas: Math.max(0, readyInstances - 1),
-            ...(cluster.spec.replication.mode === 'sync'
-              ? { syncReplicas: Array.from({ length: Math.max(0, readyInstances - 1) }, (_, i) => `${name}-${i + 1}`) }
-              : {}),
             ...(readRouting
               ? {
                   readRoutablePods: readRouting.readRoutablePods,
@@ -194,20 +230,25 @@ export class FirebirdClusterController {
       await this.updateStatus(cluster, {
         phase: isReady ? 'Running' : 'Creating',
         phaseReason: isReady
-          ? 'All resources reconciled successfully'
-          : `Waiting for pods: ${readyInstances}/${targetInstances} ready`,
+          ? fencedCount > 0
+            ? `All resources reconciled; ${fencedCount} instance(s) fenced`
+            : 'All resources reconciled successfully'
+          : `Waiting for pods: ${readyInstances}/${expectedReady} ready`,
         instances: targetInstances,
         readyInstances,
         replicationStatus,
         superuserSecretHash,
+        fencedInstances: fencing.fenced,
+        selector: podSelector(cluster),
         ...(volumes ? { volumes } : {}),
         conditions: [
           this.makeCondition(
             'Ready',
             isReady ? 'True' : 'False',
             isReady ? 'ClusterReady' : 'PodsNotReady',
-            isReady ? 'Cluster is ready' : `${readyInstances}/${targetInstances} ready`,
+            isReady ? 'Cluster is ready' : `${readyInstances}/${expectedReady} ready`,
           ),
+          this.fencingCondition(fencing),
           this.makeCondition(
             'Progressing',
             isReady ? 'False' : 'True',
@@ -323,24 +364,46 @@ export class FirebirdClusterController {
     });
   }
 
+  /** The current primary instance: the leader Lease holder, or ordinal 0 before one exists */
+  private async resolvePrimaryPod(cluster: FirebirdCluster, log: Logger): Promise<string> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    try {
+      const lease = await this.coordinationApi.readNamespacedLease({ name: `${name}-lease`, namespace });
+      if (lease.spec?.holderIdentity) return lease.spec.holderIdentity;
+    } catch {
+      log.debug('Leader lease not found, assuming ordinal 0 is primary');
+    }
+    return `${name}-0`;
+  }
+
+  /**
+   * Ready replicas that can serve seed copies to new replicas, so seeding does not lock or
+   * load the primary (see ISSUES.md, issue 2).
+   */
+  private async resolveSeedSources(cluster: FirebirdCluster, primaryPod: string): Promise<string[]> {
+    if (!replicationEnabled(cluster) || cluster.spec.hibernated) return [];
+    const { name, namespace = 'default' } = cluster.metadata;
+    const pods = await this.coreApi.listNamespacedPod({
+      namespace,
+      labelSelector: `${CLUSTER_LABEL}=${name}`,
+    });
+    return pods.items
+      .filter((pod) => pod.metadata?.name && pod.metadata.name !== primaryPod && isPodReady(pod))
+      .map((pod) => pod.metadata!.name!)
+      .sort();
+  }
+
   /**
    * Label cluster pods with their role and read-routability so that the
    * primary and `-replica` Services route traffic based on readiness and replication lag.
    */
   private async reconcileReadRouting(
     cluster: FirebirdCluster,
+    primaryPod: string,
     log: Logger,
   ): Promise<ReadRoutingResult | undefined> {
     if (!readOnlyRoutingEnabled(cluster) || cluster.spec.hibernated) return undefined;
     const { name, namespace = 'default' } = cluster.metadata;
-
-    let primaryPod = `${name}-0`;
-    try {
-      const lease = await this.coordinationApi.readNamespacedLease({ name: `${name}-lease`, namespace });
-      if (lease.spec?.holderIdentity) primaryPod = lease.spec.holderIdentity;
-    } catch {
-      log.debug('Leader lease not found, assuming ordinal 0 is primary');
-    }
 
     const pods = await this.coreApi.listNamespacedPod({
       namespace,
@@ -484,13 +547,14 @@ export class FirebirdClusterController {
   /** Reconcile CronJob for replication journal continuous archiving to S3 */
   private async reconcileJournalArchiveCronJob(
     cluster: FirebirdCluster,
+    primaryPod: string,
     log: Logger,
   ): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const cronJobName = `${name}-journal-archive`;
 
     if (cluster.spec.replication?.enabled && cluster.spec.replication.journalArchiveS3) {
-      const built = buildJournalArchiveCronJob(cluster);
+      const built = buildJournalArchiveCronJob(cluster, primaryPod);
       if (!built) return;
       const desired = withHibernation(built, cluster);
       try {
@@ -526,13 +590,14 @@ export class FirebirdClusterController {
   /** Reconcile the CronJob resource for database backups */
   private async reconcileBackupCronJob(
     cluster: FirebirdCluster,
+    primaryPod: string,
     log: Logger,
   ): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const backupName = `${name}-backup`;
 
     if (cluster.spec.backup?.enabled) {
-      const desired = withHibernation(buildBackupCronJob(cluster), cluster);
+      const desired = withHibernation(buildBackupCronJob(cluster, primaryPod), cluster);
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: backupName, namespace });
         if (cronJobNeedsUpdate(existing, desired)) {
@@ -662,11 +727,13 @@ export class FirebirdClusterController {
   /** Reconcile custom firebird.conf settings or init.sql script ConfigMap */
   private async reconcileConfigMap(
     cluster: FirebirdCluster,
+    primaryPod: string,
+    seedSourcePods: string[],
     log: Logger,
   ): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const configName = `${name}-config`;
-    const desired = buildConfigMap(cluster);
+    const desired = buildConfigMap(cluster, { primaryPod, seedSourcePods });
 
     if (desired) {
       try {
@@ -944,6 +1011,77 @@ export class FirebirdClusterController {
   }
 
   /** Helper to create a status condition */
+  private fencingCondition(fencing: FencingResult): FirebirdClusterCondition {
+    const parts = [
+      fencing.fenced.length ? `fenced: ${fencing.fenced.join(', ')}` : '',
+      fencing.pending.length ? `changing: ${fencing.pending.join(', ')}` : '',
+      fencing.failed.length ? `failed (retrying): ${fencing.failed.join(', ')}` : '',
+    ].filter(Boolean);
+    return this.makeCondition(
+      'Fenced',
+      fencing.fenced.length ? 'True' : 'False',
+      fencing.failed.length ? 'FencingFailed' : fencing.pending.length ? 'FencingInProgress' : 'FencingApplied',
+      parts.length ? parts.join('; ') : 'No instance is fenced',
+    );
+  }
+
+  /**
+   * Applies the fencedInstances annotation: one Job per instance puts its database into full
+   * shutdown or back online, and status.fencedInstances records what has been applied.
+   */
+  private async reconcileFencing(cluster: FirebirdCluster, log: Logger): Promise<FencingResult> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    const desired = new Set(desiredFencedInstances(cluster));
+    // entries for instances removed by scaling down are kept: their volumes stay shut down
+    const applied = new Set(cluster.status?.fencedInstances ?? []);
+    const result: FencingResult = { fenced: [], pending: [], failed: [] };
+    if (cluster.spec.hibernated) {
+      result.fenced = [...applied].sort();
+      return result;
+    }
+
+    for (let i = 0; i < cluster.spec.instances; i++) {
+      const pod = `${name}-${i}`;
+      const jobName = fencingJobName(pod);
+      let job;
+      try {
+        job = await this.batchApi.readNamespacedJob({ name: jobName, namespace });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+      const step = planFencing(desired.has(pod), applied.has(pod), job);
+      switch (step.kind) {
+        case 'create':
+          log.info({ pod, action: step.action }, 'Starting fencing Job');
+          try {
+            await this.batchApi.createNamespacedJob({ namespace, body: buildFencingJob(cluster, pod, step.action) });
+          } catch (err) {
+            // the previous Job of this instance is still being deleted; retried on the next reconcile
+            if ((err as { code?: number })?.code !== 409) throw err;
+          }
+          result.pending.push(pod);
+          break;
+        case 'wait':
+          result.pending.push(pod);
+          break;
+        case 'applied':
+          log.info({ pod, action: step.action }, step.action === 'fence' ? 'Instance fenced' : 'Instance unfenced');
+          if (step.action === 'fence') applied.add(pod);
+          else applied.delete(pod);
+          await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
+          if (desired.has(pod) !== applied.has(pod)) result.pending.push(pod);
+          break;
+        case 'failed':
+          log.warn({ pod, action: step.action }, 'Fencing Job failed; retrying on the next reconcile');
+          await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
+          result.failed.push(pod);
+          break;
+      }
+    }
+    result.fenced = [...applied].sort();
+    return result;
+  }
+
   private makeCondition(
     type: FirebirdClusterCondition['type'],
     status: FirebirdClusterCondition['status'],

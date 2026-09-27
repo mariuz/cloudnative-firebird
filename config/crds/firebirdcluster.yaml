@@ -26,6 +26,8 @@ spec:
         scale:
           specReplicasPath: .spec.instances
           statusReplicasPath: .status.instances
+          # lets the HorizontalPodAutoscaler / VerticalPodAutoscaler map the cluster to its pods
+          labelSelectorPath: .status.selector
       additionalPrinterColumns:
         - name: Age
           type: date
@@ -148,7 +150,7 @@ spec:
                       description: Cron schedule for backups (e.g. "0 2 * * *")
                       type: string
                     retentionPolicy:
-                      description: Backup retention policy (e.g. "7d")
+                      description: Backup retention policy (e.g. "7d"). Not enforced yet.
                       type: string
                     s3:
                       description: Cloud object storage configuration for backup archive export
@@ -164,6 +166,9 @@ spec:
                         region:
                           type: string
                         prefix:
+                          type: string
+                        clientImage:
+                          description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
                           type: string
                         secretRef:
                           type: object
@@ -249,7 +254,10 @@ spec:
                         group:
                           type: string
                 replication:
-                  description: Replication configuration (requires Firebird 4.0+)
+                  description: >
+                    Journal-based asynchronous replication (Firebird 4.0+). Instance 0 is the
+                    bootstrap primary; the other instances are read-only replicas seeded from a
+                    ready replica or the primary's offline bootstrap seed. See ISSUES.md.
                   type: object
                   required:
                     - enabled
@@ -259,16 +267,34 @@ spec:
                       type: boolean
                     mode:
                       description: >
-                        Replication mode. 'sync' waits for replica acknowledgement before
-                        confirming writes (safer, slower). 'async' confirms writes immediately
-                        and lets replicas catch up (faster, less durable). Defaults to 'async'.
+                        Replication mode. Only 'async' (journal shipping) is supported; 'sync' is
+                        rejected until synchronous replication is implemented. Defaults to 'async'.
                       type: string
                       enum:
                         - sync
                         - async
                     journalDirectory:
-                      description: Directory path for replication journal files (defaults to "/var/lib/firebird/data/journals")
+                      description: >
+                        Base directory for replication files on each instance's volume; journal,
+                        archive and source directories are created below it. Must be below
+                        /var/lib/firebird/data (defaults to "/var/lib/firebird/data/replication").
                       type: string
+                      pattern: '^/var/lib/firebird/data/[A-Za-z0-9._/-]+$'
+                    archiveTimeoutSeconds:
+                      description: Seconds after which a partially filled journal segment is archived and shipped (defaults to 10)
+                      type: integer
+                      minimum: 1
+                    segmentRetentionHours:
+                      description: Hours archived segments are kept on the primary for replicas to fetch (defaults to 24)
+                      type: integer
+                      minimum: 1
+                    allowLiveSeedFromPrimary:
+                      description: >
+                        Allow seeding a replica with a locked copy of the live primary when no ready
+                        replica and no usable offline bootstrap seed exist. Off by default: seeding
+                        from replicas or the offline seed adds no load to the primary and avoids a
+                        suspected commit/lock window (ISSUES.md, issue 2).
+                      type: boolean
                     archiveSchedule:
                       description: Cron schedule for archiving completed journal files to object storage
                       type: string
@@ -307,6 +333,9 @@ spec:
                         region:
                           type: string
                         prefix:
+                          type: string
+                        clientImage:
+                          description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
                           type: string
                         secretRef:
                           type: object
@@ -365,6 +394,10 @@ spec:
                       type: object
                       properties:
                         sourcePath:
+                          description: >-
+                            gbak backup to restore: the object key relative to s3.prefix (default
+                            backup.fbk) when s3 is set, otherwise a file path readable from the
+                            init container
                           type: string
                         s3:
                           type: object
@@ -379,6 +412,9 @@ spec:
                             region:
                               type: string
                             prefix:
+                              type: string
+                            clientImage:
+                              description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
                               type: string
                             secretRef:
                               type: object
@@ -397,6 +433,17 @@ spec:
                           type: string
                         namespace:
                           type: string
+                        databaseName:
+                          description: Database file name in the source cluster (defaults to this cluster's databaseName)
+                          type: string
+                        superuserSecret:
+                          description: Secret (key "password") in this namespace with the source cluster's SYSDBA password; defaults to superuserSecret
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
                 env:
                   description: Additional environment variables for the Firebird container
                   type: array
@@ -475,6 +522,14 @@ spec:
                 superuserSecretHash:
                   description: SHA-256 hash digest of superuser secret for password rotation tracking
                   type: string
+                selector:
+                  description: Label selector of the instance pods (scale subresource)
+                  type: string
+                fencedInstances:
+                  description: Instances whose database is fenced (full shutdown), applied from the fencedInstances annotation
+                  type: array
+                  items:
+                    type: string
                 replicationStatus:
                   description: Detailed replication status details
                   type: object
@@ -483,10 +538,6 @@ spec:
                       type: string
                     activeReplicas:
                       type: integer
-                    syncReplicas:
-                      type: array
-                      items:
-                        type: string
                     readRoutablePods:
                       description: Pods currently selected by the read-only -replica Service
                       type: array
