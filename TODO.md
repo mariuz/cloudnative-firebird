@@ -91,8 +91,10 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Re-creating a replica's volume** (lost node with local storage): re-seeding keeps the PVC.
   Deleting it needs the pod deleted repeatedly until the claim is gone, because the StatefulSet
   recreates the pod against the terminating claim.
-- [ ] Items from the CloudNativePG 1.28 – 1.30 review ([docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md)):
-  pod/container security contexts.
+- [ ] **Non-root instances**: the official image runs the server as root (its entrypoint edits
+  `/opt/firebird/*.conf` and the server needs its firebird-owned lock directory), so instance pods
+  meet the `baseline` Pod Security Standard, not `restricted`. Running as the `firebird` user
+  needs the configuration moved to a writable location (or an image that supports it).
 - [ ] **Validation that needs other objects** stays in the operator: e.g. a restore into the
   cluster database, a clone of a cluster in another namespace, a missing Secret. A
   ValidatingAdmissionPolicy with parameter resources, or a webhook, could reject these at apply

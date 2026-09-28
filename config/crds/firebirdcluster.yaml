@@ -530,6 +530,20 @@ spec:
                   items:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
+                podSecurityContext:
+                  description: >-
+                    Pod security context of the instance pods (a Kubernetes PodSecurityContext),
+                    merged over the defaults fsGroup 999 and seccompProfile RuntimeDefault
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                securityContext:
+                  description: >-
+                    Security context of every instance container (a Kubernetes SecurityContext),
+                    merged over the defaults: allowPrivilegeEscalation false, all capabilities
+                    dropped except CHOWN, DAC_OVERRIDE and FOWNER (the official image runs the
+                    server as root)
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
                 serviceAccountName:
                   description: >-
                     Existing ServiceAccount for the instance pods and every Job of the cluster

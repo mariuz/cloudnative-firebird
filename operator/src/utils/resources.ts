@@ -9,6 +9,9 @@ import {
   V1NetworkPolicy,
   V1MicroTime,
   V1Container,
+  V1PodSecurityContext,
+  V1PodSpec,
+  V1SecurityContext,
 } from '@kubernetes/client-node';
 import {
   FirebirdCluster,
@@ -349,6 +352,7 @@ export function buildStatefulSet(
       : []),
   ];
 
+  const secured = (c: V1Container): V1Container => ({ ...c, securityContext: instanceSecurityContext(cluster) });
   const statefulSet: V1StatefulSet = {
     apiVersion: 'apps/v1',
     kind: 'StatefulSet',
@@ -394,14 +398,12 @@ export function buildStatefulSet(
         },
         spec: {
           ...serviceAccount(cluster),
-          securityContext: {
-            fsGroup: 999,
-          },
-          ...(initContainers.length > 0 ? { initContainers } : {}),
+          securityContext: instancePodSecurityContext(cluster),
+          ...(initContainers.length > 0 ? { initContainers: initContainers.map(secured) } : {}),
           ...(spec.nodeSelector ? { nodeSelector: spec.nodeSelector } : {}),
           ...(spec.affinity ? { affinity: spec.affinity } : {}),
           ...(spec.tolerations ? { tolerations: spec.tolerations } : {}),
-          containers,
+          containers: containers.map(secured),
           ...(volumes.length > 0 ? { volumes } : {}),
         },
       },
@@ -598,6 +600,10 @@ export function statefulSetNeedsUpdate(
   if (!existingPodSpec || !desiredPodSpec) return true;
 
   if ((existingPodSpec.serviceAccountName ?? 'default') !== (desiredPodSpec.serviceAccountName ?? 'default')) return true;
+  if (JSON.stringify(existingPodSpec.securityContext ?? {}) !== JSON.stringify(desiredPodSpec.securityContext ?? {})) return true;
+  const securityContexts = (spec: V1PodSpec) =>
+    JSON.stringify([...(spec.initContainers ?? []), ...(spec.containers ?? [])].map((c) => c.securityContext ?? {}));
+  if (securityContexts(existingPodSpec) !== securityContexts(desiredPodSpec)) return true;
   if (JSON.stringify(existingPodSpec.nodeSelector) !== JSON.stringify(desiredPodSpec.nodeSelector)) return true;
   if (JSON.stringify(existingPodSpec.affinity) !== JSON.stringify(desiredPodSpec.affinity)) return true;
   if (JSON.stringify(existingPodSpec.tolerations) !== JSON.stringify(desiredPodSpec.tolerations)) return true;
@@ -622,6 +628,56 @@ export function statefulSetNeedsUpdate(
   }
 
   return false;
+}
+
+/** User and group of the firebird account in the official image */
+export const FIREBIRD_UID = 84;
+
+/**
+ * Capabilities the instance containers keep: the official image runs the server as root, which
+ * needs DAC_OVERRIDE for its firebird-owned lock directory; the init scripts chown files (CHOWN,
+ * FOWNER). Everything else is dropped.
+ */
+export const INSTANCE_CAPABILITIES = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER'];
+
+/** Pod security context of the instance pods: defaults, overridden by spec.podSecurityContext */
+export function instancePodSecurityContext(cluster: FirebirdCluster): V1PodSecurityContext {
+  return { fsGroup: 999, seccompProfile: { type: 'RuntimeDefault' }, ...(cluster.spec.podSecurityContext ?? {}) };
+}
+
+/** Security context of every instance container: defaults, overridden by spec.securityContext */
+export function instanceSecurityContext(cluster: FirebirdCluster): V1SecurityContext {
+  return {
+    allowPrivilegeEscalation: false,
+    capabilities: { drop: ['ALL'], add: [...INSTANCE_CAPABILITIES] },
+    ...(cluster.spec.securityContext ?? {}),
+  };
+}
+
+/**
+ * Pod spec of an operator Job (backup, restore, archive, maintenance, fencing, switchover, users).
+ * The Jobs only use client tools over the network, so they meet the "restricted" Pod Security
+ * Standard: non-root (the image's firebird user), no privilege escalation, no capabilities,
+ * RuntimeDefault seccomp. They run with the cluster's service account.
+ */
+export function jobPodSpec<T extends V1PodSpec>(cluster: FirebirdCluster, podSpec: T): T {
+  const container = (c: V1Container): V1Container => ({
+    ...c,
+    securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, ...(c.securityContext ?? {}) },
+  });
+  return {
+    ...podSpec,
+    ...serviceAccount(cluster),
+    securityContext: {
+      runAsNonRoot: true,
+      runAsUser: FIREBIRD_UID,
+      runAsGroup: FIREBIRD_UID,
+      seccompProfile: { type: 'RuntimeDefault' },
+      ...(podSpec.securityContext ?? {}),
+    },
+    containers: podSpec.containers.map(container),
+    ...(podSpec.initContainers ? { initContainers: podSpec.initContainers.map(container) } : {}),
+  };
 }
 
 /**
@@ -978,9 +1034,8 @@ export function buildAutoSweepCronJob(cluster: FirebirdCluster): V1CronJob {
             metadata: {
               labels,
             },
-            spec: {
+            spec: jobPodSpec(cluster, {
               restartPolicy: 'OnFailure',
-              ...serviceAccount(cluster),
               containers: [
                 {
                   name: 'firebird-sweep',
@@ -992,7 +1047,7 @@ export function buildAutoSweepCronJob(cluster: FirebirdCluster): V1CronJob {
                   env: superuserClientEnv(cluster),
                 },
               ],
-            },
+            }),
           },
         },
       },
@@ -1146,9 +1201,8 @@ export function buildDiagnosticsCronJob(cluster: FirebirdCluster): V1CronJob {
         spec: {
           template: {
             metadata: { labels },
-            spec: {
+            spec: jobPodSpec(cluster, {
               restartPolicy: 'OnFailure',
-              ...serviceAccount(cluster),
               containers: [
                 {
                   name: 'firebird-diagnostics',
@@ -1164,7 +1218,7 @@ export function buildDiagnosticsCronJob(cluster: FirebirdCluster): V1CronJob {
                   env: superuserClientEnv(cluster),
                 },
               ],
-            },
+            }),
           },
         },
       },

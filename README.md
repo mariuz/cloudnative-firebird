@@ -174,6 +174,33 @@ environment variables, so changing them rolls the pods. Sweep and diagnostics Jo
 the primary through the read-write Service instead of mounting the instance PVC; diagnostics
 use online validation (`fbsvcmgr action_validate`), which works while clients are connected.
 
+### Security Contexts
+
+The official image runs the Firebird server as root, so the instance pods cannot meet the
+`restricted` Pod Security Standard; they meet `baseline` and drop what they can
+(CloudNativePG 1.28 `podSecurityContext` / `securityContext`):
+
+| | Instance pods (all containers) | Operator Jobs (backups, restores, archive, maintenance, fencing, switchover, users) |
+|---|---|---|
+| user | root (image default) | `firebird` (uid 84), `runAsNonRoot` |
+| capabilities | all dropped except `CHOWN`, `DAC_OVERRIDE` (the server's firebird-owned lock directory), `FOWNER` (init scripts) | all dropped |
+| privilege escalation | no | no |
+| seccomp | `RuntimeDefault` | `RuntimeDefault` |
+| Pod Security Standard | `baseline` | `restricted` |
+
+`spec.podSecurityContext` and `spec.securityContext` are merged over the instance defaults, e.g.
+to add `supplementalGroups` or use a different `fsGroup`:
+
+```yaml
+spec:
+  podSecurityContext:
+    fsGroup: 2000
+  securityContext:
+    readOnlyRootFilesystem: false
+```
+
+Changing them (and upgrading from a version without these defaults) rolls the instances.
+
 ### Status Fields
 
 | Field | Description |

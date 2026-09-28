@@ -21,6 +21,7 @@ Status: **done** (in this repository), **planned** (listed in [ROADMAP.md](../RO
 | 1.29: Kubernetes events during reconciliation; 1.30: `PrimaryStatusCheckFailed` warning event | Events on clusters, backups, restores and users (v0.16.0); `PrimaryNotReady` when the primary stops being ready (with automatic failover enabled), aggregated like client-go | done |
 | 1.29: shared `serviceAccountName` for workload identity (IRSA, Workload Identity) | `spec.serviceAccountName` for the instance pods and all Jobs; `s3.secretRef` optional, so the `aws` CLI can use the pod's credentials (v0.18.0) | done |
 | 1.29: `cnpg.io/reconciliationDisabled` on backups | `firebird.cloudnative-firebird.io/reconciliationDisabled` on backups, scheduled backups, restores and users (v0.18.0); clusters use `spec.suspended` | done |
+| 1.28: pod `securityContext` and per-container `containerSecurityContext` | `spec.podSecurityContext` / `spec.securityContext` over hardened defaults (v0.19.0): the official image runs the server as root and needs `DAC_OVERRIDE` for its lock directory, so instance pods meet `baseline`; operator Jobs run as the non-root `firebird` user and meet `restricted` | done |
 | 1.30: `DatabaseRole` CRD with `databaseRoleReclaimPolicy: retain \| delete` | `FirebirdUser` (v0.12.0): Secret-backed password, `active`, `admin`, role grants, `reclaimPolicy`. Firebird users live in per-instance security databases, so they are applied to every instance; the security database was moved onto the instance volume first | done |
 
 ## Planned
@@ -28,7 +29,6 @@ Status: **done** (in this repository), **planned** (listed in [ROADMAP.md](../RO
 | CloudNativePG | What it means here |
 |---|---|
 | 1.30: primary `Lease` as a promotion mutex; the instance must hold it before acting as primary, and releases it on clean shutdown | Planned switchover (v0.13.0) and automatic failover (v0.14.0) move the `<cluster>-lease` to the promoted instance. The instances do not hold or renew it yet, so it is not a promotion mutex in CloudNativePG's sense (TODO.md, "Failover safety"). |
-| 1.28: pod `securityContext` and per-container `containerSecurityContext` | Needs checking against the official image, whose entrypoint starts as root. |
 | 1.30 security: operator-to-instance calls authenticated with a client certificate | The segment server authenticates with the SYSDBA password over plain TCP inside the cluster; see "Encrypt segment shipping" in TODO.md. |
 
 ## Already aligned
