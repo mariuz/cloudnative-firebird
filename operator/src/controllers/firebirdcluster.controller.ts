@@ -11,9 +11,11 @@ import {
   PolicyV1Api,
   setHeaderOptions,
   V1MicroTime,
+  V1StatefulSet,
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
 import { buildBackupCronJob, buildJournalArchiveCronJob } from '../utils/backup';
+import { PRIMARY_RESTART_GRACE_SECONDS, operatorRollsPods, planRollingUpdate } from '../utils/rolling-update';
 import {
   DEFAULT_FAILOVER_DELAY_SECONDS,
   TARGET_PRIMARY_ANNOTATION,
@@ -70,6 +72,7 @@ import {
   FirebirdCluster,
   FirebirdClusterCondition,
   FirebirdClusterStatus,
+  RollingUpdateStatus,
   SwitchoverStatus,
   RESOURCE_PLURAL,
   VolumeStatus,
@@ -90,6 +93,11 @@ interface SwitchoverResult {
   reseed: Record<string, string>;
   status?: SwitchoverStatus;
   primaryNotReadySince?: string;
+}
+
+/** Whether a switchover or failover is between its start and its completion */
+function switchoverInFlight(state?: SwitchoverStatus): boolean {
+  return state?.phase === 'Electing' || state?.phase === 'Stopping' || state?.phase === 'Promoting';
 }
 
 /** Outcome of the fencing reconciliation */
@@ -202,12 +210,20 @@ export class FirebirdClusterController {
       const readRouting = await this.reconcileReadRouting(cluster, primaryPod, log);
       await this.reconcileHeadlessService(cluster, log);
       await this.reconcileService(cluster, log);
-      const { readyInstances, superuserSecretHash, statefulSetExisted } =
+      const { readyInstances, superuserSecretHash, statefulSetExisted, statefulSet } =
         await this.reconcileStatefulSet(cluster, log);
       const volumes = statefulSetExisted
         ? await this.reconcileVolumeExpansion(cluster, log)
         : undefined;
       const fencing = await this.reconcileFencing(cluster, log);
+      const busy = switchoverInFlight(switchover.status)
+        ? `${switchover.status?.kind ?? 'switchover'} in progress`
+        : Object.keys(reseed.requests).length > 0 || reseed.restart.length > 0 || switchover.restart.length > 0
+          ? 'instances are being re-seeded or restarted'
+          : undefined;
+      const rollingUpdate = statefulSetExisted
+        ? await this.reconcileRollingUpdate(cluster, statefulSet, primaryPod, fencing.fenced, busy, switchover.status, log)
+        : undefined;
 
       if (cluster.spec.replication?.enabled) {
         await this.reconcileReplicaService(cluster, log);
@@ -266,9 +282,11 @@ export class FirebirdClusterController {
         : undefined;
 
       await this.updateStatus(cluster, {
-        phase: isReady ? 'Running' : 'Creating',
+        phase: isReady ? (rollingUpdate ? 'Updating' : 'Running') : 'Creating',
         phaseReason: isReady
-          ? fencedCount > 0
+          ? rollingUpdate
+            ? `Rolling update: ${rollingUpdate.message}`
+            : fencedCount > 0
             ? `All resources reconciled; ${fencedCount} instance(s) fenced`
             : 'All resources reconciled successfully'
           : `Waiting for pods: ${readyInstances}/${expectedReady} ready`,
@@ -279,6 +297,7 @@ export class FirebirdClusterController {
         fencedInstances: fencing.fenced,
         selector: podSelector(cluster),
         reseedingInstances: Object.keys(reseed.requests).sort(),
+        rollingUpdate,
         ...(switchover.status ? { switchover: switchover.status } : {}),
         primaryNotReadySince: switchover.primaryNotReadySince,
         ...(volumes ? { volumes } : {}),
@@ -484,8 +503,12 @@ export class FirebirdClusterController {
 
     // Automatic failover: the primary has not been ready for failover.delaySeconds
     if (!inFlight && failover?.enabled) {
-      if (primaryReady || fenced.includes(primaryPod)) {
-        result.primaryNotReadySince = undefined; // a fenced primary is never failed over
+      const restart = current.status?.rollingUpdate?.primaryRestart;
+      const graceMs = Math.max(PRIMARY_RESTART_GRACE_SECONDS, failover.delaySeconds ?? DEFAULT_FAILOVER_DELAY_SECONDS) * 1000;
+      const plannedRestart = restart?.pod === primaryPod && Date.now() - Date.parse(restart.time) < graceMs;
+      if (primaryReady || fenced.includes(primaryPod) || plannedRestart) {
+        // a fenced primary is never failed over, a primary restarted by a rolling update not yet
+        result.primaryNotReadySince = undefined;
       } else {
         const since = current.status?.primaryNotReadySince ?? now;
         result.primaryNotReadySince = since;
@@ -904,7 +927,12 @@ export class FirebirdClusterController {
   private async reconcileStatefulSet(
     cluster: FirebirdCluster,
     log: Logger,
-  ): Promise<{ readyInstances: number; superuserSecretHash?: string; statefulSetExisted: boolean }> {
+  ): Promise<{
+    readyInstances: number;
+    superuserSecretHash?: string;
+    statefulSetExisted: boolean;
+    statefulSet: V1StatefulSet;
+  }> {
     const { name, namespace = 'default' } = cluster.metadata;
     let superuserSecretHash: string | undefined;
 
@@ -937,6 +965,7 @@ export class FirebirdClusterController {
         readyInstances: created.status?.readyReplicas ?? 0,
         superuserSecretHash,
         statefulSetExisted: false,
+        statefulSet: created,
       };
     }
 
@@ -947,10 +976,15 @@ export class FirebirdClusterController {
       if (desired.spec && existing.spec?.volumeClaimTemplates) {
         desired.spec.volumeClaimTemplates = existing.spec.volumeClaimTemplates;
       }
+      // a merge patch keeps the existing rollingUpdate settings, which OnDelete rejects
+      const body =
+        desired.spec?.updateStrategy?.type === 'OnDelete'
+          ? { ...desired, spec: { ...desired.spec, updateStrategy: { type: 'OnDelete', rollingUpdate: null } } }
+          : desired;
       current = await this.appsApi.patchNamespacedStatefulSet({
         name,
         namespace,
-        body: desired,
+        body,
       }, MERGE_PATCH);
     } else {
       log.debug('StatefulSet is up to date, skipping');
@@ -960,6 +994,75 @@ export class FirebirdClusterController {
       readyInstances: current.status?.readyReplicas ?? 0,
       superuserSecretHash,
       statefulSetExisted: true,
+      statefulSet: current,
+    };
+  }
+
+  /**
+   * Rolling update with the primary last (utils/rolling-update.ts): restarts at most one outdated
+   * instance per reconcile, or asks for a switchover to an updated replica.
+   */
+  private async reconcileRollingUpdate(
+    cluster: FirebirdCluster,
+    statefulSet: V1StatefulSet,
+    primaryPod: string,
+    fenced: string[],
+    busy: string | undefined,
+    lastSwitchover: SwitchoverStatus | undefined,
+    log: Logger,
+  ): Promise<RollingUpdateStatus | undefined> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    if (!operatorRollsPods(cluster) || cluster.spec.hibernated) return undefined;
+    const pods = instancePods(
+      (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items,
+      name,
+    );
+    const plan = planRollingUpdate({ cluster, statefulSet, pods, primaryPod, fenced, busy, lastSwitchover });
+    // the StatefulSet controller has not observed the latest template yet: keep the last status
+    if (!plan) return cluster.status?.rollingUpdate;
+    const primary = pods.find((p) => p.metadata?.name === primaryPod);
+    // automatic failover leaves the restarted primary alone until it is ready again
+    let primaryRestart = cluster.status?.rollingUpdate?.primaryRestart;
+    if (primaryRestart && (primaryRestart.pod !== primaryPod || (primary && isPodReady(primary) && primary.metadata?.uid !== primaryRestart.uid))) {
+      primaryRestart = undefined;
+    }
+    if (plan.outdated.length === 0) {
+      return primaryRestart
+        ? { revision: plan.revision, outdatedInstances: [], message: `waiting for ${primaryPod} to be ready`, primaryRestart }
+        : undefined;
+    }
+
+    if (plan.restart) {
+      log.info({ pod: plan.restart, revision: plan.revision }, 'Rolling update: restarting instance');
+      if (plan.restart === primaryPod) {
+        primaryRestart = { pod: primaryPod, uid: primary?.metadata?.uid ?? '', time: new Date().toISOString() };
+      }
+      try {
+        await this.coreApi.deleteNamespacedPod({ name: plan.restart, namespace });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+    } else if (plan.switchoverTo) {
+      log.info({ from: primaryPod, target: plan.switchoverTo }, 'Rolling update: switching over to update the primary');
+      await this.customApi.patchNamespacedCustomObject(
+        {
+          group: API_GROUP,
+          version: API_VERSION,
+          namespace,
+          plural: RESOURCE_PLURAL,
+          name,
+          body: { metadata: { annotations: { [TARGET_PRIMARY_ANNOTATION]: plan.switchoverTo } } },
+        },
+        MERGE_PATCH,
+      );
+    } else {
+      log.debug({ outdated: plan.outdated }, plan.message);
+    }
+    return {
+      revision: plan.revision,
+      outdatedInstances: plan.outdated,
+      message: plan.message,
+      ...(primaryRestart ? { primaryRestart } : {}),
     };
   }
 

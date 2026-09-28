@@ -18,6 +18,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Declarative users** (`FirebirdUser`, after CloudNativePG's `DatabaseRole`) with Secret-backed passwords, role grants and a reclaim policy; users persist across pod restarts
 - **Automatic failover** (opt-in) to the most advanced replica; the old primary is re-seeded when it returns
 - **Planned switchover** with the `targetPrimary` annotation: no data loss, the other replicas continue without re-seeding
+- **Rolling updates with the primary last** (`primaryUpdateStrategy` / `primaryUpdateMethod`, as in CloudNativePG): replicas are restarted one at a time, then the primary is restarted or switched over
 - **Replica re-seeding** with a pod annotation (CloudNativePG `unrecoverable`)
 - **Instance fencing** via the `fencedInstances` annotation (CloudNativePG format): the database is shut down, the pod keeps running
 - **Lag-aware read-only routing** to replicas via the `<name>-replica` Service (`spec.replication.readOnlyRouting`)
@@ -175,6 +176,7 @@ use online validation (`fbsvcmgr action_validate`), which works while clients ar
 | `conditions` | Standard Kubernetes status conditions (`Ready`, `Progressing`, `Degraded`) |
 | `replicationStatus` | Primary pod, number of active replicas, and with read-only routing the `readRoutablePods` and `laggingReplicas` |
 | `volumes` | Per-PVC requested size, capacity and expansion state (`Ready`, `Resizing`, `ResizeFailed`, `ShrinkRejected`) |
+| `rollingUpdate` | With replication: the StatefulSet revision being rolled out, the outdated instances and the current step |
 
 ### Hibernation
 
@@ -274,6 +276,38 @@ there), because it may have committed transactions that never reached a replica.
 - A fenced primary is never failed over, and there is no failover without a ready replica.
 - `status.switchover` reports the failover (`kind: failover`, phases `Electing`, `Promoting`,
   `Completed` or `Failed`).
+
+### Rolling Updates
+
+Without replication the StatefulSet controller rolls the pods. With replication the StatefulSet
+uses the `OnDelete` update strategy and the operator rolls them itself (CloudNativePG's
+approach), so the primary is restarted only once:
+
+1. Outdated replicas are restarted one at a time, highest ordinal first, each only after every
+   instance is ready again. A restarted replica continues from its replication state; nothing is
+   re-seeded.
+2. The primary is updated last, according to:
+
+```yaml
+spec:
+  primaryUpdateStrategy: unsupervised   # or supervised
+  primaryUpdateMethod: restart          # or switchover
+```
+
+- `unsupervised` + `restart` (default): the primary pod is restarted in place. Writes stop until
+  it is ready again. Automatic failover leaves a primary restarted this way alone for up to five
+  minutes (or `failover.delaySeconds` if longer), so a planned restart does not become a lossy
+  failover.
+- `unsupervised` + `switchover`: the operator sets the `targetPrimary` annotation to an updated
+  replica; the planned switchover (no data loss) demotes the old primary, whose restart updates
+  it. Falls back to a restart when no updated replica is ready or the switchover to it failed.
+- `supervised`: the replicas are updated and the primary is left alone
+  (`status.rollingUpdate.message` says so) until you switch over with the `targetPrimary`
+  annotation or delete the primary pod.
+
+Nothing is restarted while a switchover, failover or re-seed is in progress. Fenced instances are
+not restarted; they are updated once unfenced. `status.phase` is `Updating` while instances run
+an older revision, and `status.rollingUpdate` lists them.
 
 ### Re-seeding a Replica
 

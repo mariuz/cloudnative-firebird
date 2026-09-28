@@ -318,6 +318,17 @@ export interface FirebirdClusterSpec {
    * CronJobs while retaining PVCs, Services and configuration. Set back to false to resume.
    */
   hibernated?: boolean;
+  /**
+   * How the primary is updated during a rolling update with replication (CloudNativePG):
+   * "unsupervised" (default) updates it automatically after the replicas; "supervised" waits
+   * for a switchover (targetPrimary annotation) or a manual restart of the primary.
+   */
+  primaryUpdateStrategy?: 'unsupervised' | 'supervised';
+  /**
+   * How an unsupervised rolling update updates the primary: "restart" (default) restarts it in
+   * place, "switchover" promotes an updated replica first.
+   */
+  primaryUpdateMethod?: 'restart' | 'switchover';
   /** Additional environment variables to pass to the Firebird container */
   env?: Array<{ name: string; value?: string; valueFrom?: object }>;
   /** Node labels required for pod scheduling */
@@ -418,6 +429,19 @@ export interface FirebirdClusterStatus {
   reseedingInstances?: string[];
   /** Label selector of the instance pods, for the scale subresource (HPA / VPA) */
   selector?: string;
+  /** Rolling update in progress (replication clusters, primary last) */
+  rollingUpdate?: RollingUpdateStatus;
+}
+
+/** Progress of a rolling update of the instance pods */
+export interface RollingUpdateStatus {
+  /** StatefulSet revision the instances are updated to */
+  revision: string;
+  /** Instances still running an older revision */
+  outdatedInstances: string[];
+  message: string;
+  /** The primary pod restarted by the update (automatic failover waits for it to return) */
+  primaryRestart?: { pod: string; uid: string; time: string };
 }
 
 /** Automatic failover settings */

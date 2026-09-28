@@ -19,6 +19,7 @@ import {
 import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
 import { bootstrapVolumes, buildBootstrapInitContainers } from './backup';
 import { databaseOnlineCheck } from './fencing';
+import { operatorRollsPods } from './rolling-update';
 import {
   PRIMARY_KEY,
   REPLICATION_SCRIPTS,
@@ -371,6 +372,9 @@ export function buildStatefulSet(
       serviceName: `${name}-headless`,
       // Hibernation scales to zero pods while keeping the PVCs
       replicas: spec.hibernated ? 0 : spec.instances,
+      // with replication the operator restarts outdated pods itself, replicas first and the
+      // primary last (utils/rolling-update.ts)
+      updateStrategy: { type: operatorRollsPods(cluster) ? 'OnDelete' : 'RollingUpdate' },
       selector: {
         matchLabels: labels,
       },
@@ -578,6 +582,9 @@ export function statefulSetNeedsUpdate(
   if (!existingSpec || !desiredSpec) return true;
 
   if (existingSpec.replicas !== desiredSpec.replicas) return true;
+  if ((existingSpec.updateStrategy?.type ?? 'RollingUpdate') !== (desiredSpec.updateStrategy?.type ?? 'RollingUpdate')) {
+    return true;
+  }
   // Only operator-set annotations are compared; others (e.g. kubectl restartedAt) are kept
   const existingAnnotations = existingSpec.template?.metadata?.annotations ?? {};
   const desiredAnnotations = desiredSpec.template?.metadata?.annotations ?? {};
