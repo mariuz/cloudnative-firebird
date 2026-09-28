@@ -4,8 +4,8 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.14.0):** journal replication (experimental) with replica re-seeding,
-> planned switchover and automatic failover, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
+> **Status note (v0.15.0):** journal replication (experimental) with replica re-seeding,
+> planned switchover, automatic failover and rolling updates with the primary last, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
 > (1.28 – 1.30.1) are reviewed in [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md).
@@ -162,8 +162,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 - [x] **CloudNativePG 1.30 alignment** *(v0.11.0)*
   - Scale subresource label selector (`status.selector`) for HPA / VPA.
   - Immutable `clusterName` on backup, scheduled backup and restore resources (CEL).
-- [ ] **Rolling Updates with Primary Last**
-  - Update replicas first, then switch over before restarting the primary to minimise write downtime.
+- [x] **Rolling Updates with Primary Last** *(v0.15.0)*
+  - With replication the StatefulSet uses `OnDelete` and the operator restarts outdated replicas one at a time, then the primary.
+  - `primaryUpdateStrategy: unsupervised | supervised` and `primaryUpdateMethod: restart | switchover` (CloudNativePG); automatic failover waits for a primary restarted by the update.
 - [x] **Declarative Database Users & Roles** *(v0.12.0)*
   - `FirebirdUser` resource per user (CloudNativePG 1.30 `DatabaseRole`): Secret-backed password, `active`, `admin`, role grants, `reclaimPolicy: retain | delete`.
   - Applied to every instance's security database and the role grants to the cluster database; tracked per instance and volume.
@@ -190,6 +191,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Volume Expansion** | PVC Resize | In-place PVC Expansion | **v0.6.0 (Done)** |
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | `targetPrimary` annotation | **v0.13.0 (Done)** |
+| **Rolling Updates** | Primary last, `primaryUpdateStrategy` / `primaryUpdateMethod` | Same settings, `OnDelete` StatefulSet | **v0.15.0 (Done)** |
 | **Declarative Roles** | `DatabaseRole` / `managed.roles` | `FirebirdUser` | **v0.12.0 (Done)** |
 | **Fencing** | Instance Fencing | `fencedInstances` annotation, database full shutdown | **v0.11.0 (Done)** |
 | **Auto-Sweeping / Maintenance** | VACUUM Scheduling | `gfix -sweep` CronJob | **v0.3.0 (Done)** |

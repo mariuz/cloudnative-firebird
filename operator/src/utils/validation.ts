@@ -71,6 +71,15 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     );
   }
 
+  if (spec.primaryUpdateStrategy && !['unsupervised', 'supervised'].includes(spec.primaryUpdateStrategy)) {
+    throw new ValidationError(
+      `Invalid primaryUpdateStrategy: ${spec.primaryUpdateStrategy}. Must be unsupervised or supervised.`,
+    );
+  }
+  if (spec.primaryUpdateMethod && !['restart', 'switchover'].includes(spec.primaryUpdateMethod)) {
+    throw new ValidationError(`Invalid primaryUpdateMethod: ${spec.primaryUpdateMethod}. Must be restart or switchover.`);
+  }
+
   if (spec.replication?.enabled) {
     if (spec.replication.mode && !['sync', 'async'].includes(spec.replication.mode)) {
       throw new ValidationError(

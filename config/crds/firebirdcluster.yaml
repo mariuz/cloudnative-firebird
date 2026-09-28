@@ -503,6 +503,20 @@ spec:
                     operator-managed CronJobs are suspended, while PVCs, Services and
                     configuration are retained. Set back to false to resume the cluster.
                   type: boolean
+                primaryUpdateStrategy:
+                  description: >
+                    With replication, instance pods are updated by the operator, replicas first
+                    and the primary last. unsupervised (default) updates the primary
+                    automatically; supervised waits for a switchover (targetPrimary annotation)
+                    or a manual restart of the primary.
+                  type: string
+                  enum: [unsupervised, supervised]
+                primaryUpdateMethod:
+                  description: >
+                    How an unsupervised rolling update updates the primary: restart (default)
+                    restarts it in place, switchover promotes an updated replica first.
+                  type: string
+                  enum: [restart, switchover]
                 serviceAnnotations:
                   description: Custom annotations to apply to primary and replica services
                   type: object
@@ -543,6 +557,29 @@ spec:
                   type: array
                   items:
                     type: string
+                rollingUpdate:
+                  description: Rolling update in progress (replication clusters, primary last)
+                  type: object
+                  properties:
+                    revision:
+                      description: StatefulSet revision the instances are updated to
+                      type: string
+                    outdatedInstances:
+                      type: array
+                      items:
+                        type: string
+                    message:
+                      type: string
+                    primaryRestart:
+                      description: Primary pod restarted by the update (failover waits for it)
+                      type: object
+                      properties:
+                        pod:
+                          type: string
+                        uid:
+                          type: string
+                        time:
+                          type: string
                 reseedingInstances:
                   description: Replicas being re-seeded (reseed pod annotation)
                   type: array
