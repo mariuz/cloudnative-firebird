@@ -76,6 +76,35 @@ export function s3Uri(s3: S3BackupConfiguration, key: string): string {
   return `s3://${s3.bucket}/${s3KeyPrefix(s3)}${key}`;
 }
 
+/** Accepted retentionPolicy values (CloudNativePG's format): days, weeks or months (30 days) */
+export const RETENTION_POLICY_PATTERN = /^([1-9][0-9]*)([dwm])$/;
+
+/** Seconds covered by a retentionPolicy such as "30d", "4w" or "6m" */
+export function retentionSeconds(policy: string): number {
+  const m = RETENTION_POLICY_PATTERN.exec(policy.trim());
+  if (!m) throw new Error(`invalid retentionPolicy "${policy}": use <n>d, <n>w or <n>m`);
+  return Number(m[1]) * { d: 1, w: 7, m: 30 }[m[2] as 'd' | 'w' | 'm'] * 86400;
+}
+
+/**
+ * Shell that deletes the S3 objects of a scheduled backup series ("backup-<series>-<timestamp>.fbk")
+ * older than the retention window, after an upload. The newest object of the series and the one
+ * just uploaded ($f) are always kept, so a stopped schedule never loses its last backup. Timestamps
+ * are compared as strings (fixed-width UTC); other series and other files are never touched.
+ */
+export function s3RetentionScript(s3: S3BackupConfiguration, series: string, seconds: number): string {
+  const re = `^backup-${series.replace(/[.]/g, '[.]')}-[0-9]{8}T[0-9]{6}Z[.]fbk$`;
+  const dir = `s3://${s3.bucket}/${s3KeyPrefix(s3)}`;
+  return (
+    `cutoff=$(date -u -d "@$(( $(date +%s) - ${seconds} ))" +%Y%m%dT%H%M%SZ); ` +
+    `${awsCommand(s3)} s3 ls ${shellQuote(dir)} | awk '{ print $4 }' | grep -E ${shellQuote(re)} | sort > ${WORK_DIR}/series; ` +
+    `newest=$(tail -n 1 ${WORK_DIR}/series); ` +
+    `awk -v c="$cutoff" -v n="$newest" -v f="$f" '$0 != n && $0 != f { ts = $0; sub(/^.*-/, "", ts); sub(/[.]fbk$/, "", ts); if (ts < c) print }' ${WORK_DIR}/series > ${WORK_DIR}/expired; ` +
+    `while read -r k; do ${awsCommand(s3)} s3 rm ${shellQuote(dir)}"$k"; echo "retention: deleted $k"; done < ${WORK_DIR}/expired; ` +
+    `echo "retention: kept $(( $(wc -l < ${WORK_DIR}/series) - $(wc -l < ${WORK_DIR}/expired) )) backup(s) of ${series} newer than $cutoff or newest"`
+  );
+}
+
 /** Shell-quotes a value for /bin/sh */
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -134,7 +163,15 @@ const workMount: V1VolumeMount = { name: 'work', mountPath: WORK_DIR };
  */
 export function buildBackupPodSpec(
   cluster: FirebirdCluster,
-  options: { primaryHost: string; type: BackupType; level?: number; fileName: string; s3?: S3BackupConfiguration },
+  options: {
+    primaryHost: string;
+    type: BackupType;
+    level?: number;
+    fileName: string;
+    s3?: S3BackupConfiguration;
+    /** Scheduled series and retentionPolicy: expired S3 objects of the series are deleted after the upload */
+    retention?: { series: string; policy?: string };
+  },
 ): V1PodSpec {
   const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
   const env: V1EnvVar[] = [
@@ -190,7 +227,10 @@ export function buildBackupPodSpec(
         command: ['/bin/sh', '-c'],
         args: [
           `set -eu; f=$(cat ${WORK_DIR}/.name); ` +
-            `${awsCommand(s3)} s3 cp "${WORK_DIR}/$f" "s3://${s3.bucket}/${s3KeyPrefix(s3)}$f"`,
+            `${awsCommand(s3)} s3 cp "${WORK_DIR}/$f" "s3://${s3.bucket}/${s3KeyPrefix(s3)}$f"` +
+            (options.retention?.policy
+              ? `; ${s3RetentionScript(s3, options.retention.series, retentionSeconds(options.retention.policy))}`
+              : ''),
         ],
         env: s3ClientEnv(s3),
         volumeMounts: [workMount],
@@ -268,6 +308,7 @@ export function buildBackupCronJob(cluster: FirebirdCluster, primaryPod?: string
       level: backup?.level,
       fileName: scheduledFileName(name, type, backup?.level),
       s3: backup?.s3,
+      retention: { series: name, policy: backup?.retentionPolicy },
     }),
   );
 }
@@ -299,6 +340,7 @@ export function buildScheduledBackupCronJob(
       level: spec.level,
       fileName: scheduledFileName(sbName, type, spec.level),
       s3: spec.s3,
+      retention: { series: sbName, policy: spec.retentionPolicy },
     }),
     (spec.suspend ?? false) || Boolean(cluster.spec.hibernated),
   );

@@ -195,6 +195,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       }
     }
     validateBackupDestination('spec.backup', spec.backup.type, spec.backup.s3);
+    validateRetention('spec.backup', spec.backup.retentionPolicy);
   }
 
   if (spec.monitoring?.exporter?.enabled) {
@@ -242,6 +243,13 @@ function validateBackupDestination(field: string, type?: string, s3?: S3BackupCo
     throw new ValidationError(
       `${field}: physical backups are stored in the primary's data directory; S3 upload is supported for logical backups only`,
     );
+  }
+}
+
+/** retentionPolicy: "<n>d", "<n>w" or "<n>m" (CloudNativePG's format) */
+function validateRetention(field: string, policy?: string): void {
+  if (policy !== undefined && !/^[1-9][0-9]*[dwm]$/.test(policy)) {
+    throw new ValidationError(`${field}.retentionPolicy "${policy}" is invalid: use <n>d, <n>w or <n>m (e.g. "30d")`);
   }
 }
 
@@ -323,7 +331,14 @@ export function validateRestoreSpec(restore: FirebirdRestore): void {
  * Validates a FirebirdScheduledBackup custom resource specification.
  */
 export function validateScheduledBackupSpec(scheduledBackup: {
-  spec: { clusterName: string; schedule: string; type?: string; level?: number; s3?: S3BackupConfiguration };
+  spec: {
+    clusterName: string;
+    schedule: string;
+    type?: string;
+    level?: number;
+    s3?: S3BackupConfiguration;
+    retentionPolicy?: string;
+  };
 }): void {
   if (!scheduledBackup.spec?.clusterName || scheduledBackup.spec.clusterName.trim() === '') {
     throw new ValidationError('FirebirdScheduledBackup clusterName is required');
@@ -339,5 +354,6 @@ export function validateScheduledBackupSpec(scheduledBackup: {
   }
   validateS3('spec', scheduledBackup.spec.s3);
   validateBackupDestination('spec', scheduledBackup.spec.type, scheduledBackup.spec.s3);
+  validateRetention('spec', scheduledBackup.spec.retentionPolicy);
 }
 
