@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { V1Job } from '@kubernetes/client-node';
 import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster, FirebirdUser } from '../types';
-import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv } from './resources';
+import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, serviceAccount } from './resources';
 import { instanceHost } from './replication';
 import { ValidationError } from './validation';
 
@@ -190,6 +190,7 @@ export function buildUserJob(
         metadata: { labels },
         spec: {
           restartPolicy: 'Never',
+          ...serviceAccount(cluster),
           containers: [
             {
               name: 'user',

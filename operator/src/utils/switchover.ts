@@ -1,6 +1,6 @@
 import { V1Job } from '@kubernetes/client-node';
 import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster } from '../types';
-import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv } from './resources';
+import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, serviceAccount } from './resources';
 import { OPERATOR_CONFIG_DIR, SEGMENT_PORT, instanceHost } from './replication';
 
 /**
@@ -52,6 +52,7 @@ export function buildSwitchoverJob(
         metadata: { labels },
         spec: {
           restartPolicy: 'Never',
+          ...serviceAccount(cluster),
           containers: [
             {
               name: 'switchover',
@@ -110,6 +111,7 @@ export function buildFailoverJob(cluster: FirebirdCluster, candidates: string[])
         metadata: { labels },
         spec: {
           restartPolicy: 'Never',
+          ...serviceAccount(cluster),
           containers: [
             {
               name: 'failover',

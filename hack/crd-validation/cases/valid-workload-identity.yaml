@@ -1,0 +1,20 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 2
+  storage:
+    size: 1Gi
+  serviceAccountName: firebird-backups
+  backup:
+    enabled: true
+    s3:
+      bucket: b
+      region: eu-west-1
+  replication:
+    enabled: true
+    journalArchiveS3:
+      bucket: b
+      prefix: journals

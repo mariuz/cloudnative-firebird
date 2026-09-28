@@ -92,9 +92,7 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   Deleting it needs the pod deleted repeatedly until the claim is gone, because the StatefulSet
   recreates the pod against the terminating claim.
 - [ ] Items from the CloudNativePG 1.28 – 1.30 review ([docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md)):
-  `serviceAccountName` for workload
-  identity (S3 without static keys), per-backup reconciliation pause, pod/container security
-  contexts.
+  pod/container security contexts.
 - [ ] **Validation that needs other objects** stays in the operator: e.g. a restore into the
   cluster database, a clone of a cluster in another namespace, a missing Secret. A
   ValidatingAdmissionPolicy with parameter resources, or a webhook, could reject these at apply

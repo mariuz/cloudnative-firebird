@@ -175,7 +175,6 @@ spec:
                       type: object
                       required:
                         - bucket
-                        - secretRef
                       properties:
                         endpoint:
                           type: string
@@ -190,6 +189,9 @@ spec:
                           description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
                           type: string
                         secretRef:
+                          description: >-
+                            Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                            credentials of its environment (workload identity through serviceAccountName, instance profile)
                           type: object
                           required:
                             - name
@@ -361,7 +363,6 @@ spec:
                       type: object
                       required:
                         - bucket
-                        - secretRef
                       properties:
                         endpoint:
                           type: string
@@ -376,6 +377,9 @@ spec:
                           description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
                           type: string
                         secretRef:
+                          description: >-
+                            Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                            credentials of its environment (workload identity through serviceAccountName, instance profile)
                           type: object
                           required:
                             - name
@@ -450,7 +454,6 @@ spec:
                           type: object
                           required:
                             - bucket
-                            - secretRef
                           properties:
                             endpoint:
                               type: string
@@ -465,6 +468,9 @@ spec:
                               description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
                               type: string
                             secretRef:
+                              description: >-
+                                Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                                credentials of its environment (workload identity through serviceAccountName, instance profile)
                               type: object
                               required:
                                 - name
@@ -524,6 +530,15 @@ spec:
                   items:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
+                serviceAccountName:
+                  description: >-
+                    Existing ServiceAccount for the instance pods and every Job of the cluster
+                    (backups, restores, journal archiving, maintenance), e.g. for S3 access through
+                    workload identity instead of static keys. Defaults to the namespace's default
+                    ServiceAccount.
+                  type: string
+                  maxLength: 253
+                  pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
                 serviceType:
                   description: Kubernetes Service type (ClusterIP, NodePort, LoadBalancer)
                   type: string

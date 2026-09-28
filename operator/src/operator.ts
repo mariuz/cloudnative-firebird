@@ -15,6 +15,7 @@ import {
   FirebirdScheduledBackup,
   FirebirdUser,
   RESOURCE_PLURAL,
+  reconciliationDisabled,
 } from './types';
 
 /** Annotations that drive reconciliation (they do not bump the generation) */
@@ -25,7 +26,7 @@ function drivingAnnotations(cluster: FirebirdCluster): string {
 
 /** Kubernetes object fields the operator's event handling relies on */
 interface WatchedObject {
-  metadata: { name: string; namespace?: string; generation?: number };
+  metadata: { name: string; namespace?: string; generation?: number; annotations?: Record<string, string> };
 }
 
 /** A watched resource kind other than FirebirdCluster (backups, restores, users) and how to reconcile it */
@@ -64,6 +65,8 @@ export class Operator {
   private readonly rerun = new Set<string>();
   /** metadata.generation of the last successful reconcile, per cluster */
   private readonly reconciledGenerations = new Map<string, number>();
+  /** reconciliationDisabled state of the last reconcile, per backup, restore or user */
+  private readonly reconciledPause = new Map<string, boolean>();
 
   constructor(kubeConfig: KubeConfig, healthPort = 8080, resyncIntervalMs = DEFAULT_RESYNC_INTERVAL_MS) {
     this.resyncIntervalMs = resyncIntervalMs;
@@ -130,6 +133,7 @@ export class Operator {
     this.knownBackupObjects.clear();
     this.rerun.clear();
     this.reconciledGenerations.clear();
+    this.reconciledPause.clear();
     this.reconciledFencing.clear();
     this.healthServer.stop();
   }
@@ -212,17 +216,25 @@ export class Operator {
       case 'ADDED':
       case 'MODIFIED':
         this.knownBackupObjects.set(key, { kind, obj });
-        // status-only updates (the controller's own) are left to the resync
-        if (phase === 'MODIFIED' && generation !== undefined && this.reconciledGenerations.get(key) === generation) {
+        // status-only updates (the controller's own) are left to the resync; pausing or resuming
+        // with the reconciliationDisabled annotation does not bump the generation either
+        if (
+          phase === 'MODIFIED' &&
+          generation !== undefined &&
+          this.reconciledGenerations.get(key) === generation &&
+          this.reconciledPause.get(key) === reconciliationDisabled(obj)
+        ) {
           break;
         }
         if (generation !== undefined) this.reconciledGenerations.set(key, generation);
+        this.reconciledPause.set(key, reconciliationDisabled(obj));
         log.info('Received event, reconciling');
         await kind.reconcile(obj);
         break;
       case 'DELETED':
         this.knownBackupObjects.delete(key);
         this.reconciledGenerations.delete(key);
+        this.reconciledPause.delete(key);
         break;
       default:
         log.debug('Ignoring watch event');

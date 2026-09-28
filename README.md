@@ -362,7 +362,7 @@ spec:
     bucket: firebird-backups
     prefix: my-cluster
     endpoint: https://s3.example.com
-    secretRef:
+    secretRef:                # optional: without it, credentials come from the pod (see below)
       name: s3-credentials    # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
 ---
 apiVersion: firebird.cloudnative-firebird.io/v1
@@ -389,6 +389,27 @@ spec:
     # or clone a running cluster by streaming gbak from its Service:
     # clone: { sourceCluster: my-cluster, namespace: prod, superuserSecret: { name: prod-su } }
 ```
+
+**S3 without static keys.** `s3.secretRef` is optional everywhere (backups, scheduled backups,
+restores, bootstrap recovery, journal archiving). Without it the `aws` CLI uses the credentials of
+its pod, typically workload identity (EKS IRSA or Pod Identity) through a service account set with
+`spec.serviceAccountName` (CloudNativePG 1.29). The instance pods and every Job the operator runs
+for the cluster use that service account:
+
+```yaml
+spec:
+  serviceAccountName: firebird-backups   # existing ServiceAccount, e.g. annotated with an IAM role
+  backup:
+    enabled: true
+    s3: { bucket: firebird-backups, region: eu-west-1 }
+```
+
+**Pausing a resource.** The annotation `firebird.cloudnative-firebird.io/reconciliationDisabled:
+"true"` on a `FirebirdBackup`, `FirebirdScheduledBackup`, `FirebirdRestore` or `FirebirdUser`
+(CloudNativePG 1.29 `cnpg.io/reconciliationDisabled`) makes the operator leave it, its status and
+its Jobs / CronJob alone until the annotation is removed; a new backup or restore created with it
+does not start. Deleting a paused `FirebirdUser` keeps the Firebird user (as with `retain`).
+Clusters are paused with `spec.suspended`.
 
 With replication enabled, only the primary bootstraps; replicas are then seeded by replication.
 With `replication.journalArchiveS3`, a CronJob copies archived journal segments from the

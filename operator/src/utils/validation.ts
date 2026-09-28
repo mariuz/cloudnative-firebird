@@ -62,6 +62,10 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     throw new ValidationError('superuserSecret name cannot be empty');
   }
 
+  if (spec.serviceAccountName !== undefined && !/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(spec.serviceAccountName)) {
+    throw new ValidationError(`Invalid serviceAccountName: "${spec.serviceAccountName}". Must be a DNS subdomain name.`);
+  }
+
   if (
     spec.serviceType &&
     !['ClusterIP', 'NodePort', 'LoadBalancer'].includes(spec.serviceType)
@@ -126,7 +130,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       if (!spec.replication.journalArchiveS3.bucket || spec.replication.journalArchiveS3.bucket.trim() === '') {
         throw new ValidationError('Replication journalArchiveS3 bucket name is required');
       }
-      if (!spec.replication.journalArchiveS3.secretRef?.name || spec.replication.journalArchiveS3.secretRef.name.trim() === '') {
+      if (spec.replication.journalArchiveS3.secretRef && (!spec.replication.journalArchiveS3.secretRef.name || spec.replication.journalArchiveS3.secretRef.name.trim() === '')) {
         throw new ValidationError('Replication journalArchiveS3 secretRef name is required');
       }
     }
@@ -154,7 +158,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       if (!s3.bucket || s3.bucket.trim() === '') {
         throw new ValidationError('Bootstrap recovery S3 bucket is required');
       }
-      if (!s3.secretRef?.name || s3.secretRef.name.trim() === '') {
+      if (s3.secretRef && (!s3.secretRef.name || s3.secretRef.name.trim() === '')) {
         throw new ValidationError('Bootstrap recovery S3 secretRef name is required');
       }
     }
@@ -186,7 +190,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       if (!spec.backup.s3.bucket || spec.backup.s3.bucket.trim() === '') {
         throw new ValidationError('S3 backup bucket name is required');
       }
-      if (!spec.backup.s3.secretRef?.name || spec.backup.s3.secretRef.name.trim() === '') {
+      if (spec.backup.s3.secretRef && (!spec.backup.s3.secretRef.name || spec.backup.s3.secretRef.name.trim() === '')) {
         throw new ValidationError('S3 backup secretRef name is required');
       }
     }
@@ -245,7 +249,7 @@ function validateBackupDestination(field: string, type?: string, s3?: S3BackupCo
 function validateS3(field: string, s3?: S3BackupConfiguration): void {
   if (!s3) return;
   if (!s3.bucket || s3.bucket.trim() === '') throw new ValidationError(`${field}.s3.bucket is required`);
-  if (!s3.secretRef?.name || s3.secretRef.name.trim() === '') {
+  if (s3.secretRef && (!s3.secretRef.name || s3.secretRef.name.trim() === '')) {
     throw new ValidationError(`${field}.s3.secretRef.name is required`);
   }
 }

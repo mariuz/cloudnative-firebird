@@ -45,8 +45,12 @@ export interface S3BackupConfiguration {
   bucket: string;
   /** AWS/S3 Region (defaults to "us-east-1") */
   region?: string;
-  /** Reference to Secret containing AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY */
-  secretRef: {
+  /**
+   * Secret containing AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY. Without it the S3 client uses
+   * the credentials of its environment, e.g. workload identity through spec.serviceAccountName
+   * (EKS IRSA or Pod Identity) or the node's instance profile.
+   */
+  secretRef?: {
     name: string;
   };
   /** Object key prefix/folder inside bucket */
@@ -337,6 +341,13 @@ export interface FirebirdClusterSpec {
   affinity?: object;
   /** Node taint tolerations */
   tolerations?: Array<object>;
+  /**
+   * Existing ServiceAccount for the instance pods and every Job of the cluster (backups,
+   * restores, journal archiving, maintenance), e.g. for S3 access through workload identity
+   * instead of static keys (CloudNativePG 1.29 serviceAccountName). Defaults to the namespace's
+   * default ServiceAccount.
+   */
+  serviceAccountName?: string;
   /** Kubernetes Service type (defaults to ClusterIP) */
   serviceType?: 'ClusterIP' | 'NodePort' | 'LoadBalancer';
   /** Custom annotations to apply to primary and replica services */
@@ -507,6 +518,18 @@ export const DEFAULT_FIREBIRD_IMAGE = 'firebirdsql/firebird:latest';
 
 /** API group for the FirebirdCluster CRD */
 export const API_GROUP = 'firebird.cloudnative-firebird.io';
+
+/**
+ * Pauses the reconciliation of one FirebirdBackup, FirebirdScheduledBackup, FirebirdRestore or
+ * FirebirdUser when set to "true" (CloudNativePG 1.29 cnpg.io/reconciliationDisabled): the
+ * operator leaves the resource, its status and its Jobs / CronJob alone until it is removed.
+ */
+export const RECONCILIATION_DISABLED_ANNOTATION = `${API_GROUP}/reconciliationDisabled`;
+
+/** Whether reconciliation is paused for the object */
+export function reconciliationDisabled(obj: { metadata?: { annotations?: Record<string, string> } }): boolean {
+  return obj.metadata?.annotations?.[RECONCILIATION_DISABLED_ANNOTATION]?.trim().toLowerCase() === 'true';
+}
 
 /** API version for the FirebirdCluster CRD */
 export const API_VERSION = 'v1';

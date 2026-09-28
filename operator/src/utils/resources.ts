@@ -393,6 +393,7 @@ export function buildStatefulSet(
             : {}),
         },
         spec: {
+          ...serviceAccount(cluster),
           securityContext: {
             fsGroup: 999,
           },
@@ -596,6 +597,7 @@ export function statefulSetNeedsUpdate(
   const desiredPodSpec = desiredSpec.template?.spec;
   if (!existingPodSpec || !desiredPodSpec) return true;
 
+  if ((existingPodSpec.serviceAccountName ?? 'default') !== (desiredPodSpec.serviceAccountName ?? 'default')) return true;
   if (JSON.stringify(existingPodSpec.nodeSelector) !== JSON.stringify(desiredPodSpec.nodeSelector)) return true;
   if (JSON.stringify(existingPodSpec.affinity) !== JSON.stringify(desiredPodSpec.affinity)) return true;
   if (JSON.stringify(existingPodSpec.tolerations) !== JSON.stringify(desiredPodSpec.tolerations)) return true;
@@ -620,6 +622,14 @@ export function statefulSetNeedsUpdate(
   }
 
   return false;
+}
+
+/**
+ * Service account of the instance pods and of every Job the operator runs for the cluster
+ * (spec.serviceAccountName), e.g. for S3 access through workload identity instead of static keys.
+ */
+export function serviceAccount(cluster: FirebirdCluster): { serviceAccountName?: string } {
+  return cluster.spec.serviceAccountName ? { serviceAccountName: cluster.spec.serviceAccountName } : {};
 }
 
 /** Annotation carrying the hash of an operator-managed CronJob's job template */
@@ -970,6 +980,7 @@ export function buildAutoSweepCronJob(cluster: FirebirdCluster): V1CronJob {
             },
             spec: {
               restartPolicy: 'OnFailure',
+              ...serviceAccount(cluster),
               containers: [
                 {
                   name: 'firebird-sweep',
@@ -1137,6 +1148,7 @@ export function buildDiagnosticsCronJob(cluster: FirebirdCluster): V1CronJob {
             metadata: { labels },
             spec: {
               restartPolicy: 'OnFailure',
+              ...serviceAccount(cluster),
               containers: [
                 {
                   name: 'firebird-diagnostics',
