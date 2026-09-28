@@ -22,7 +22,7 @@ import {
   clusterLabels,
   databaseName,
   FIREBIRD_DATA_DIR,
-  serviceAccount,
+  jobPodSpec,
   superuserClientEnv,
   withTemplateHash,
 } from './resources';
@@ -148,9 +148,8 @@ export function buildBackupPodSpec(
       options.type === 'physical'
         ? `action_nbak dbname "$DATABASE_PATH" nbk_file "${FIREBIRD_DATA_DIR}/$f" nbk_level ${options.level ?? 0}`
         : `action_backup dbname "$DATABASE_PATH" bkp_file "${FIREBIRD_DATA_DIR}/$f"`;
-    return {
+    return jobPodSpec(cluster, {
       restartPolicy: 'Never',
-      ...serviceAccount(cluster),
       containers: [
         {
           name: 'firebird-backup',
@@ -164,14 +163,13 @@ export function buildBackupPodSpec(
           env,
         },
       ],
-    };
+    });
   }
 
   // logical backup streamed to this pod, then uploaded
   const s3 = options.s3;
-  return {
+  return jobPodSpec(cluster, {
     restartPolicy: 'Never',
-    ...serviceAccount(cluster),
     initContainers: [
       {
         name: 'firebird-backup',
@@ -199,7 +197,7 @@ export function buildBackupPodSpec(
       },
     ],
     volumes: [workVolume],
-  };
+  });
 }
 
 /** Where a backup with a fixed file name ends up */
@@ -366,9 +364,8 @@ export function buildRestoreJob(
   let podSpec: V1PodSpec;
   if (source.s3) {
     const s3 = source.s3;
-    podSpec = {
+    podSpec = jobPodSpec(cluster, {
       restartPolicy: 'Never',
-      ...serviceAccount(cluster),
       initContainers: [
         {
           name: 'download',
@@ -390,7 +387,7 @@ export function buildRestoreJob(
         },
       ],
       volumes: [workVolume],
-    };
+    });
   } else {
     const action =
       source.type === 'physical'
@@ -399,9 +396,8 @@ export function buildRestoreJob(
             .map((p) => `nbk_file ${shellQuote(serverPath(p))}`)
             .join(' ')
         : `action_restore bkp_file ${shellQuote(serverPath(source.path))} dbname "$TARGET_PATH"`;
-    podSpec = {
+    podSpec = jobPodSpec(cluster, {
       restartPolicy: 'Never',
-      ...serviceAccount(cluster),
       containers: [
         {
           name: 'firebird-restore',
@@ -411,7 +407,7 @@ export function buildRestoreJob(
           env,
         },
       ],
-    };
+    });
   }
 
   return {
@@ -447,9 +443,8 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
 
   const labels = { ...clusterLabels(name), 'app.kubernetes.io/component': 'journal-archive' };
   const journals = s3Uri(s3, 'journals/');
-  const podSpec: V1PodSpec = {
+  const podSpec: V1PodSpec = jobPodSpec(cluster, {
     restartPolicy: 'Never',
-    ...serviceAccount(cluster),
     initContainers: [
       {
         name: 'list-uploaded',
@@ -490,7 +485,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
       },
     ],
     volumes: [workVolume, { name: 'cluster-config', configMap: { name: `${name}-config` } }],
-  };
+  });
 
   return cronJob(
     {

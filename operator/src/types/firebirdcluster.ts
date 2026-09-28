@@ -1,3 +1,4 @@
+import type { V1PodSecurityContext, V1SecurityContext } from '@kubernetes/client-node';
 /**
  * Type definitions for the FirebirdCluster Custom Resource Definition.
  * Inspired by cloudnative-pg's Cluster CRD.
@@ -348,6 +349,17 @@ export interface FirebirdClusterSpec {
    * default ServiceAccount.
    */
   serviceAccountName?: string;
+  /**
+   * Pod security context of the instance pods (CloudNativePG 1.28 podSecurityContext), merged
+   * over the defaults: fsGroup 999, seccomp RuntimeDefault
+   */
+  podSecurityContext?: V1PodSecurityContext;
+  /**
+   * Security context of every instance container (CloudNativePG 1.28 securityContext), merged
+   * over the defaults: no privilege escalation, all capabilities dropped except CHOWN,
+   * DAC_OVERRIDE and FOWNER (the official image runs the server as root)
+   */
+  securityContext?: V1SecurityContext;
   /** Kubernetes Service type (defaults to ClusterIP) */
   serviceType?: 'ClusterIP' | 'NodePort' | 'LoadBalancer';
   /** Custom annotations to apply to primary and replica services */

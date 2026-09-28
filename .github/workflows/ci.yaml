@@ -86,6 +86,11 @@ jobs:
           kubectl rollout status deployment/cloudnative-firebird-operator \
             -n cloudnative-firebird-system --timeout=120s
 
+      - name: Enforce the baseline Pod Security Standard
+        run: |
+          # every instance pod and Job created from here on must pass baseline admission
+          kubectl label namespace default pod-security.kubernetes.io/enforce=baseline pod-security.kubernetes.io/warn=restricted
+
       - name: Create FirebirdCluster
         run: |
           kubectl apply -f - <<'EOF'
@@ -540,7 +545,18 @@ jobs:
           kubectl get --raw /apis/firebird.cloudnative-firebird.io/v1/namespaces/default/firebirdclusters/test-cluster/scale \
             | grep -q '"selector":"app.kubernetes.io/name=firebird'
 
-      - name: Verify Kubernetes events
+      - name: Verify security contexts
+        run: |
+          [ "$(kubectl get pod repl-0 -o jsonpath='{.spec.securityContext.seccompProfile.type}')" = RuntimeDefault ]
+          kubectl get pod repl-0 -o jsonpath='{.spec.containers[0].securityContext}' | tee /dev/stderr | grep -q '"drop":\["ALL"\]'
+          # operator Jobs meet the restricted Pod Security Standard
+          kubectl create namespace pss-restricted
+          kubectl label namespace pss-restricted pod-security.kubernetes.io/enforce=restricted
+          kubectl get job backup-repl-logical -o json \
+            | jq '{apiVersion: "v1", kind: "Pod", metadata: {name: "restricted-check", namespace: "pss-restricted"}, spec: .spec.template.spec}' \
+            | kubectl apply --dry-run=server -f -
+          kubectl delete namespace pss-restricted --wait=false
+
         run: |
           kubectl get events --sort-by=.lastTimestamp \
             -o custom-columns=KIND:.involvedObject.kind,NAME:.involvedObject.name,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message \
