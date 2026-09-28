@@ -88,6 +88,11 @@ export interface BackupConfiguration {
   retentionPolicy?: string;
   /** Upload backups to S3 instead of the primary's data directory (logical backups only) */
   s3?: S3BackupConfiguration;
+  /**
+   * Where the backup runs: "primary" (default) or "prefer-standby", a ready replica when one
+   * qualifies (logical backups to S3 only; others always run on the primary)
+   */
+  target?: 'primary' | 'prefer-standby';
 }
 
 /**

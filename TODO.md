@@ -54,8 +54,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   logical backups to S3 only. Server-side files need a deletion path on the primary's volume
   (e.g. a segment server command, which only exists with replication), and nbackup retention must
   keep every level 0 that a kept level 1 or 2 depends on (chains span schedules).
-- [ ] **Backups from a replica**: `gbak -b` works against a read-only replica (verified), which
-  would keep backup load off the primary; pick a ready replica when one exists.
 - [ ] **Backup verification**: optionally restore each backup into a scratch database and
   validate it.
 - [ ] **Clone across NetworkPolicies**: a clone pod carries the target cluster's labels, so a

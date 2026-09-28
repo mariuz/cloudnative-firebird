@@ -10,6 +10,7 @@ import {
   V1Job,
 } from '@kubernetes/client-node';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
+import { BackupTarget, chooseBackupInstance } from '../utils/backup-target';
 import { logger } from '../utils/logger';
 import {
   BackupSource,
@@ -21,7 +22,7 @@ import {
   onDemandBackupFileName,
   restoreTargetDatabase,
 } from '../utils/backup';
-import { cronJobNeedsUpdate, databaseName, FIREBIRD_DATA_DIR } from '../utils/resources';
+import { cronJobNeedsUpdate, databaseName, FIREBIRD_DATA_DIR, instancePodSelector } from '../utils/resources';
 import {
   ValidationError,
   validateBackupSpec,
@@ -36,9 +37,19 @@ import {
   FirebirdScheduledBackup,
   FirebirdRestore,
   reconciliationDisabled,
+  S3BackupConfiguration,
 } from '../types';
 
 const MERGE_PATCH = setHeaderOptions('Content-Type', PatchStrategy.MergePatch);
+
+/** Instance a backup Job connects to (its FIREBIRD_HOST, "<pod>.<cluster>-headless") */
+function jobInstance(job: V1Job): string | undefined {
+  const spec = job.spec?.template.spec;
+  const host = [...(spec?.initContainers ?? []), ...(spec?.containers ?? [])]
+    .flatMap((c) => c.env ?? [])
+    .find((e) => e.name === 'FIREBIRD_HOST')?.value;
+  return host?.split('.')[0];
+}
 
 /** Returns true for a Kubernetes API "not found" error */
 function isNotFound(err: unknown): boolean {
@@ -58,12 +69,26 @@ export class FirebirdBackupController {
   private readonly customApi: CustomObjectsApi;
   private readonly coordinationApi: CoordinationV1Api;
   private readonly events: EventRecorder;
+  private readonly coreApi: CoreV1Api;
 
   constructor(kubeConfig: KubeConfig) {
     this.batchApi = kubeConfig.makeApiClient(BatchV1Api);
     this.customApi = kubeConfig.makeApiClient(CustomObjectsApi);
     this.coordinationApi = kubeConfig.makeApiClient(CoordinationV1Api);
-    this.events = new EventRecorder(kubeConfig.makeApiClient(CoreV1Api));
+    this.coreApi = kubeConfig.makeApiClient(CoreV1Api);
+    this.events = new EventRecorder(this.coreApi);
+  }
+
+  /** Instance a backup runs on: the primary, or a replica with target prefer-standby */
+  private async backupInstance(
+    cluster: FirebirdCluster,
+    spec: { target?: BackupTarget; type?: 'logical' | 'physical'; s3?: S3BackupConfiguration },
+  ): Promise<string> {
+    const primaryPod = await this.primaryPod(cluster);
+    if (spec.target !== 'prefer-standby') return primaryPod;
+    const { name, namespace = 'default' } = cluster.metadata;
+    const pods = (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items;
+    return chooseBackupInstance({ cluster, primaryPod, pods, ...spec });
   }
 
   /** Records a Kubernetes event on a backup or restore */
@@ -138,7 +163,7 @@ export class FirebirdBackupController {
           await this.updateBackupStatus(backup, { phase: 'Pending', error: 'cluster is hibernated' });
           return;
         }
-        const desired = buildBackupJob(backup, cluster, await this.primaryPod(cluster));
+        const desired = buildBackupJob(backup, cluster, await this.backupInstance(cluster, backup.spec));
         log.info({ jobName }, 'Creating backup Job');
         job = await this.batchApi.createNamespacedJob({ namespace, body: desired });
         await this.event(backup, 'FirebirdBackup', 'Normal', EventReason.BackupStarted, `${backup.spec.type ?? 'logical'} backup of cluster ${backup.spec.clusterName} started (Job ${jobName})`);
@@ -146,6 +171,8 @@ export class FirebirdBackupController {
 
       const outcome = jobOutcome(job);
       const startTime = backup.status?.startTime ?? new Date().toISOString();
+      const instance = jobInstance(job);
+      if (instance) Object.assign(base, { instance });
       if (outcome === 'Completed') {
         log.info({ location: base.location }, 'Backup completed');
         await this.event(backup, 'FirebirdBackup', 'Normal', EventReason.BackupCompleted, `backup stored at ${base.location}`);
@@ -192,7 +219,7 @@ export class FirebirdBackupController {
 
     validateScheduledBackupSpec(scheduledBackup);
     const cluster = await this.getCluster(namespace, scheduledBackup.spec.clusterName);
-    const desired = buildScheduledBackupCronJob(scheduledBackup, cluster, await this.primaryPod(cluster));
+    const desired = buildScheduledBackupCronJob(scheduledBackup, cluster, await this.backupInstance(cluster, scheduledBackup.spec));
     const cronName = desired.metadata!.name!;
 
     let current: V1CronJob;

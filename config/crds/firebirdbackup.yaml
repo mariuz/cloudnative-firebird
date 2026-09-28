@@ -71,6 +71,12 @@ spec:
                   type: integer
                   minimum: 0
                   maximum: 2
+                target:
+                  description: >-
+                    Where the backup runs: primary (default) or prefer-standby, a ready, unfenced and
+                    non-lagging replica when one exists (logical backups to S3 only; others use the primary)
+                  type: string
+                  enum: [primary, prefer-standby]
                 s3:
                   description: Upload the backup to S3 instead of the primary's data directory (logical backups only)
                   type: object
@@ -122,6 +128,9 @@ spec:
                   type: string
                 location:
                   description: Full location of the backup, a path on the primary or an s3:// URI
+                  type: string
+                instance:
+                  description: Instance the backup was taken from
                   type: string
                 jobName:
                   type: string

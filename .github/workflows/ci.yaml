@@ -267,6 +267,8 @@ jobs:
             level: 0
           EOF
           wait_phase firebirdbackup repl-logical Completed backup-repl-logical
+          # status.instance: the backup ran on the primary (the default target)
+          [ "$(kubectl get firebirdbackup repl-logical -o jsonpath={.status.instance})" = repl-0 ]
           wait_phase firebirdbackup repl-physical Completed backup-repl-physical
           kubectl get firebirdbackups
 
