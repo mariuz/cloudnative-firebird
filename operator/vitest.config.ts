@@ -5,6 +5,8 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     include: ['tests/**/*.test.ts'],
+    // unit tests never reach real segment servers
+    setupFiles: ['tests/helpers/no-network.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

@@ -52,6 +52,7 @@ import {
   cronJobNeedsUpdate,
   diagnosticsCronJobNeedsUpdate,
   networkPolicyNeedsUpdate,
+  networkPolicyWireFormat,
   podDisruptionBudgetNeedsUpdate,
   primaryServiceSelector,
   readOnlyRoutingEnabled,
@@ -63,8 +64,9 @@ import {
   instancePodSelector,
   instancePods,
 } from '../utils/resources';
-import { computeReadRouting, isPodReady, podRoutingLabelPatch } from '../utils/routing';
-import { RESEED_ANNOTATION, RESEED_KEY, instanceHost, replicationEnabled } from '../utils/replication';
+import { REPLICATION_LAG_ANNOTATION, computeReadRouting, isPodReady, podRoutingLabelPatch } from '../utils/routing';
+import { SegmentClient, computeLag, parseArchived, parsePosition, segmentRequest } from '../utils/replication-lag';
+import { RESEED_ANNOTATION, RESEED_KEY, SEGMENT_PORT, instanceHost, replicationEnabled } from '../utils/replication';
 import { planVolumeExpansion } from '../utils/storage';
 import { validateClusterSpec } from '../utils/validation';
 import {
@@ -73,6 +75,7 @@ import {
   FirebirdCluster,
   FirebirdClusterCondition,
   FirebirdClusterStatus,
+  ReplicaLagStatus,
   RollingUpdateStatus,
   SwitchoverStatus,
   RESOURCE_KIND,
@@ -163,7 +166,10 @@ export class FirebirdClusterController {
   private readonly policyApi: PolicyV1Api;
   private readonly events: EventRecorder;
 
-  constructor(kubeConfig: KubeConfig) {
+  constructor(
+    kubeConfig: KubeConfig,
+    private readonly segmentClient: SegmentClient = segmentRequest,
+  ) {
     this.appsApi = kubeConfig.makeApiClient(AppsV1Api);
     this.batchApi = kubeConfig.makeApiClient(BatchV1Api);
     this.coordinationApi = kubeConfig.makeApiClient(CoordinationV1Api);
@@ -227,6 +233,8 @@ export class FirebirdClusterController {
           if (!isNotFound(err)) throw err; // already gone
         }
       }
+      // lag is published as pod annotations before read-only routing evaluates them
+      const lag = await this.reconcileReplicationLag(cluster, primaryPod, switchover.status, log);
       // Label pods before (re)pointing service selectors at the routing labels
       const readRouting = await this.reconcileReadRouting(cluster, primaryPod, log);
       await this.reconcileHeadlessService(cluster, log);
@@ -299,6 +307,7 @@ export class FirebirdClusterController {
                   laggingReplicas: readRouting.laggingReplicas,
                 }
               : {}),
+            ...(lag ?? {}),
           }
         : undefined;
 
@@ -1117,6 +1126,82 @@ export class FirebirdClusterController {
     };
   }
 
+  /** The SYSDBA password, which is also the segment servers' token */
+  private async superuserPassword(cluster: FirebirdCluster): Promise<string | undefined> {
+    const secret = cluster.spec.superuserSecret?.name;
+    if (!secret) return 'masterkey'; // the pods' ISC_PASSWORD without a superuser Secret
+    try {
+      const data = (await this.coreApi.readNamespacedSecret({ name: secret, namespace: cluster.metadata.namespace ?? 'default' }))
+        .data?.password;
+      return data ? Buffer.from(data, 'base64').toString('utf8') : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Measures each ready replica's replication lag from the segment servers (utils/replication-lag.ts),
+   * publishes it as the replication-lag-seconds pod annotation read by read-only routing, and
+   * returns it for status.replicationStatus. An unmeasurable replica loses the annotation (it is
+   * then routed on readiness alone).
+   */
+  private async reconcileReplicationLag(
+    cluster: FirebirdCluster,
+    primaryPod: string,
+    switchover: SwitchoverStatus | undefined,
+    log: Logger,
+  ): Promise<{ lastArchivedSequence?: number; replicas: ReplicaLagStatus[] } | undefined> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    if (!replicationEnabled(cluster) || cluster.spec.hibernated || cluster.spec.instances < 2) return undefined;
+    // positions are meaningless while the primary moves
+    if (switchoverInFlight(switchover)) return cluster.status?.replicationStatus?.replicas ? {
+      lastArchivedSequence: cluster.status.replicationStatus.lastArchivedSequence,
+      replicas: cluster.status.replicationStatus.replicas,
+    } : undefined;
+    const token = await this.superuserPassword(cluster);
+    if (token === undefined) return undefined;
+
+    const pods = instancePods(
+      (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items,
+      name,
+    );
+    const host = (pod: string) => `${instanceHost(cluster, pod)}.${namespace}.svc`;
+    const primary = pods.find((p) => p.metadata?.name === primaryPod);
+    if (!primary || !isPodReady(primary)) return undefined;
+    let archived;
+    try {
+      archived = parseArchived(await this.segmentClient(host(primaryPod), SEGMENT_PORT, `${token} ARCHIVED`));
+    } catch (err) {
+      log.debug({ err }, 'Could not list the primary archived segments');
+      return undefined;
+    }
+
+    const replicas: ReplicaLagStatus[] = [];
+    for (const pod of pods) {
+      const podName = pod.metadata?.name;
+      if (!podName || podName === primaryPod || !isPodReady(pod)) continue;
+      let entry: ReplicaLagStatus;
+      try {
+        const position = parsePosition(await this.segmentClient(host(podName), SEGMENT_PORT, `${token} POSITION`));
+        entry = { name: podName, appliedSequence: position.sequence, pendingSegments: position.pending, ...computeLag(archived, position.sequence) };
+      } catch (err) {
+        entry = { name: podName, error: err instanceof Error ? err.message : String(err) };
+      }
+      replicas.push(entry);
+      const annotation = entry.lagSeconds === undefined ? null : String(entry.lagSeconds);
+      if ((pod.metadata?.annotations?.[REPLICATION_LAG_ANNOTATION] ?? null) !== annotation) {
+        await this.coreApi.patchNamespacedPod(
+          { name: podName, namespace, body: { metadata: { annotations: { [REPLICATION_LAG_ANNOTATION]: annotation } } } },
+          MERGE_PATCH,
+        );
+      }
+    }
+    return {
+      ...(archived.length ? { lastArchivedSequence: archived[archived.length - 1].sequence } : {}),
+      replicas: replicas.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })),
+    };
+  }
+
   /** Reconcile CronJob for replication journal continuous archiving to S3 */
   private async reconcileJournalArchiveCronJob(
     cluster: FirebirdCluster,
@@ -1404,7 +1489,7 @@ export class FirebirdClusterController {
           await this.networkingApi.patchNamespacedNetworkPolicy({
             name: npName,
             namespace,
-            body: desired,
+            body: networkPolicyWireFormat(desired),
           }, MERGE_PATCH);
         } else {
           log.debug('NetworkPolicy is up to date, skipping');

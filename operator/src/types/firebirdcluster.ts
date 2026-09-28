@@ -395,6 +395,25 @@ export interface ReplicationStatus {
   readRoutablePods?: string[];
   /** Replicas excluded from read-only routing because of excessive replication lag */
   laggingReplicas?: string[];
+  /** Last journal segment archived on the primary */
+  lastArchivedSequence?: number;
+  /** Replication position and lag of each replica, measured from the segment servers */
+  replicas?: ReplicaLagStatus[];
+}
+
+/** Replication progress of one replica */
+export interface ReplicaLagStatus {
+  name: string;
+  /** Journal segment applied by the replica (its replica control file) */
+  appliedSequence?: number;
+  /** Segments received but not applied yet */
+  pendingSegments?: number;
+  /** Segments archived on the primary after the applied one */
+  lagSegments?: number;
+  /** Age of the oldest archived segment not applied yet (0 when up to date) */
+  lagSeconds?: number;
+  /** Why the position could not be measured */
+  error?: string;
 }
 
 /**

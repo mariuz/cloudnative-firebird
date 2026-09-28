@@ -10,6 +10,8 @@
 #   "<token> POSITION\n"       -> replica: "OK <sequence> <offset> <pending>", the replica control
 #                                 file position and the number of received segments beyond it;
 #                                 primary: "OK primary" (used by planned switchover)
+#   "<token> ARCHIVED\n"       -> "<sequence> <age seconds>" for each archived segment, then ".\n"
+#                                 (the operator compares it with the replicas' POSITION: lag)
 #
 # The token is the SYSDBA password (ISC_PASSWORD).
 #
@@ -298,6 +300,15 @@ while (1) {
         print $client "OK $ctl->{sequence} $ctl->{offset} $pending\n";
       }
     }
+  } elsif ($cmd eq 'ARCHIVED') {
+    # ages are computed here, so the operator's clock does not matter
+    my $now = time;
+    for my $name (segments()) {
+      my $seq = segment_sequence("$dir/$name");
+      my $mtime = (stat("$dir/$name"))[9];
+      print $client "$seq " . ($now - $mtime) . "\n" if defined $seq && defined $mtime;
+    }
+    print $client ".\n";
   } elsif ($cmd eq 'SEED') {
     is_primary() ? seed_from_primary($client) : seed_from_replica($client);
   } else {
