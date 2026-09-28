@@ -105,3 +105,31 @@ describe('replica re-seeding', () => {
     expect(recorded).toBeGreaterThan(lines.findIndex((l) => l.includes('mv "$work" "$DATABASE_PATH"') && l.startsWith('mv')));
   });
 });
+
+describe('enabling replication on an existing cluster (init-instance.sh)', () => {
+  const script = REPLICATION_SCRIPTS['init-instance.sh'];
+  const lines = script.split('\n');
+  const at = (text: string) => lines.findIndex((l) => l.includes(text));
+  const nothingToDo = at('echo "database exists, nothing to initialise"');
+
+  it('converts before concluding that an existing database needs nothing', () => {
+    expect(at('existing primary database now publishes')).toBeGreaterThan(0);
+    expect(at('existing primary database now publishes')).toBeLessThan(nothingToDo);
+    expect(at('keeping it as $keep')).toBeLessThan(nothingToDo);
+  });
+
+  it("only renames databases (resumable), never deletes an instance's own database", () => {
+    expect(script).toContain('mv "$DATABASE_PATH" "$keep"');
+    expect(script).not.toMatch(/rm [^\n]*\$keep/);
+    // an interrupted conversion is resumed before anything looks at the database path
+    expect(at('if [ -f "$en" ] && [ ! -f "$DATABASE_PATH" ]')).toBeLessThan(at('existing primary database now publishes'));
+  });
+
+  it('leaves a database that already publishes without writing a seed from it', () => {
+    const check = at('RDB$ACTIVE_FLAG');
+    const skip = at('database exists and publishes, but has no offline bootstrap seed');
+    expect(check).toBeGreaterThan(0);
+    expect(skip).toBeGreaterThan(check);
+    expect(skip).toBeLessThan(at('existing primary database now publishes'));
+  });
+});

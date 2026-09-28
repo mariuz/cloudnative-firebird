@@ -89,6 +89,22 @@ export function planRollingUpdate(options: {
     return plan;
   }
 
+  // Replication just enabled: the primary still runs without it and has no seed for the replicas
+  // (they could never become ready), so it goes first: its init container enables publication
+  // and writes the offline bootstrap seed from which the replicas are then seeded.
+  const primary = pods.find((p) => name(p) === primaryPod);
+  if (
+    primary &&
+    outdated.includes(primaryPod) &&
+    !fenced.includes(primaryPod) &&
+    (primary.spec?.containers ?? []).length > 0 &&
+    !primary.spec!.containers.some((c) => c.name === 'segment-server')
+  ) {
+    plan.restart = primaryPod;
+    plan.message = `replication enabled: restarting the primary ${primaryPod} first to publish and seed the replicas`;
+    return plan;
+  }
+
   // replicas first, highest ordinal first like the StatefulSet controller
   const replica = [...outdated].reverse().find((pod) => pod !== primaryPod && !fenced.includes(pod));
   if (replica) {

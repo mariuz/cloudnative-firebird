@@ -7,7 +7,9 @@
 #   offline bootstrap seed for the first replicas. No nbackup lock is taken on the primary.
 # Replica, empty volume: fetch a seed copy (from a ready replica first, then from the primary),
 #   turn it into a read-only replica and write its replica control file.
-# Existing database: nothing to do.
+# Existing database: nothing to do, unless replication was enabled on an existing cluster: the
+#   primary then enables publication and writes the bootstrap seed offline, and other instances
+#   keep their own database aside and are seeded as replicas.
 #
 # Seeds avoid locking the primary: see ISSUES.md, issue 2.
 set -eu
@@ -95,6 +97,44 @@ if [ -n "$reseed_token" ] && [ "$(cat "$REPLICATION_DIR/.reseeded" 2>/dev/null |
   esac
 else
   reseed_token=""
+fi
+
+# Replication enabled on an existing cluster: the databases were created without it.
+is_primary() { case "$primary" in ""|"$POD_NAME"|"$POD_NAME".*) return 0 ;; *) return 1 ;; esac; }
+is_replica_db() { gstat -h "$1" | grep -q '^[[:space:]]*Attributes.*replica'; }
+en="$DATA_DIR/.enable-replication.fdb"
+# resume an interrupted conversion before anything looks at DATABASE_PATH
+if [ -f "$en" ] && [ ! -f "$DATABASE_PATH" ]; then mv "$en" "$DATABASE_PATH"; fi
+if [ -f "$DATABASE_PATH" ] && is_primary && [ ! -f "$REPLICATION_DIR/bootstrap-seed.fdb" ] && ! is_replica_db "$DATABASE_PATH"; then
+  # The primary keeps its data: publication is enabled offline on a work path (not journaled) and
+  # a plain copy becomes the offline bootstrap seed, exactly as for a database created with
+  # replication. Resumable: the database is only ever renamed.
+  mv "$DATABASE_PATH" "$en"
+  active=$(echo 'SET LIST ON; SELECT RDB$ACTIVE_FLAG AS A FROM RDB$PUBLICATIONS;' | isql -q "$en" | awk '$1 == "A" { print $2 }')
+  if [ "$active" = 1 ]; then
+    # already publishing: its journal may hold changes the file has too, so a copy is no seed
+    mv "$en" "$DATABASE_PATH"
+    echo "database exists and publishes, but has no offline bootstrap seed; replicas seed from ready replicas"
+    exit 0
+  fi
+  echo "replication enabled on an existing database: enabling publication and writing the offline bootstrap seed"
+  isql -q -i "$SCRIPT_DIR/enable-publication.sql" "$en"
+  cp "$en" "$REPLICATION_DIR/bootstrap-seed.fdb.tmp"
+  mv "$REPLICATION_DIR/bootstrap-seed.fdb.tmp" "$REPLICATION_DIR/bootstrap-seed.fdb"
+  chown -R firebird:firebird "$DATA_DIR"
+  mv "$en" "$DATABASE_PATH"
+  echo "existing primary database now publishes; offline bootstrap seed written"
+  exit 0
+fi
+if [ -f "$DATABASE_PATH" ] && ! is_primary && ! is_replica_db "$DATABASE_PATH" &&
+  [ -z "$(find "$SOURCE_DIR" -maxdepth 1 -name '{*}' 2>/dev/null)" ]; then
+  # A database of its own on a non-primary instance (instances without replication are
+  # independent): it cannot become a replica of the primary. It is kept aside, never deleted,
+  # and the instance is seeded from the primary like a new replica.
+  keep="$DATA_DIR/pre-replication-$(date -u +%Y%m%dT%H%M%SZ).fdb"
+  echo "this instance's database is not a replica of $primary: keeping it as $keep and seeding a replica"
+  mv "$DATABASE_PATH" "$keep"
+  wipe_replication_state
 fi
 
 if [ -f "$DATABASE_PATH" ]; then
