@@ -196,6 +196,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     }
     validateBackupDestination('spec.backup', spec.backup.type, spec.backup.s3);
     validateRetention('spec.backup', spec.backup.retentionPolicy);
+    validateTarget('spec.backup', spec.backup.target);
   }
 
   if (spec.monitoring?.exporter?.enabled) {
@@ -246,6 +247,13 @@ function validateBackupDestination(field: string, type?: string, s3?: S3BackupCo
   }
 }
 
+/** Backup target: "primary" or "prefer-standby" */
+function validateTarget(field: string, target?: string): void {
+  if (target !== undefined && !['primary', 'prefer-standby'].includes(target)) {
+    throw new ValidationError(`${field}.target "${target}" is invalid: use "primary" or "prefer-standby"`);
+  }
+}
+
 /** retentionPolicy: "<n>d", "<n>w" or "<n>m" (CloudNativePG's format) */
 function validateRetention(field: string, policy?: string): void {
   if (policy !== undefined && !/^[1-9][0-9]*[dwm]$/.test(policy)) {
@@ -288,6 +296,7 @@ export function validateBackupSpec(backup: FirebirdBackup): void {
   }
   validateS3('spec', backup.spec.s3);
   validateBackupDestination('spec', backup.spec.type, backup.spec.s3);
+  validateTarget('spec', backup.spec.target);
 }
 
 /**
@@ -338,6 +347,7 @@ export function validateScheduledBackupSpec(scheduledBackup: {
     level?: number;
     s3?: S3BackupConfiguration;
     retentionPolicy?: string;
+    target?: string;
   };
 }): void {
   if (!scheduledBackup.spec?.clusterName || scheduledBackup.spec.clusterName.trim() === '') {
@@ -355,5 +365,6 @@ export function validateScheduledBackupSpec(scheduledBackup: {
   validateS3('spec', scheduledBackup.spec.s3);
   validateBackupDestination('spec', scheduledBackup.spec.type, scheduledBackup.spec.s3);
   validateRetention('spec', scheduledBackup.spec.retentionPolicy);
+  validateTarget('spec', scheduledBackup.spec.target);
 }
 

@@ -409,6 +409,15 @@ by validation). The S3 client image defaults to `amazon/aws-cli` and can be chan
 `s3.clientImage`. Server-side backups share the primary's volume, so they protect against logical
 errors, not against losing the volume.
 
+**Backups from a replica.** `target: prefer-standby` (CloudNativePG's `target`) on
+`spec.backup`, a `FirebirdBackup` or a `FirebirdScheduledBackup` takes logical backups to S3 from a
+replica instead of the primary: `gbak` reads the read-only replica and streams the backup to the
+Job pod, so the primary carries no backup load. The replica is the ready, unfenced, non-lagging one
+with the lowest ordinal (a scheduled backup keeps using it while it stays healthy); without one the
+backup runs on the primary. Physical backups and server-side files are written by the primary's
+server, so they always run on the primary. `status.instance` of a `FirebirdBackup` names the
+instance it ran on.
+
 **Retention.** `retentionPolicy` (`<n>d`, `<n>w` or `<n>m` for 30 days, as in CloudNativePG) on
 `spec.backup` or a `FirebirdScheduledBackup` is enforced for logical backups to S3: after each
 upload the Job deletes the schedule's objects (`backup-<schedule>-<timestamp>.fbk` under its

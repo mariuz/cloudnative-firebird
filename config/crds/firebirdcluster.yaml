@@ -174,6 +174,12 @@ spec:
                         is always kept); server-side files and nbackup chains are not pruned.
                       type: string
                       pattern: '^[1-9][0-9]*[dwm]$'
+                    target:
+                      description: >-
+                        Where the backup runs: primary (default) or prefer-standby, a ready, unfenced and
+                        non-lagging replica when one exists (logical backups to S3 only; others use the primary)
+                      type: string
+                      enum: [primary, prefer-standby]
                     s3:
                       description: Cloud object storage configuration for backup archive export
                       type: object

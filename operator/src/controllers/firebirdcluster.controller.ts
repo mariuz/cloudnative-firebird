@@ -17,6 +17,7 @@ import { Logger } from 'pino';
 import { buildBackupCronJob, buildJournalArchiveCronJob } from '../utils/backup';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { PRIMARY_RESTART_GRACE_SECONDS, operatorRollsPods, planRollingUpdate } from '../utils/rolling-update';
+import { chooseBackupInstance } from '../utils/backup-target';
 import {
   DEFAULT_FAILOVER_DELAY_SECONDS,
   TARGET_PRIMARY_ANNOTATION,
@@ -1255,7 +1256,13 @@ export class FirebirdClusterController {
     const backupName = `${name}-backup`;
 
     if (cluster.spec.backup?.enabled) {
-      const desired = withHibernation(buildBackupCronJob(cluster, primaryPod), cluster);
+      const backup = cluster.spec.backup;
+      const pods =
+        backup.target === 'prefer-standby'
+          ? (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items
+          : [];
+      const instance = chooseBackupInstance({ cluster, primaryPod, pods, ...backup });
+      const desired = withHibernation(buildBackupCronJob(cluster, instance), cluster);
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: backupName, namespace });
         if (cronJobNeedsUpdate(existing, desired)) {
