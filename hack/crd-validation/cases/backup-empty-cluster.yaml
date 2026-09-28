@@ -1,0 +1,7 @@
+# expect: spec.clusterName
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdBackup
+metadata:
+  name: r1
+spec:
+  clusterName: ''

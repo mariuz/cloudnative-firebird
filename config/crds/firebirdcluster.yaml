@@ -49,6 +49,11 @@ spec:
         openAPIV3Schema:
           description: FirebirdCluster is the Schema for the firebirdclusters API
           type: object
+          x-kubernetes-validations:
+            - rule: >-
+                !has(self.spec.bootstrap) || !has(self.spec.bootstrap.clone) ||
+                self.spec.bootstrap.clone.sourceCluster != self.metadata.name
+              message: bootstrap clone sourceCluster cannot be the cluster itself
           required:
             - spec
           properties:
@@ -64,6 +69,9 @@ spec:
             spec:
               description: FirebirdClusterSpec defines the desired state of a FirebirdCluster
               type: object
+              x-kubernetes-validations:
+                - rule: "!has(self.bootstrap) || !has(self.bootstrap.clone) || !has(self.bootstrap.recovery)"
+                  message: bootstrap recovery and clone are mutually exclusive
               required:
                 - instances
                 - storage
@@ -87,6 +95,7 @@ spec:
                     name:
                       description: Name of the Secret resource
                       type: string
+                      minLength: 1
                 databaseName:
                   description: >
                     Database file created in each instance's data directory
@@ -105,6 +114,11 @@ spec:
                         expands existing PVCs in place (requires a StorageClass with
                         allowVolumeExpansion); shrinking is not supported.
                       type: string
+                      x-kubernetes-validations:
+                        - rule: isQuantity(self) && quantity(self).isGreaterThan(quantity('0'))
+                          message: storage size must be a positive quantity (e.g. "10Gi")
+                        - rule: "!isQuantity(oldSelf) || !isQuantity(self) || !quantity(self).isLessThan(quantity(oldSelf))"
+                          message: storage size cannot be decreased (PVCs cannot shrink)
                     storageClass:
                       description: Optional StorageClass name for the PVC
                       type: string
@@ -129,6 +143,9 @@ spec:
                 backup:
                   description: Backup configuration
                   type: object
+                  x-kubernetes-validations:
+                    - rule: "!has(self.type) || self.type != 'physical' || !has(self.s3)"
+                      message: physical backups are stored in the primary's data directory; S3 upload is supported for logical backups only
                   required:
                     - enabled
                   properties:
@@ -149,6 +166,7 @@ spec:
                     schedule:
                       description: Cron schedule for backups (e.g. "0 2 * * *")
                       type: string
+                      pattern: '^\s*\S+(\s+\S+){4}\s*$'
                     retentionPolicy:
                       description: Backup retention policy (e.g. "7d"). Not enforced yet.
                       type: string
@@ -163,6 +181,7 @@ spec:
                           type: string
                         bucket:
                           type: string
+                          minLength: 1
                         region:
                           type: string
                         prefix:
@@ -177,6 +196,7 @@ spec:
                           properties:
                             name:
                               type: string
+                              minLength: 1
                 networkPolicy:
                   description: NetworkPolicy configuration for database isolation
                   type: object
@@ -249,6 +269,7 @@ spec:
                       properties:
                         name:
                           type: string
+                          minLength: 1
                         kind:
                           type: string
                         group:
@@ -261,6 +282,9 @@ spec:
                   type: object
                   required:
                     - enabled
+                  x-kubernetes-validations:
+                    - rule: "!self.enabled || !has(self.mode) || self.mode == 'async'"
+                      message: replication mode 'sync' is not supported yet; use 'async' (journal shipping)
                   properties:
                     enabled:
                       description: Whether replication is enabled
@@ -343,6 +367,7 @@ spec:
                           type: string
                         bucket:
                           type: string
+                          minLength: 1
                         region:
                           type: string
                         prefix:
@@ -357,6 +382,7 @@ spec:
                           properties:
                             name:
                               type: string
+                              minLength: 1
                 autoSweep:
                   description: AutoSweep configuration for periodic gfix database sweeping
                   type: object
@@ -369,6 +395,7 @@ spec:
                     schedule:
                       description: Cron schedule for sweep execution (defaults to "0 3 * * *")
                       type: string
+                      pattern: '^\s*\S+(\s+\S+){4}\s*$'
                     databaseName:
                       description: Database file name to sweep (defaults to spec.databaseName)
                       type: string
@@ -384,6 +411,7 @@ spec:
                     schedule:
                       description: Cron schedule for diagnostic execution (defaults to "0 4 * * 0")
                       type: string
+                      pattern: '^\s*\S+(\s+\S+){4}\s*$'
                     databaseName:
                       description: Database file name to check (defaults to spec.databaseName)
                       type: string
@@ -395,6 +423,9 @@ spec:
                       type: object
                       additionalProperties:
                         type: string
+                      x-kubernetes-validations:
+                        - rule: self.all(k, k.lowerAscii() != 'securitydatabase')
+                          message: SecurityDatabase is managed by the operator (the security database is kept on the instance volume)
                 bootstrap:
                   description: Bootstrap options for initial database creation
                   type: object
@@ -405,6 +436,9 @@ spec:
                     recovery:
                       description: Cloud or file backup recovery configuration for database bootstrapping
                       type: object
+                      x-kubernetes-validations:
+                        - rule: has(self.s3) || (has(self.sourcePath) && self.sourcePath != '')
+                          message: bootstrap recovery requires either sourcePath or s3
                       properties:
                         sourcePath:
                           description: >-
@@ -422,6 +456,7 @@ spec:
                               type: string
                             bucket:
                               type: string
+                              minLength: 1
                             region:
                               type: string
                             prefix:
@@ -436,6 +471,7 @@ spec:
                               properties:
                                 name:
                                   type: string
+                                  minLength: 1
                     clone:
                       description: Target source cluster configuration for cluster-to-cluster cloning
                       type: object
@@ -444,6 +480,7 @@ spec:
                       properties:
                         sourceCluster:
                           type: string
+                          minLength: 1
                         namespace:
                           type: string
                         databaseName:

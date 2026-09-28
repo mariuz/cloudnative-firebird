@@ -44,12 +44,27 @@ spec:
             spec:
               description: FirebirdRestoreSpec defines the desired state of a FirebirdRestore
               type: object
+              x-kubernetes-validations:
+                - rule: has(self.backupName) != has(self.backupPath)
+                  message: exactly one of backupName and backupPath is required
+                - rule: "!has(self.backupPath) || !has(self.s3) || !has(self.restoreType) || self.restoreType != 'physical'"
+                  message: physical restores read nbackup files from the primary's data directory; S3 sources are supported for logical restores only
+                - rule: >-
+                    !has(self.backupPath) || has(self.s3) ||
+                    (!self.backupPath.matches('(^|/)[.][.](/|$)') &&
+                    (!self.backupPath.startsWith('/') || self.backupPath.startsWith('/var/lib/firebird/data/')))
+                  message: backupPath must be inside /var/lib/firebird/data and must not contain ".."
+                - rule: >-
+                    !has(self.incrementalBackupPaths) || size(self.incrementalBackupPaths) == 0 ||
+                    (has(self.restoreType) && self.restoreType == 'physical' && !has(self.backupName))
+                  message: incrementalBackupPaths applies to physical restores from backupPath only
               required:
                 - clusterName
               properties:
                 clusterName:
                   description: Target FirebirdCluster name to restore into (immutable)
                   type: string
+                  minLength: 1
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: clusterName is immutable
@@ -62,11 +77,19 @@ spec:
                     primary's data directory (relative, or absolute within it), or the object key
                     relative to s3.prefix
                   type: string
+                  maxLength: 1024
                 incrementalBackupPaths:
                   description: nbackup level 1 and 2 files applied on top of backupPath by a physical restore
                   type: array
+                  maxItems: 16
                   items:
                     type: string
+                    maxLength: 1024
+                    x-kubernetes-validations:
+                      - rule: "!self.matches('(^|/)[.][.](/|$)')"
+                        message: backup paths must not contain ".."
+                      - rule: "!self.startsWith('/') || self.startsWith('/var/lib/firebird/data/')"
+                        message: backup paths must be inside /var/lib/firebird/data
                 restoreType:
                   description: Restore strategy ('logical' or 'physical')
                   type: string
@@ -89,6 +112,7 @@ spec:
                       type: string
                     bucket:
                       type: string
+                      minLength: 1
                     region:
                       type: string
                     prefix:
@@ -103,6 +127,7 @@ spec:
                       properties:
                         name:
                           type: string
+                          minLength: 1
             status:
               description: FirebirdRestoreStatus defines the observed state of FirebirdRestore
               type: object

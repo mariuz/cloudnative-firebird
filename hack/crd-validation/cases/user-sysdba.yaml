@@ -1,0 +1,10 @@
+# expect: SYSDBA is managed
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdUser
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  passwordSecret:
+    name: pw
+  username: sysdba

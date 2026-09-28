@@ -1,0 +1,12 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRestore
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  backupPath: daily/../x.fbk
+  s3:
+    bucket: b
+    secretRef:
+      name: s3-creds

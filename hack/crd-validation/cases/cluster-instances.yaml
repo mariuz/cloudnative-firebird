@@ -1,0 +1,9 @@
+# expect: spec.instances
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 11
+  storage:
+    size: 1Gi

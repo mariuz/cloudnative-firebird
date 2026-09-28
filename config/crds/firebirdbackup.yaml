@@ -47,12 +47,16 @@ spec:
             spec:
               description: FirebirdBackupSpec defines the desired state of a FirebirdBackup
               type: object
+              x-kubernetes-validations:
+                - rule: "!has(self.type) || self.type != 'physical' || !has(self.s3)"
+                  message: physical backups are stored in the primary's data directory; S3 upload is supported for logical backups only
               required:
                 - clusterName
               properties:
                 clusterName:
                   description: Target FirebirdCluster name (immutable)
                   type: string
+                  minLength: 1
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: clusterName is immutable
@@ -78,6 +82,7 @@ spec:
                       type: string
                     bucket:
                       type: string
+                      minLength: 1
                     region:
                       type: string
                     prefix:
@@ -92,6 +97,7 @@ spec:
                       properties:
                         name:
                           type: string
+                          minLength: 1
             status:
               description: FirebirdBackupStatus defines the observed state of FirebirdBackup
               type: object

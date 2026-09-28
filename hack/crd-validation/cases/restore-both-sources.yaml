@@ -1,0 +1,9 @@
+# expect: exactly one of backupName and backupPath
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRestore
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  backupName: b
+  backupPath: x.fbk

@@ -1,0 +1,12 @@
+# expect: cannot be the cluster itself
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  bootstrap:
+    clone:
+      sourceCluster: c1

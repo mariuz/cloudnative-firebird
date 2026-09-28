@@ -1,0 +1,33 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  replication:
+    enabled: true
+    mode: async
+    failover:
+      enabled: true
+      delaySeconds: 30
+  backup:
+    enabled: true
+    type: logical
+    schedule: 0 2 * * *
+    s3: &id001
+      bucket: b
+      secretRef:
+        name: s3-creds
+  autoSweep:
+    enabled: true
+    schedule: 0 3 * * *
+  config:
+    settings:
+      DefaultCacheMem: 64M
+  bootstrap:
+    recovery:
+      s3: *id001
+  primaryUpdateMethod: switchover
