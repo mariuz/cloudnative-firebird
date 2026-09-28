@@ -22,6 +22,7 @@ import {
   clusterLabels,
   databaseName,
   FIREBIRD_DATA_DIR,
+  serviceAccount,
   superuserClientEnv,
   withTemplateHash,
 } from './resources';
@@ -84,19 +85,24 @@ function awsCommand(s3: S3BackupConfiguration): string {
   return s3.endpoint ? `aws --endpoint-url ${shellQuote(s3.endpoint)}` : 'aws';
 }
 
-/** Environment for the S3 client container */
+/**
+ * Environment for the S3 client container: static keys from secretRef, or none, so that the aws
+ * CLI uses the pod's own credentials (workload identity via the service account, instance profile)
+ */
 export function s3ClientEnv(s3: S3BackupConfiguration): V1EnvVar[] {
-  return [
-    {
-      name: 'AWS_ACCESS_KEY_ID',
-      valueFrom: { secretKeyRef: { name: s3.secretRef.name, key: 'AWS_ACCESS_KEY_ID' } },
-    },
-    {
-      name: 'AWS_SECRET_ACCESS_KEY',
-      valueFrom: { secretKeyRef: { name: s3.secretRef.name, key: 'AWS_SECRET_ACCESS_KEY' } },
-    },
-    { name: 'AWS_DEFAULT_REGION', value: s3.region ?? 'us-east-1' },
-  ];
+  const keys: V1EnvVar[] = s3.secretRef
+    ? [
+        {
+          name: 'AWS_ACCESS_KEY_ID',
+          valueFrom: { secretKeyRef: { name: s3.secretRef.name, key: 'AWS_ACCESS_KEY_ID' } },
+        },
+        {
+          name: 'AWS_SECRET_ACCESS_KEY',
+          valueFrom: { secretKeyRef: { name: s3.secretRef.name, key: 'AWS_SECRET_ACCESS_KEY' } },
+        },
+      ]
+    : [];
+  return [...keys, { name: 'AWS_DEFAULT_REGION', value: s3.region ?? 'us-east-1' }];
 }
 
 function s3ClientImage(s3: S3BackupConfiguration): string {
@@ -144,6 +150,7 @@ export function buildBackupPodSpec(
         : `action_backup dbname "$DATABASE_PATH" bkp_file "${FIREBIRD_DATA_DIR}/$f"`;
     return {
       restartPolicy: 'Never',
+      ...serviceAccount(cluster),
       containers: [
         {
           name: 'firebird-backup',
@@ -164,6 +171,7 @@ export function buildBackupPodSpec(
   const s3 = options.s3;
   return {
     restartPolicy: 'Never',
+    ...serviceAccount(cluster),
     initContainers: [
       {
         name: 'firebird-backup',
@@ -360,6 +368,7 @@ export function buildRestoreJob(
     const s3 = source.s3;
     podSpec = {
       restartPolicy: 'Never',
+      ...serviceAccount(cluster),
       initContainers: [
         {
           name: 'download',
@@ -392,6 +401,7 @@ export function buildRestoreJob(
         : `action_restore bkp_file ${shellQuote(serverPath(source.path))} dbname "$TARGET_PATH"`;
     podSpec = {
       restartPolicy: 'Never',
+      ...serviceAccount(cluster),
       containers: [
         {
           name: 'firebird-restore',
@@ -439,6 +449,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
   const journals = s3Uri(s3, 'journals/');
   const podSpec: V1PodSpec = {
     restartPolicy: 'Never',
+    ...serviceAccount(cluster),
     initContainers: [
       {
         name: 'list-uploaded',

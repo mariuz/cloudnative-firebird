@@ -30,6 +30,7 @@ import {
   FirebirdUser,
   FirebirdUserInstanceStatus,
   FirebirdUserStatus,
+  reconciliationDisabled,
 } from '../types';
 
 /** A failed Job for an unchanged spec is retried after this delay */
@@ -82,6 +83,12 @@ export class FirebirdUserController {
     const { name, namespace = 'default' } = user.metadata;
     const log = logger.child({ user: name, namespace });
 
+    if (reconciliationDisabled(user)) {
+      // a paused user never blocks its own deletion: the Firebird user is kept (as with "retain")
+      if (user.metadata.deletionTimestamp) await this.ensureFinalizer(user, false);
+      log.debug('Reconciliation disabled by annotation');
+      return;
+    }
     if (user.metadata.deletionTimestamp) {
       await this.reconcileDeletion(user, log);
       return;

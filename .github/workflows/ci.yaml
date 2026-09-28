@@ -296,6 +296,34 @@ jobs:
           kubectl get firebirdrestore over-live -o jsonpath='{.status.error}' | grep -q 'cluster database'
           ! kubectl get job restore-over-live 2>/dev/null
 
+      - name: Verify service account and paused reconciliation
+        run: |
+          # instance pods run with spec.serviceAccountName (workload identity for S3)
+          kubectl create serviceaccount firebird-sa
+          kubectl patch firebirdcluster test-cluster --type merge -p '{"spec":{"serviceAccountName":"firebird-sa"}}'
+          timeout 120 bash -c 'until [ "$(kubectl get statefulset test-cluster -o jsonpath={.spec.template.spec.serviceAccountName})" = firebird-sa ]; do sleep 3; done'
+          timeout 300 bash -c 'until [ "$(kubectl get pod test-cluster-0 -o jsonpath={.spec.serviceAccountName})" = firebird-sa ]; do sleep 5; done'
+          kubectl wait pod/test-cluster-0 --for=condition=Ready --timeout=300s
+
+          # a paused backup is left alone until the annotation is removed
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: paused
+            annotations:
+              firebird.cloudnative-firebird.io/reconciliationDisabled: "true"
+          spec:
+            clusterName: repl
+          EOF
+          sleep 45
+          ! kubectl get job backup-paused 2>/dev/null
+          [ -z "$(kubectl get firebirdbackup paused -o jsonpath={.status.phase})" ]
+          kubectl annotate firebirdbackup paused firebird.cloudnative-firebird.io/reconciliationDisabled-
+          timeout 300 bash -c 'until [ "$(kubectl get firebirdbackup paused -o jsonpath={.status.phase})" = Completed ]; do
+            [ "$(kubectl get firebirdbackup paused -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done'
+          echo "paused backup ran once resumed"
+
       - name: Verify declarative users
         run: |
           DB=/var/lib/firebird/data/mydb.fdb

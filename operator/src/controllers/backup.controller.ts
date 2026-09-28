@@ -35,6 +35,7 @@ import {
   FirebirdBackup,
   FirebirdScheduledBackup,
   FirebirdRestore,
+  reconciliationDisabled,
 } from '../types';
 
 const MERGE_PATCH = setHeaderOptions('Content-Type', PatchStrategy.MergePatch);
@@ -114,6 +115,10 @@ export class FirebirdBackupController {
   async reconcileBackup(backup: FirebirdBackup): Promise<void> {
     const { name, namespace = 'default' } = backup.metadata;
     const log = logger.child({ backup: name, namespace });
+    if (reconciliationDisabled(backup)) {
+      log.debug('Reconciliation disabled by annotation');
+      return;
+    }
 
     if (backup.status?.phase === 'Completed' || backup.status?.phase === 'Failed') {
       log.debug({ phase: backup.status.phase }, 'FirebirdBackup is already in terminal state');
@@ -180,6 +185,10 @@ export class FirebirdBackupController {
   async reconcileScheduledBackup(scheduledBackup: FirebirdScheduledBackup): Promise<void> {
     const { name, namespace = 'default' } = scheduledBackup.metadata;
     const log = logger.child({ scheduledBackup: name, namespace });
+    if (reconciliationDisabled(scheduledBackup)) {
+      log.debug('Reconciliation disabled by annotation');
+      return;
+    }
 
     validateScheduledBackupSpec(scheduledBackup);
     const cluster = await this.getCluster(namespace, scheduledBackup.spec.clusterName);
@@ -248,6 +257,10 @@ export class FirebirdBackupController {
   async reconcileRestore(restore: FirebirdRestore): Promise<void> {
     const { name, namespace = 'default' } = restore.metadata;
     const log = logger.child({ restore: name, namespace });
+    if (reconciliationDisabled(restore)) {
+      log.debug('Reconciliation disabled by annotation');
+      return;
+    }
 
     if (restore.status?.phase === 'Completed' || restore.status?.phase === 'Failed') {
       log.debug({ phase: restore.status.phase }, 'FirebirdRestore is already in terminal state');

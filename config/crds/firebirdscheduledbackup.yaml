@@ -86,7 +86,6 @@ spec:
                   type: object
                   required:
                     - bucket
-                    - secretRef
                   properties:
                     endpoint:
                       type: string
@@ -101,6 +100,9 @@ spec:
                       description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
                       type: string
                     secretRef:
+                      description: >-
+                        Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                        credentials of its environment (workload identity through serviceAccountName, instance profile)
                       type: object
                       required:
                         - name

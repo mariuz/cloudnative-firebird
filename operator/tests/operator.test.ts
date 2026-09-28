@@ -518,6 +518,21 @@ describe('Operator – backup resources', () => {
     expect(mockReconcileBackup).not.toHaveBeenCalled();
     operator.stop();
   });
+
+  it('reconciles right away when the reconciliationDisabled annotation is added or removed', async () => {
+    const operator = new Operator(new KubeConfig(), 8080, 0);
+    await operator.start();
+    const paused = (value: string) => ({
+      ...backup(1),
+      metadata: { ...backup(1).metadata, annotations: { 'firebird.cloudnative-firebird.io/reconciliationDisabled': value } },
+    });
+    emit('firebirdbackups', 'ADDED', backup(1));
+    emit('firebirdbackups', 'MODIFIED', paused('true'));
+    emit('firebirdbackups', 'MODIFIED', paused('true'));
+    emit('firebirdbackups', 'MODIFIED', backup(1));
+    expect(mockReconcileBackup).toHaveBeenCalledTimes(3);
+    operator.stop();
+  });
 });
 
 describe('Operator – reconcile serialization', () => {

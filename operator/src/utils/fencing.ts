@@ -1,6 +1,6 @@
 import { V1Job } from '@kubernetes/client-node';
 import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster } from '../types';
-import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv } from './resources';
+import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, serviceAccount } from './resources';
 import { instanceHost } from './replication';
 import { ValidationError } from './validation';
 
@@ -115,6 +115,7 @@ export function buildFencingJob(cluster: FirebirdCluster, pod: string, action: F
         metadata: { labels },
         spec: {
           restartPolicy: 'Never',
+          ...serviceAccount(cluster),
           containers: [
             {
               name: 'fencing',
