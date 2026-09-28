@@ -6,6 +6,7 @@ import {
   KubeConfig,
   V1Job,
 } from '@kubernetes/client-node';
+import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { logger } from '../utils/logger';
 import { CLUSTER_LABEL, instancePodSelector } from '../utils/resources';
 import { replicationEnabled } from '../utils/replication';
@@ -62,12 +63,19 @@ export class FirebirdUserController {
   private readonly coreApi: CoreV1Api;
   private readonly customApi: CustomObjectsApi;
   private readonly coordinationApi: CoordinationV1Api;
+  private readonly events: EventRecorder;
 
   constructor(kubeConfig: KubeConfig, private readonly now: () => number = Date.now) {
     this.batchApi = kubeConfig.makeApiClient(BatchV1Api);
     this.coreApi = kubeConfig.makeApiClient(CoreV1Api);
     this.customApi = kubeConfig.makeApiClient(CustomObjectsApi);
     this.coordinationApi = kubeConfig.makeApiClient(CoordinationV1Api);
+    this.events = new EventRecorder(this.coreApi, now);
+  }
+
+  /** Records a Kubernetes event on a FirebirdUser */
+  private event(user: FirebirdUser, type: EventType, reason: string, message: string): Promise<void> {
+    return this.events.record({ apiVersion: `${API_GROUP}/${API_VERSION}`, kind: 'FirebirdUser', metadata: user.metadata }, type, reason, message);
   }
 
   async reconcileUser(user: FirebirdUser): Promise<void> {
@@ -144,10 +152,12 @@ export class FirebirdUserController {
           status.failedHash = undefined;
           status.lastFailureTime = undefined;
           log.info({ instances: targets.map((t) => t.name) }, 'Firebird user applied');
+          await this.event(user, 'Normal', EventReason.UserApplied, `user ${firebirdUsername(user)} applied to ${targets.map((t) => t.name).join(', ')}`);
         } else {
           status.failedHash = jobHash;
           status.lastFailureTime = new Date(this.now()).toISOString();
           log.warn({ jobName }, 'Firebird user Job failed');
+          await this.event(user, 'Warning', EventReason.UserFailed, `Job ${jobName} failed (see its pod logs; e.g. a role that does not exist)`);
         }
       }
     }
@@ -226,6 +236,7 @@ export class FirebirdUserController {
       await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
       if (state === 'complete') {
         log.info('Firebird user dropped');
+        await this.event(user, 'Normal', EventReason.UserDropped, `user ${firebirdUsername(user)} dropped`);
         await this.ensureFinalizer(user, false);
       }
       return; // a failed drop is retried on the next reconcile

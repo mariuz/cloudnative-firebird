@@ -92,7 +92,7 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   Deleting it needs the pod deleted repeatedly until the claim is gone, because the StatefulSet
   recreates the pod against the terminating claim.
 - [ ] Items from the CloudNativePG 1.28 – 1.30 review ([docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md)):
-  Kubernetes events, `serviceAccountName` for workload
+  `serviceAccountName` for workload
   identity (S3 without static keys), per-backup reconciliation pause, pod/container security
   contexts.
 - [ ] Admission validation (CRD CEL rules or a webhook) so invalid specs are rejected at apply
