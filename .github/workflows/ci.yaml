@@ -509,6 +509,29 @@ jobs:
           kubectl get --raw /apis/firebird.cloudnative-firebird.io/v1/namespaces/default/firebirdclusters/test-cluster/scale \
             | grep -q '"selector":"app.kubernetes.io/name=firebird'
 
+      - name: Verify Kubernetes events
+        run: |
+          kubectl get events --sort-by=.lastTimestamp \
+            -o custom-columns=KIND:.involvedObject.kind,NAME:.involvedObject.name,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message \
+            | grep -E '^Firebird' | tee /tmp/events.txt
+          expect() {
+            kubectl get events --field-selector "involvedObject.kind=$1,involvedObject.name=$2,reason=$3" -o name | grep -q . \
+              || { echo "missing event $3 on $1/$2"; exit 1; }
+          }
+          expect FirebirdCluster repl SwitchoverStarted
+          expect FirebirdCluster repl SwitchoverCompleted
+          expect FirebirdCluster repl PrimaryNotReady
+          expect FirebirdCluster repl FailoverStarted
+          expect FirebirdCluster repl FailoverCompleted
+          expect FirebirdCluster repl ReseedStarted
+          expect FirebirdCluster repl RollingUpdate
+          expect FirebirdCluster repl RollingUpdateCompleted
+          expect FirebirdCluster test-cluster InstanceFenced
+          expect FirebirdCluster test-cluster InstanceUnfenced
+          expect FirebirdBackup repl-logical BackupCompleted
+          expect FirebirdRestore from-logical RestoreCompleted
+          expect FirebirdUser app-user UserApplied
+
       - name: Verify operator reconciled without API errors
         run: |
           logs=$(kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1)

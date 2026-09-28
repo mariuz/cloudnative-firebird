@@ -15,6 +15,7 @@ import {
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
 import { buildBackupCronJob, buildJournalArchiveCronJob } from '../utils/backup';
+import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { PRIMARY_RESTART_GRACE_SECONDS, operatorRollsPods, planRollingUpdate } from '../utils/rolling-update';
 import {
   DEFAULT_FAILOVER_DELAY_SECONDS,
@@ -74,6 +75,7 @@ import {
   FirebirdClusterStatus,
   RollingUpdateStatus,
   SwitchoverStatus,
+  RESOURCE_KIND,
   RESOURCE_PLURAL,
   VolumeStatus,
 } from '../types';
@@ -98,6 +100,23 @@ interface SwitchoverResult {
 /** Whether a switchover or failover is between its start and its completion */
 function switchoverInFlight(state?: SwitchoverStatus): boolean {
   return state?.phase === 'Electing' || state?.phase === 'Stopping' || state?.phase === 'Promoting';
+}
+
+/** Event type and reason of a switchover / failover phase */
+function switchoverEvent(status: SwitchoverStatus): [EventType, string] {
+  const failover = status.kind === 'failover';
+  switch (status.phase) {
+    case 'Electing':
+      return ['Warning', EventReason.FailoverStarted];
+    case 'Stopping':
+      return ['Normal', EventReason.SwitchoverStarted];
+    case 'Promoting':
+      return failover ? ['Warning', EventReason.FailingOver] : ['Normal', EventReason.SwitchoverPromoting];
+    case 'Completed':
+      return ['Normal', failover ? EventReason.FailoverCompleted : EventReason.SwitchoverCompleted];
+    default:
+      return ['Warning', failover ? EventReason.FailoverFailed : EventReason.SwitchoverFailed];
+  }
 }
 
 /** Outcome of the fencing reconciliation */
@@ -142,6 +161,7 @@ export class FirebirdClusterController {
   private readonly customApi: CustomObjectsApi;
   private readonly networkingApi: NetworkingV1Api;
   private readonly policyApi: PolicyV1Api;
+  private readonly events: EventRecorder;
 
   constructor(kubeConfig: KubeConfig) {
     this.appsApi = kubeConfig.makeApiClient(AppsV1Api);
@@ -151,6 +171,7 @@ export class FirebirdClusterController {
     this.customApi = kubeConfig.makeApiClient(CustomObjectsApi);
     this.networkingApi = kubeConfig.makeApiClient(NetworkingV1Api);
     this.policyApi = kubeConfig.makeApiClient(PolicyV1Api);
+    this.events = new EventRecorder(this.coreApi);
   }
 
   /**
@@ -322,6 +343,7 @@ export class FirebirdClusterController {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.error({ err }, 'Reconciliation failed');
+      await this.event(cluster, 'Warning', EventReason.ReconcileFailed, message);
 
       await this.updateStatus(cluster, {
         phase: 'Degraded',
@@ -489,7 +511,7 @@ export class FirebirdClusterController {
     const primaryReady = Boolean(podOf(primaryPod) && isPodReady(podOf(primaryPod)!));
     // each phase change is stored before it is acted upon, so a failed or concurrent reconcile
     // resumes the phase instead of repeating the previous one
-    const persist = async (status: SwitchoverStatus) => {
+    const persist = async (status: SwitchoverStatus, reason?: string) => {
       await this.customApi.patchNamespacedCustomObjectStatus({
         group: API_GROUP,
         version: API_VERSION,
@@ -499,6 +521,8 @@ export class FirebirdClusterController {
         body: [{ op: 'add', path: '/status/switchover', value: status }],
       });
       result.status = status;
+      const [type, defaultReason] = switchoverEvent(status);
+      await this.event(cluster, type, reason ?? defaultReason, status.message ?? `${status.phase}`);
     };
 
     // Automatic failover: the primary has not been ready for failover.delaySeconds
@@ -512,6 +536,10 @@ export class FirebirdClusterController {
       } else {
         const since = current.status?.primaryNotReadySince ?? now;
         result.primaryNotReadySince = since;
+        if (!current.status?.primaryNotReadySince) {
+          const delay = failover.delaySeconds ?? DEFAULT_FAILOVER_DELAY_SECONDS;
+          await this.event(cluster, 'Warning', EventReason.PrimaryNotReady, `primary ${primaryPod} is not ready; failover in ${delay}s unless it recovers`);
+        }
         const delayMs = (failover.delaySeconds ?? DEFAULT_FAILOVER_DELAY_SECONDS) * 1000;
         const recentFailure =
           state?.kind === 'failover' && state.phase === 'Failed' && state.from === primaryPod &&
@@ -586,7 +614,10 @@ export class FirebirdClusterController {
       if (primaryReady) {
         // nothing was changed yet: the primary came back, discard the election
         log.info({ primary: phase.from }, 'Primary recovered; automatic failover cancelled');
-        await persist({ ...phase, phase: 'Failed', message: `${phase.from} recovered before a replica was promoted`, completionTime: now });
+        await persist(
+          { ...phase, phase: 'Failed', message: `${phase.from} recovered before a replica was promoted`, completionTime: now },
+          EventReason.FailoverCancelled,
+        );
         await this.batchApi.deleteNamespacedJob({ name: electionJob, namespace, propagationPolicy: 'Background' }).catch(() => undefined);
         result.primaryNotReadySince = undefined;
         return result;
@@ -794,6 +825,7 @@ export class FirebirdClusterController {
       // done once a new pod (another UID) is ready: its init container re-seeded it
       if (podObj && podObj.metadata?.uid !== token && isPodReady(podObj)) {
         log.info({ pod }, 'Replica re-seeded');
+        await this.event(cluster, 'Normal', EventReason.ReseedCompleted, `${pod} re-seeded and ready`);
         continue;
       }
       if (Number(pod.slice(name.length + 1)) >= cluster.spec.instances) continue; // scaled away
@@ -810,6 +842,7 @@ export class FirebirdClusterController {
       if (result.requests[podName] === pod.metadata.uid) continue; // already requested, restart pending
       result.requests[podName] = pod.metadata.uid ?? '';
       result.restart.push(podName);
+      await this.event(cluster, 'Normal', EventReason.ReseedStarted, `re-seeding ${podName} (reseed annotation)`);
     }
     return result;
   }
@@ -864,6 +897,10 @@ export class FirebirdClusterController {
     if (plan.laggingReplicas.length > 0) {
       log.warn({ laggingReplicas: plan.laggingReplicas }, 'Replicas excluded from read-only routing due to replication lag');
     }
+    const wasLagging = cluster.status?.replicationStatus?.laggingReplicas ?? [];
+    for (const pod of plan.laggingReplicas.filter((p) => !wasLagging.includes(p))) {
+      await this.event(cluster, 'Warning', EventReason.ReplicaLagging, `${pod} excluded from read-only routing: replication lag`);
+    }
 
     return { primaryPod, readRoutablePods: plan.readRoutablePods, laggingReplicas: plan.laggingReplicas };
   }
@@ -895,6 +932,7 @@ export class FirebirdClusterController {
     const statuses: VolumeStatus[] = [];
     for (const pvc of pvcs.items.filter((p) => pattern.test(p.metadata?.name ?? ''))) {
       const plan = planVolumeExpansion(pvc, desiredSize);
+      const previous = cluster.status?.volumes?.find((v) => v.name === plan.status.name)?.state;
       if (plan.expand) {
         log.info({ pvc: plan.status.name, size: desiredSize }, 'Expanding PersistentVolumeClaim');
         try {
@@ -906,6 +944,9 @@ export class FirebirdClusterController {
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           log.warn({ err, pvc: plan.status.name }, 'PersistentVolumeClaim expansion rejected');
+          if (previous !== 'ResizeFailed') {
+            await this.event(cluster, 'Warning', EventReason.VolumeResizeFailed, `${plan.status.name}: ${message}`);
+          }
           statuses.push({
             ...plan.status,
             requestedSize: pvc.spec?.resources?.requests?.storage,
@@ -914,8 +955,12 @@ export class FirebirdClusterController {
           });
           continue;
         }
+        await this.event(cluster, 'Normal', EventReason.VolumeResizing, `${plan.status.name}: expanding to ${desiredSize}`);
       } else if (plan.status.state === 'ShrinkRejected') {
         log.warn({ pvc: plan.status.name }, plan.status.message);
+        if (previous !== 'ShrinkRejected') {
+          await this.event(cluster, 'Warning', EventReason.VolumeResizeFailed, `${plan.status.name}: ${plan.status.message}`);
+        }
       }
       statuses.push(plan.status);
     }
@@ -1027,11 +1072,17 @@ export class FirebirdClusterController {
       primaryRestart = undefined;
     }
     if (plan.outdated.length === 0) {
+      if (cluster.status?.rollingUpdate && !primaryRestart) {
+        await this.event(cluster, 'Normal', EventReason.RollingUpdateCompleted, `all instances run revision ${plan.revision}`);
+      }
       return primaryRestart
         ? { revision: plan.revision, outdatedInstances: [], message: `waiting for ${primaryPod} to be ready`, primaryRestart }
         : undefined;
     }
 
+    if (plan.restart || plan.switchoverTo) {
+      await this.event(cluster, 'Normal', EventReason.RollingUpdate, plan.message);
+    }
     if (plan.restart) {
       log.info({ pod: plan.restart, revision: plan.revision }, 'Rolling update: restarting instance');
       if (plan.restart === primaryPod) {
@@ -1508,6 +1559,16 @@ export class FirebirdClusterController {
     }
   }
 
+  /** Records a Kubernetes event on the cluster */
+  private event(cluster: FirebirdCluster, type: EventType, reason: string, message: string): Promise<void> {
+    return this.events.record(
+      { apiVersion: `${API_GROUP}/${API_VERSION}`, kind: RESOURCE_KIND, metadata: cluster.metadata },
+      type,
+      reason,
+      message,
+    );
+  }
+
   /** Update the status sub-resource of a FirebirdCluster */
   async updateStatus(
     cluster: FirebirdCluster,
@@ -1596,6 +1657,12 @@ export class FirebirdClusterController {
           break;
         case 'applied':
           log.info({ pod, action: step.action }, step.action === 'fence' ? 'Instance fenced' : 'Instance unfenced');
+          await this.event(
+            cluster,
+            'Normal',
+            step.action === 'fence' ? EventReason.InstanceFenced : EventReason.InstanceUnfenced,
+            step.action === 'fence' ? `${pod}: database shut down (fenced)` : `${pod}: database back online`,
+          );
           if (step.action === 'fence') applied.add(pod);
           else applied.delete(pod);
           await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
@@ -1603,6 +1670,7 @@ export class FirebirdClusterController {
           break;
         case 'failed':
           log.warn({ pod, action: step.action }, 'Fencing Job failed; retrying on the next reconcile');
+          await this.event(cluster, 'Warning', EventReason.FencingFailed, `${step.action} Job for ${pod} failed; retrying`);
           await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
           result.failed.push(pod);
           break;

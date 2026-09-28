@@ -4,8 +4,8 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.15.0):** journal replication (experimental) with replica re-seeding,
-> planned switchover, automatic failover and rolling updates with the primary last, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
+> **Status note (v0.16.0):** journal replication (experimental) with replica re-seeding,
+> planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
 > (1.28 – 1.30.1) are reviewed in [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md).
@@ -171,8 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
-- [ ] **Kubernetes Events**
-  - Events for fencing, backups, restores, seeding and routing changes (CloudNativePG 1.29 / 1.30).
+- [x] **Kubernetes Events** *(v0.16.0)*
+  - Events on `FirebirdCluster`, `FirebirdBackup`, `FirebirdRestore` and `FirebirdUser` for switchovers, failovers (including `PrimaryNotReady`, CloudNativePG's `PrimaryStatusCheckFailed`), fencing, re-seeding, rolling updates, lagging replicas, volume expansion, reconcile failures, backups, restores and users (CloudNativePG 1.29 / 1.30).
+  - Repeated events are aggregated into a count, like client-go's event recorder.
 
 ---
 

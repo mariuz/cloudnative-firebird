@@ -18,6 +18,7 @@ Status: **done** (in this repository), **planned** (listed in [ROADMAP.md](../RO
 | 1.30: the `cluster` reference of `ScheduledBackup`, `Database` and similar resources is immutable (CEL rule) | `clusterName` is immutable on `FirebirdBackup`, `FirebirdScheduledBackup`, `FirebirdRestore` and `FirebirdUser` | done |
 | 1.28: `alpha.cnpg.io/unrecoverable` (delete a replica's pod and PVCs, recreate it) | `firebird.cloudnative-firebird.io/reseed=true` on a replica pod (v0.12.0): the data is discarded and re-seeded from a ready replica, keeping the PVC (a StatefulSet recreates the pod immediately, so deleting its claim can deadlock) and the security database | done |
 | `primaryUpdateStrategy` (`unsupervised` / `supervised`) and `primaryUpdateMethod` (`restart` / `switchover`): rolling updates restart the replicas first and the primary last | Same fields (v0.15.0). With replication the StatefulSet uses `OnDelete` and the operator restarts one instance at a time; automatic failover waits for a primary restarted by the update | done |
+| 1.29: Kubernetes events during reconciliation; 1.30: `PrimaryStatusCheckFailed` warning event | Events on clusters, backups, restores and users (v0.16.0); `PrimaryNotReady` when the primary stops being ready (with automatic failover enabled), aggregated like client-go | done |
 | 1.30: `DatabaseRole` CRD with `databaseRoleReclaimPolicy: retain \| delete` | `FirebirdUser` (v0.12.0): Secret-backed password, `active`, `admin`, role grants, `reclaimPolicy`. Firebird users live in per-instance security databases, so they are applied to every instance; the security database was moved onto the instance volume first | done |
 
 ## Planned
@@ -25,7 +26,6 @@ Status: **done** (in this repository), **planned** (listed in [ROADMAP.md](../RO
 | CloudNativePG | What it means here |
 |---|---|
 | 1.30: primary `Lease` as a promotion mutex; the instance must hold it before acting as primary, and releases it on clean shutdown | Planned switchover (v0.13.0) and automatic failover (v0.14.0) move the `<cluster>-lease` to the promoted instance. The instances do not hold or renew it yet, so it is not a promotion mutex in CloudNativePG's sense (TODO.md, "Failover safety"). |
-| 1.29: Kubernetes events during reconciliation; 1.30: `PrimaryStatusCheckFailed` warning event | Emit events for fencing, backups, restores, seeding and routing changes. |
 | 1.29: shared `serviceAccountName` for workload identity (IRSA, Workload Identity) | Backup, restore and archive Jobs require an S3 `secretRef` today; a service account would allow cloud credentials without static keys. |
 | 1.29: `cnpg.io/reconciliationDisabled` on backups | Per-resource pause for `FirebirdBackup` / `FirebirdScheduledBackup` (clusters already have `spec.suspended`). |
 | 1.28: pod `securityContext` and per-container `containerSecurityContext` | Needs checking against the official image, whose entrypoint starts as root. |

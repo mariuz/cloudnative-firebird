@@ -1,6 +1,7 @@
 import {
   BatchV1Api,
   CoordinationV1Api,
+  CoreV1Api,
   CustomObjectsApi,
   KubeConfig,
   PatchStrategy,
@@ -8,6 +9,7 @@ import {
   V1CronJob,
   V1Job,
 } from '@kubernetes/client-node';
+import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { logger } from '../utils/logger';
 import {
   BackupSource,
@@ -54,11 +56,24 @@ export class FirebirdBackupController {
   private readonly batchApi: BatchV1Api;
   private readonly customApi: CustomObjectsApi;
   private readonly coordinationApi: CoordinationV1Api;
+  private readonly events: EventRecorder;
 
   constructor(kubeConfig: KubeConfig) {
     this.batchApi = kubeConfig.makeApiClient(BatchV1Api);
     this.customApi = kubeConfig.makeApiClient(CustomObjectsApi);
     this.coordinationApi = kubeConfig.makeApiClient(CoordinationV1Api);
+    this.events = new EventRecorder(kubeConfig.makeApiClient(CoreV1Api));
+  }
+
+  /** Records a Kubernetes event on a backup or restore */
+  private event(
+    object: FirebirdBackup | FirebirdRestore,
+    kind: 'FirebirdBackup' | 'FirebirdRestore',
+    type: EventType,
+    reason: string,
+    message: string,
+  ): Promise<void> {
+    return this.events.record({ apiVersion: `${API_GROUP}/${API_VERSION}`, kind, metadata: object.metadata }, type, reason, message);
   }
 
   private async getCluster(namespace: string, name: string): Promise<FirebirdCluster> {
@@ -121,12 +136,14 @@ export class FirebirdBackupController {
         const desired = buildBackupJob(backup, cluster, await this.primaryPod(cluster));
         log.info({ jobName }, 'Creating backup Job');
         job = await this.batchApi.createNamespacedJob({ namespace, body: desired });
+        await this.event(backup, 'FirebirdBackup', 'Normal', EventReason.BackupStarted, `${backup.spec.type ?? 'logical'} backup of cluster ${backup.spec.clusterName} started (Job ${jobName})`);
       }
 
       const outcome = jobOutcome(job);
       const startTime = backup.status?.startTime ?? new Date().toISOString();
       if (outcome === 'Completed') {
         log.info({ location: base.location }, 'Backup completed');
+        await this.event(backup, 'FirebirdBackup', 'Normal', EventReason.BackupCompleted, `backup stored at ${base.location}`);
         await this.updateBackupStatus(backup, {
           ...base,
           phase: 'Completed',
@@ -136,6 +153,7 @@ export class FirebirdBackupController {
         });
       } else if (outcome === 'Failed') {
         log.warn({ jobName }, 'Backup Job failed');
+        await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, `backup Job ${jobName} failed; see its pod logs`);
         await this.updateBackupStatus(backup, {
           ...base,
           phase: 'Failed',
@@ -148,6 +166,7 @@ export class FirebirdBackupController {
     } catch (err) {
       if (!(err instanceof ValidationError)) throw err;
       log.error({ err }, 'Invalid FirebirdBackup');
+      await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, err.message);
       await this.updateBackupStatus(backup, { phase: 'Failed', error: err.message }).catch((statusErr) => {
         log.error({ err: statusErr }, 'Failed to update backup status');
       });
@@ -269,12 +288,14 @@ export class FirebirdBackupController {
         const desired = buildRestoreJob(restore, cluster, source, await this.primaryPod(cluster));
         log.info({ jobName }, 'Creating restore Job');
         job = await this.batchApi.createNamespacedJob({ namespace, body: desired });
+        await this.event(restore, 'FirebirdRestore', 'Normal', EventReason.RestoreStarted, `restoring into ${base.targetPath} (Job ${jobName})`);
       }
 
       const outcome = jobOutcome(job);
       const startTime = restore.status?.startTime ?? new Date().toISOString();
       if (outcome === 'Completed') {
         log.info({ target: base.targetPath }, 'Restore completed');
+        await this.event(restore, 'FirebirdRestore', 'Normal', EventReason.RestoreCompleted, `restored into ${base.targetPath}`);
         await this.updateRestoreStatus(restore, {
           ...base,
           phase: 'Completed',
@@ -284,6 +305,7 @@ export class FirebirdBackupController {
         });
       } else if (outcome === 'Failed') {
         log.warn({ jobName }, 'Restore Job failed');
+        await this.event(restore, 'FirebirdRestore', 'Warning', EventReason.RestoreFailed, `restore Job ${jobName} failed; see its pod logs`);
         await this.updateRestoreStatus(restore, {
           ...base,
           phase: 'Failed',
@@ -296,6 +318,7 @@ export class FirebirdBackupController {
     } catch (err) {
       if (!(err instanceof ValidationError)) throw err;
       log.error({ err }, 'Invalid FirebirdRestore');
+      await this.event(restore, 'FirebirdRestore', 'Warning', EventReason.RestoreFailed, err.message);
       await this.updateRestoreStatus(restore, { phase: 'Failed', error: err.message }).catch((statusErr) => {
         log.error({ err: statusErr }, 'Failed to update restore status');
       });

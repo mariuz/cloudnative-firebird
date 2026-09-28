@@ -24,7 +24,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Lag-aware read-only routing** to replicas via the `<name>-replica` Service (`spec.replication.readOnlyRouting`)
 - **Secret-based** SYSDBA password management
 - **Automatic service creation** (ClusterIP + headless for StatefulSet DNS)
-- **Status reporting** with conditions and phase tracking
+- **Status reporting** with conditions and phase tracking, and **Kubernetes events** for switchovers, failovers, fencing, re-seeding, rolling updates, backups, restores and users
 - **Owner references** for automatic garbage collection of child resources
 - **Graceful shutdown** with SIGTERM/SIGINT handling
 
@@ -450,6 +450,21 @@ lifted. A fenced replica stops applying segments and catches up once unfenced.
 `status.fencedInstances` lists the applied fences and the `Fenced` condition reports changes in
 progress or failed Jobs (retried on the next reconcile). Upgrading the operator rolls existing
 instances once, to switch them from the TCP readiness probe to the database-online probe.
+
+### Events
+
+The operator records Kubernetes events on its resources (CloudNativePG 1.29 / 1.30), so
+`kubectl describe firebirdcluster my-cluster` and `kubectl get events` show what it did:
+
+| Resource | Reasons |
+|---|---|
+| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`; `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReconcileFailed` (warning) |
+| `FirebirdBackup` | `BackupStarted`, `BackupCompleted`, `BackupFailed` (warning) |
+| `FirebirdRestore` | `RestoreStarted`, `RestoreCompleted`, `RestoreFailed` (warning) |
+| `FirebirdUser` | `UserApplied`, `UserFailed` (warning), `UserDropped` |
+
+Events are recorded on transitions; a repeated event (e.g. the same reconcile error) increments
+the count of the previous one for ten minutes, like client-go's event recorder.
 
 ### Read-Only Traffic Routing
 
