@@ -104,6 +104,14 @@ kubectl port-forward svc/my-firebird-cluster 3050:3050
 
 ## FirebirdCluster CRD Reference
 
+Invalid specs are rejected when they are applied: the CRDs carry OpenAPI constraints and CEL
+validation rules (`x-kubernetes-validations`) for the same checks the operator runs on every
+reconcile, e.g. mutually exclusive bootstrap sources, cron schedules, physical backups with S3,
+restore paths outside the data directory, `sync` replication, shrinking `storage.size` and
+immutable `clusterName` / `username` fields. No admission webhook is needed. The operator still
+validates each reconcile (for objects created before an upgrade) and reports `Degraded`.
+`hack/crd-validation/test.sh` checks the rules against an API server.
+
 ```yaml
 apiVersion: firebird.cloudnative-firebird.io/v1
 kind: FirebirdCluster
@@ -123,7 +131,7 @@ spec:
 
   # Storage configuration (required)
   # Growing size expands existing PVCs in place (needs allowVolumeExpansion
-  # on the StorageClass); shrinking is rejected and reported in status.volumes.
+  # on the StorageClass); shrinking is rejected by the API server.
   storage:
     size: 1Gi
     storageClass: standard   # optional

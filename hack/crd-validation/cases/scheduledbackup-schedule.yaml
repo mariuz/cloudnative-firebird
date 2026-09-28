@@ -1,0 +1,8 @@
+# expect: spec.schedule
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdScheduledBackup
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  schedule: '@daily'

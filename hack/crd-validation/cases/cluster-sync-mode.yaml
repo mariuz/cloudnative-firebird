@@ -1,0 +1,12 @@
+# expect: 'sync' is not supported
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  replication:
+    enabled: true
+    mode: sync

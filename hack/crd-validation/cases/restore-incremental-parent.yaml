@@ -1,0 +1,11 @@
+# expect: must not contain ".."
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRestore
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  backupPath: x.nbk
+  restoreType: physical
+  incrementalBackupPaths:
+  - ../l1.nbk

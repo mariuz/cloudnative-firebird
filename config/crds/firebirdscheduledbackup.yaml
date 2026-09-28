@@ -47,6 +47,9 @@ spec:
             spec:
               description: FirebirdScheduledBackupSpec defines the desired state of a FirebirdScheduledBackup
               type: object
+              x-kubernetes-validations:
+                - rule: "!has(self.type) || self.type != 'physical' || !has(self.s3)"
+                  message: physical backups are stored in the primary's data directory; S3 upload is supported for logical backups only
               required:
                 - clusterName
                 - schedule
@@ -54,12 +57,14 @@ spec:
                 clusterName:
                   description: Target FirebirdCluster name (immutable)
                   type: string
+                  minLength: 1
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: clusterName is immutable
                 schedule:
                   description: Cron schedule expression (e.g. "0 2 * * *")
                   type: string
+                  pattern: '^\s*\S+(\s+\S+){4}\s*$'
                 suspend:
                   description: Whether scheduled backup execution is suspended
                   type: boolean
@@ -87,6 +92,7 @@ spec:
                       type: string
                     bucket:
                       type: string
+                      minLength: 1
                     region:
                       type: string
                     prefix:
@@ -101,6 +107,7 @@ spec:
                       properties:
                         name:
                           type: string
+                          minLength: 1
             status:
               description: FirebirdScheduledBackupStatus defines the observed state of FirebirdScheduledBackup
               type: object

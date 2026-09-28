@@ -221,6 +221,12 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       );
     }
   }
+
+  if (spec.diagnostics?.enabled && spec.diagnostics.schedule && spec.diagnostics.schedule.trim().split(/\s+/).length !== 5) {
+    throw new ValidationError(
+      `Invalid diagnostics schedule cron expression: "${spec.diagnostics.schedule}". Standard 5-field cron expression required.`,
+    );
+  }
 }
 
 /**

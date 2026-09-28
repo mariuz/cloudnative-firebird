@@ -40,6 +40,11 @@ spec:
           type: object
           required:
             - spec
+          x-kubernetes-validations:
+            - rule: >-
+                has(self.spec.username) ||
+                (self.metadata.name.matches('^[A-Za-z][A-Za-z0-9-]{0,62}$') && self.metadata.name.lowerAscii() != 'sysdba')
+              message: the resource name is not a valid Firebird user name (letters, digits and "-"); set spec.username
           properties:
             apiVersion:
               type: string
@@ -56,6 +61,7 @@ spec:
                 clusterName:
                   description: FirebirdCluster name (immutable)
                   type: string
+                  minLength: 1
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: clusterName is immutable
@@ -64,10 +70,13 @@ spec:
                     Firebird user name, a regular identifier stored in upper case (default: the
                     resource name with "-" replaced by "_"). Immutable.
                   type: string
+                  maxLength: 63
                   pattern: '^[A-Za-z][A-Za-z0-9_$]{0,62}$'
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: username is immutable
+                    - rule: self.upperAscii() != 'SYSDBA'
+                      message: SYSDBA is managed through the cluster superuserSecret
                 passwordSecret:
                   description: Secret holding the password
                   type: object
@@ -76,6 +85,7 @@ spec:
                   properties:
                     name:
                       type: string
+                      minLength: 1
                     key:
                       description: Key in the Secret (default "password")
                       type: string
@@ -90,9 +100,14 @@ spec:
                     Roles granted in the cluster database. They must exist; roles granted
                     earlier and no longer listed are revoked.
                   type: array
+                  maxItems: 64
                   items:
                     type: string
+                    maxLength: 63
                     pattern: '^[A-Za-z][A-Za-z0-9_$]{0,62}$'
+                    x-kubernetes-validations:
+                      - rule: self.upperAscii() != 'RDB$ADMIN'
+                        message: use spec.admin instead of the RDB$ADMIN role
                 reclaimPolicy:
                   description: >-
                     "retain" (default) keeps the Firebird user when this resource is deleted;

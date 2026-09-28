@@ -1,0 +1,9 @@
+# expect: not a valid Firebird user name
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdUser
+metadata:
+  name: app.user
+spec:
+  clusterName: c1
+  passwordSecret:
+    name: pw

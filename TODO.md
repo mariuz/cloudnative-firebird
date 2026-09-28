@@ -95,5 +95,7 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   `serviceAccountName` for workload
   identity (S3 without static keys), per-backup reconciliation pause, pod/container security
   contexts.
-- [ ] Admission validation (CRD CEL rules or a webhook) so invalid specs are rejected at apply
-  time rather than surfacing as a Degraded status.
+- [ ] **Validation that needs other objects** stays in the operator: e.g. a restore into the
+  cluster database, a clone of a cluster in another namespace, a missing Secret. A
+  ValidatingAdmissionPolicy with parameter resources, or a webhook, could reject these at apply
+  time too.
