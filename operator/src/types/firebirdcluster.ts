@@ -179,6 +179,12 @@ export interface ReplicationConfiguration {
    * (ISSUES.md, issue 2).
    */
   allowLiveSeedFromPrimary?: boolean;
+  /**
+   * Automatic failover: when the primary pod has not been ready for delaySeconds, the most
+   * advanced ready replica is promoted and the old primary is re-seeded when it returns. Replication
+   * is asynchronous: transactions the replicas had not received are lost.
+   */
+  failover?: FailoverConfiguration;
   /** Cloud S3 storage configuration for continuous journal archiving (PITR) */
   journalArchiveS3?: S3BackupConfiguration;
   /** Cron schedule for archiving completed journal files to object storage */
@@ -404,7 +410,9 @@ export interface FirebirdClusterStatus {
    * fencedInstances annotation
    */
   fencedInstances?: string[];
-  /** Planned switchover in progress or last completed / failed (targetPrimary annotation) */
+  /** Since when the primary pod has not been ready (automatic failover) */
+  primaryNotReadySince?: string;
+  /** Planned switchover or failover in progress, or the last one */
   switchover?: SwitchoverStatus;
   /** Replicas being re-seeded (reseed annotation) */
   reseedingInstances?: string[];
@@ -412,13 +420,23 @@ export interface FirebirdClusterStatus {
   selector?: string;
 }
 
+/** Automatic failover settings */
+export interface FailoverConfiguration {
+  /** Whether the operator promotes a replica when the primary is unavailable (default false) */
+  enabled?: boolean;
+  /** How long the primary must be unavailable before a failover starts (default 30) */
+  delaySeconds?: number;
+}
+
 /** State of a planned switchover */
 export interface SwitchoverStatus {
-  /** Instance being promoted */
+  /** "switchover" (targetPrimary annotation) or "failover" (primary unavailable) */
+  kind?: 'switchover' | 'failover';
+  /** Instance being promoted (empty while a failover elects it) */
   target: string;
   /** Primary being demoted */
   from: string;
-  phase: 'Stopping' | 'Promoting' | 'Completed' | 'Failed';
+  phase: 'Electing' | 'Stopping' | 'Promoting' | 'Completed' | 'Failed';
   message?: string;
   startTime?: string;
   completionTime?: string;

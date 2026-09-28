@@ -51,6 +51,7 @@ export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.from
     'fetch-segments.pl',
     'set-repl-seq.pl',
     'switchover.pl',
+    'failover.pl',
   ].map(
     (name) => [name, readFileSync(join(SCRIPT_DIR, name), 'utf8')],
   ),

@@ -16,6 +16,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
 - **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
 - **Declarative users** (`FirebirdUser`, after CloudNativePG's `DatabaseRole`) with Secret-backed passwords, role grants and a reclaim policy; users persist across pod restarts
+- **Automatic failover** (opt-in) to the most advanced replica; the old primary is re-seeded when it returns
 - **Planned switchover** with the `targetPrimary` annotation: no data loss, the other replicas continue without re-seeding
 - **Replica re-seeding** with a pod annotation (CloudNativePG `unrecoverable`)
 - **Instance fencing** via the `fencedInstances` annotation (CloudNativePG format): the database is shut down, the pod keeps running
@@ -244,6 +245,35 @@ Writes are unavailable from the start of step 1 until the target is ready again 
 pod restarts). If the Job fails (for example a replica does not catch up within five minutes) the
 old primary is brought back online and stays primary; change the annotation to retry. There is
 no automatic failover yet; see TODO.md.
+
+### Automatic Failover
+
+Opt in per cluster (replication is experimental):
+
+```yaml
+spec:
+  replication:
+    enabled: true
+    failover:
+      enabled: true
+      delaySeconds: 30     # how long the primary may be unavailable (not ready) first
+```
+
+When the primary pod has not been ready for `delaySeconds` (`status.primaryNotReadySince`), the
+operator runs an election Job: every ready replica gets up to a minute to apply the segments it
+already received, then reports its position (`POSITION`), and the most advanced one wins. The
+election changes nothing, so if the primary recovers meanwhile it is simply discarded. The winner
+is promoted exactly like a planned switchover (its journal continues after the last segment it
+applied), the Lease and the `targetPrimary` annotation move to it, replicas behind it are
+re-seeded, and the old primary is **re-seeded** when it comes back (restarted if its pod is still
+there), because it may have committed transactions that never reached a replica.
+
+- Replication is asynchronous: transactions the replicas had not received when the primary
+  failed are lost. `archiveTimeoutSeconds` bounds how long a committed transaction can wait on
+  the primary before being shipped.
+- A fenced primary is never failed over, and there is no failover without a ready replica.
+- `status.switchover` reports the failover (`kind: failover`, phases `Electing`, `Promoting`,
+  `Completed` or `Failed`).
 
 ### Re-seeding a Replica
 

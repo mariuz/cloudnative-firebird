@@ -96,6 +96,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     for (const [field, value] of [
       ['archiveTimeoutSeconds', spec.replication.archiveTimeoutSeconds],
       ['segmentRetentionHours', spec.replication.segmentRetentionHours],
+      ['failover.delaySeconds', spec.replication.failover?.delaySeconds],
     ] as const) {
       if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
         throw new ValidationError(`Invalid replication ${field}: ${value}. Must be a positive integer.`);

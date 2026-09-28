@@ -288,6 +288,19 @@ spec:
                       description: Hours archived segments are kept on the primary for replicas to fetch (defaults to 24)
                       type: integer
                       minimum: 1
+                    failover:
+                      description: >-
+                        Automatic failover: when the primary pod has not been ready for delaySeconds,
+                        the most advanced ready replica is promoted and the old primary is re-seeded.
+                        Asynchronous replication: transactions the replicas had not received are lost.
+                      type: object
+                      properties:
+                        enabled:
+                          type: boolean
+                        delaySeconds:
+                          description: Seconds the primary must be unavailable before a failover (default 30)
+                          type: integer
+                          minimum: 1
                     allowLiveSeedFromPrimary:
                       description: >
                         Allow seeding a replica with a locked copy of the live primary when no ready
@@ -535,10 +548,18 @@ spec:
                   type: array
                   items:
                     type: string
+                primaryNotReadySince:
+                  description: Since when the primary pod has not been ready (automatic failover)
+                  type: string
                 switchover:
-                  description: Planned switchover in progress, or the last one (targetPrimary annotation)
+                  description: Planned switchover or automatic failover in progress, or the last one
                   type: object
                   properties:
+                    kind:
+                      type: string
+                      enum:
+                        - switchover
+                        - failover
                     target:
                       type: string
                     from:
@@ -546,6 +567,7 @@ spec:
                     phase:
                       type: string
                       enum:
+                        - Electing
                         - Stopping
                         - Promoting
                         - Completed

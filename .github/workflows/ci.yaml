@@ -391,6 +391,45 @@ jobs:
           fi
           echo "switchover to repl-1 completed; replicas follow the new primary"
 
+      - name: Verify automatic failover
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
+          count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          wait_count() {
+            for n in $(seq 1 36); do [ "$(count "$1")" = "$2" ] && return 0; sleep 5; done
+            echo "$1 has $(count "$1") rows, expected $2"; return 1
+          }
+          old=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
+          before=$(count "$old")
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"replication":{"failover":{"enabled":true,"delaySeconds":20}}}}'
+          sleep 10
+          # the primary's database stops answering (not fenced): its pod stays up but not ready
+          kubectl exec "$old" -c firebird -- bash -c \
+            "fbsvcmgr localhost:service_mgr action_properties dbname $DB prp_shutdown_mode prp_sm_full prp_force_shutdown 0"
+          timeout 600 bash -c \
+            'until kubectl get firebirdcluster repl -o jsonpath="{.status.switchover.kind} {.status.switchover.phase}" | grep -q "failover Completed"; do
+               kubectl get firebirdcluster repl -o jsonpath="{.status.switchover.kind} {.status.switchover.phase}" | grep -q "failover Failed" && exit 1; sleep 5; done' \
+            || { kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo; kubectl logs job/repl-failover || true; exit 1; }
+          kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo
+          new=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
+          [ "$new" != "$old" ]
+          [ "$(kubectl get firebirdcluster repl -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/targetPrimary}')" = "$new" ]
+          kubectl logs "$new" -c replication-init | grep 'promoted to primary'
+          # no writes happened while the primary was down: nothing is lost here
+          [ "$(count "$new")" = "$before" ]
+          for i in $(seq 201 210); do sql "$new" "insert into app values ($i, 'after failover'); commit;" >/dev/null; done
+          # the old primary comes back re-seeded, as a read-only replica
+          kubectl wait pod/"$old" --for=condition=Ready --timeout=300s
+          kubectl logs "$old" -c replication-init | grep 're-seed requested'
+          for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$new" ] || wait_count "$pod" $((before + 10)); done
+          if sql "$old" "insert into app values (998, 'old primary'); commit;" | grep -q 'read-only'; then
+            echo "old primary is a re-seeded read-only replica"
+          else
+            echo "old primary accepted a write"; exit 1
+          fi
+          echo "failed over from $old to $new"
+
       - name: Verify instance fencing
         run: |
           ANN=firebird.cloudnative-firebird.io/fencedInstances
@@ -450,6 +489,7 @@ jobs:
           for j in $(kubectl get jobs -n default -o name 2>/dev/null); do
             echo "--- $j"; kubectl logs "$j" -n default --all-containers || true
           done
+          for j in repl-failover repl-switchover; do echo "--- job/$j"; kubectl logs "job/$j" || true; done
           echo "=== FirebirdCluster status ==="
           kubectl get firebirdcluster -o yaml || true
           echo "=== Replication init and sidecar logs ==="
