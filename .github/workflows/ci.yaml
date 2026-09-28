@@ -552,11 +552,13 @@ jobs:
           # operator Jobs meet the restricted Pod Security Standard
           kubectl create namespace pss-restricted
           kubectl label namespace pss-restricted pod-security.kubernetes.io/enforce=restricted
+          timeout 60 bash -c 'until kubectl get serviceaccount default -n pss-restricted >/dev/null 2>&1; do sleep 2; done'
           kubectl get job backup-repl-logical -o json \
             | jq '{apiVersion: "v1", kind: "Pod", metadata: {name: "restricted-check", namespace: "pss-restricted"}, spec: .spec.template.spec}' \
             | kubectl apply --dry-run=server -f -
           kubectl delete namespace pss-restricted --wait=false
 
+      - name: Verify Kubernetes events
         run: |
           kubectl get events --sort-by=.lastTimestamp \
             -o custom-columns=KIND:.involvedObject.kind,NAME:.involvedObject.name,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message \
