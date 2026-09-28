@@ -407,7 +407,14 @@ Lease holder, as `<pod>.<cluster>-headless`); they never mount an instance volum
 Physical backups are written by the primary's server, so they cannot be uploaded to S3 (rejected
 by validation). The S3 client image defaults to `amazon/aws-cli` and can be changed with
 `s3.clientImage`. Server-side backups share the primary's volume, so they protect against logical
-errors, not against losing the volume. `retentionPolicy` is not enforced yet.
+errors, not against losing the volume.
+
+**Retention.** `retentionPolicy` (`<n>d`, `<n>w` or `<n>m` for 30 days, as in CloudNativePG) on
+`spec.backup` or a `FirebirdScheduledBackup` is enforced for logical backups to S3: after each
+upload the Job deletes the schedule's objects (`backup-<schedule>-<timestamp>.fbk` under its
+prefix) older than the window, always keeping the newest one, so a stopped schedule never loses
+its last backup. Other schedules and other objects are never touched. Server-side files and
+`nbackup` chains (whose increments depend on a base from another schedule) are not pruned.
 
 ```yaml
 apiVersion: firebird.cloudnative-firebird.io/v1

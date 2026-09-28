@@ -168,8 +168,12 @@ spec:
                       type: string
                       pattern: '^\s*\S+(\s+\S+){4}\s*$'
                     retentionPolicy:
-                      description: Backup retention policy (e.g. "7d"). Not enforced yet.
+                      description: >-
+                        How long scheduled backups are kept: <n>d, <n>w or <n>m (30 days). Enforced for logical
+                        backups to S3 (expired objects of the schedule are deleted after each upload, the newest
+                        is always kept); server-side files and nbackup chains are not pruned.
                       type: string
+                      pattern: '^[1-9][0-9]*[dwm]$'
                     s3:
                       description: Cloud object storage configuration for backup archive export
                       type: object

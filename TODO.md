@@ -50,8 +50,10 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   directory. Shipping the file needs a transfer path, e.g. a `BACKUP <file>` command on the
   segment server, or taking the physical copy on a replica (which also keeps the load off the
   primary).
-- [ ] **Retention**: `retentionPolicy` is accepted but not enforced, neither for server-side
-  files nor for S3 objects.
+- [ ] **Retention of server-side and nbackup backups**: `retentionPolicy` is enforced for
+  logical backups to S3 only. Server-side files need a deletion path on the primary's volume
+  (e.g. a segment server command, which only exists with replication), and nbackup retention must
+  keep every level 0 that a kept level 1 or 2 depends on (chains span schedules).
 - [ ] **Backups from a replica**: `gbak -b` works against a read-only replica (verified), which
   would keep backup load off the primary; pick a ready replica when one exists.
 - [ ] **Backup verification**: optionally restore each backup into a scratch database and

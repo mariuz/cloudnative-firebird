@@ -81,7 +81,10 @@ export interface BackupConfiguration {
   level?: 0 | 1 | 2;
   /** Cron schedule for backups (e.g. "0 2 * * *") */
   schedule?: string;
-  /** Backup retention policy (e.g. "7d", "30d"). Not enforced yet. */
+  /**
+   * How long scheduled backups are kept: "<n>d", "<n>w" or "<n>m" (30 days). Enforced for logical
+   * backups to S3 (see FirebirdScheduledBackupSpec.retentionPolicy).
+   */
   retentionPolicy?: string;
   /** Upload backups to S3 instead of the primary's data directory (logical backups only) */
   s3?: S3BackupConfiguration;

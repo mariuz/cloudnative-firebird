@@ -145,7 +145,11 @@ export interface FirebirdScheduledBackupSpec {
   type?: 'logical' | 'physical';
   /** Physical backup level (0, 1, 2) */
   level?: 0 | 1 | 2;
-  /** Backup retention policy (e.g. "7d", "30d"). Not enforced yet. */
+  /**
+   * How long backups of this schedule are kept: "<n>d", "<n>w" or "<n>m" (30 days). Enforced for
+   * logical backups to S3: each run deletes the schedule's objects older than that, always keeping
+   * the newest. Server-side files and nbackup chains are not pruned.
+   */
   retentionPolicy?: string;
   /** Upload backups to S3 instead of the primary's data directory (logical backups only) */
   s3?: S3BackupConfiguration;
