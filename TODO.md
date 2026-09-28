@@ -22,9 +22,8 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Enable replication on an existing cluster.** Publication is enabled only when the
   database is created; an existing single-instance database needs `ALTER DATABASE ENABLE
   PUBLICATION` / `INCLUDE ALL TO PUBLICATION` on the primary before replicas can be added.
-- [ ] **Replication lag in status**: the segment servers now answer `POSITION` (a replica's
-  control-file position and pending segments); compare it with the primary's sequence and publish
-  it (feeds `readOnlyRouting` via the `replication-lag-seconds` annotation).
+- [ ] **Lag metrics**: the measured lag is in the status and pod annotations; exporting it as a
+  Prometheus metric (and a Grafana panel) would allow alerting.
 - [ ] **Failover safety**: the Lease is moved by the operator, not held and renewed by the
   instances (CloudNativePG 1.30's promotion mutex). A primary that is alive but unready (e.g.
   overloaded) is restarted and re-seeded after a failover; one that is partitioned from the other

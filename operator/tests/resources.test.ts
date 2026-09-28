@@ -15,6 +15,7 @@ import {
   autoSweepCronJobNeedsUpdate,
   buildNetworkPolicy,
   networkPolicyNeedsUpdate,
+  networkPolicyWireFormat,
   buildCertificate,
   buildLease,
   buildDiagnosticsCronJob,
@@ -684,7 +685,7 @@ describe('buildNetworkPolicy & networkPolicyNeedsUpdate', () => {
       },
     });
     const np = buildNetworkPolicy(cluster);
-    expect(np.spec?.ingress?.[0]?.from?.[0]?.podSelector?.matchLabels).toEqual({ app: 'api' });
+    expect(np.spec?.ingress?.[0]?._from?.[0]?.podSelector?.matchLabels).toEqual({ app: 'api' });
   });
 
   it('detects NetworkPolicy updates correctly', () => {
@@ -949,11 +950,40 @@ describe('buildNetworkPolicy (intra-cluster traffic)', () => {
       }),
     );
     expect(np.spec?.ingress).toContainEqual({
-      from: [{ podSelector: { matchLabels: { 'firebird.cloudnative-firebird.io/cluster': 'test-cluster' } } }],
+      _from: [{ podSelector: { matchLabels: { 'firebird.cloudnative-firebird.io/cluster': 'test-cluster' } } }],
       ports: [
         { protocol: 'TCP', port: 3050 },
         { protocol: 'TCP', port: 3051 },
       ],
+    });
+  });
+
+  it('keeps the "from" restrictions on the wire, when created and when patched', async () => {
+    // the client's typed serializer (used for create) maps _from to "from"; a plain object with a
+    // "from" key would lose its restrictions and allow every pod
+    const { ObjectSerializer } = await import('../node_modules/@kubernetes/client-node/dist/gen/models/ObjectSerializer.js');
+    const np = buildNetworkPolicy(
+      makeCluster({ networkPolicy: { enabled: true, ingressFrom: [{ podSelector: { app: 'client' } }] }, replication: { enabled: true } }),
+    );
+    const created = ObjectSerializer.serialize(np, 'V1NetworkPolicy', '') as { spec: { ingress: Array<{ from?: unknown[] }> } };
+    const patched = networkPolicyWireFormat(np) as { spec: { ingress: Array<{ from?: unknown[]; _from?: unknown }> } };
+    for (const ingress of [created.spec.ingress, patched.spec.ingress]) {
+      expect(ingress).toHaveLength(3);
+      for (const rule of ingress) {
+        expect(rule.from?.length).toBeGreaterThan(0);
+        expect(rule).not.toHaveProperty('_from');
+      }
+    }
+    expect(created.spec.ingress[0].from).toEqual([{ podSelector: { matchLabels: { app: 'client' } } }]);
+    // the operator can reach the segment port to measure replication lag
+    expect(patched.spec.ingress[2]).toEqual({
+      from: [
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'cloudnative-firebird-system' } },
+          podSelector: { matchLabels: { 'app.kubernetes.io/name': 'cloudnative-firebird' } },
+        },
+      ],
+      ports: [{ protocol: 'TCP', port: 3051 }],
     });
   });
 

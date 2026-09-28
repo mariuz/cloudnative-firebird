@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.19.0):** journal replication (experimental) with replica re-seeding,
+> **Status note (v0.20.0):** journal replication (experimental) with replica re-seeding,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Replication Lag** *(v0.20.0)*
+  - The operator measures each replica's lag from the segment servers (archived segments on the primary vs. the replica's applied position) and reports it in `status.replicationStatus.replicas`.
+  - Published as the `replication-lag-seconds` pod annotation, so lag-aware read-only routing now works without an external source.
+  - Fixed: generated NetworkPolicies lost their `from` restrictions when created (the client's model names the field `_from`), so they allowed every pod.
 - [x] **Pod and Container Security Contexts** *(v0.19.0, CloudNativePG 1.28)*
   - Instance pods: seccomp `RuntimeDefault`, no privilege escalation, all capabilities dropped except `CHOWN`, `DAC_OVERRIDE` and `FOWNER` (the official image runs the server as root): `baseline` Pod Security Standard.
   - Operator Jobs run as the non-root `firebird` user with no capabilities: `restricted` Pod Security Standard.

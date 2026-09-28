@@ -708,6 +708,31 @@ spec:
                       type: array
                       items:
                         type: string
+                    lastArchivedSequence:
+                      description: Last journal segment archived on the primary
+                      type: integer
+                    replicas:
+                      description: Replication position and lag of each ready replica, measured from the segment servers
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          appliedSequence:
+                            description: Journal segment applied by the replica
+                            type: integer
+                          pendingSegments:
+                            description: Segments received but not applied yet
+                            type: integer
+                          lagSegments:
+                            description: Segments archived on the primary after the applied one
+                            type: integer
+                          lagSeconds:
+                            description: Age of the oldest archived segment not applied yet (0 when up to date)
+                            type: integer
+                          error:
+                            type: string
                 volumes:
                   description: Per-instance PVC storage and volume expansion status
                   type: array

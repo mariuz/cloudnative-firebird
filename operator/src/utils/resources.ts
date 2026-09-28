@@ -7,6 +7,7 @@ import {
   V1PodDisruptionBudget,
   V1ConfigMap,
   V1NetworkPolicy,
+  V1NetworkPolicyIngressRule,
   V1MicroTime,
   V1Container,
   V1PodSecurityContext,
@@ -630,6 +631,11 @@ export function statefulSetNeedsUpdate(
   return false;
 }
 
+/** Namespace the operator runs in (OPERATOR_NAMESPACE, from the downward API) */
+export function operatorNamespace(): string {
+  return process.env.OPERATOR_NAMESPACE || 'cloudnative-firebird-system';
+}
+
 /** User and group of the firebird account in the official image */
 export const FIREBIRD_UID = 84;
 
@@ -1086,8 +1092,8 @@ export function buildNetworkPolicy(cluster: FirebirdCluster): V1NetworkPolicy {
   const labels = clusterLabels(name);
   const npConfig = cluster.spec.networkPolicy;
 
-  const ingressRules = npConfig?.ingressFrom?.map((rule) => ({
-    from: [
+  const ingressRules: V1NetworkPolicyIngressRule[] = npConfig?.ingressFrom?.map((rule) => ({
+    _from: [
       ...(rule.podSelector ? [{ podSelector: { matchLabels: rule.podSelector } }] : []),
       ...(rule.namespaceSelector ? [{ namespaceSelector: { matchLabels: rule.namespaceSelector } }] : []),
     ],
@@ -1111,13 +1117,25 @@ export function buildNetworkPolicy(cluster: FirebirdCluster): V1NetworkPolicy {
   // The cluster's own pods (instances and maintenance Jobs share the cluster label) reach
   // the database over the network, and replicas fetch journal segments from the primary
   const intraClusterRule = {
-    from: [{ podSelector: { matchLabels: { [CLUSTER_LABEL]: name } } }],
+    _from: [{ podSelector: { matchLabels: { [CLUSTER_LABEL]: name } } }],
     ports: [
       { protocol: 'TCP', port: 3050 },
       ...(replicationEnabled(cluster) ? [{ protocol: 'TCP', port: SEGMENT_PORT }] : []),
     ],
   };
   ingressRules.push(intraClusterRule);
+  // the operator measures replication lag from the segment servers
+  if (replicationEnabled(cluster)) {
+    ingressRules.push({
+      _from: [
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': operatorNamespace() } },
+          podSelector: { matchLabels: { 'app.kubernetes.io/name': 'cloudnative-firebird' } },
+        },
+      ],
+      ports: [{ protocol: 'TCP', port: SEGMENT_PORT }],
+    });
+  }
 
   const networkPolicy: V1NetworkPolicy = {
     apiVersion: 'networking.k8s.io/v1',
@@ -1152,6 +1170,21 @@ export function buildNetworkPolicy(cluster: FirebirdCluster): V1NetworkPolicy {
 /**
  * Checks if a NetworkPolicy needs updating.
  */
+/**
+ * The client's NetworkPolicy model names the "from" field `_from` and only renames it when it
+ * serializes a typed body (create). Merge patches send the object as is, so they need the wire
+ * name; without it the "from" restrictions would be dropped and the rules allow every pod.
+ */
+export function networkPolicyWireFormat(policy: V1NetworkPolicy): object {
+  return {
+    ...policy,
+    spec: {
+      ...policy.spec,
+      ingress: (policy.spec?.ingress ?? []).map(({ _from, ...rule }) => ({ ...rule, ...(_from ? { from: _from } : {}) })),
+    },
+  };
+}
+
 export function networkPolicyNeedsUpdate(
   existing: V1NetworkPolicy,
   desired: V1NetworkPolicy,

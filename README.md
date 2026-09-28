@@ -257,6 +257,37 @@ spec:
     segmentRetentionHours: 24     # keep archived segments on the primary for 24h
 ```
 
+### Replication Lag
+
+With replication, every reconcile (at least every 30 s) the operator asks the primary's segment
+server for its archived journal segments and each ready replica's segment server for the segment
+it has applied. A replica's lag is the number of archived segments it has not applied and the age
+of the oldest of them:
+
+```yaml
+status:
+  replicationStatus:
+    primaryPod: my-cluster-0
+    lastArchivedSequence: 1422
+    replicas:
+      - name: my-cluster-1
+        appliedSequence: 1422
+        pendingSegments: 0
+        lagSegments: 0
+        lagSeconds: 0
+      - name: my-cluster-2
+        appliedSequence: 1417
+        pendingSegments: 3
+        lagSegments: 5
+        lagSeconds: 41
+```
+
+The lag is also written to each replica's `firebird.cloudnative-firebird.io/replication-lag-seconds`
+annotation, which lag-aware read-only routing (`readOnlyRouting.maxLagSeconds`) uses to take
+lagging replicas out of the `-replica` Service. Transactions still in the primary's active segment
+are not counted (`archiveTimeoutSeconds` bounds them). With `networkPolicy.enabled`, the generated
+policy lets the operator's pods reach the segment port (namespace from `OPERATOR_NAMESPACE`).
+
 ### Planned Switchover
 
 Promote a replica with the `targetPrimary` annotation (CloudNativePG's `kubectl cnpg promote`):
