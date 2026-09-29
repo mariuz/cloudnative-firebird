@@ -1305,6 +1305,35 @@ export function buildGrafanaDashboardConfigMap(cluster: FirebirdCluster): V1Conf
         type: 'gauge',
         targets: [{ expr: `firebird_oldest_active_transaction{cluster="${name}"}` }],
       },
+      // exported by the operator itself (utils/metrics.ts)
+      {
+        title: 'Ready Instances',
+        type: 'stat',
+        targets: [
+          { expr: `firebird_cluster_ready_instances{namespace="${namespace}",cluster="${name}"}`, legendFormat: 'Ready' },
+          { expr: `firebird_cluster_instances{namespace="${namespace}",cluster="${name}"}`, legendFormat: 'Requested' },
+        ],
+      },
+      {
+        title: 'Replication Lag (seconds)',
+        type: 'timeseries',
+        targets: [
+          {
+            expr: `firebird_replication_lag_seconds{namespace="${namespace}",cluster="${name}"}`,
+            legendFormat: '{{pod}}',
+          },
+        ],
+      },
+      {
+        title: 'Replication Lag (segments)',
+        type: 'timeseries',
+        targets: [
+          {
+            expr: `firebird_replication_lag_segments{namespace="${namespace}",cluster="${name}"}`,
+            legendFormat: '{{pod}}',
+          },
+        ],
+      },
     ],
   });
 

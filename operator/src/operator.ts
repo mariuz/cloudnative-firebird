@@ -1,6 +1,7 @@
 import { KubeConfig, Watch } from '@kubernetes/client-node';
 import { logger } from './utils/logger';
 import { HealthServer } from './utils/health';
+import { metrics } from './utils/metrics';
 import { FirebirdClusterController } from './controllers/firebirdcluster.controller';
 import { FirebirdBackupController } from './controllers/backup.controller';
 import { FirebirdUserController } from './controllers/user.controller';
@@ -310,6 +311,7 @@ export class Operator {
         this.knownClusters.delete(key);
         this.reconciledGenerations.delete(key);
         this.reconciledFencing.delete(key);
+        metrics.remove({ namespace: cluster.metadata.namespace ?? 'default', cluster: cluster.metadata.name });
         log.info('FirebirdCluster deleted; owned resources will be garbage collected');
         break;
 

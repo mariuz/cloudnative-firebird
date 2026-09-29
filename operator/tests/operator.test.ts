@@ -254,6 +254,17 @@ describe('Operator – event handling', () => {
       await Promise.resolve();
       expect(mockReconcile).not.toHaveBeenCalled();
     });
+
+    it("drops the deleted cluster's metrics", async () => {
+      const { metrics } = await import('../src/utils/metrics');
+      const cluster = makeNamedCluster('gone', 'production');
+      metrics.set('firebird_cluster_ready', 'Ready', { namespace: 'production', cluster: 'gone' }, 1);
+      metrics.set('firebird_cluster_ready', 'Ready', { namespace: 'production', cluster: 'kept' }, 1);
+      capturedEventCallback!('DELETED', cluster);
+      await Promise.resolve();
+      expect(metrics.render()).not.toContain('cluster="gone"');
+      expect(metrics.render()).toContain('cluster="kept"');
+    });
   });
 
   describe('ERROR events', () => {

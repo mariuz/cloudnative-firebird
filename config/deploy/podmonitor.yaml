@@ -1,0 +1,19 @@
+# Optional: scrape the operator's /metrics with the Prometheus Operator.
+# Requires the monitoring.coreos.com CRDs; not applied by default.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: cloudnative-firebird-operator
+  namespace: cloudnative-firebird-system
+  labels:
+    app.kubernetes.io/name: cloudnative-firebird
+    app.kubernetes.io/component: operator
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudnative-firebird
+      app.kubernetes.io/component: operator
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

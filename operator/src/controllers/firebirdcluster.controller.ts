@@ -15,6 +15,7 @@ import {
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
 import { buildBackupCronJob, buildJournalArchiveCronJob } from '../utils/backup';
+import { recordClusterMetrics, recordReconcile } from '../utils/metrics';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { PRIMARY_RESTART_GRACE_SECONDS, operatorRollsPods, planRollingUpdate } from '../utils/rolling-update';
 import { chooseBackupInstance } from '../utils/backup-target';
@@ -271,7 +272,7 @@ export class FirebirdClusterController {
       await this.reconcileGrafanaDashboard(cluster, log);
 
       if (cluster.spec.hibernated) {
-        await this.updateStatus(cluster, {
+        const hibernated: Partial<FirebirdClusterStatus> = {
           phase: 'Hibernated',
           phaseReason: readyInstances > 0
             ? `Hibernating: waiting for ${readyInstances} pod(s) to terminate`
@@ -287,7 +288,10 @@ export class FirebirdClusterController {
             this.makeCondition('Hibernated', 'True', 'HibernationRequested', 'spec.hibernated is true'),
             this.makeCondition('Ready', 'False', 'Hibernated', 'Cluster is hibernated'),
           ],
-        });
+        };
+        await this.updateStatus(cluster, hibernated);
+        recordClusterMetrics(cluster, hibernated);
+        recordReconcile(cluster, 'success');
         log.info('Cluster is hibernated');
         return;
       }
@@ -312,7 +316,7 @@ export class FirebirdClusterController {
           }
         : undefined;
 
-      await this.updateStatus(cluster, {
+      const status: Partial<FirebirdClusterStatus> = {
         phase: isReady ? (rollingUpdate ? 'Updating' : 'Running') : 'Creating',
         phaseReason: isReady
           ? rollingUpdate
@@ -347,12 +351,16 @@ export class FirebirdClusterController {
             isReady ? 'Reconciliation completed' : 'Waiting for StatefulSet pods',
           ),
         ],
-      });
+      };
+      await this.updateStatus(cluster, status);
+      recordClusterMetrics(cluster, status);
+      recordReconcile(cluster, 'success');
 
       log.info('Reconciliation complete');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.error({ err }, 'Reconciliation failed');
+      recordReconcile(cluster, 'error');
       await this.event(cluster, 'Warning', EventReason.ReconcileFailed, message);
 
       await this.updateStatus(cluster, {

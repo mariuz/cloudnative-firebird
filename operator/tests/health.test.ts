@@ -46,6 +46,21 @@ describe('HealthServer', () => {
     expect(res.body).toBe('ok');
   });
 
+  it('serves the Prometheus metrics on /metrics', async () => {
+    const res = await new Promise<{ statusCode: number; type: string; body: string }>((resolve, reject) => {
+      http
+        .get(`http://127.0.0.1:${port}/metrics`, (r) => {
+          let data = '';
+          r.on('data', (chunk) => (data += chunk));
+          r.on('end', () => resolve({ statusCode: r.statusCode || 500, type: String(r.headers['content-type']), body: data }));
+        })
+        .on('error', reject);
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.type).toMatch(/^text\/plain; version=0\.0\.4/);
+    expect(res.body.endsWith('\n')).toBe(true);
+  });
+
   it('returns 404 for unknown endpoints', async () => {
     const res = await get('/unknown');
     expect(res.statusCode).toBe(404);
