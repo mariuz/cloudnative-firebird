@@ -126,6 +126,7 @@ spec:
                     - Applying
                     - Applied
                     - Failed
+                    - Dropping
                 message:
                   type: string
                 username:
@@ -137,6 +138,16 @@ spec:
                   format: date-time
                 failedHash:
                   type: string
+                droppedFrom:
+                  description: Instances the user has been dropped from while the resource is deleted (reclaimPolicy delete)
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      volume:
+                        type: string
                 instances:
                   description: Instances the current spec has been applied to
                   type: array

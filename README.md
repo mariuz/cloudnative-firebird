@@ -571,6 +571,13 @@ re-created instances get the user when they become ready, and a changed Secret i
 a resync interval. A failed Job (for example a role that does not exist) is retried after five
 minutes; `kubectl logs job/fbuser-<name>` shows the error.
 
+With `reclaimPolicy: delete`, deleting the resource drops the user from every ready instance and
+revokes its grants. An instance that holds the user (per `status.instances`) but is not ready at
+the time is waited for: the resource stays in phase `Dropping` (`status.droppedFrom` lists where
+the user is gone) and the user is dropped there once the instance is ready again. After 15
+minutes the finalizer is released anyway and a Warning event names the instances that keep the
+user.
+
 Security notes: the password is read from the Secret inside the Job and only sent to the servers
 as SQL text, where it can briefly show in `MON$STATEMENTS` or a trace session. Users are not part
 of `gbak` backups; keep the `FirebirdUser` objects (for example in Git) to re-create them on a

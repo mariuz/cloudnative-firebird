@@ -36,6 +36,12 @@ import {
 /** A failed Job for an unchanged spec is retried after this delay */
 export const USER_RETRY_DELAY_MS = 5 * 60 * 1000;
 
+/**
+ * How long the deletion of a FirebirdUser (reclaimPolicy "delete") waits for instances that hold
+ * the user but are not ready, before releasing the finalizer and keeping the user on them
+ */
+export const USER_DROP_WAIT_MS = 15 * 60 * 1000;
+
 function isNotFound(err: unknown): boolean {
   const e = err as { code?: number; statusCode?: number; response?: { statusCode?: number } };
   return e?.code === 404 || e?.statusCode === 404 || e?.response?.statusCode === 404;
@@ -223,7 +229,11 @@ export class FirebirdUserController {
     await this.updateStatus(user, { ...status, phase: 'Applying', jobName, message: `applying to ${targets.map((t) => t.name).join(', ')}` });
   }
 
-  /** Drops the user (reclaimPolicy "delete") before releasing the finalizer */
+  /**
+   * Drops the user (reclaimPolicy "delete") before releasing the finalizer: from every ready
+   * instance, then from each instance that holds it (status.instances) once it is ready again.
+   * Instances that stay unready longer than USER_DROP_WAIT_MS keep the user (Warning event).
+   */
   private async reconcileDeletion(user: FirebirdUser, log: typeof logger): Promise<void> {
     const { namespace = 'default' } = user.metadata;
     if (!user.metadata.finalizers?.includes(USER_FINALIZER)) return;
@@ -235,42 +245,93 @@ export class FirebirdUserController {
       return;
     }
 
+    const status: FirebirdUserStatus = { ...(user.status ?? {}), username: firebirdUsername(user) };
+    let droppedFrom = [...(status.droppedFrom ?? [])];
     const jobName = userJobName(user);
     const job = await this.readJob(jobName, namespace);
-    if (job && job.metadata?.labels?.[USER_JOB_ACTION_LABEL] === 'drop') {
-      const state = jobState(job);
-      if (state === 'running') return;
-      await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
-      if (state === 'complete') {
-        log.info('Firebird user dropped');
-        await this.event(user, 'Normal', EventReason.UserDropped, `user ${firebirdUsername(user)} dropped`);
-        await this.ensureFinalizer(user, false);
-      }
-      return; // a failed drop is retried on the next reconcile
-    }
     if (job) {
-      // an apply Job is still around: remove it first
+      const drop = job.metadata?.labels?.[USER_JOB_ACTION_LABEL] === 'drop';
+      const state = jobState(job);
+      if (drop && state === 'running') return;
+      // an apply Job is removed first, even while running
       await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
+      if (!drop || state !== 'complete') return; // a failed drop is retried on the next reconcile
+      const targets = JSON.parse(job.metadata?.annotations?.[USER_JOB_TARGETS_ANNOTATION] ?? '[]') as Array<{
+        name: string;
+        volume: string;
+      }>;
+      droppedFrom = [
+        ...droppedFrom.filter((d) => !targets.some((t) => t.name === d.name)),
+        ...targets,
+      ].sort((a, b) => a.name.localeCompare(b.name));
+      log.info({ instances: targets.map((t) => t.name) }, 'Firebird user dropped');
+    }
+
+    const instances = await this.instances(cluster);
+    const dropped = (i: Instance) => droppedFrom.some((d) => d.name === i.name && d.volume === i.volume);
+    const targets = instances.filter((i) => i.ready && i.volume && !dropped(i));
+    // the user is known to be on these volumes, whose instances are not ready
+    const waiting = instances.filter(
+      (i) => !i.ready && !dropped(i) && status.instances?.some((a) => a.name === i.name && a.volume === i.volume),
+    );
+
+    if (targets.length > 0) {
+      const primary = await this.primaryPod(cluster);
+      const body = buildUserJob(cluster, user, {
+        action: 'drop',
+        instances: targets.map((i) => i.name),
+        grantInstances: replicationEnabled(cluster)
+          ? targets.filter((i) => i.name === primary).map((i) => i.name)
+          : targets.map((i) => i.name),
+        hash: '',
+        targets: JSON.stringify(targets.map((t) => ({ name: t.name, volume: t.volume }))),
+      });
+      try {
+        await this.batchApi.createNamespacedJob({ namespace, body });
+        log.info({ instances: targets.map((i) => i.name) }, 'Dropping Firebird user');
+      } catch (err) {
+        if ((err as { code?: number })?.code !== 409) throw err;
+      }
+      await this.updateStatus(user, {
+        ...status,
+        droppedFrom,
+        jobName,
+        phase: 'Dropping',
+        message: `dropping from ${targets.map((i) => i.name).join(', ')}`,
+      });
       return;
     }
 
-    const instances = (await this.instances(cluster)).filter((i) => i.ready);
-    const primary = await this.primaryPod(cluster);
-    const body = buildUserJob(cluster, user, {
-      action: 'drop',
-      instances: instances.map((i) => i.name),
-      grantInstances: replicationEnabled(cluster)
-        ? instances.filter((i) => i.name === primary).map((i) => i.name)
-        : instances.map((i) => i.name),
-      hash: '',
-      targets: '[]',
-    });
-    try {
-      await this.batchApi.createNamespacedJob({ namespace, body });
-      log.info({ instances: instances.map((i) => i.name) }, 'Dropping Firebird user');
-    } catch (err) {
-      if ((err as { code?: number })?.code !== 409) throw err;
+    const names = (list: Instance[]) => list.map((i) => i.name).join(', ');
+    if (waiting.length > 0) {
+      const since = new Date(user.metadata.deletionTimestamp ?? NaN).getTime();
+      if (!Number.isFinite(since) || this.now() - since < USER_DROP_WAIT_MS) {
+        await this.updateStatus(user, {
+          ...status,
+          droppedFrom,
+          jobName: undefined,
+          phase: 'Dropping',
+          message: `waiting for instance(s) to be ready to drop the user: ${names(waiting)}`,
+        });
+        return;
+      }
+      log.warn({ instances: waiting.map((i) => i.name) }, 'Instances not ready; the Firebird user is kept on them');
+      await this.event(
+        user,
+        'Warning',
+        EventReason.UserFailed,
+        `user ${firebirdUsername(user)} kept on ${names(waiting)}: not ready for ${USER_DROP_WAIT_MS / 60000} minutes`,
+      );
     }
+    if (droppedFrom.length > 0) {
+      await this.event(
+        user,
+        'Normal',
+        EventReason.UserDropped,
+        `user ${firebirdUsername(user)} dropped from ${droppedFrom.map((d) => d.name).join(', ')}`,
+      );
+    }
+    await this.ensureFinalizer(user, false);
   }
 
   private async instances(cluster: FirebirdCluster): Promise<Instance[]> {
