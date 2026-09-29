@@ -7,6 +7,9 @@ import { FirebirdBackupController } from './controllers/backup.controller';
 import { FirebirdUserController } from './controllers/user.controller';
 import { FENCED_INSTANCES_ANNOTATION } from './utils/fencing';
 import { TARGET_PRIMARY_ANNOTATION } from './utils/switchover';
+import { RESEED_ANNOTATION } from './utils/replication';
+import { CLUSTER_LABEL, instancePods } from './utils/resources';
+import { isPodReady } from './utils/routing';
 import {
   API_GROUP,
   API_VERSION,
@@ -39,6 +42,43 @@ interface BackupKind {
 /** Default interval for periodic re-reconciliation of known clusters */
 export const DEFAULT_RESYNC_INTERVAL_MS = 30_000;
 
+/** Pod events of one cluster within this window are coalesced into one reconcile */
+export const POD_EVENT_DEBOUNCE_MS = 1_000;
+
+/** Instance pods of every cluster (Job pods have other components) */
+export const INSTANCE_POD_WATCH_SELECTOR =
+  'app.kubernetes.io/managed-by=cloudnative-firebird-operator,app.kubernetes.io/component=database';
+
+/** Instance pod fields the operator's event handling relies on */
+interface WatchedPod {
+  metadata?: {
+    name?: string;
+    namespace?: string;
+    uid?: string;
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+    deletionTimestamp?: unknown;
+  };
+  status?: { phase?: string; conditions?: Array<{ type: string; status: string }> };
+}
+
+/**
+ * The state of an instance pod the cluster reconcile acts on: readiness (rolling updates, failover,
+ * routing, fencing), termination, revision and the reseed request. The labels and annotations the
+ * operator itself writes (role, read-routable, replication lag) are left out, so its own pod
+ * patches do not trigger reconciles.
+ */
+export function podFingerprint(pod: WatchedPod): string {
+  return JSON.stringify([
+    pod.metadata?.uid,
+    pod.status?.phase,
+    isPodReady(pod as Parameters<typeof isPodReady>[0]),
+    Boolean(pod.metadata?.deletionTimestamp),
+    pod.metadata?.labels?.['controller-revision-hash'],
+    pod.metadata?.annotations?.[RESEED_ANNOTATION],
+  ]);
+}
+
 /**
  * Operator watches for FirebirdCluster resources and triggers reconciliation.
  * Known clusters are also re-reconciled periodically so that state outside the
@@ -68,6 +108,10 @@ export class Operator {
   private readonly reconciledGenerations = new Map<string, number>();
   /** reconciliationDisabled state of the last reconcile, per backup, restore or user */
   private readonly reconciledPause = new Map<string, boolean>();
+  /** podFingerprint of every watched instance pod, keyed by namespace/name */
+  private readonly podStates = new Map<string, string>();
+  /** Pending pod-triggered reconciles, per cluster */
+  private readonly podTriggers = new Map<string, NodeJS.Timeout>();
 
   constructor(kubeConfig: KubeConfig, healthPort = 8080, resyncIntervalMs = DEFAULT_RESYNC_INTERVAL_MS) {
     this.resyncIntervalMs = resyncIntervalMs;
@@ -112,6 +156,13 @@ export class Operator {
         this.handleBackupEvent(kind, phase, obj as WatchedObject),
       );
     }
+    // instance pods: rolling updates, re-seeding, failover and routing react to readiness
+    // changes as they happen instead of on the next resync
+    await this.watchPath(
+      '/api/v1/pods',
+      async (phase, obj) => this.handlePodEvent(phase, obj as WatchedPod),
+      { labelSelector: INSTANCE_POD_WATCH_SELECTOR },
+    );
     if (this.resyncIntervalMs > 0) {
       this.resyncTimer = setInterval(() => this.resync(), this.resyncIntervalMs);
     }
@@ -126,6 +177,9 @@ export class Operator {
     this.watchRequests.clear();
     for (const timer of this.watchTimers.values()) clearTimeout(timer);
     this.watchTimers.clear();
+    for (const timer of this.podTriggers.values()) clearTimeout(timer);
+    this.podTriggers.clear();
+    this.podStates.clear();
     if (this.resyncTimer) {
       clearInterval(this.resyncTimer);
       this.resyncTimer = null;
@@ -140,7 +194,11 @@ export class Operator {
   }
 
   /** Watches a resource collection, restarting the watch whenever the stream ends */
-  private async watchPath(path: string, onEvent: (phase: string, obj: unknown) => Promise<void>): Promise<void> {
+  private async watchPath(
+    path: string,
+    onEvent: (phase: string, obj: unknown) => Promise<void>,
+    params: Record<string, string> = {},
+  ): Promise<void> {
     logger.info({ path }, 'Starting watch');
 
     const schedule = (delayMs: number): void => {
@@ -160,7 +218,7 @@ export class Operator {
       try {
         const request = await this.watch.watch(
           path,
-          {},
+          params,
           (phase: string, obj: unknown) => {
             onEvent(phase, obj).catch((err) => {
               logger.error({ err, phase, path }, 'Unhandled error in event handler');
@@ -202,6 +260,38 @@ export class Operator {
         logger.error({ err, kind: kind.plural, name, namespace }, 'Periodic resync reconcile failed');
       });
     }
+  }
+
+  /**
+   * Reconciles the pod's cluster when the pod's fingerprint changes (created, deleted, readiness,
+   * termination, revision, reseed request). Events of one cluster are coalesced.
+   */
+  private async handlePodEvent(phase: string, pod: WatchedPod): Promise<void> {
+    const { name, namespace = 'default', labels } = pod?.metadata ?? {};
+    const cluster = labels?.[CLUSTER_LABEL];
+    if (!name || !cluster || instancePods([{ metadata: { name } }], cluster).length === 0) return;
+    const podKey = `${namespace}/${name}`;
+    if (phase === 'DELETED') {
+      this.podStates.delete(podKey);
+    } else if (phase === 'ADDED' || phase === 'MODIFIED') {
+      const fingerprint = podFingerprint(pod);
+      if (this.podStates.get(podKey) === fingerprint) return;
+      this.podStates.set(podKey, fingerprint);
+    } else {
+      return;
+    }
+    const key = `${namespace}/${cluster}`;
+    if (!this.knownClusters.has(key) || this.podTriggers.has(key)) return;
+    this.podTriggers.set(
+      key,
+      setTimeout(() => {
+        this.podTriggers.delete(key);
+        logger.debug({ cluster, namespace, pod: name, phase }, 'Instance pod changed, reconciling');
+        this.reconcileCluster(key).catch((err) => {
+          logger.error({ err, cluster, namespace }, 'Pod-triggered reconcile failed');
+        });
+      }, POD_EVENT_DEBOUNCE_MS),
+    );
   }
 
   private async handleBackupEvent(kind: BackupKind, phase: string, obj: WatchedObject): Promise<void> {

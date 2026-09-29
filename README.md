@@ -389,8 +389,8 @@ Without replication the StatefulSet controller rolls the pods. With replication 
 uses the `OnDelete` update strategy and the operator rolls them itself (CloudNativePG's
 approach), so the primary is restarted only once:
 
-1. Outdated replicas are restarted one at a time, highest ordinal first, each only after every
-   instance is ready again. A restarted replica continues from its replication state; nothing is
+1. Outdated replicas are restarted one at a time, highest ordinal first, each as soon as every
+   instance is ready again (the operator watches the instance pods). A restarted replica continues from its replication state; nothing is
    re-seeded.
 2. The primary is updated last, according to:
 
@@ -424,8 +424,8 @@ annotate its pod:
 kubectl annotate pod my-cluster-2 firebird.cloudnative-firebird.io/reseed=true
 ```
 
-Within a resync interval the operator lists the request in the cluster ConfigMap and restarts the
-pod; its replication init container discards the database and the replication state (not the
+The operator sees the annotation on the pod right away, lists the request in the cluster ConfigMap
+and restarts the pod; its replication init container discards the database and the replication state (not the
 security database, so users stay) and seeds it again from another ready replica or the primary's
 offline seed. The primary is never re-seeded. `status.reseedingInstances` lists requests until the
 new pod is ready. Unlike CloudNativePG, the PVC is kept: with a StatefulSet, deleting the claim of a
@@ -616,11 +616,11 @@ With `spec.replication.readOnlyRouting.enabled: true` the operator labels every 
 `firebird.cloudnative-firebird.io/read-routable`. The primary Service selects only the
 primary pod, and the `<name>-replica` Service selects only ready replicas whose replication
 lag is within `maxLagSeconds` (default 30). Lag is read from the
-`firebird.cloudnative-firebird.io/replication-lag-seconds` pod annotation, published by the
-replication agent or metrics exporter; replicas without a lag report are routed on readiness
-alone. When no replica qualifies, reads fall back to the primary unless
-`fallbackToPrimary: false`. Clusters are re-reconciled every 30 seconds so routing follows
-readiness and lag changes.
+`firebird.cloudnative-firebird.io/replication-lag-seconds` pod annotation, which the operator
+publishes from its own measurement (see Replication Lag); replicas without a lag report are routed
+on readiness alone. When no replica qualifies, reads fall back to the primary unless
+`fallbackToPrimary: false`. Routing follows readiness changes as the operator sees them on
+its instance pod watch, and lag changes on the reconcile every 30 seconds.
 
 ## Development
 

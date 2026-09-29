@@ -89,7 +89,7 @@ vi.mock('../src/utils/health', () => ({
 }));
 
 import { KubeConfig } from '@kubernetes/client-node';
-import { Operator } from '../src/operator';
+import { INSTANCE_POD_WATCH_SELECTOR, Operator, POD_EVENT_DEBOUNCE_MS } from '../src/operator';
 import { makeCluster, makeNamedCluster } from './helpers/factories';
 
 /** Lets pending (coalesced) reconciles run */
@@ -125,7 +125,10 @@ describe('Operator – lifecycle', () => {
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdscheduledbackups',
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdrestores',
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdusers',
+        '/api/v1/pods',
       ]);
+      // only instance pods, not Job pods
+      expect(mockWatchFn.mock.calls[5][1]).toEqual({ labelSelector: INSTANCE_POD_WATCH_SELECTOR });
     });
 
     it('watches the correct API path for FirebirdCluster resources', async () => {
@@ -160,7 +163,7 @@ describe('Operator – lifecycle', () => {
       const { operator } = makeOperator();
       await operator.start();
       operator.stop();
-      expect(mockWatchAbort).toHaveBeenCalledTimes(5);
+      expect(mockWatchAbort).toHaveBeenCalledTimes(6);
     });
 
     it('marks the operator as not ready', async () => {
@@ -578,5 +581,95 @@ describe('Operator – reconcile serialization', () => {
     mockReconcile.mockReset();
     mockReconcile.mockResolvedValue(undefined);
     operator.stop();
+  });
+});
+
+describe('Operator – instance pod watch', () => {
+  const PODS_PATH = '/api/v1/pods';
+  let operator: Operator;
+
+  const pod = (
+    name: string,
+    options: { ready?: boolean; cluster?: string; revision?: string; annotations?: Record<string, string>; deleting?: boolean } = {},
+  ) => ({
+    metadata: {
+      name,
+      namespace: 'default',
+      uid: `uid-${name}`,
+      labels: {
+        'firebird.cloudnative-firebird.io/cluster': options.cluster ?? 'test-cluster',
+        'controller-revision-hash': options.revision ?? 'rev-1',
+      },
+      annotations: options.annotations ?? {},
+      ...(options.deleting ? { deletionTimestamp: '2026-01-01T00:00:00Z' } : {}),
+    },
+    status: { phase: 'Running', conditions: [{ type: 'Ready', status: options.ready === false ? 'False' : 'True' }] },
+  });
+  const emitPod = (phase: string, obj: unknown) => eventCallbacks.get(PODS_PATH)!(phase, obj);
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    ({ operator } = makeOperator());
+    await operator.start();
+    capturedEventCallback!('ADDED', makeCluster());
+    await vi.advanceTimersByTimeAsync(0);
+    mockReconcile.mockClear();
+  });
+
+  afterEach(() => {
+    operator.stop();
+    vi.useRealTimers();
+  });
+
+  it('reconciles the cluster when an instance becomes ready or unready, once per burst', async () => {
+    emitPod('ADDED', pod('test-cluster-0', { ready: false }));
+    emitPod('ADDED', pod('test-cluster-1', { ready: false }));
+    await vi.advanceTimersByTimeAsync(POD_EVENT_DEBOUNCE_MS);
+    expect(mockReconcile).toHaveBeenCalledTimes(1);
+
+    emitPod('MODIFIED', pod('test-cluster-1'));
+    await vi.advanceTimersByTimeAsync(POD_EVENT_DEBOUNCE_MS);
+    expect(mockReconcile).toHaveBeenCalledTimes(2);
+    expect(mockReconcile).toHaveBeenLastCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ name: 'test-cluster' }) }));
+  });
+
+  it("ignores the operator's own label and annotation patches", async () => {
+    emitPod('ADDED', pod('test-cluster-1'));
+    await vi.advanceTimersByTimeAsync(POD_EVENT_DEBOUNCE_MS);
+    mockReconcile.mockClear();
+
+    const patched = pod('test-cluster-1', {
+      annotations: { 'firebird.cloudnative-firebird.io/replication-lag-seconds': '4' },
+    });
+    patched.metadata.labels['firebird.cloudnative-firebird.io/role'] = 'replica';
+    emitPod('MODIFIED', patched);
+    await vi.advanceTimersByTimeAsync(POD_EVENT_DEBOUNCE_MS);
+    expect(mockReconcile).not.toHaveBeenCalled();
+  });
+
+  it('reacts to termination, deletion, a new revision and a reseed request', async () => {
+    emitPod('ADDED', pod('test-cluster-1'));
+    await vi.advanceTimersByTimeAsync(POD_EVENT_DEBOUNCE_MS);
+    const changes = [
+      ['MODIFIED', pod('test-cluster-1', { annotations: { 'firebird.cloudnative-firebird.io/reseed': 'true' } })],
+      ['MODIFIED', pod('test-cluster-1', { deleting: true })],
+      ['DELETED', pod('test-cluster-1', { deleting: true })],
+      ['ADDED', pod('test-cluster-1', { ready: false, revision: 'rev-2' })],
+    ] as const;
+    for (const [phase, obj] of changes) {
+      mockReconcile.mockClear();
+      emitPod(phase, obj);
+      await vi.advanceTimersByTimeAsync(POD_EVENT_DEBOUNCE_MS);
+      expect(mockReconcile, phase).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('ignores pods of unknown clusters and pods that are not instances', async () => {
+    emitPod('ADDED', pod('other-0', { cluster: 'other' }));
+    emitPod('ADDED', pod('test-cluster-backup-x7k2p', {}));
+    emitPod('ERROR', { kind: 'Status' });
+    await vi.advanceTimersByTimeAsync(POD_EVENT_DEBOUNCE_MS);
+    expect(mockReconcile).not.toHaveBeenCalled();
   });
 });
