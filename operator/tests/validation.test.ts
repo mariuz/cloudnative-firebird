@@ -167,6 +167,7 @@ describe('validateClusterSpec', () => {
   it.each([
     ['archiveTimeoutSeconds', 0],
     ['segmentRetentionHours', -1],
+    ['maxSegmentRetentionHours', 0],
     ['archiveTimeoutSeconds', 1.5],
   ])('rejects replication %s = %s', (field, value) => {
     expect(() =>

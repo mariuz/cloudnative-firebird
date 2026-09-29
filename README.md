@@ -256,7 +256,16 @@ spec:
     enabled: true
     archiveTimeoutSeconds: 10     # ship partially filled segments after 10s
     segmentRetentionHours: 24     # keep archived segments on the primary for 24h
+    maxSegmentRetentionHours: 168 # ... and up to 7 days while a replica has not applied them
 ```
+
+Archived segments are deleted from the primary after `segmentRetentionHours`, except those a
+replica has not applied yet: the operator sends the primary's segment server the lowest segment
+the replicas applied (`status.replicationStatus.segmentRetention`), and those segments are kept up
+to `maxSegmentRetentionHours` (default 168, never below `segmentRetentionHours`). A replica that
+is slow or stopped for a while (a node drain, a long maintenance) then catches up from the archive
+instead of needing a re-seed. A replica that is not ready keeps its last known position; one that
+is scaled away no longer holds segments back. The floor is stored on the primary's volume.
 
 **Enabling replication on an existing cluster.** Setting `replication.enabled` on a running
 cluster keeps the primary's data. The operator restarts the primary first; its init container

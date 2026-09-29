@@ -1,4 +1,5 @@
 import { Socket } from 'net';
+import { ReplicaLagStatus, SegmentRetentionStatus } from '../types';
 
 /**
  * Replication lag, measured by the operator from the segment servers:
@@ -68,4 +69,31 @@ export function computeLag(archived: ArchivedSegment[], applied: number): { lagS
     lagSegments: behind.length,
     lagSeconds: behind.length ? Math.max(...behind.map((s) => s.ageSeconds)) : 0,
   };
+}
+
+/**
+ * Segment retention floor: the primary keeps every archived segment after the lowest segment
+ * applied by a replica (up to maxSegmentRetentionHours), so a slow or stopped replica can catch up
+ * instead of being re-seeded. A replica that cannot be measured now (not ready, stopped) keeps its
+ * last known position; replicas that no longer exist (scaled away, now the primary) are dropped,
+ * and replicas never measured yet (being seeded) do not hold the floor back.
+ */
+export function segmentRetention(options: {
+  /** Replicas the cluster has: instance pods other than the primary, below spec.instances */
+  replicaNames: string[];
+  measured: ReplicaLagStatus[];
+  previous?: SegmentRetentionStatus;
+}): SegmentRetentionStatus {
+  const { replicaNames, measured, previous } = options;
+  const replicas = replicaNames
+    .map((name) => {
+      const appliedSequence =
+        measured.find((r) => r.name === name)?.appliedSequence ??
+        previous?.replicas?.find((r) => r.name === name)?.appliedSequence;
+      return appliedSequence === undefined ? undefined : { name, appliedSequence };
+    })
+    .filter((r): r is { name: string; appliedSequence: number } => r !== undefined);
+  return replicas.length
+    ? { floorSequence: Math.min(...replicas.map((r) => r.appliedSequence)), replicas }
+    : {};
 }

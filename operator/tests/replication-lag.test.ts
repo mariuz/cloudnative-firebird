@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, Mock } from 'vitest';
 import { spawn, spawnSync } from 'child_process';
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'fs';
 import { createServer } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { KubeConfig, V1Pod } from '@kubernetes/client-node';
-import { computeLag, parseArchived, parsePosition, SegmentClient } from '../src/utils/replication-lag';
-import { REPLICATION_SCRIPTS } from '../src/utils/replication';
+import { computeLag, parseArchived, parsePosition, SegmentClient, segmentRetention } from '../src/utils/replication-lag';
+import { maxSegmentRetentionHours, REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { REPLICATION_LAG_ANNOTATION } from '../src/utils/routing';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
 import { FirebirdCluster } from '../src/types';
@@ -28,6 +28,43 @@ describe('replication lag computation', () => {
     expect(computeLag(archived, 11)).toEqual({ lagSegments: 1, lagSeconds: 60 });
     expect(computeLag(archived, 9)).toEqual({ lagSegments: 3, lagSeconds: 300 });
     expect(computeLag([], 5)).toEqual({ lagSegments: 0, lagSeconds: 0 });
+  });
+
+  it('keeps segments from the lowest applied position, remembering replicas that are not ready', () => {
+    const measured = [
+      { name: 'db-1', appliedSequence: 40 },
+      { name: 'db-2', error: 'connect ECONNREFUSED' },
+    ];
+    // db-2 cannot be measured now: its last known position holds the floor back
+    expect(
+      segmentRetention({
+        replicaNames: ['db-1', 'db-2'],
+        measured,
+        previous: { floorSequence: 30, replicas: [{ name: 'db-1', appliedSequence: 35 }, { name: 'db-2', appliedSequence: 31 }] },
+      }),
+    ).toEqual({ floorSequence: 31, replicas: [{ name: 'db-1', appliedSequence: 40 }, { name: 'db-2', appliedSequence: 31 }] });
+    // scaled away or promoted: dropped; never measured (being seeded): does not hold the floor
+    expect(
+      segmentRetention({
+        replicaNames: ['db-1', 'db-3'],
+        measured,
+        previous: { replicas: [{ name: 'db-2', appliedSequence: 31 }, { name: 'db-0', appliedSequence: 10 }] },
+      }),
+    ).toEqual({ floorSequence: 40, replicas: [{ name: 'db-1', appliedSequence: 40 }] });
+    expect(segmentRetention({ replicaNames: ['db-1'], measured: [] })).toEqual({});
+  });
+
+  it('caps unapplied segments at maxSegmentRetentionHours, never below segmentRetentionHours', () => {
+    const c = (replication: FirebirdCluster['spec']['replication']): FirebirdCluster => ({
+      apiVersion: 'firebird.cloudnative-firebird.io/v1',
+      kind: 'FirebirdCluster',
+      metadata: { name: 'db' },
+      spec: { instances: 2, storage: { size: '1Gi' }, replication },
+    });
+    expect(maxSegmentRetentionHours(c({ enabled: true }))).toBe(168);
+    expect(maxSegmentRetentionHours(c({ enabled: true, maxSegmentRetentionHours: 48 }))).toBe(48);
+    expect(maxSegmentRetentionHours(c({ enabled: true, segmentRetentionHours: 200 }))).toBe(200);
+    expect(maxSegmentRetentionHours(c({ enabled: true, segmentRetentionHours: 72, maxSegmentRetentionHours: 24 }))).toBe(72);
   });
 
   it('segmentRequest sends one line and reads the reply up to the terminator', async () => {
@@ -106,6 +143,70 @@ describe.skipIf(!hasPerl)('segment-server.pl ARCHIVED', () => {
   });
 });
 
+describe.skipIf(!hasPerl)('segment-server.pl RETAIN and pruning', () => {
+  it('keeps segments replicas have not applied past the retention age, up to the maximum', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'segsrv-'));
+    for (const d of ['archive', 'source', 'repl']) mkdirSync(join(root, d));
+    const segment = (seq: number, ageSeconds: number) => {
+      const header = Buffer.alloc(48);
+      header.write('FBCHANGELOG', 0, 'latin1');
+      header.writeBigUInt64LE(BigInt(seq), 32);
+      header.writeBigUInt64LE(48n, 40);
+      const path = join(root, 'archive', `mydb.fdb.journal-${String(seq).padStart(9, '0')}`);
+      writeFileSync(path, header);
+      const t = Date.now() / 1000 - ageSeconds;
+      utimesSync(path, t, t);
+    };
+    segment(7, 7200); // past the maximum retention: deleted even though a replica needs it
+    segment(8, 120); // past the retention age, applied by every replica: deleted
+    segment(9, 120); // past the retention age, not applied by a replica yet: kept
+    segment(10, 10); // within the retention age: kept
+    // the floor survives a restart of the primary's segment server
+    writeFileSync(join(root, 'repl', 'retain-floor'), '8\n');
+    writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
+    const script = join(root, 'segment-server.pl');
+    writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
+    const port = 20000 + Math.floor(Math.random() * 20000);
+    const child = spawn('perl', [script], {
+      env: {
+        ...process.env,
+        ARCHIVE_DIR: join(root, 'archive'),
+        DATABASE_PATH: join(root, 'mydb.fdb'),
+        SOURCE_DIR: join(root, 'source'),
+        REPLICATION_DIR: join(root, 'repl'),
+        PRIMARY_FILE: join(root, 'repl', 'primary'),
+        POD_NAME: 'db-0',
+        ISC_PASSWORD: 'tok',
+        SEGMENT_PORT: String(port),
+        SEGMENT_RETENTION_SECONDS: '60',
+        SEGMENT_MAX_RETENTION_SECONDS: '3600',
+      },
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.on('data', (d) => d.toString().includes('listening') && resolve());
+        child.once('exit', (code) => reject(new Error(`segment server exited ${code}`)));
+      });
+      const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
+        '../src/utils/replication-lag',
+      );
+      // the first request is served after the startup prune
+      const archived = parseArchived(await segmentRequest('127.0.0.1', port, 'tok ARCHIVED'));
+      expect(archived.map((s) => s.sequence)).toEqual([9, 10]);
+
+      const floor = () => readFileSync(join(root, 'repl', 'retain-floor'), 'utf8');
+      expect(await segmentRequest('127.0.0.1', port, 'tok RETAIN 9')).toEqual(['OK']);
+      expect(floor()).toBe('9\n');
+      expect(await segmentRequest('127.0.0.1', port, 'tok RETAIN none')).toEqual(['OK']);
+      expect(existsSync(join(root, 'repl', 'retain-floor'))).toBe(false);
+      expect(await segmentRequest('127.0.0.1', port, 'tok RETAIN -1')).toEqual(['ERR bad request']);
+      expect(await segmentRequest('127.0.0.1', port, 'wrong RETAIN 9')).toEqual(['ERR unauthorized']);
+    } finally {
+      child.kill();
+    }
+  });
+});
+
 describe('replication lag reconciliation', () => {
   const cluster: FirebirdCluster = {
     apiVersion: 'firebird.cloudnative-firebird.io/v1',
@@ -176,6 +277,35 @@ describe('replication lag reconciliation', () => {
     expect(exported).toContain('firebird_replication_lag_seconds{namespace="prod",cluster="db",pod="db-2"} 90\n');
     expect(exported).toContain('firebird_replication_lag_segments{namespace="prod",cluster="db",pod="db-1"} 0\n');
     expect(exported).toMatch(/firebird_operator_reconciles_total\{namespace="prod",cluster="db",result="success"\} \d+/);
+  });
+
+  it('sends the primary the lowest applied segment, remembering replicas that are not ready', async () => {
+    const s = setup([pod('db-0'), pod('db-1'), { ...pod('db-2'), status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'False' }] } }], {
+      'db-0 ARCHIVED': ['20 400', '21 90', '22 10'],
+      'db-0 RETAIN': ['OK'],
+      'db-1 POSITION': ['OK 22 100 0'],
+    });
+    await s.controller.reconcile({
+      ...cluster,
+      status: { replicationStatus: { segmentRetention: { floorSequence: 18, replicas: [{ name: 'db-1', appliedSequence: 21 }, { name: 'db-2', appliedSequence: 18 }] } } },
+    });
+    expect(s.client).toHaveBeenCalledWith('db-0.db-headless.prod.svc', 3051, 'masterkey RETAIN 18');
+    expect(s.status().replicationStatus.segmentRetention).toEqual({
+      floorSequence: 18,
+      replicas: [{ name: 'db-1', appliedSequence: 22 }, { name: 'db-2', appliedSequence: 18 }],
+    });
+  });
+
+  it('keeps the floor when the primary cannot be reached, and clears it without replicas', async () => {
+    const previous = { segmentRetention: { floorSequence: 18, replicas: [{ name: 'db-1', appliedSequence: 18 }] } };
+    const down = setup([pod('db-0'), pod('db-1')], { 'db-0 ARCHIVED': new Error('connect ECONNREFUSED') });
+    await down.controller.reconcile({ ...cluster, spec: { ...cluster.spec, instances: 2 }, status: { replicationStatus: previous } });
+    expect(down.status().replicationStatus.segmentRetention).toEqual(previous.segmentRetention);
+
+    const single = setup([pod('db-0')], { 'db-0 RETAIN': ['OK'] });
+    await single.controller.reconcile({ ...cluster, spec: { ...cluster.spec, instances: 1 }, status: { replicationStatus: previous } });
+    expect(single.client).toHaveBeenCalledWith('db-0.db-headless.prod.svc', 3051, 'masterkey RETAIN none');
+    expect(single.status().replicationStatus.segmentRetention).toBeUndefined();
   });
 
   it('drops the annotation of a replica that cannot be measured', async () => {

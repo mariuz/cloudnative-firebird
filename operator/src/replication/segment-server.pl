@@ -12,6 +12,9 @@
 #                                 primary: "OK primary" (used by planned switchover)
 #   "<token> ARCHIVED\n"       -> "<sequence> <age seconds>" for each archived segment, then ".\n"
 #                                 (the operator compares it with the replicas' POSITION: lag)
+#   "<token> RETAIN <S>|none\n" -> "OK": keep archived segments after S (the lowest segment the
+#                                 replicas applied, sent by the operator) past the retention age,
+#                                 up to SEGMENT_MAX_RETENTION_SECONDS; "none" clears the floor
 #
 # The token is the SYSDBA password (ISC_PASSWORD).
 #
@@ -42,6 +45,11 @@ my $self      = $ENV{POD_NAME} // '';
 my $token     = $ENV{ISC_PASSWORD} // '';
 my $port      = $ENV{SEGMENT_PORT} // 3051;
 my $retention = $ENV{SEGMENT_RETENTION_SECONDS} // 86400;
+my $max_retention = $ENV{SEGMENT_MAX_RETENTION_SECONDS} // 7 * 86400;
+$max_retention = $retention if $max_retention < $retention;
+# lowest segment applied by the replicas, as last reported by the operator; kept on the volume
+# so a restarted primary does not prune what a stopped replica still needs
+my $floor_file = "$base/retain-floor";
 my $allow_live = ($ENV{ALLOW_LIVE_SEED} // '') eq 'true';
 my $seed_file = "$base/seed.copy";
 my $bootstrap_seed = "$base/bootstrap-seed.fdb";
@@ -243,11 +251,24 @@ sub seed_from_primary {
   unlink $seed_file;
 }
 
+# Segments older than the retention age are deleted unless a replica has not applied them yet
+# (sequence above the floor); those are kept up to the maximum retention age, so a slow or stopped
+# replica can catch up without being re-seeded, and a replica that never returns cannot fill the
+# volume.
 sub prune {
-  my $cutoff = time - $retention;
+  my $now = time;
+  my $floor = slurp($floor_file);
+  $floor = undef unless $floor =~ /^\d+$/;
   for my $name (segments()) {
     my $mtime = (stat("$dir/$name"))[9];
-    unlink "$dir/$name" if defined $mtime && $mtime < $cutoff;
+    next unless defined $mtime;
+    my $age = $now - $mtime;
+    next if $age < $retention;
+    if ($age < $max_retention && defined $floor) {
+      my $seq = segment_sequence("$dir/$name");
+      next if !defined $seq || $seq > $floor;
+    }
+    unlink "$dir/$name";
   }
 }
 
@@ -309,6 +330,17 @@ while (1) {
       print $client "$seq " . ($now - $mtime) . "\n" if defined $seq && defined $mtime;
     }
     print $client ".\n";
+  } elsif ($cmd eq 'RETAIN' && defined $arg && $arg =~ /^(\d+|none)$/) {
+    if ($arg eq 'none') {
+      unlink $floor_file;
+    } else {
+      if (open(my $fh, '>', "$floor_file.tmp")) {
+        print $fh "$arg\n";
+        close $fh;
+        rename "$floor_file.tmp", $floor_file;
+      }
+    }
+    print $client "OK\n";
   } elsif ($cmd eq 'SEED') {
     is_primary() ? seed_from_primary($client) : seed_from_replica($client);
   } else {

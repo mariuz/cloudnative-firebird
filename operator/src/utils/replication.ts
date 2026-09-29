@@ -74,6 +74,12 @@ export function replicationDirectories(cluster: FirebirdCluster, dataDir: string
   };
 }
 
+/** Hours unapplied segments are kept at most (maxSegmentRetentionHours, never below segmentRetentionHours) */
+export function maxSegmentRetentionHours(cluster: FirebirdCluster): number {
+  const replication = cluster.spec.replication;
+  return Math.max(replication?.maxSegmentRetentionHours ?? 168, replication?.segmentRetentionHours ?? 24);
+}
+
 /** Stable DNS name of an instance through the headless Service */
 export function instanceHost(cluster: FirebirdCluster, podName: string): string {
   return `${podName}.${cluster.metadata.name}-headless`;
@@ -134,6 +140,10 @@ function replicationEnv(
     {
       name: 'SEGMENT_RETENTION_SECONDS',
       value: String((cluster.spec.replication?.segmentRetentionHours ?? 24) * 3600),
+    },
+    {
+      name: 'SEGMENT_MAX_RETENTION_SECONDS',
+      value: String(maxSegmentRetentionHours(cluster) * 3600),
     },
   ];
 }

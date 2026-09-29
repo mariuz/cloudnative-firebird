@@ -67,7 +67,14 @@ import {
   instancePods,
 } from '../utils/resources';
 import { REPLICATION_LAG_ANNOTATION, computeReadRouting, isPodReady, podRoutingLabelPatch } from '../utils/routing';
-import { SegmentClient, computeLag, parseArchived, parsePosition, segmentRequest } from '../utils/replication-lag';
+import {
+  SegmentClient,
+  computeLag,
+  parseArchived,
+  parsePosition,
+  segmentRequest,
+  segmentRetention,
+} from '../utils/replication-lag';
 import { RESEED_ANNOTATION, RESEED_KEY, SEGMENT_PORT, instanceHost, replicationEnabled } from '../utils/replication';
 import { planVolumeExpansion } from '../utils/storage';
 import { validateClusterSpec } from '../utils/validation';
@@ -78,6 +85,7 @@ import {
   FirebirdClusterCondition,
   FirebirdClusterStatus,
   ReplicaLagStatus,
+  SegmentRetentionStatus,
   RollingUpdateStatus,
   SwitchoverStatus,
   RESOURCE_KIND,
@@ -1159,16 +1167,25 @@ export class FirebirdClusterController {
     primaryPod: string,
     switchover: SwitchoverStatus | undefined,
     log: Logger,
-  ): Promise<{ lastArchivedSequence?: number; replicas: ReplicaLagStatus[] } | undefined> {
+  ): Promise<
+    | { lastArchivedSequence?: number; replicas?: ReplicaLagStatus[]; segmentRetention?: SegmentRetentionStatus }
+    | undefined
+  > {
     const { name, namespace = 'default' } = cluster.metadata;
-    if (!replicationEnabled(cluster) || cluster.spec.hibernated || cluster.spec.instances < 2) return undefined;
+    if (!replicationEnabled(cluster) || cluster.spec.hibernated) return undefined;
+    const previous = cluster.status?.replicationStatus;
+    // the retention floor is kept (not re-measured) whenever the replicas cannot be measured
+    const keep = () => (previous?.segmentRetention ? { segmentRetention: previous.segmentRetention } : undefined);
     // positions are meaningless while the primary moves
-    if (switchoverInFlight(switchover)) return cluster.status?.replicationStatus?.replicas ? {
-      lastArchivedSequence: cluster.status.replicationStatus.lastArchivedSequence,
-      replicas: cluster.status.replicationStatus.replicas,
-    } : undefined;
+    if (switchoverInFlight(switchover)) return previous?.replicas ? {
+      lastArchivedSequence: previous.lastArchivedSequence,
+      replicas: previous.replicas,
+      ...keep(),
+    } : keep();
+    // a single instance has no replica to measure, only a floor to clear
+    if (cluster.spec.instances < 2 && previous?.segmentRetention?.floorSequence === undefined) return undefined;
     const token = await this.superuserPassword(cluster);
-    if (token === undefined) return undefined;
+    if (token === undefined) return keep();
 
     const pods = instancePods(
       (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items,
@@ -1176,13 +1193,22 @@ export class FirebirdClusterController {
     );
     const host = (pod: string) => `${instanceHost(cluster, pod)}.${namespace}.svc`;
     const primary = pods.find((p) => p.metadata?.name === primaryPod);
-    if (!primary || !isPodReady(primary)) return undefined;
+    if (!primary || !isPodReady(primary)) return keep();
+    if (cluster.spec.instances < 2) {
+      try {
+        await this.retainSegments(host(primaryPod), token, undefined);
+        return undefined;
+      } catch (err) {
+        log.debug({ err }, 'Could not clear the segment retention floor');
+        return keep();
+      }
+    }
     let archived;
     try {
       archived = parseArchived(await this.segmentClient(host(primaryPod), SEGMENT_PORT, `${token} ARCHIVED`));
     } catch (err) {
       log.debug({ err }, 'Could not list the primary archived segments');
-      return undefined;
+      return keep();
     }
 
     const replicas: ReplicaLagStatus[] = [];
@@ -1205,10 +1231,27 @@ export class FirebirdClusterController {
         );
       }
     }
+    // the primary keeps the segments the replicas (ready or not) have not applied yet
+    const replicaNames = Array.from({ length: cluster.spec.instances }, (_, i) => `${name}-${i}`).filter(
+      (pod) => pod !== primaryPod,
+    );
+    const retention = segmentRetention({ replicaNames, measured: replicas, previous: previous?.segmentRetention });
+    try {
+      await this.retainSegments(host(primaryPod), token, retention.floorSequence);
+    } catch (err) {
+      log.debug({ err }, 'Could not send the segment retention floor to the primary');
+    }
     return {
       ...(archived.length ? { lastArchivedSequence: archived[archived.length - 1].sequence } : {}),
       replicas: replicas.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })),
+      segmentRetention: retention,
     };
+  }
+
+  /** Tells the primary's segment server which archived segments the replicas still need */
+  private async retainSegments(host: string, token: string, floorSequence: number | undefined): Promise<void> {
+    const reply = await this.segmentClient(host, SEGMENT_PORT, `${token} RETAIN ${floorSequence ?? 'none'}`);
+    if (reply[0] !== 'OK') throw new Error(reply[0] ?? 'empty RETAIN reply');
   }
 
   /** Reconcile CronJob for replication journal continuous archiving to S3 */

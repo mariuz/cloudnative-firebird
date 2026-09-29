@@ -324,6 +324,13 @@ spec:
                       description: Hours archived segments are kept on the primary for replicas to fetch (defaults to 24)
                       type: integer
                       minimum: 1
+                    maxSegmentRetentionHours:
+                      description: >-
+                        Hours archived segments a replica has not applied yet are kept past
+                        segmentRetentionHours, so a slow or stopped replica can catch up without being
+                        re-seeded (defaults to 168; never less than segmentRetentionHours)
+                      type: integer
+                      minimum: 1
                     failover:
                       description: >-
                         Automatic failover: when the primary pod has not been ready for delaySeconds,
@@ -743,6 +750,23 @@ spec:
                             type: integer
                           error:
                             type: string
+                    segmentRetention:
+                      description: Archived segments the primary keeps for the replicas past segmentRetentionHours
+                      type: object
+                      properties:
+                        floorSequence:
+                          description: Lowest segment applied by a replica; every archived segment after it is kept
+                          type: integer
+                        replicas:
+                          description: Last applied segment known for each replica, including replicas not ready now
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              name:
+                                type: string
+                              appliedSequence:
+                                type: integer
                 volumes:
                   description: Per-instance PVC storage and volume expansion status
                   type: array
