@@ -394,11 +394,26 @@ jobs:
           wait_login repl-1
           echo "user survived pod re-creation"
 
-          # reclaimPolicy delete drops the user before the resource goes away
-          kubectl delete firebirduser app-user --timeout=180s
-          if as_app repl-0 | grep -q 'APP_USER'; then echo "user still exists"; exit 1; fi
-          as_app repl-0 | grep -q 'not defined'
-          echo "user dropped"
+          # reclaimPolicy delete drops the user before the resource goes away, also from an
+          # instance that is not ready at the time (fenced here): the deletion waits for it
+          ANN=firebird.cloudnative-firebird.io/fencedInstances
+          kubectl annotate firebirdcluster repl "$ANN=[\"repl-2\"]" --overwrite
+          kubectl wait pod/repl-2 --for=condition=Ready=false --timeout=180s
+          kubectl delete firebirduser app-user --wait=false
+          timeout 180 bash -c \
+            'until kubectl get firebirduser app-user -o jsonpath={.status.message} | grep -q "ready to drop the user: repl-2"; do sleep 5; done' \
+            || { kubectl get firebirduser app-user -o yaml; exit 1; }
+          kubectl get firebirduser app-user -o jsonpath='{.status}'; echo
+          for pod in repl-0 repl-1; do as_app $pod | grep -q 'not defined'; done
+          kubectl annotate firebirdcluster repl "$ANN=[]" --overwrite
+          kubectl wait pod/repl-2 --for=condition=Ready --timeout=300s
+          kubectl wait firebirduser/app-user --for=delete --timeout=240s
+          for pod in repl-0 repl-1 repl-2; do
+            if as_app $pod | grep -q 'APP_USER'; then echo "user still exists on $pod"; exit 1; fi
+            as_app $pod | grep -q 'not defined'
+          done
+          timeout 120 bash -c 'while kubectl get firebirdcluster repl -o jsonpath={.status.fencedInstances} | grep -q repl-2; do sleep 3; done'
+          echo "user dropped from every instance"
 
       - name: Verify re-seeding a replica
         run: |

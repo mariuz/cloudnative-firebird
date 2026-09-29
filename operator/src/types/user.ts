@@ -43,7 +43,7 @@ export interface FirebirdUserInstanceStatus {
 }
 
 export interface FirebirdUserStatus {
-  phase?: 'Pending' | 'Applying' | 'Applied' | 'Failed';
+  phase?: 'Pending' | 'Applying' | 'Applied' | 'Failed' | 'Dropping';
   /** Human-readable detail */
   message?: string;
   /** Firebird user name */
@@ -56,6 +56,8 @@ export interface FirebirdUserStatus {
   lastFailureTime?: string;
   /** Hash of the spec whose Job failed last */
   failedHash?: string;
+  /** Instances (and volumes) the user has been dropped from while the resource is deleted */
+  droppedFrom?: Array<{ name: string; volume: string }>;
 }
 
 export interface FirebirdUser {

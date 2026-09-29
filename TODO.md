@@ -59,8 +59,9 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Role management**: `FirebirdUser` grants roles that must already exist. Declaring roles
   (and their privileges) would complete the picture, e.g. a `FirebirdRole` resource or a
   `Database`-like resource as in CloudNativePG.
-- [ ] **Dropping users on unready instances**: with `reclaimPolicy: delete`, instances that are not
-  ready when the resource is deleted keep the user in their security database.
+- [ ] **Dropping users from instances unready for long**: the deletion waits 15 minutes for an
+  instance that holds the user; one down longer (or scaled away with its volume kept) keeps it.
+  An instance could drop pending users itself on start, from a list the operator keeps.
 - [ ] **Password without SQL text**: the services API (`action_modify_user`) would keep the
   password out of `MON$STATEMENTS`, but takes it as a command-line argument; pick the lesser risk.
 - [ ] **Existing users on upgrade**: clusters created before v0.12.0 start with a fresh security

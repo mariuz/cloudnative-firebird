@@ -13,7 +13,7 @@ import {
   userSpecHash,
   validateUserSpec,
 } from '../src/utils/users';
-import { FirebirdUserController, USER_RETRY_DELAY_MS } from '../src/controllers/user.controller';
+import { FirebirdUserController, USER_DROP_WAIT_MS, USER_RETRY_DELAY_MS } from '../src/controllers/user.controller';
 import { SECURITY_DB_PATH, buildStatefulSet } from '../src/utils/resources';
 import { validateClusterSpec, ValidationError } from '../src/utils/validation';
 import { FirebirdCluster, FirebirdUser } from '../src/types';
@@ -25,11 +25,16 @@ const makeCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): Firebird
   spec: { instances: 2, storage: { size: '1Gi' }, superuserSecret: { name: 'su' }, ...overrides },
 });
 
-const makeUser = (spec: Partial<FirebirdUser['spec']> = {}, metadata: Partial<FirebirdUser['metadata']> = {}): FirebirdUser => ({
+const makeUser = (
+  spec: Partial<FirebirdUser['spec']> = {},
+  metadata: Partial<FirebirdUser['metadata']> = {},
+  status?: FirebirdUser['status'],
+): FirebirdUser => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
   kind: 'FirebirdUser',
   metadata: { name: 'app-user', namespace: 'default', uid: 'u-uid', resourceVersion: '1', ...metadata },
   spec: { clusterName: 'db', passwordSecret: { name: 'app-pw' }, ...spec },
+  ...(status ? { status } : {}),
 });
 
 const secret = { metadata: { uid: 's-uid', resourceVersion: '7' }, data: { password: 'c2VjcmV0' } };
@@ -157,6 +162,7 @@ describe('FirebirdUserController', () => {
       listNamespacedPod: vi.fn().mockResolvedValue({ items: (opts.readyPods ?? ['db-0', 'db-1']).map(readyPod) }),
       listNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({ items: ['db-0', 'db-1'].map(pvc) }),
       readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: 'db-1' } }),
+      createNamespacedEvent: vi.fn().mockResolvedValue({}),
     };
     const kubeConfig = new KubeConfig();
     vi.spyOn(kubeConfig, 'makeApiClient').mockReturnValue(
@@ -286,17 +292,94 @@ describe('FirebirdUserController', () => {
     expect(envOf(drop).HOSTS).toBe('db-0.db-headless db-1.db-headless');
     expect(envOf(drop).GRANT_HOSTS).toBe('db-1.db-headless');
 
-    const done: V1Job = {
-      metadata: { labels: { [USER_JOB_ACTION_LABEL]: 'drop' } },
-      status: { conditions: [{ type: 'Complete', status: 'True' }] },
-    };
-    const f = setup({ job: done });
+    expect(JSON.parse(drop.metadata!.annotations![USER_JOB_TARGETS_ANNOTATION])).toEqual([
+      { name: 'db-0', volume: 'vol-db-0' },
+      { name: 'db-1', volume: 'vol-db-1' },
+    ]);
+    expect(d.status()).toMatchObject({ phase: 'Dropping' });
+
+    const f = setup({ job: dropJob(['db-0', 'db-1']) });
     await f.controller.reconcileUser(deleting);
+    expect(f.created()).toHaveLength(0);
     expect(f.api.patchNamespacedCustomObject.mock.calls[0][0].body[1]).toEqual({
       op: 'add',
       path: '/metadata/finalizers',
       value: [],
     });
+  });
+
+  const dropJob = (instances: string[]): V1Job => ({
+    metadata: {
+      labels: { [USER_JOB_ACTION_LABEL]: 'drop' },
+      annotations: { [USER_JOB_TARGETS_ANNOTATION]: JSON.stringify(instances.map((name) => ({ name, volume: `vol-${name}` }))) },
+    },
+    status: { conditions: [{ type: 'Complete', status: 'True' }] },
+  });
+  const deletingHolder = (droppedFrom?: Array<{ name: string; volume: string }>) =>
+    makeUser(
+      { reclaimPolicy: 'delete' },
+      { finalizers: [USER_FINALIZER], deletionTimestamp: '2026-09-27T12:00:00Z' },
+      {
+        instances: [
+          { name: 'db-0', volume: 'vol-db-0', hash: 'h' },
+          { name: 'db-1', volume: 'vol-db-1', hash: 'h' },
+        ],
+        ...(droppedFrom ? { droppedFrom } : {}),
+      },
+    );
+
+  it('keeps the finalizer until an unready instance holding the user can drop it', async () => {
+    // db-1 holds the user but is not ready: dropped from db-0 only, then waited for
+    const first = setup({ readyPods: ['db-0'] });
+    await first.controller.reconcileUser(deletingHolder());
+    expect(envOf(first.created()[0]).HOSTS).toBe('db-0.db-headless');
+
+    const waiting = setup({ readyPods: ['db-0'], job: dropJob(['db-0']) });
+    await waiting.controller.reconcileUser(deletingHolder());
+    expect(waiting.created()).toHaveLength(0);
+    expect(waiting.api.patchNamespacedCustomObject).not.toHaveBeenCalled();
+    expect(waiting.status()).toMatchObject({
+      phase: 'Dropping',
+      message: 'waiting for instance(s) to be ready to drop the user: db-1',
+      droppedFrom: [{ name: 'db-0', volume: 'vol-db-0' }],
+    });
+
+    // db-1 is ready again: the user is dropped from it, then the finalizer is released
+    const later = setup();
+    await later.controller.reconcileUser(deletingHolder([{ name: 'db-0', volume: 'vol-db-0' }]));
+    expect(envOf(later.created()[0]).HOSTS).toBe('db-1.db-headless');
+    const done = setup({ job: dropJob(['db-1']) });
+    await done.controller.reconcileUser(deletingHolder([{ name: 'db-0', volume: 'vol-db-0' }]));
+    expect(done.api.patchNamespacedCustomObject.mock.calls[0][0].body[1].value).toEqual([]);
+  });
+
+  it('removes a running apply Job before dropping', async () => {
+    const applying: V1Job = { metadata: { labels: { [USER_JOB_ACTION_LABEL]: 'apply' } }, status: { active: 1 } };
+    const s = setup({ job: applying });
+    await s.controller.reconcileUser(deletingHolder());
+    expect(s.api.deleteNamespacedJob).toHaveBeenCalled();
+    expect(s.created()).toHaveLength(0);
+  });
+
+  it('does not wait for unready instances that never had the user', async () => {
+    const s = setup({ readyPods: ['db-0'], job: dropJob(['db-0']) });
+    await s.controller.reconcileUser(
+      makeUser({ reclaimPolicy: 'delete' }, { finalizers: [USER_FINALIZER], deletionTimestamp: '2026-09-27T12:00:00Z' }),
+    );
+    expect(s.api.patchNamespacedCustomObject.mock.calls[0][0].body[1].value).toEqual([]);
+  });
+
+  it(`keeps the user on instances unready for ${USER_DROP_WAIT_MS / 60000} minutes and releases the finalizer`, async () => {
+    const s = setup({
+      readyPods: ['db-0'],
+      job: dropJob(['db-0']),
+      now: Date.parse('2026-09-27T12:00:00Z') + USER_DROP_WAIT_MS,
+    });
+    await s.controller.reconcileUser(deletingHolder());
+    expect(s.created()).toHaveLength(0);
+    expect(s.api.patchNamespacedCustomObject.mock.calls[0][0].body[1].value).toEqual([]);
+    const warning = s.api.createNamespacedEvent.mock.calls.map((c) => c[0].body).find((e) => e.type === 'Warning');
+    expect(warning?.message).toMatch(/kept on db-1/);
   });
 
   it('releases the finalizer without dropping when the cluster is gone', async () => {
