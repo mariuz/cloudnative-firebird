@@ -513,6 +513,11 @@ spec:
     # clone: { sourceCluster: my-cluster, namespace: prod, superuserSecret: { name: prod-su } }
 ```
 
+When the source cluster has `networkPolicy.enabled`, its generated NetworkPolicy admits the
+instance pods of every cluster that clones from it (matched by namespace and cluster label, port
+3050 only), so a clone works without widening `ingressFrom`. The source is reconciled as soon as
+the clone is created, before the clone's instances copy the database.
+
 **S3 without static keys.** `s3.secretRef` is optional everywhere (backups, scheduled backups,
 restores, bootstrap recovery, journal archiving). Without it the `aws` CLI uses the credentials of
 its pod, typically workload identity (EKS IRSA or Pod Identity) through a service account set with

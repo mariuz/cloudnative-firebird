@@ -44,6 +44,8 @@ import {
   buildHeadlessService,
   buildLease,
   buildNetworkPolicy,
+  CloneTarget,
+  cloneTargets,
   buildPodDisruptionBudget,
   buildPodMonitor,
   buildReplicaService,
@@ -1540,10 +1542,12 @@ export class FirebirdClusterController {
     const npName = `${name}-networkpolicy`;
 
     if (cluster.spec.networkPolicy?.enabled) {
-      const desired = buildNetworkPolicy(cluster);
+      const clones = await this.cloneTargets(cluster, log);
+      const desired = buildNetworkPolicy(cluster, clones ?? []);
       try {
         const existing = await this.networkingApi.readNamespacedNetworkPolicy({ name: npName, namespace });
-        if (networkPolicyNeedsUpdate(existing, desired)) {
+        // without the list of clones, an update could drop the rule a running clone relies on
+        if (clones && networkPolicyNeedsUpdate(existing, desired)) {
           log.info('Updating NetworkPolicy');
           await this.networkingApi.patchNamespacedNetworkPolicy({
             name: npName,
@@ -1568,6 +1572,21 @@ export class FirebirdClusterController {
       } catch {
         log.debug('NetworkPolicy does not exist, skipping deletion');
       }
+    }
+  }
+
+  /** Clusters in any namespace cloning from this one (undefined when they cannot be listed) */
+  private async cloneTargets(cluster: FirebirdCluster, log: Logger): Promise<CloneTarget[] | undefined> {
+    try {
+      const list = (await this.customApi.listClusterCustomObject({
+        group: API_GROUP,
+        version: API_VERSION,
+        plural: RESOURCE_PLURAL,
+      })) as { items?: FirebirdCluster[] };
+      return cloneTargets(cluster, list.items ?? []);
+    } catch (err) {
+      log.warn({ err }, 'Could not list the clusters cloning from this one');
+      return undefined;
     }
   }
 

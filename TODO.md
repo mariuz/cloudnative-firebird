@@ -51,8 +51,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   keep every level 0 that a kept level 1 or 2 depends on (chains span schedules).
 - [ ] **Backup verification**: optionally restore each backup into a scratch database and
   validate it.
-- [ ] **Clone across NetworkPolicies**: a clone pod carries the target cluster's labels, so a
-  source cluster with `networkPolicy.enabled` rejects it unless its `ingressFrom` allows it.
 
 ## Users
 

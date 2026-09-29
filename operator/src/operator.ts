@@ -362,6 +362,21 @@ export class Operator {
     return run;
   }
 
+  /**
+   * A new clone: its source's NetworkPolicy must admit the clone's instances before they copy the
+   * database, so the source is reconciled now rather than on the next resync
+   */
+  private reconcileCloneSource(cluster: FirebirdCluster): void {
+    const clone = cluster.spec?.bootstrap?.clone;
+    if (!clone) return;
+    const sourceKey = `${clone.namespace ?? cluster.metadata.namespace ?? 'default'}/${clone.sourceCluster}`;
+    const source = this.knownClusters.get(sourceKey);
+    if (!source?.spec.networkPolicy?.enabled) return;
+    this.reconcileCluster(sourceKey).catch((err) => {
+      logger.error({ err, cluster: sourceKey }, 'Reconcile of the clone source failed');
+    });
+  }
+
   private async handleEvent(phase: string, cluster: FirebirdCluster): Promise<void> {
     // ERROR events carry a Status object, not a cluster
     if (phase === 'ERROR' || !cluster?.metadata) {
@@ -376,6 +391,7 @@ export class Operator {
     switch (phase) {
       case 'ADDED':
       case 'MODIFIED':
+        if (!this.knownClusters.has(key)) this.reconcileCloneSource(cluster);
         this.knownClusters.set(key, cluster);
         // Status-only updates (including the operator's own) do not bump metadata.generation;
         // skip them to avoid a reconcile → status patch → MODIFIED feedback loop.
