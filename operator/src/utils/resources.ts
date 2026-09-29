@@ -997,9 +997,9 @@ export function configMapNeedsUpdate(existing: V1ConfigMap, desired: V1ConfigMap
 }
 
 /**
- * Builds the CronJob for periodic Firebird database sweeping (gfix -sweep).
+ * Builds the CronJob for periodic Firebird database sweeping (gfix -sweep) of the primary.
  */
-export function buildAutoSweepCronJob(cluster: FirebirdCluster): V1CronJob {
+export function buildAutoSweepCronJob(cluster: FirebirdCluster, primaryPod?: string): V1CronJob {
   const { name, namespace = 'default' } = cluster.metadata;
   const spec = cluster.spec;
   const autoSweep = spec.autoSweep;
@@ -1047,9 +1047,10 @@ export function buildAutoSweepCronJob(cluster: FirebirdCluster): V1CronJob {
                   name: 'firebird-sweep',
                   image,
                   command: ['/bin/sh', '-c'],
-                  // Sweep the primary over the network through the read-write Service;
-                  // the Job needs no access to the instance PVC
-                  args: [`gfix -sweep ${name}:${FIREBIRD_DATA_DIR}/${dbName}`],
+                  // Sweep the primary over the network through its stable headless-Service name
+                  // (the <name> Service balances across instances unless read-only routing
+                  // labels the primary); the Job needs no access to the instance PVC
+                  args: [`gfix -sweep ${instanceHost(cluster, primaryPod ?? `${name}-0`)}:${FIREBIRD_DATA_DIR}/${dbName}`],
                   env: superuserClientEnv(cluster),
                 },
               ],
@@ -1193,9 +1194,9 @@ export function networkPolicyNeedsUpdate(
 }
 
 /**
- * Builds the CronJob for online database diagnostics (gfix -v -full).
+ * Builds the CronJob for online database diagnostics (gfix -v -full) of the primary.
  */
-export function buildDiagnosticsCronJob(cluster: FirebirdCluster): V1CronJob {
+export function buildDiagnosticsCronJob(cluster: FirebirdCluster, primaryPod?: string): V1CronJob {
   const { name, namespace = 'default' } = cluster.metadata;
   const spec = cluster.spec;
   const diag = spec.diagnostics;
@@ -1244,7 +1245,7 @@ export function buildDiagnosticsCronJob(cluster: FirebirdCluster): V1CronJob {
                   // Online validation through the service manager works while clients are
                   // connected (gfix -v needs exclusive access); fail the Job on reported errors
                   args: [
-                    `out=$(fbsvcmgr ${name}:service_mgr action_validate dbname ${FIREBIRD_DATA_DIR}/${dbName} 2>&1); ` +
+                    `out=$(fbsvcmgr ${instanceHost(cluster, primaryPod ?? `${name}-0`)}:service_mgr action_validate dbname ${FIREBIRD_DATA_DIR}/${dbName} 2>&1); ` +
                       `status=$?; echo "$out"; ` +
                       `[ $status -eq 0 ] && ! echo "$out" | grep -qiE 'error|corrupt'`,
                   ],
@@ -1268,6 +1269,12 @@ export function diagnosticsCronJobNeedsUpdate(existing: V1CronJob, desired: V1Cr
   if (!existingSpec || !desiredSpec) return true;
   if (existingSpec.schedule !== desiredSpec.schedule) return true;
   if (Boolean(existingSpec.suspend) !== Boolean(desiredSpec.suspend)) return true;
+  // image, or the primary after a switchover or failover
+  const existingContainer = existingSpec.jobTemplate?.spec?.template?.spec?.containers?.[0];
+  const desiredContainer = desiredSpec.jobTemplate?.spec?.template?.spec?.containers?.[0];
+  if (!existingContainer || !desiredContainer) return true;
+  if (existingContainer.image !== desiredContainer.image) return true;
+  if (JSON.stringify(existingContainer.args) !== JSON.stringify(desiredContainer.args)) return true;
   return false;
 }
 

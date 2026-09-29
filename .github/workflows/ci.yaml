@@ -444,6 +444,18 @@ jobs:
           fi
           echo "switchover to repl-1 completed; replicas follow the new primary"
 
+          # maintenance Jobs follow the primary, not the <name> Service
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"autoSweep":{"enabled":true},"diagnostics":{"enabled":true}}}'
+          for cj in repl-sweep repl-diagnostics; do
+            timeout 120 bash -c "until kubectl get cronjob $cj -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].args[0]}' 2>/dev/null | grep -q 'repl-1.repl-headless:'; do sleep 3; done" \
+              || { kubectl get cronjob $cj -o yaml; exit 1; }
+            kubectl create job "$cj-ci" --from=cronjob/$cj
+            kubectl wait job/"$cj-ci" --for=condition=Complete --timeout=180s || { kubectl logs job/"$cj-ci"; exit 1; }
+            kubectl logs job/"$cj-ci"
+            kubectl delete job "$cj-ci" --wait=false
+          done
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"autoSweep":null,"diagnostics":null}}'
+
       - name: Verify automatic failover
         run: |
           DB=/var/lib/firebird/data/mydb.fdb

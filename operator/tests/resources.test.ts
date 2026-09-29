@@ -589,7 +589,7 @@ describe('buildAutoSweepCronJob & autoSweepCronJobNeedsUpdate', () => {
     expect(cronJob.metadata?.name).toBe('test-cluster-sweep');
     expect(cronJob.spec?.schedule).toBe('0 3 * * *');
     const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
-    expect(container?.args?.[0]).toBe('gfix -sweep test-cluster:/var/lib/firebird/data/mydb.fdb');
+    expect(container?.args?.[0]).toBe('gfix -sweep test-cluster-0.test-cluster-headless:/var/lib/firebird/data/mydb.fdb');
   });
 
   it('sweeps the primary over the network without mounting the instance PVC', () => {
@@ -614,7 +614,7 @@ describe('buildAutoSweepCronJob & autoSweepCronJobNeedsUpdate', () => {
   it('defaults the swept database to spec.databaseName', () => {
     const cronJob = buildAutoSweepCronJob(makeCluster({ databaseName: 'app.fdb', autoSweep: { enabled: true } }));
     expect(cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0].args?.[0]).toContain(
-      'test-cluster:/var/lib/firebird/data/app.fdb',
+      'test-cluster-0.test-cluster-headless:/var/lib/firebird/data/app.fdb',
     );
   });
 
@@ -625,7 +625,22 @@ describe('buildAutoSweepCronJob & autoSweepCronJobNeedsUpdate', () => {
     const cronJob = buildAutoSweepCronJob(cluster);
     expect(cronJob.spec?.schedule).toBe('0 4 * * *');
     const container = cronJob.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0];
-    expect(container?.args?.[0]).toContain('test-cluster:/var/lib/firebird/data/custom.fdb');
+    expect(container?.args?.[0]).toContain('test-cluster-0.test-cluster-headless:/var/lib/firebird/data/custom.fdb');
+  });
+
+  it('follows the primary: the CronJob is updated after a switchover or failover', () => {
+    const cluster = makeCluster({ autoSweep: { enabled: true }, diagnostics: { enabled: true } });
+    const sweep = buildAutoSweepCronJob(cluster, 'test-cluster-2');
+    const diag = buildDiagnosticsCronJob(cluster, 'test-cluster-2');
+    expect(sweep.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0].args?.[0]).toBe(
+      'gfix -sweep test-cluster-2.test-cluster-headless:/var/lib/firebird/data/mydb.fdb',
+    );
+    expect(diag.spec?.jobTemplate?.spec?.template?.spec?.containers?.[0].args?.[0]).toContain(
+      'fbsvcmgr test-cluster-2.test-cluster-headless:service_mgr',
+    );
+    expect(autoSweepCronJobNeedsUpdate(buildAutoSweepCronJob(cluster, 'test-cluster-0'), sweep)).toBe(true);
+    expect(diagnosticsCronJobNeedsUpdate(buildDiagnosticsCronJob(cluster, 'test-cluster-0'), diag)).toBe(true);
+    expect(diagnosticsCronJobNeedsUpdate(diag, diag)).toBe(false);
   });
 
   it('detects AutoSweep CronJob updates correctly', () => {
@@ -789,7 +804,7 @@ describe('Diagnostics & Grafana Dashboard Builders', () => {
     const podSpec = cronJob.spec?.jobTemplate?.spec?.template?.spec;
     // gfix -v needs exclusive access; online validation works with clients connected
     expect(podSpec?.containers?.[0].args?.[0]).toContain(
-      'fbsvcmgr test-cluster:service_mgr action_validate dbname /var/lib/firebird/data/mydb.fdb',
+      'fbsvcmgr test-cluster-0.test-cluster-headless:service_mgr action_validate dbname /var/lib/firebird/data/mydb.fdb',
     );
     expect(podSpec?.containers?.[0].args?.[0]).not.toContain('gfix -v');
     expect(podSpec?.volumes).toBeUndefined();

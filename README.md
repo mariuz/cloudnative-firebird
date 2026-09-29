@@ -171,7 +171,8 @@ entrypoint creates `databaseName` on first start and runs `bootstrap.initSql`. T
 Secret sets the SYSDBA password (`FIREBIRD_ROOT_PASSWORD`) and is exposed to client tools as
 `ISC_USER`/`ISC_PASSWORD`, and `config.settings` are applied through `FIREBIRD_CONF_<key>`
 environment variables, so changing them rolls the pods. Sweep and diagnostics Jobs connect to
-the primary through the read-write Service instead of mounting the instance PVC; diagnostics
+the primary instance by its headless-Service name (like backups, and updated after a switchover or
+failover) instead of mounting the instance PVC; diagnostics
 use online validation (`fbsvcmgr action_validate`), which works while clients are connected.
 
 ### Security Contexts

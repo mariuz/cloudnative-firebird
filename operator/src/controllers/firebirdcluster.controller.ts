@@ -266,8 +266,8 @@ export class FirebirdClusterController {
       await this.reconcilePodDisruptionBudget(cluster, log);
       await this.reconcileNetworkPolicy(cluster, log);
       await this.reconcileBackupCronJob(cluster, primaryPod, log);
-      await this.reconcileAutoSweepCronJob(cluster, log);
-      await this.reconcileDiagnosticsCronJob(cluster, log);
+      await this.reconcileAutoSweepCronJob(cluster, primaryPod, log);
+      await this.reconcileDiagnosticsCronJob(cluster, primaryPod, log);
       await this.reconcilePodMonitor(cluster, log);
       await this.reconcileGrafanaDashboard(cluster, log);
 
@@ -1450,13 +1450,14 @@ export class FirebirdClusterController {
   /** Reconcile the CronJob resource for periodic gfix database sweeping */
   private async reconcileAutoSweepCronJob(
     cluster: FirebirdCluster,
+    primaryPod: string,
     log: Logger,
   ): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const sweepName = `${name}-sweep`;
 
     if (cluster.spec.autoSweep?.enabled) {
-      const desired = withHibernation(buildAutoSweepCronJob(cluster), cluster);
+      const desired = withHibernation(buildAutoSweepCronJob(cluster, primaryPod), cluster);
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: sweepName, namespace });
         if (autoSweepCronJobNeedsUpdate(existing, desired)) {
@@ -1582,13 +1583,14 @@ export class FirebirdClusterController {
   /** Reconcile the online database diagnostics CronJob (gfix -v -full) */
   private async reconcileDiagnosticsCronJob(
     cluster: FirebirdCluster,
+    primaryPod: string,
     log: Logger,
   ): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const cronJobName = `${name}-diagnostics`;
 
     if (cluster.spec.diagnostics?.enabled) {
-      const desired = withHibernation(buildDiagnosticsCronJob(cluster), cluster);
+      const desired = withHibernation(buildDiagnosticsCronJob(cluster, primaryPod), cluster);
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: cronJobName, namespace });
         if (diagnosticsCronJobNeedsUpdate(existing, desired)) {
