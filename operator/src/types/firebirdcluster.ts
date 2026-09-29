@@ -186,6 +186,12 @@ export interface ReplicationConfiguration {
   /** Hours archived segments are kept on the primary for replicas to fetch (defaults to 24) */
   segmentRetentionHours?: number;
   /**
+   * Hours archived segments a replica has not applied yet are kept past segmentRetentionHours, so
+   * a slow or stopped replica can catch up without being re-seeded (defaults to 168, at least
+   * segmentRetentionHours)
+   */
+  maxSegmentRetentionHours?: number;
+  /**
    * Allow seeding a new replica with a locked copy of the live primary when no ready replica
    * and no usable offline bootstrap seed exist. Off by default: seeding from replicas or the
    * offline seed adds no load to the primary and avoids a suspected commit/lock window
@@ -407,6 +413,16 @@ export interface ReplicationStatus {
   lastArchivedSequence?: number;
   /** Replication position and lag of each replica, measured from the segment servers */
   replicas?: ReplicaLagStatus[];
+  /** Archived segments the primary keeps for the replicas past segmentRetentionHours */
+  segmentRetention?: SegmentRetentionStatus;
+}
+
+/** Segments kept on the primary for replicas that have not applied them */
+export interface SegmentRetentionStatus {
+  /** Lowest segment applied by a replica: the primary keeps every archived segment after it */
+  floorSequence?: number;
+  /** Last applied segment known for each replica, including replicas not ready now */
+  replicas?: Array<{ name: string; appliedSequence: number }>;
 }
 
 /** Replication progress of one replica */

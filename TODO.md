@@ -16,9 +16,9 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   a cluster without any ready replica cannot seed a new one unless live seeding is allowed.
   Options: refresh the seed whenever the primary restarts (costs a full copy), or keep segments
   until a replica has consumed them.
-- [ ] **Tie segment retention to replica progress** instead of a fixed age, so a slow or stopped
-  replica cannot fall behind the archive (and so the archive does not grow unbounded when replicas
-  keep up).
+- [ ] **Prune applied segments early**: segments every replica has applied are still kept for
+  `segmentRetentionHours` (the offline bootstrap seed and the journal archive upload may need
+  them). Deleting them once applied and uploaded would bound the archive by replica progress.
 - [ ] **Failover safety**: the Lease is moved by the operator, not held and renewed by the
   instances (CloudNativePG 1.30's promotion mutex). A primary that is alive but unready (e.g.
   overloaded) is restarted and re-seeded after a failover; one that is partitioned from the other

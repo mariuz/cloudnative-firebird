@@ -109,6 +109,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     for (const [field, value] of [
       ['archiveTimeoutSeconds', spec.replication.archiveTimeoutSeconds],
       ['segmentRetentionHours', spec.replication.segmentRetentionHours],
+      ['maxSegmentRetentionHours', spec.replication.maxSegmentRetentionHours],
       ['failover.delaySeconds', spec.replication.failover?.delaySeconds],
     ] as const) {
       if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
