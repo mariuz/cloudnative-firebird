@@ -216,6 +216,13 @@ jobs:
           [ -n "$(kubectl get firebirdcluster repl -o jsonpath={.status.replicationStatus.lastArchivedSequence})" ]
           [ "$(kubectl get pod repl-1 -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/replication-lag-seconds}')" = 0 ]
 
+          # ... and exports it on the operator's /metrics endpoint
+          OP=$(kubectl get pod -n cloudnative-firebird-system -l app.kubernetes.io/component=operator -o jsonpath='{.items[0].metadata.name}')
+          kubectl get --raw "/api/v1/namespaces/cloudnative-firebird-system/pods/$OP:8080/proxy/metrics" | tee /tmp/metrics.txt | grep '^firebird_'
+          grep -q '^firebird_replication_lag_seconds{namespace="default",cluster="repl",pod="repl-1"} 0$' /tmp/metrics.txt
+          grep -q '^firebird_cluster_ready_instances{namespace="default",cluster="repl"} 2$' /tmp/metrics.txt
+          grep -q '^firebird_operator_reconciles_total{namespace="default",cluster="repl",result="success"}' /tmp/metrics.txt
+
           # replicas are read-only
           if sql repl-1 "insert into app values (999, 'replica'); commit;" 2>&1 | grep -q 'read-only'; then
             echo "replica rejects writes"

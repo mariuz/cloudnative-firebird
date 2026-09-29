@@ -10,6 +10,7 @@ import { REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { REPLICATION_LAG_ANNOTATION } from '../src/utils/routing';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
 import { FirebirdCluster } from '../src/types';
+import { metrics } from '../src/utils/metrics';
 
 describe('replication lag computation', () => {
   const archived = parseArchived(['10 300', '12 60', '11 120', '.'].filter((l) => l !== '.'));
@@ -170,6 +171,11 @@ describe('replication lag reconciliation', () => {
         { name: 'db-2', appliedSequence: 20, pendingSegments: 2, lagSegments: 2, lagSeconds: 90 },
       ],
     });
+    // and exported as Prometheus metrics
+    const exported = metrics.render();
+    expect(exported).toContain('firebird_replication_lag_seconds{namespace="prod",cluster="db",pod="db-2"} 90\n');
+    expect(exported).toContain('firebird_replication_lag_segments{namespace="prod",cluster="db",pod="db-1"} 0\n');
+    expect(exported).toMatch(/firebird_operator_reconciles_total\{namespace="prod",cluster="db",result="success"\} \d+/);
   });
 
   it('drops the annotation of a replica that cannot be measured', async () => {

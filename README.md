@@ -297,6 +297,36 @@ lagging replicas out of the `-replica` Service. Transactions still in the primar
 are not counted (`archiveTimeoutSeconds` bounds them). With `networkPolicy.enabled`, the generated
 policy lets the operator's pods reach the segment port (namespace from `OPERATOR_NAMESPACE`).
 
+### Operator Metrics
+
+The operator serves Prometheus metrics on `/metrics` of its health port (8080, container port
+`http`), updated on every reconcile. The replication lag it measures is exported directly, so
+alerting on it needs no exporter sidecar:
+
+| Metric | Labels | Meaning |
+|--------|--------|---------|
+| `firebird_cluster_instances` | `namespace`, `cluster` | `spec.instances` |
+| `firebird_cluster_ready_instances` | `namespace`, `cluster` | Instances whose pod is ready |
+| `firebird_cluster_fenced_instances` | `namespace`, `cluster` | Fenced instances |
+| `firebird_cluster_ready` | `namespace`, `cluster` | 1 when the phase is `Running` |
+| `firebird_replication_last_archived_sequence` | `namespace`, `cluster` | Last segment archived on the primary |
+| `firebird_replication_lag_seconds` | `namespace`, `cluster`, `pod` | Age of the oldest archived segment the replica has not applied |
+| `firebird_replication_lag_segments` | `namespace`, `cluster`, `pod` | Archived segments the replica has not applied |
+| `firebird_replication_pending_segments` | `namespace`, `cluster`, `pod` | Segments received but not applied yet |
+| `firebird_replication_applied_sequence` | `namespace`, `cluster`, `pod` | Segment applied by the replica |
+| `firebird_operator_reconciles_total` | `namespace`, `cluster`, `result` | Reconciles by result (`success`, `error`) |
+
+A replica that cannot be measured has no lag series (alert on `absent()` or on
+`firebird_cluster_ready_instances`); the series of a deleted cluster are dropped.
+`config/deploy/podmonitor.yaml` scrapes the operator with the Prometheus Operator, and the
+generated Grafana dashboard has ready-instance and replication-lag panels. For example:
+
+```yaml
+- alert: FirebirdReplicaLagging
+  expr: firebird_replication_lag_seconds > 60
+  for: 5m
+```
+
 ### Planned Switchover
 
 Promote a replica with the `targetPrimary` annotation (CloudNativePG's `kubectl cnpg promote`):

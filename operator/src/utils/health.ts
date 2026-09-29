@@ -1,15 +1,19 @@
 import { createServer, IncomingMessage, ServerResponse } from 'http';
 import { logger } from './logger';
+import { metrics, MetricsRegistry } from './metrics';
 
 /**
  * A minimal HTTP server that serves Kubernetes liveness (/healthz)
- * and readiness (/readyz) probe endpoints.
+ * and readiness (/readyz) probe endpoints, and the operator's Prometheus metrics (/metrics).
  */
 export class HealthServer {
   private server: ReturnType<typeof createServer>;
   private ready = false;
 
-  constructor(private readonly port = 8080) {
+  constructor(
+    private readonly port = 8080,
+    private readonly registry: MetricsRegistry = metrics,
+  ) {
     this.server = createServer(this.handleRequest.bind(this));
   }
 
@@ -47,6 +51,12 @@ export class HealthServer {
         res.writeHead(503, { 'Content-Type': 'text/plain' });
         res.end('not ready');
       }
+      return;
+    }
+
+    if (req.url === '/metrics' || req.url?.startsWith('/metrics?')) {
+      res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4; charset=utf-8' });
+      res.end(this.registry.render());
       return;
     }
 
