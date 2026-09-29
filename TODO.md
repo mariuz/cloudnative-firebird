@@ -19,9 +19,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Tie segment retention to replica progress** instead of a fixed age, so a slow or stopped
   replica cannot fall behind the archive (and so the archive does not grow unbounded when replicas
   keep up).
-- [ ] **Enable replication on an existing cluster.** Publication is enabled only when the
-  database is created; an existing single-instance database needs `ALTER DATABASE ENABLE
-  PUBLICATION` / `INCLUDE ALL TO PUBLICATION` on the primary before replicas can be added.
 - [ ] **Lag metrics**: the measured lag is in the status and pod annotations; exporting it as a
   Prometheus metric (and a Grafana panel) would allow alerting.
 - [ ] **Failover safety**: the Lease is moved by the operator, not held and renewed by the

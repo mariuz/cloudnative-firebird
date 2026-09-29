@@ -521,6 +521,48 @@ jobs:
           for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$primary" ] || wait_count "$pod" $((before + 5)); done
           echo "rolling update finished with the primary $primary last"
 
+      - name: Verify enabling replication on an existing cluster
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:${3:-$DB}" 2>&1; }
+          count() { sql "$1" 'select count(*) from app;' "${2:-$DB}" | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: late
+          spec:
+            instances: 2
+            storage:
+              size: 1Gi
+            bootstrap:
+              initSql: "CREATE TABLE app (id INTEGER PRIMARY KEY, note VARCHAR(20)); COMMIT;"
+          EOF
+          for pod in late-0 late-1; do
+            timeout 300 bash -c "until kubectl get pod $pod >/dev/null 2>&1; do sleep 3; done"
+            kubectl wait pod/$pod --for=condition=Ready --timeout=300s
+          done
+          # without replication every instance has a database of its own
+          for i in $(seq 1 10); do sql late-0 "insert into app values ($i, 'primary'); commit;" >/dev/null; done
+          sql late-1 "insert into app values (500, 'own'); commit;" >/dev/null
+          old_uid=$(kubectl get pod late-1 -o jsonpath={.metadata.uid})
+
+          kubectl patch firebirdcluster late --type merge -p '{"spec":{"replication":{"enabled":true,"archiveTimeoutSeconds":3}}}'
+          # the primary converts first, then the other instance is seeded from it
+          timeout 600 bash -c "until kubectl logs late-1 -c replication-init 2>/dev/null | grep -q 'seeded replica'; do sleep 5; done" \
+            || { kubectl get pods -l firebird.cloudnative-firebird.io/cluster=late; kubectl get firebirdcluster late -o jsonpath='{.status.rollingUpdate}'; exit 1; }
+          kubectl wait pod/late-0 pod/late-1 --for=condition=Ready --timeout=300s
+          kubectl logs late-0 -c replication-init | tee /dev/stderr | grep -q 'existing primary database now publishes'
+          kubectl logs late-1 -c replication-init | tee /dev/stderr | grep -q 'keeping it as'
+          [ "$(count late-1)" = 10 ]
+          for i in $(seq 11 15); do sql late-0 "insert into app values ($i, 'replicated'); commit;" >/dev/null; done
+          for n in $(seq 1 36); do [ "$(count late-1)" = 15 ] && break; sleep 5; done
+          [ "$(count late-1)" = 15 ]
+          # the instance's own database was kept aside, not deleted
+          kept=$(kubectl exec late-1 -c firebird -- sh -c 'ls /var/lib/firebird/data | grep pre-replication')
+          [ "$(count late-1 "/var/lib/firebird/data/$kept")" = 1 ]
+          echo "replication enabled on an existing cluster; late-1 follows late-0"
+
       - name: Verify instance fencing
         run: |
           ANN=firebird.cloudnative-firebird.io/fencedInstances

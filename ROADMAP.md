@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.22.0):** journal replication (experimental) with replica re-seeding,
+> **Status note (v0.23.0):** journal replication (experimental) with replica re-seeding,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Enabling Replication on an Existing Cluster** *(v0.23.0)*
+  - The primary restarts first: publication is enabled on the existing database offline and the bootstrap seed written. Other instances keep their own database aside (`pre-replication-<timestamp>.fdb`) and are seeded as replicas.
 - [x] **Backups from a Replica** *(v0.22.0)*
   - `target: prefer-standby` (CloudNativePG) takes logical backups to S3 from a ready, unfenced, non-lagging replica, keeping the load off the primary; falls back to the primary. `status.instance` reports where a backup ran.
 - [x] **Backup Retention** *(v0.21.0)*

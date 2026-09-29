@@ -46,6 +46,16 @@ describe('rolling update planning', () => {
     expect(plan([pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-new')])?.restart).toBe('db-1');
   });
 
+  it('restarts the primary first when replication was just enabled (it seeds the replicas)', () => {
+    const withContainers = (p: V1Pod, names: string[]) => ({ ...p, spec: { containers: names.map((n) => ({ name: n })) } });
+    const plain = [pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-old')].map((p) => withContainers(p, ['firebird']));
+    expect(plan(plain)).toMatchObject({ restart: 'db-0' });
+    expect(plan(plain)?.message).toContain('replication enabled');
+    // once the primary runs with replication, the replicas follow as usual
+    const next = [withContainers(pod('db-0', 'db-new'), ['firebird', 'segment-server', 'segment-puller']), ...plain.slice(1)];
+    expect(plan(next)?.restart).toBe('db-2');
+  });
+
   it('restarts the primary last', () => {
     const p = plan([pod('db-0', 'db-old'), pod('db-1', 'db-new'), pod('db-2', 'db-new')]);
     expect(p).toMatchObject({ restart: 'db-0' });

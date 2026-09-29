@@ -257,6 +257,15 @@ spec:
     segmentRetentionHours: 24     # keep archived segments on the primary for 24h
 ```
 
+**Enabling replication on an existing cluster.** Setting `replication.enabled` on a running
+cluster keeps the primary's data. The operator restarts the primary first; its init container
+enables publication on the existing database offline and writes the offline bootstrap seed, as
+for a database created with replication. The other instances are restarted next. Without
+replication each of them had a database of its own, which cannot become a replica: it is kept
+aside as `pre-replication-<timestamp>.fdb` in the instance's data directory (never deleted) and
+the instance is seeded from the primary. A database that already publishes but has no seed is
+left as it is (its journal may hold changes the file already has, so a copy is not a safe seed).
+
 ### Replication Lag
 
 With replication, every reconcile (at least every 30 s) the operator asks the primary's segment
