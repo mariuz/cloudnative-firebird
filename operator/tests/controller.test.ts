@@ -522,7 +522,19 @@ describe('FirebirdClusterController – basic reconciliation', () => {
       const controller = new FirebirdClusterController(mockKubeConfig);
       const cluster = makeCluster();
 
-      await expect(controller.updateStatus(cluster, { phase: 'Running' })).resolves.toBeUndefined();
+      await expect(controller.updateStatus(cluster, { phase: 'Running' })).resolves.toBe(true);
+    });
+
+    it('reports a deleted cluster, and a reconcile of it recreates nothing', async () => {
+      const gone = Object.assign(new Error('Not Found'), { code: 404 });
+      const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({
+        patchNamespacedCustomObjectStatusImpl: vi.fn().mockRejectedValue(gone),
+      });
+      const controller = new FirebirdClusterController(mockKubeConfig);
+      await expect(controller.updateStatus(makeCluster(), { phase: 'Running' })).resolves.toBe(false);
+
+      await controller.reconcile(makeCluster());
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled();
     });
   });
 

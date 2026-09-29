@@ -223,10 +223,11 @@ export class FirebirdClusterController {
         return;
       }
 
-      await this.updateStatus(cluster, {
-        phase: 'Creating',
-        phaseReason: 'Reconciliation started',
-      });
+      if (!(await this.updateStatus(cluster, { phase: 'Creating', phaseReason: 'Reconciliation started' }))) {
+        // deleted since this reconcile was queued (e.g. a resync): recreate nothing
+        log.info('Cluster no longer exists; nothing to reconcile');
+        return;
+      }
 
       const switchover = await this.reconcileSwitchover(cluster, await this.resolvePrimaryPod(cluster, log), log);
       const primaryPod = switchover.primaryPod;
@@ -299,9 +300,10 @@ export class FirebirdClusterController {
             this.makeCondition('Ready', 'False', 'Hibernated', 'Cluster is hibernated'),
           ],
         };
-        await this.updateStatus(cluster, hibernated);
-        recordClusterMetrics(cluster, hibernated);
-        recordReconcile(cluster, 'success');
+        if (await this.updateStatus(cluster, hibernated)) {
+          recordClusterMetrics(cluster, hibernated);
+          recordReconcile(cluster, 'success');
+        }
         log.info('Cluster is hibernated');
         return;
       }
@@ -362,9 +364,11 @@ export class FirebirdClusterController {
           ),
         ],
       };
-      await this.updateStatus(cluster, status);
-      recordClusterMetrics(cluster, status);
-      recordReconcile(cluster, 'success');
+      // a cluster deleted during the reconcile must not get its metric series back
+      if (await this.updateStatus(cluster, status)) {
+        recordClusterMetrics(cluster, status);
+        recordReconcile(cluster, 'success');
+      }
 
       log.info('Reconciliation complete');
     } catch (err) {
@@ -1733,11 +1737,14 @@ export class FirebirdClusterController {
     );
   }
 
-  /** Update the status sub-resource of a FirebirdCluster */
+  /**
+   * Update the status sub-resource of a FirebirdCluster. Returns false when the cluster no longer
+   * exists (deleted while a reconcile of it was running); other failures are logged.
+   */
   async updateStatus(
     cluster: FirebirdCluster,
     status: Partial<FirebirdClusterStatus>,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const { name, namespace = 'default' } = cluster.metadata;
 
     const patch = [
@@ -1761,8 +1768,13 @@ export class FirebirdClusterController {
         body: patch,
       });
     } catch (err) {
+      if (isNotFound(err)) {
+        logger.debug({ cluster: name, namespace }, 'Cluster no longer exists; status not updated');
+        return false;
+      }
       logger.warn({ err, cluster: name }, 'Failed to update cluster status');
     }
+    return true;
   }
 
   /** Helper to create a status condition */
