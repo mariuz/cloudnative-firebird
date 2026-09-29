@@ -44,6 +44,8 @@ import {
   buildHeadlessService,
   buildLease,
   buildNetworkPolicy,
+  CloneTarget,
+  cloneTargets,
   buildPodDisruptionBudget,
   buildPodMonitor,
   buildReplicaService,
@@ -221,10 +223,11 @@ export class FirebirdClusterController {
         return;
       }
 
-      await this.updateStatus(cluster, {
-        phase: 'Creating',
-        phaseReason: 'Reconciliation started',
-      });
+      if (!(await this.updateStatus(cluster, { phase: 'Creating', phaseReason: 'Reconciliation started' }))) {
+        // deleted since this reconcile was queued (e.g. a resync): recreate nothing
+        log.info('Cluster no longer exists; nothing to reconcile');
+        return;
+      }
 
       const switchover = await this.reconcileSwitchover(cluster, await this.resolvePrimaryPod(cluster, log), log);
       const primaryPod = switchover.primaryPod;
@@ -297,9 +300,10 @@ export class FirebirdClusterController {
             this.makeCondition('Ready', 'False', 'Hibernated', 'Cluster is hibernated'),
           ],
         };
-        await this.updateStatus(cluster, hibernated);
-        recordClusterMetrics(cluster, hibernated);
-        recordReconcile(cluster, 'success');
+        if (await this.updateStatus(cluster, hibernated)) {
+          recordClusterMetrics(cluster, hibernated);
+          recordReconcile(cluster, 'success');
+        }
         log.info('Cluster is hibernated');
         return;
       }
@@ -360,9 +364,11 @@ export class FirebirdClusterController {
           ),
         ],
       };
-      await this.updateStatus(cluster, status);
-      recordClusterMetrics(cluster, status);
-      recordReconcile(cluster, 'success');
+      // a cluster deleted during the reconcile must not get its metric series back
+      if (await this.updateStatus(cluster, status)) {
+        recordClusterMetrics(cluster, status);
+        recordReconcile(cluster, 'success');
+      }
 
       log.info('Reconciliation complete');
     } catch (err) {
@@ -1540,10 +1546,12 @@ export class FirebirdClusterController {
     const npName = `${name}-networkpolicy`;
 
     if (cluster.spec.networkPolicy?.enabled) {
-      const desired = buildNetworkPolicy(cluster);
+      const clones = await this.cloneTargets(cluster, log);
+      const desired = buildNetworkPolicy(cluster, clones ?? []);
       try {
         const existing = await this.networkingApi.readNamespacedNetworkPolicy({ name: npName, namespace });
-        if (networkPolicyNeedsUpdate(existing, desired)) {
+        // without the list of clones, an update could drop the rule a running clone relies on
+        if (clones && networkPolicyNeedsUpdate(existing, desired)) {
           log.info('Updating NetworkPolicy');
           await this.networkingApi.patchNamespacedNetworkPolicy({
             name: npName,
@@ -1568,6 +1576,21 @@ export class FirebirdClusterController {
       } catch {
         log.debug('NetworkPolicy does not exist, skipping deletion');
       }
+    }
+  }
+
+  /** Clusters in any namespace cloning from this one (undefined when they cannot be listed) */
+  private async cloneTargets(cluster: FirebirdCluster, log: Logger): Promise<CloneTarget[] | undefined> {
+    try {
+      const list = (await this.customApi.listClusterCustomObject({
+        group: API_GROUP,
+        version: API_VERSION,
+        plural: RESOURCE_PLURAL,
+      })) as { items?: FirebirdCluster[] };
+      return cloneTargets(cluster, list.items ?? []);
+    } catch (err) {
+      log.warn({ err }, 'Could not list the clusters cloning from this one');
+      return undefined;
     }
   }
 
@@ -1714,11 +1737,14 @@ export class FirebirdClusterController {
     );
   }
 
-  /** Update the status sub-resource of a FirebirdCluster */
+  /**
+   * Update the status sub-resource of a FirebirdCluster. Returns false when the cluster no longer
+   * exists (deleted while a reconcile of it was running); other failures are logged.
+   */
   async updateStatus(
     cluster: FirebirdCluster,
     status: Partial<FirebirdClusterStatus>,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const { name, namespace = 'default' } = cluster.metadata;
 
     const patch = [
@@ -1742,8 +1768,13 @@ export class FirebirdClusterController {
         body: patch,
       });
     } catch (err) {
+      if (isNotFound(err)) {
+        logger.debug({ cluster: name, namespace }, 'Cluster no longer exists; status not updated');
+        return false;
+      }
       logger.warn({ err, cluster: name }, 'Failed to update cluster status');
     }
+    return true;
   }
 
   /** Helper to create a status condition */

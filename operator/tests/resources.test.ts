@@ -14,6 +14,7 @@ import {
   buildAutoSweepCronJob,
   autoSweepCronJobNeedsUpdate,
   buildNetworkPolicy,
+  cloneTargets,
   networkPolicyNeedsUpdate,
   networkPolicyWireFormat,
   buildCertificate,
@@ -1000,6 +1001,43 @@ describe('buildNetworkPolicy (intra-cluster traffic)', () => {
       ],
       ports: [{ protocol: 'TCP', port: 3051 }],
     });
+  });
+
+  it('admits the instances of the clusters cloning from it, and only those', () => {
+    const source = makeCluster({ networkPolicy: { enabled: true, ingressFrom: [{ podSelector: { app: 'client' } }] } });
+    const clusterIn = (namespace: string, name: string, clone?: { sourceCluster: string; namespace?: string }): FirebirdCluster => ({
+      ...makeCluster(clone ? { bootstrap: { clone } } : {}),
+      metadata: { name, namespace, uid: name },
+    });
+    const clones = cloneTargets(source, [
+      clusterIn('default', 'copy', { sourceCluster: 'test-cluster' }),
+      clusterIn('staging', 'staging-copy', { sourceCluster: 'test-cluster', namespace: 'default' }),
+      clusterIn('staging', 'same-name-elsewhere', { sourceCluster: 'test-cluster' }), // its own namespace
+      clusterIn('default', 'other', { sourceCluster: 'another-cluster' }),
+      clusterIn('default', 'plain'),
+    ]);
+    expect(clones).toEqual([
+      { namespace: 'default', name: 'copy' },
+      { namespace: 'staging', name: 'staging-copy' },
+    ]);
+    const wire = networkPolicyWireFormat(buildNetworkPolicy(source, clones)) as {
+      spec: { ingress: Array<{ from?: unknown[]; ports?: unknown[] }> };
+    };
+    expect(wire.spec.ingress).toContainEqual({
+      from: [
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'default' } },
+          podSelector: { matchLabels: { 'firebird.cloudnative-firebird.io/cluster': 'copy' } },
+        },
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'staging' } },
+          podSelector: { matchLabels: { 'firebird.cloudnative-firebird.io/cluster': 'staging-copy' } },
+        },
+      ],
+      ports: [{ protocol: 'TCP', port: 3050 }],
+    });
+    // no clone, no rule
+    expect(buildNetworkPolicy(source).spec?.ingress).toHaveLength(2);
   });
 
   it('does not open the segment port without replication', () => {

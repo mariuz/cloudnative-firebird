@@ -1088,7 +1088,26 @@ export function autoSweepCronJobNeedsUpdate(existing: V1CronJob, desired: V1Cron
 /**
  * Builds the NetworkPolicy resource for a FirebirdCluster.
  */
-export function buildNetworkPolicy(cluster: FirebirdCluster): V1NetworkPolicy {
+/** A cluster cloning from another one (bootstrap.clone), by its namespace and name */
+export interface CloneTarget {
+  namespace: string;
+  name: string;
+}
+
+/** The clusters whose bootstrap.clone reads from `source` */
+export function cloneTargets(source: FirebirdCluster, clusters: FirebirdCluster[]): CloneTarget[] {
+  const { name, namespace = 'default' } = source.metadata;
+  return clusters
+    .filter((c) => {
+      const clone = c.spec?.bootstrap?.clone;
+      const targetNamespace = c.metadata.namespace ?? 'default';
+      return clone?.sourceCluster === name && (clone.namespace ?? targetNamespace) === namespace;
+    })
+    .map((c) => ({ namespace: c.metadata.namespace ?? 'default', name: c.metadata.name }))
+    .sort((a, b) => `${a.namespace}/${a.name}`.localeCompare(`${b.namespace}/${b.name}`));
+}
+
+export function buildNetworkPolicy(cluster: FirebirdCluster, clones: CloneTarget[] = []): V1NetworkPolicy {
   const { name, namespace = 'default' } = cluster.metadata;
   const labels = clusterLabels(name);
   const npConfig = cluster.spec.networkPolicy;
@@ -1125,6 +1144,16 @@ export function buildNetworkPolicy(cluster: FirebirdCluster): V1NetworkPolicy {
     ],
   };
   ingressRules.push(intraClusterRule);
+  // clusters cloning from this one: their instance pods copy the database with gbak at bootstrap
+  if (clones.length > 0) {
+    ingressRules.push({
+      _from: clones.map((c) => ({
+        namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': c.namespace } },
+        podSelector: { matchLabels: { [CLUSTER_LABEL]: c.name } },
+      })),
+      ports: [{ protocol: 'TCP', port: 3050 }],
+    });
+  }
   // the operator measures replication lag from the segment servers
   if (replicationEnabled(cluster)) {
     ingressRules.push({

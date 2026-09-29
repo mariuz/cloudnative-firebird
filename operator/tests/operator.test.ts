@@ -549,6 +549,37 @@ describe('Operator – backup resources', () => {
   });
 });
 
+describe('Operator – clone sources', () => {
+  let operator: Operator;
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    ({ operator } = makeOperator());
+    await operator.start();
+  });
+  afterEach(() => operator.stop());
+
+  it('reconciles the source when a clone appears, so its NetworkPolicy admits the clone', async () => {
+    const source = makeNamedCluster('src', 'prod');
+    source.spec.networkPolicy = { enabled: true };
+    capturedEventCallback!('ADDED', source);
+    await flush();
+    mockReconcile.mockClear();
+
+    const clone = makeNamedCluster('copy', 'staging');
+    clone.spec.bootstrap = { clone: { sourceCluster: 'src', namespace: 'prod' } };
+    capturedEventCallback!('ADDED', clone);
+    await flush();
+    const reconciled = mockReconcile.mock.calls.map((c) => `${c[0].metadata.namespace}/${c[0].metadata.name}`);
+    expect(reconciled).toEqual(expect.arrayContaining(['prod/src', 'staging/copy']));
+
+    // not again on later events of the clone
+    mockReconcile.mockClear();
+    capturedEventCallback!('MODIFIED', { ...clone, metadata: { ...clone.metadata, generation: 2 } });
+    await flush();
+    expect(mockReconcile.mock.calls.map((c) => c[0].metadata.name)).toEqual(['copy']);
+  });
+});
+
 describe('Operator – reconcile serialization', () => {
   beforeEach(() => vi.clearAllMocks());
 

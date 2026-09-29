@@ -636,6 +636,38 @@ jobs:
           kubectl get --raw /apis/firebird.cloudnative-firebird.io/v1/namespaces/default/firebirdclusters/test-cluster/scale \
             | grep -q '"selector":"app.kubernetes.io/name=firebird'
 
+      - name: Verify a clone is admitted by the source cluster's NetworkPolicy
+        run: |
+          # kind's CNI does not enforce NetworkPolicies: check the generated rule, then the clone itself
+          kubectl patch firebirdcluster test-cluster --type merge \
+            -p '{"spec":{"networkPolicy":{"enabled":true,"ingressFrom":[{"podSelector":{"app":"client"}}]}}}'
+          timeout 90 bash -c 'until kubectl get networkpolicy test-cluster-networkpolicy >/dev/null 2>&1; do sleep 3; done'
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: copy
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            bootstrap:
+              clone:
+                sourceCluster: test-cluster
+          EOF
+          timeout 90 bash -c 'until kubectl get networkpolicy test-cluster-networkpolicy -o json \
+            | jq -e ".spec.ingress[] | select(any(.from[]?; .podSelector.matchLabels[\"firebird.cloudnative-firebird.io/cluster\"] == \"copy\" and .namespaceSelector.matchLabels[\"kubernetes.io/metadata.name\"] == \"default\"))" >/dev/null; do sleep 3; done' \
+            || { kubectl get networkpolicy test-cluster-networkpolicy -o yaml; exit 1; }
+          kubectl get networkpolicy test-cluster-networkpolicy -o jsonpath='{.spec.ingress}'; echo
+          timeout 300 bash -c 'until kubectl get pod copy-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/copy-0 --for=condition=Ready --timeout=300s
+          kubectl logs copy-0 -c bootstrap-clone | tee /tmp/clone.log
+          grep -q 'cloned ' /tmp/clone.log
+          kubectl delete firebirdcluster copy --wait=true
+          # the later steps run without a NetworkPolicy
+          kubectl patch firebirdcluster test-cluster --type merge -p '{"spec":{"networkPolicy":null}}'
+          timeout 90 bash -c 'while kubectl get networkpolicy test-cluster-networkpolicy >/dev/null 2>&1; do sleep 3; done'
+
       - name: Verify security contexts
         run: |
           [ "$(kubectl get pod repl-0 -o jsonpath='{.spec.securityContext.seccompProfile.type}')" = RuntimeDefault ]

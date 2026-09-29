@@ -414,6 +414,36 @@ describe('FirebirdClusterController – hibernation', () => {
   });
 });
 
+describe('FirebirdClusterController – NetworkPolicy for clones', () => {
+  const source = makeCluster({ networkPolicy: { enabled: true, ingressFrom: [{ podSelector: { app: 'client' } }] } });
+  const clone: FirebirdCluster = {
+    ...makeCluster({ bootstrap: { clone: { sourceCluster: 'test-cluster', namespace: 'default' } } }),
+    metadata: { name: 'copy', namespace: 'staging', uid: 'copy' },
+  };
+  type Rule = { from?: Array<{ podSelector?: { matchLabels?: Record<string, string> } }> };
+  const cloneRule = (ingress: Rule[]) =>
+    ingress.find((r) => r.from?.some((f) => f.podSelector?.matchLabels?.['firebird.cloudnative-firebird.io/cluster'] === 'copy'));
+
+  it("admits a clone's instances in the source cluster's NetworkPolicy", async () => {
+    const { kubeConfig, api } = makeMockKubeConfig({
+      listClusterCustomObject: vi.fn().mockResolvedValue({ items: [source, clone] }),
+      readNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ spec: { ingress: [] } }),
+    });
+    await new FirebirdClusterController(kubeConfig).reconcile(source);
+    const patch = api('patchNamespacedNetworkPolicy').mock.calls[0][0].body;
+    expect(cloneRule(patch.spec.ingress)).toBeDefined();
+  });
+
+  it('leaves the NetworkPolicy alone when the clusters cannot be listed', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig({
+      listClusterCustomObject: vi.fn().mockRejectedValue(new Error('forbidden')),
+      readNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ spec: { ingress: [] } }),
+    });
+    await new FirebirdClusterController(kubeConfig).reconcile(source);
+    expect(api('patchNamespacedNetworkPolicy')).not.toHaveBeenCalled();
+  });
+});
+
 describe('FirebirdClusterController – replication seed sources', () => {
   const pod = (name: string, ready: boolean): V1Pod => ({
     metadata: { name, labels: clusterLabels('test-cluster') },
