@@ -28,6 +28,11 @@ export interface FirebirdBackupSpec {
    * qualifies (logical backups to S3 only; others always run on the primary)
    */
   target?: 'primary' | 'prefer-standby';
+  /**
+   * Restore each backup into a scratch database and validate it (gbak -c, then a full
+   * validation); the backup fails when it does not restore or validate. Logical backups only.
+   */
+  verify?: boolean;
 }
 
 /**
@@ -48,6 +53,8 @@ export interface FirebirdBackupStatus {
   jobName?: string;
   /** Instance the backup was taken from */
   instance?: string;
+  /** The backup was restored into a scratch database and validated (spec.verify) */
+  verified?: boolean;
   /** Error message if backup failed */
   error?: string;
 }
@@ -165,6 +172,11 @@ export interface FirebirdScheduledBackupSpec {
    * qualifies (logical backups to S3 only; others always run on the primary)
    */
   target?: 'primary' | 'prefer-standby';
+  /**
+   * Restore each backup into a scratch database and validate it (gbak -c, then a full
+   * validation); the backup fails when it does not restore or validate. Logical backups only.
+   */
+  verify?: boolean;
 }
 
 /**

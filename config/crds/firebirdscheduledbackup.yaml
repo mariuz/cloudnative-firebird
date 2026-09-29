@@ -50,6 +50,8 @@ spec:
               x-kubernetes-validations:
                 - rule: "!has(self.type) || self.type != 'physical' || !has(self.s3)"
                   message: physical backups are stored in the primary's data directory; S3 upload is supported for logical backups only
+                - rule: "!has(self.verify) || !self.verify || !has(self.type) || self.type != 'physical'"
+                  message: verify is supported for logical backups only
               required:
                 - clusterName
                 - schedule
@@ -86,6 +88,11 @@ spec:
                     is always kept); server-side files and nbackup chains are not pruned.
                   type: string
                   pattern: '^[1-9][0-9]*[dwm]$'
+                verify:
+                  description: >-
+                    Restore each backup into a scratch database and validate it (gbak -c, then a full
+                    validation); the backup fails when it does not restore or validate. Logical backups only.
+                  type: boolean
                 target:
                   description: >-
                     Where the backup runs: primary (default) or prefer-standby, a ready, unfenced and

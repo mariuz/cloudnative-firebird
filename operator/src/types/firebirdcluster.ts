@@ -93,6 +93,11 @@ export interface BackupConfiguration {
    * qualifies (logical backups to S3 only; others always run on the primary)
    */
   target?: 'primary' | 'prefer-standby';
+  /**
+   * Restore each backup into a scratch database and validate it (gbak -c, then a full
+   * validation); the backup fails when it does not restore or validate. Logical backups only.
+   */
+  verify?: boolean;
 }
 
 /**

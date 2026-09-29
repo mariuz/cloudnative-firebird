@@ -174,10 +174,18 @@ export class FirebirdBackupController {
       const instance = jobInstance(job);
       if (instance) Object.assign(base, { instance });
       if (outcome === 'Completed') {
-        log.info({ location: base.location }, 'Backup completed');
-        await this.event(backup, 'FirebirdBackup', 'Normal', EventReason.BackupCompleted, `backup stored at ${base.location}`);
+        const verified = Boolean(backup.spec.verify) && backup.spec.type !== 'physical';
+        log.info({ location: base.location, verified }, 'Backup completed');
+        await this.event(
+          backup,
+          'FirebirdBackup',
+          'Normal',
+          EventReason.BackupCompleted,
+          `backup stored at ${base.location}${verified ? ', restored and validated' : ''}`,
+        );
         await this.updateBackupStatus(backup, {
           ...base,
+          ...(verified ? { verified } : {}),
           phase: 'Completed',
           startTime,
           completionTime: new Date().toISOString(),
@@ -190,7 +198,7 @@ export class FirebirdBackupController {
           ...base,
           phase: 'Failed',
           startTime,
-          error: `backup Job ${jobName} failed; see its pod logs`,
+          error: `backup Job ${jobName} failed${backup.spec.verify ? ' (or the backup did not restore and validate)' : ''}; see its pod logs`,
         });
       } else {
         await this.updateBackupStatus(backup, { ...base, phase: 'Running', startTime, error: undefined });

@@ -268,6 +268,7 @@ jobs:
             name: repl-logical
           spec:
             clusterName: repl
+            verify: true
           ---
           apiVersion: firebird.cloudnative-firebird.io/v1
           kind: FirebirdBackup
@@ -281,6 +282,10 @@ jobs:
           wait_phase firebirdbackup repl-logical Completed backup-repl-logical
           # status.instance: the backup ran on the primary (the default target)
           [ "$(kubectl get firebirdbackup repl-logical -o jsonpath={.status.instance})" = repl-0 ]
+          # verify: the backup was restored into a scratch database on the primary, validated and dropped
+          [ "$(kubectl get firebirdbackup repl-logical -o jsonpath={.status.verified})" = true ]
+          kubectl logs job/backup-repl-logical | grep -q 'restored and validated'
+          if kubectl exec repl-0 -c firebird -- ls -a $DB_DIR | grep -q '^\.verify-'; then echo "scratch database left behind"; exit 1; fi
           wait_phase firebirdbackup repl-physical Completed backup-repl-physical
           kubectl get firebirdbackups
 

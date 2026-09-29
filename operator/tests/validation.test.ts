@@ -295,6 +295,18 @@ describe('backup destinations and restore sources', () => {
     expect(() => validateBackupSpec(backup({ type: 'logical', s3 }))).not.toThrow();
   });
 
+  it('verifies logical backups only', () => {
+    expect(() => validateBackupSpec(backup({ type: 'physical', verify: true }))).toThrow(/verify is supported for logical/);
+    expect(() =>
+      validateScheduledBackupSpec({ spec: { clusterName: 'c', schedule: '0 1 * * *', type: 'physical', verify: true } }),
+    ).toThrow(/verify/);
+    expect(() => validateClusterSpec(makeCluster({ backup: { enabled: true, type: 'physical', verify: true } }))).toThrow(
+      /verify/,
+    );
+    expect(() => validateBackupSpec(backup({ verify: true }))).not.toThrow();
+    expect(() => validateBackupSpec(backup({ type: 'physical', verify: false }))).not.toThrow();
+  });
+
   it('requires a bucket and credentials for S3', () => {
     expect(() => validateBackupSpec(backup({ s3: { bucket: '', secretRef: { name: 's' } } }))).toThrow(/bucket/);
   });
