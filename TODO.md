@@ -71,14 +71,9 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 - [ ] TLS: Firebird has no native TLS listener; decide between WireCrypt only, a TLS proxy
   sidecar, or dropping the `tls` mount.
-- [ ] **Rolling updates react within a resync interval** (up to 30 s per instance): the operator
-  restarts the next instance on the periodic resync after the previous one is ready. A pod watch
-  would make updates of large clusters faster.
 - [ ] **In-place configuration reloads**: every template change restarts the instances, even
   settings Firebird could apply without a restart. CloudNativePG reloads PostgreSQL in place when
   possible.
-- [ ] **Re-seeding reacts within a resync interval** (up to 30 s): pods are not watched. A pod
-  watch would also let fencing and routing react faster.
 - [ ] **Re-creating a replica's volume** (lost node with local storage): re-seeding keeps the PVC.
   Deleting it needs the pod deleted repeatedly until the claim is gone, because the StatefulSet
   recreates the pod against the terminating claim.

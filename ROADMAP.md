@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.25.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.26.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Instance Pod Watch** *(v0.26.0)*
+  - The operator watches the instance pods of every cluster and reconciles a cluster as soon as one of its instances is created, deleted, becomes ready or unready, starts terminating, changes revision or is annotated for re-seeding, instead of waiting for the 30-second resync. Rolling updates, re-seeding, failover detection and read-only routing react right away.
+  - The labels and annotations the operator writes on pods (role, read-routable, replication lag) are ignored, so its own patches do not trigger reconciles; bursts of pod events are coalesced into one reconcile per cluster.
 - [x] **Maintenance Jobs on the Primary** *(v0.25.0)*
   - Sweep and online-validation Jobs connect to the primary instance (the Lease holder) rather than the `<name>` Service, which balances across all instances unless read-only routing is enabled; their CronJobs follow a switchover or failover.
 - [x] **Operator Metrics** *(v0.24.0)*
