@@ -212,6 +212,27 @@ describe('FirebirdClusterController – smart read-only routing', () => {
     expect(replication.readRoutablePods).toEqual(['test-cluster-0']);
   });
 
+  it('points the sweep and diagnostics Jobs at the lease holder', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig({
+      readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: 'test-cluster-1' } }),
+      listNamespacedPod: vi.fn().mockResolvedValue({ items: [pod('test-cluster-0'), pod('test-cluster-1')] }),
+    });
+
+    await new FirebirdClusterController(kubeConfig).reconcile({
+      ...routedCluster,
+      spec: { ...routedCluster.spec, autoSweep: { enabled: true }, diagnostics: { enabled: true } },
+    });
+
+    const args = Object.fromEntries(
+      api('createNamespacedCronJob').mock.calls.map((c) => [
+        c[0].body.metadata.name,
+        c[0].body.spec.jobTemplate.spec.template.spec.containers[0].args[0],
+      ]),
+    );
+    expect(args['test-cluster-sweep']).toBe('gfix -sweep test-cluster-1.test-cluster-headless:/var/lib/firebird/data/mydb.fdb');
+    expect(args['test-cluster-diagnostics']).toContain('fbsvcmgr test-cluster-1.test-cluster-headless:service_mgr');
+  });
+
   it('creates services with role-aware selectors', async () => {
     const { kubeConfig, api } = makeMockKubeConfig();
 

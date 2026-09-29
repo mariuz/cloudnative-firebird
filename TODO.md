@@ -53,9 +53,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   validate it.
 - [ ] **Clone across NetworkPolicies**: a clone pod carries the target cluster's labels, so a
   source cluster with `networkPolicy.enabled` rejects it unless its `ingressFrom` allows it.
-- [ ] **Sweep and diagnostics Jobs target the `<name>` Service**, which balances across all
-  instances unless read-only routing labels the primary; point them at the primary instance
-  like the backup Jobs.
 
 ## Users
 
