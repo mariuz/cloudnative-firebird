@@ -45,10 +45,11 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   off the primary, but nbackup on a replica (replica mode, read-only) is unverified.
 - [ ] **Leftover database after a failed physical restore**: `action_nrest` leaves a partial
   target file when it fails, so the Job's retries fail on the existing file (also without S3).
-- [ ] **Retention of server-side and nbackup backups**: `retentionPolicy` is enforced for
-  logical backups to S3 only. Server-side files need a deletion path on the primary's volume
-  (the segment server's `REMOVE`, which only exists with replication), and nbackup retention, on S3
-  too, must keep every level 0 that a kept level 1 or 2 depends on (chains span schedules).
+- [ ] **Retention of nbackup backups, and of server-side backups without replication**:
+  `retentionPolicy` prunes logical backups in S3, and server-side logical backups on clusters with
+  replication (through the segment server). Without replication there is no deletion path on the
+  primary's volume; nbackup retention, on S3 too, must keep every level 0 that a kept level 1 or 2
+  depends on (chains span schedules).
 
 ## Users
 

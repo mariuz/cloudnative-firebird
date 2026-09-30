@@ -500,8 +500,12 @@ instance it ran on.
 `spec.backup` or a `FirebirdScheduledBackup` is enforced for logical backups to S3: after each
 upload the Job deletes the schedule's objects (`backup-<schedule>-<timestamp>.fbk` under its
 prefix) older than the window, always keeping the newest one, so a stopped schedule never loses
-its last backup. Other schedules and other objects are never touched. Server-side files and
-`nbackup` backups, on S3 or not (increments depend on a base from another schedule), are not pruned.
+its last backup. Other schedules and other objects are never touched. On clusters with
+replication, server-side logical backups (`backup-<schedule>-<timestamp>.fbk` in the primary's data
+directory) are pruned the same way after each backup (and its verification), listed and deleted
+through the primary's segment server; without replication there is no deletion path and they are
+kept. `nbackup` backups, on S3 or not (increments depend on a base from another schedule), are not
+pruned.
 
 **Verification.** `verify: true` on a `FirebirdBackup`, a `FirebirdScheduledBackup` or
 `spec.backup` restores every logical backup into a scratch database and runs a full validation;
