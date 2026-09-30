@@ -667,6 +667,26 @@ jobs:
           [ "$(count late-1 "/var/lib/firebird/data/$kept")" = 1 ]
           echo "replication enabled on an existing cluster; late-1 follows late-0"
 
+          # A stale offline bootstrap seed (the segments after it pruned) is refreshed when the
+          # primary restarts; a replica seeded from it (late-0 is its only seed source) follows.
+          ARCHIVE=/var/lib/firebird/data/replication/archive
+          # a few more segments (archiveTimeoutSeconds: 3), then all but the newest are pruned
+          for i in 16 17 18; do sql late-0 "insert into app values ($i, 'segment'); commit;" >/dev/null; sleep 5; done
+          kubectl exec late-0 -c firebird -- sh -c "cd $ARCHIVE && ls | sort | head -n -1 | xargs -r rm -f && ls"
+          kubectl delete pod late-0 --wait=true
+          timeout 300 bash -c 'until kubectl get pod late-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/late-0 --for=condition=Ready --timeout=300s
+          kubectl logs late-0 -c replication-init | tee /dev/stderr | grep -q 'offline bootstrap seed refreshed'
+          old_uid=$(kubectl get pod late-1 -o jsonpath={.metadata.uid})
+          kubectl annotate pod late-1 firebird.cloudnative-firebird.io/reseed=true
+          timeout 300 bash -c "until [ -n \"\$(kubectl get pod late-1 -o jsonpath={.metadata.uid} 2>/dev/null)\" ] && [ \"\$(kubectl get pod late-1 -o jsonpath={.metadata.uid} 2>/dev/null)\" != '$old_uid' ]; do sleep 3; done"
+          kubectl wait pod/late-1 --for=condition=Ready --timeout=300s
+          kubectl logs late-1 -c replication-init | tee /dev/stderr | grep -q '(offline seed)'
+          for i in 19 20; do sql late-0 "insert into app values ($i, 'after refresh'); commit;" >/dev/null; done
+          for n in $(seq 1 36); do [ "$(count late-1)" = 20 ] && break; sleep 5; done
+          [ "$(count late-1)" = 20 ]
+          echo "refreshed offline seed seeded late-1, which follows late-0"
+
       - name: Verify instance fencing
         run: |
           ANN=firebird.cloudnative-firebird.io/fencedInstances

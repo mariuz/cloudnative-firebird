@@ -11,11 +11,10 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Confirm or rule out the commit/TIP window** ([ISSUES.md](ISSUES.md) issue 2) with more
   `hack/repro/replica-seed-race.sh` runs; until then keep `allowLiveSeedFromPrimary` off by
   default.
-- [ ] **Refresh the offline bootstrap seed.** It is only written when the primary database is
-  created. Once the primary has pruned the segments that follow it (`segmentRetentionHours`),
-  a cluster without any ready replica cannot seed a new one unless live seeding is allowed.
-  Options: refresh the seed whenever the primary restarts (costs a full copy), or keep segments
-  until a replica has consumed them.
+- [ ] **Refresh the offline bootstrap seed online**: the seed is refreshed when the primary
+  starts after a clean stop, and the segments after it are kept up to `maxSegmentRetentionHours`
+  while there is no replica. A primary running longer than that without a restart, and without a
+  ready replica, still cannot seed a new one unless live seeding is allowed.
 - [ ] **Prune applied segments early**: segments every replica has applied are still kept for
   `segmentRetentionHours` (the offline bootstrap seed and the journal archive upload may need
   them). Deleting them once applied and uploaded would bound the archive by replica progress.

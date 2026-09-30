@@ -9,7 +9,8 @@
 #   turn it into a read-only replica and write its replica control file.
 # Existing database: nothing to do, unless replication was enabled on an existing cluster: the
 #   primary then enables publication and writes the bootstrap seed offline, and other instances
-#   keep their own database aside and are seeded as replicas.
+#   keep their own database aside and are seeded as replicas. The primary also refreshes its
+#   bootstrap seed when it is missing or stale (the segments after it are no longer archived).
 #
 # Seeds avoid locking the primary: see ISSUES.md, issue 2.
 set -eu
@@ -25,6 +26,31 @@ pending() { t=$(awk -v p="$POD_NAME" '$1 == p { print $2 }' "$1" 2>/dev/null || 
 wipe_replication_state() {
   find "$SOURCE_DIR" "$JOURNAL_DIR" "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
   rm -f "$STATE_FILE"
+}
+# offline copy of a database nothing has attached: a consistent bootstrap seed for new replicas.
+# Its replication sequence is recorded next to it (the segment server keeps the segments after it).
+write_seed() {
+  cp "$1" "$REPLICATION_DIR/bootstrap-seed.fdb.tmp"
+  seq_of "$1" > "$REPLICATION_DIR/bootstrap-seed.seq.tmp"
+  mv "$REPLICATION_DIR/bootstrap-seed.fdb.tmp" "$REPLICATION_DIR/bootstrap-seed.fdb"
+  mv "$REPLICATION_DIR/bootstrap-seed.seq.tmp" "$REPLICATION_DIR/bootstrap-seed.seq"
+}
+# whether a journal segment at or after sequence $1 is still in use: after an unclean stop the server
+# goes on appending to it, so a copy taken now would miss changes journaled under that sequence
+# (a clean stop archives it and marks it free; state 0 in the segment header)
+segment_in_use() {
+  for f in "$JOURNAL_DIR"/*.journal-*; do
+    [ -f "$f" ] || continue
+    state=$(od -An -tu2 -j14 -N2 "$f" | tr -d ' ')
+    segment=$(od -An -tu8 -j32 -N8 "$f" | tr -d ' ')
+    if [ "$state" != 0 ] && [ "${segment:-0}" -ge "$1" ]; then return 0; fi
+  done
+  return 1
+}
+# lowest sequence among the archived segments (empty if none)
+first_archived() {
+  find "$ARCHIVE_DIR" -maxdepth 1 -name '*.journal-*' 2>/dev/null |
+    sed -n 's/.*\.journal-0*\([0-9][0-9]*\)$/\1/p' | sort -n | head -n 1
 }
 
 # Planned switchover (targetPrimary annotation). The operator stops writes on the old primary,
@@ -48,9 +74,7 @@ if [ -n "$promote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
   gfix -replica none "$sw"
   isql -q -i "$SCRIPT_DIR/enable-publication.sql" "$sw"
   wipe_replication_state
-  # offline copy: a consistent bootstrap seed for new replicas
-  cp "$sw" "$REPLICATION_DIR/bootstrap-seed.fdb.tmp"
-  mv "$REPLICATION_DIR/bootstrap-seed.fdb.tmp" "$REPLICATION_DIR/bootstrap-seed.fdb"
+  write_seed "$sw"
   chown -R firebird:firebird "$DATA_DIR"
   mv "$sw" "$DATABASE_PATH"
   echo "$promote_token" > "$REPLICATION_DIR/.promoted"
@@ -66,7 +90,7 @@ if [ -n "$demote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
   echo "ALTER DATABASE DISABLE PUBLICATION; COMMIT;" | isql -q "$sw"
   gfix -replica read_only "$sw"
   wipe_replication_state
-  rm -f "$REPLICATION_DIR/bootstrap-seed.fdb"
+  rm -f "$REPLICATION_DIR/bootstrap-seed.fdb" "$REPLICATION_DIR/bootstrap-seed.seq"
   # its own last segment is where the new primary's journal continues
   seq=$(seq_of "$sw")
   guid=$(gstat -h "$sw" | sed -n 's/^[[:space:]]*Database GUID:[[:space:]]*\({[0-9A-F-]*}\).*/\1/p')
@@ -112,19 +136,17 @@ if [ -f "$DATABASE_PATH" ] && is_primary && [ ! -f "$REPLICATION_DIR/bootstrap-s
   mv "$DATABASE_PATH" "$en"
   active=$(echo 'SET LIST ON; SELECT RDB$ACTIVE_FLAG AS A FROM RDB$PUBLICATIONS;' | isql -q "$en" | awk '$1 == "A" { print $2 }')
   if [ "$active" = 1 ]; then
-    # already publishing: its journal may hold changes the file has too, so a copy is no seed
+    # already publishing, without a seed: written by the refresh below
     mv "$en" "$DATABASE_PATH"
-    echo "database exists and publishes, but has no offline bootstrap seed; replicas seed from ready replicas"
+  else
+    echo "replication enabled on an existing database: enabling publication and writing the offline bootstrap seed"
+    isql -q -i "$SCRIPT_DIR/enable-publication.sql" "$en"
+    write_seed "$en"
+    chown -R firebird:firebird "$DATA_DIR"
+    mv "$en" "$DATABASE_PATH"
+    echo "existing primary database now publishes; offline bootstrap seed written"
     exit 0
   fi
-  echo "replication enabled on an existing database: enabling publication and writing the offline bootstrap seed"
-  isql -q -i "$SCRIPT_DIR/enable-publication.sql" "$en"
-  cp "$en" "$REPLICATION_DIR/bootstrap-seed.fdb.tmp"
-  mv "$REPLICATION_DIR/bootstrap-seed.fdb.tmp" "$REPLICATION_DIR/bootstrap-seed.fdb"
-  chown -R firebird:firebird "$DATA_DIR"
-  mv "$en" "$DATABASE_PATH"
-  echo "existing primary database now publishes; offline bootstrap seed written"
-  exit 0
 fi
 if [ -f "$DATABASE_PATH" ] && ! is_primary && ! is_replica_db "$DATABASE_PATH" &&
   [ -z "$(find "$SOURCE_DIR" -maxdepth 1 -name '{*}' 2>/dev/null)" ]; then
@@ -135,6 +157,30 @@ if [ -f "$DATABASE_PATH" ] && ! is_primary && ! is_replica_db "$DATABASE_PATH" &
   echo "this instance's database is not a replica of $primary: keeping it as $keep and seeding a replica"
   mv "$DATABASE_PATH" "$keep"
   wipe_replication_state
+fi
+
+# The offline bootstrap seed serves new replicas while every segment after it is still archived.
+# Once they are pruned (or when there is no seed), a fresh offline copy is taken here, where no
+# server has the database open. After a clean stop the last segment is archived and the restarted
+# server journals from the header sequence + 1 on, so the copy is a valid seed at that sequence.
+# After an unclean stop the server continues the segment still in use: no refresh until the next
+# clean restart.
+if [ -f "$DATABASE_PATH" ] && is_primary && ! is_replica_db "$DATABASE_PATH"; then
+  current=$(seq_of "$DATABASE_PATH")
+  seed="$REPLICATION_DIR/bootstrap-seed.fdb"
+  usable=no
+  if [ -f "$seed" ]; then
+    seed_seq=$(cat "$REPLICATION_DIR/bootstrap-seed.seq" 2>/dev/null || seq_of "$seed")
+    first=$(first_archived)
+    if [ "$current" -le "$seed_seq" ] || { [ -n "$first" ] && [ "$first" -le $((seed_seq + 1)) ]; }; then usable=yes; fi
+  fi
+  if [ "$usable" = no ] && segment_in_use "$current"; then
+    echo "offline bootstrap seed not refreshed: journal segment $current is still in use (unclean stop); refreshed at the next clean restart"
+  elif [ "$usable" = no ]; then
+    write_seed "$DATABASE_PATH"
+    chown firebird:firebird "$REPLICATION_DIR/bootstrap-seed.fdb" "$REPLICATION_DIR/bootstrap-seed.seq"
+    echo "offline bootstrap seed refreshed at replication sequence $current"
+  fi
 fi
 
 if [ -f "$DATABASE_PATH" ]; then
@@ -161,9 +207,7 @@ case "$primary" in
     if [ "$origin" = created ] && [ -f "$SCRIPT_DIR/init.sql" ]; then
       isql -q -i "$SCRIPT_DIR/init.sql" "$work"
     fi
-    # offline copy: consistent because nothing is attached
-    cp "$work" "$REPLICATION_DIR/bootstrap-seed.fdb.tmp"
-    mv "$REPLICATION_DIR/bootstrap-seed.fdb.tmp" "$REPLICATION_DIR/bootstrap-seed.fdb"
+    write_seed "$work"
     chown -R firebird:firebird "$DATA_DIR"
     mv "$work" "$DATABASE_PATH"
     echo "$origin primary database and offline bootstrap seed"

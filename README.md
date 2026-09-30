@@ -249,6 +249,12 @@ other instances are read-only replicas:
   from the primary's offline bootstrap seed while every later segment is still archived. The
   live primary is only locked when `replication.allowLiveSeedFromPrimary` is set, so seeding
   adds no load to the primary.
+- The seed stays usable: while no replica holds segments back (a single instance), the primary
+  keeps the segments after the seed up to `maxSegmentRetentionHours` (7 days by default), so an
+  instance added later can be seeded from it. Once they are pruned, the primary's init container
+  takes a fresh offline copy the next time the primary starts after a clean stop (a rolling
+  update, a restart). After an unclean stop the server goes on writing the journal segment it
+  had open, so the refresh waits for the next clean restart.
 
 ```yaml
 spec:
@@ -274,8 +280,8 @@ enables publication on the existing database offline and writes the offline boot
 for a database created with replication. The other instances are restarted next. Without
 replication each of them had a database of its own, which cannot become a replica: it is kept
 aside as `pre-replication-<timestamp>.fdb` in the instance's data directory (never deleted) and
-the instance is seeded from the primary. A database that already publishes but has no seed is
-left as it is (its journal may hold changes the file already has, so a copy is not a safe seed).
+the instance is seeded from the primary. A database that already publishes but has no seed gets
+one on its next clean start (see above).
 
 ### Replication Lag
 
