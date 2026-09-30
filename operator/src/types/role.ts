@@ -8,10 +8,15 @@ export interface FirebirdRolePrivilege {
    * procedures, functions and packages; USAGE on sequences and exceptions
    */
   privileges: string[];
-  /** The object; its name is a regular identifier (stored in upper case) */
+  /**
+   * The object: its name is a regular identifier (stored in upper case), or with quoted the exact,
+   * case-sensitive name of an object created with a delimited identifier (CREATE TABLE "Orders")
+   */
   object: {
     kind: FirebirdRoleObjectKind;
     name: string;
+    /** Use the name as a delimited identifier (case-sensitive; spaces, punctuation and reserved words allowed) */
+    quoted?: boolean;
   };
 }
 

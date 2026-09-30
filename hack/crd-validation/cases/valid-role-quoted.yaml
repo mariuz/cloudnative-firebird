@@ -1,0 +1,16 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRole
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  privileges:
+    - privileges: [SELECT]
+      object: { kind: table, name: 'my table;x', quoted: true }
+    - privileges: [ALL]
+      object: { kind: table, name: 'a"b', quoted: true }
+    - privileges: [USAGE]
+      object: { kind: sequence, name: seqLower, quoted: true }
+    - privileges: [SELECT]
+      object: { kind: view, name: orders, quoted: false }

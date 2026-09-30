@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.34.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.35.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Quoted Object Names in Roles** *(v0.35.0)*
+  - `FirebirdRole` privileges take `object.quoted: true` for objects created with delimited identifiers (`CREATE TABLE "Orders"`): the name is used as written (case-sensitive; spaces, `;`, `"` and reserved words work, verified against Firebird 5's isql). Validated by the operator and by CRD CEL rules (no control characters, no leading or trailing spaces); unquoted names keep their hashes, so existing roles are not applied again.
+  - Fix: a reconcile no longer resets the phase of an existing cluster to `Creating` until it finishes (every resync made a running cluster read `Creating` briefly).
 - [x] **Physical Backups to S3** *(v0.34.0)*
   - `type: physical` with `s3` on `spec.backup`, `FirebirdBackup` and `FirebirdScheduledBackup` (clusters with replication): the primary's server writes the `nbackup` file into its data directory, the Job copies it through the primary's segment server (new `FILE` / `STORE` / `REMOVE` commands for plain `*.nbk` names, served from a child process so transfers do not hold up replicas), removes it from the volume and uploads it.
   - `FirebirdRestore` with `restoreType: physical` and `s3` (or a completed physical `FirebirdBackup` in S3) downloads the chain, stores it next to the database, restores it with `action_nrest` and removes the copies, also when the restore fails.

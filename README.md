@@ -645,6 +645,8 @@ spec:
       object: { kind: procedure, name: monthly_report }  # procedure, function, package: EXECUTE
     - privileges: [USAGE]
       object: { kind: sequence, name: report_seq }  # sequence, exception: USAGE
+    - privileges: [SELECT]
+      object: { kind: table, name: 'Sales 2026', quoted: true }  # created as CREATE TABLE "Sales 2026"
   reclaimPolicy: delete      # drop the role when this resource is deleted (default: retain)
 ```
 
@@ -653,7 +655,9 @@ the listed privileges in one transaction: privileges removed from the spec (or g
 are revoked, and none is ever missing in between. Memberships (users granted the role) are kept.
 With replication the Job runs on the primary and the privileges replicate (`status.appliedHash`);
 without it, every instance's database gets them (`status.instances`, applied again on a new
-volume). Object names are regular identifiers (stored in upper case); a Job that fails, for
+volume). Object names are regular identifiers (stored in upper case); `quoted: true` uses the
+name exactly as written, for objects created with a delimited identifier (case-sensitive, with
+spaces, punctuation or a reserved word such as `"ORDER"`). A Job that fails, for
 example on an object that does not exist, is retried after five minutes (`kubectl logs
 job/fbrole-<name>`). With `reclaimPolicy: delete` the role is dropped with its privileges and
 memberships.

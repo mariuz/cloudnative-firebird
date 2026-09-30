@@ -52,8 +52,8 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 ## Users
 
-- [ ] **Quoted identifiers in roles**: `FirebirdRole` privileges name objects by regular
-  (upper-cased) identifiers; objects created with quoted, case-sensitive names cannot be listed.
+- [ ] **Quoted role names**: `FirebirdRole` object names can be delimited identifiers
+  (`quoted: true`), the role name itself is still a regular identifier.
 - [ ] **Dropping users from instances unready for long**: the deletion waits 15 minutes for an
   instance that holds the user; one down longer (or scaled away with its volume kept) keeps it.
   An instance could drop pending users itself on start, from a list the operator keeps.
