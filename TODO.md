@@ -43,8 +43,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Physical backups to S3 without replication**: the file is copied through the segment
   server, which only runs with replication. Taking the copy on a replica would also keep the load
   off the primary, but nbackup on a replica (replica mode, read-only) is unverified.
-- [ ] **Leftover database after a failed physical restore**: `action_nrest` leaves a partial
-  target file when it fails, so the Job's retries fail on the existing file (also without S3).
 - [ ] **Retention of nbackup backups, and of server-side backups without replication**:
   `retentionPolicy` prunes logical backups in S3, and server-side logical backups on clusters with
   replication (through the segment server). Without replication there is no deletion path on the

@@ -548,9 +548,7 @@ export function buildRestoreJob(
           args: [
             `set -eu; trap '${BACKUP_FILE} remove ${serverNames.join(' ')} || true' EXIT; ` +
               serverNames.map((n) => `${BACKUP_FILE} put ${WORK_DIR}/${n} ${n}; `).join('') +
-              `fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_nrest dbname "$TARGET_PATH" ` +
-              serverNames.map((n) => `nbk_file "${FIREBIRD_DATA_DIR}/${n}"`).join(' ') +
-              '; echo "restored into $TARGET_PATH"',
+              physicalRestoreScript(serverNames.map((n) => `"${FIREBIRD_DATA_DIR}/${n}"`)),
           ],
           env: [...env, { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) }],
           volumeMounts: [workMount, configMount],
@@ -585,13 +583,11 @@ export function buildRestoreJob(
       volumes: [workVolume],
     });
   } else {
-    const action =
+    const script =
       source.type === 'physical'
-        ? `action_nrest dbname "$TARGET_PATH" ` +
-          [source.path, ...(source.incrementalPaths ?? [])]
-            .map((p) => `nbk_file ${shellQuote(serverPath(p))}`)
-            .join(' ')
-        : `action_restore bkp_file ${shellQuote(serverPath(source.path))} dbname "$TARGET_PATH"`;
+        ? physicalRestoreScript([source.path, ...(source.incrementalPaths ?? [])].map((p) => shellQuote(serverPath(p))))
+        : `fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_restore bkp_file ${shellQuote(serverPath(source.path))} dbname "$TARGET_PATH"; ` +
+          'echo "restored into $TARGET_PATH"';
     podSpec = jobPodSpec(cluster, {
       restartPolicy: 'Never',
       containers: [
@@ -599,7 +595,7 @@ export function buildRestoreJob(
           name: 'firebird-restore',
           image,
           command: ['/bin/sh', '-c'],
-          args: [`set -eu; fbsvcmgr "$FIREBIRD_HOST:service_mgr" ${action}; echo "restored into $TARGET_PATH"`],
+          args: [`set -eu; ${script}`],
           env,
         },
       ],
@@ -617,6 +613,26 @@ export function buildRestoreJob(
     },
     spec: { backoffLimit: 2, template: { metadata: { labels }, spec: podSpec } },
   };
+}
+
+/**
+ * Shell restoring an nbackup chain (server-side paths, already quoted) into $TARGET_PATH. A failed
+ * restore leaves a partial database locked for backup merging (it expects a .delta file), which
+ * blocks every retry with "File exists": it is fixed up (action_nfix) and dropped. A target that
+ * existed before is never touched: nrest refuses it with "File exists" before writing anything.
+ */
+export function physicalRestoreScript(nbkFiles: string[]): string {
+  return (
+    `out=$(fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_nrest dbname "$TARGET_PATH" ` +
+    nbkFiles.map((f) => `nbk_file ${f}`).join(' ') +
+    ' 2>&1) && rc=0 || rc=$?; [ -z "$out" ] || echo "$out"; ' +
+    'if [ $rc -ne 0 ]; then ' +
+    `if echo "$out" | grep -q 'File exists'; then echo "$TARGET_PATH already exists; left as is"; ` +
+    'else fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_nfix dbname "$TARGET_PATH" >/dev/null 2>&1 || true; ' +
+    `if echo 'drop database;' | isql -q "$FIREBIRD_HOST:$TARGET_PATH" >/dev/null 2>&1; ` +
+    'then echo "removed the partial restore $TARGET_PATH"; else echo "note: could not remove a partial restore at $TARGET_PATH"; fi; fi; ' +
+    'exit $rc; fi; echo "restored into $TARGET_PATH"'
+  );
 }
 
 /** Outcome of a Job from its status conditions */

@@ -542,7 +542,9 @@ spec:
 The status of each resource follows its Job (`Running`/`Restoring`, then `Completed` or
 `Failed`); a backup reports its `location`. A restore always creates a **new database file**
 next to the cluster database (default `restore-<name>.fdb`) and refuses to overwrite the cluster
-database. To replace a database, bootstrap a new cluster from the backup:
+database. A physical restore that fails (e.g. an increment that does not belong to the chain)
+removes its partial database, which `nbackup` leaves locked, so the Job's retries start clean; a
+target file that existed before is never touched. To replace a database, bootstrap a new cluster from the backup:
 
 ```yaml
 spec:

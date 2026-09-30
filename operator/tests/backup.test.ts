@@ -218,6 +218,24 @@ describe('restore Jobs', () => {
     expect(env(c, 'TARGET_PATH')?.value).toBe('/var/lib/firebird/data/copy.fdb');
   });
 
+  it('removes a partial physical restore, never a target that existed before', () => {
+    const script = podOf(
+      buildRestoreJob(makeRestore(), makeCluster(), { type: 'physical', path: 'l0.nbk', incrementalPaths: ['l1.nbk'] }),
+    ).containers[0].args![0];
+    const nrest = script.indexOf('action_nrest');
+    const guard = script.indexOf(`grep -q 'File exists'`);
+    const fixup = script.indexOf('action_nfix dbname "$TARGET_PATH"');
+    const drop = script.indexOf(`echo 'drop database;' | isql -q "$FIREBIRD_HOST:$TARGET_PATH"`);
+    expect(nrest).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(nrest);
+    expect(fixup).toBeGreaterThan(guard);
+    expect(drop).toBeGreaterThan(fixup);
+    expect(script).toContain('exit $rc');
+    // logical restores (gbak removes its own partial file) are unchanged
+    const logical = podOf(buildRestoreJob(makeRestore(), makeCluster(), { type: 'logical', path: 'b.fbk' })).containers[0].args![0];
+    expect(logical).not.toContain('action_nfix');
+  });
+
   it('downloads an S3 backup and restores it over the network', () => {
     const pod = podOf(buildRestoreJob(makeRestore(), makeCluster(), { type: 'logical', path: 'backup-b1.fbk', s3 }));
     expect(pod.initContainers?.[0].name).toBe('download');
