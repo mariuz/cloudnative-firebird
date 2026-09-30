@@ -183,7 +183,7 @@ spec:
                     target:
                       description: >-
                         Where the backup runs: primary (default) or prefer-standby, a ready, unfenced and
-                        non-lagging replica when one exists (logical backups to S3 only; others use the primary)
+                        non-lagging replica when one exists (backups to S3 only; server-side backups use the primary)
                       type: string
                       enum: [primary, prefer-standby]
                     s3:

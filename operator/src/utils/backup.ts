@@ -693,7 +693,10 @@ export function physicalRestoreScript(nbkFiles: string[]): string {
     'else fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_nfix dbname "$TARGET_PATH" >/dev/null 2>&1 || true; ' +
     `if echo 'drop database;' | isql -q "$FIREBIRD_HOST:$TARGET_PATH" >/dev/null 2>&1; ` +
     'then echo "removed the partial restore $TARGET_PATH"; else echo "note: could not remove a partial restore at $TARGET_PATH"; fi; fi; ' +
-    'exit $rc; fi; echo "restored into $TARGET_PATH"'
+    'exit $rc; fi; ' +
+    // a backup taken on a replica restores as a read-only replica: make it a normal database
+    'fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_properties dbname "$TARGET_PATH" prp_replica_mode prp_rm_none || ' +
+    'echo "note: could not clear the replica mode of $TARGET_PATH"; echo "restored into $TARGET_PATH"'
   );
 }
 
