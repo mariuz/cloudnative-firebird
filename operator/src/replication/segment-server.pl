@@ -16,6 +16,15 @@
 #                                 replicas applied, sent by the operator) past the retention age,
 #                                 up to SEGMENT_MAX_RETENTION_SECONDS; "none" clears the floor (the
 #                                 segments after the offline bootstrap seed are then kept instead)
+#   "<token> FILE <name>\n"     -> "OK <size>\n" + bytes of the nbackup file <name> in the data
+#                                 directory, or "ERR <reason>\n" (physical backups to S3)
+#   "<token> STORE <name> <size>\n" + bytes -> "OK\n" once the nbackup file <name> is written to
+#                                 the data directory (physical restores from S3)
+#   "<token> REMOVE <name>\n"   -> "OK\n": deletes the nbackup file <name> from the data directory
+#
+# FILE, STORE and REMOVE only accept plain "*.nbk" names (no directories), so they cannot touch
+# the database, the journal or the replication state. FILE and STORE run in a child process, so a
+# large transfer does not hold up replicas and the operator.
 #
 # The token is the SYSDBA password (ISC_PASSWORD).
 #
@@ -57,6 +66,9 @@ my $bootstrap_seed = "$base/bootstrap-seed.fdb";
 my $pause_flag = "$base/.pause-pull";
 my $pause_ack  = "$base/.pull-paused";
 my $name_re   = qr/^[A-Za-z0-9._-]+\.journal-\d+$/;
+my $nbk_re    = qr/^[A-Za-z0-9][A-Za-z0-9._-]*\.nbk$/;
+(my $data_dir = $database) =~ s{/[^/]*$}{};
+$data_dir = '.' if $data_dir eq '';
 $| = 1;
 
 my $server = IO::Socket::INET->new(LocalPort => $port, Listen => 16, ReuseAddr => 1, Proto => 'tcp')
@@ -280,9 +292,49 @@ sub prune {
   }
 }
 
+# Streams a data directory nbackup file to the client
+sub send_file {
+  my ($client, $name) = @_;
+  open(my $fh, '<:raw', "$data_dir/$name") or do { print $client "ERR cannot read $name: $!\n"; return };
+  print $client "OK " . (-s $fh) . "\n";
+  binmode $client;
+  my $buf;
+  while (read($fh, $buf, 65536)) { print $client $buf or last; }
+  close $fh;
+}
+
+# Receives <size> bytes into a data directory nbackup file; nothing is left behind on failure
+sub store_file {
+  my ($client, $name, $size) = @_;
+  my $part = "$data_dir/.$name.part";
+  open(my $fh, '>:raw', $part) or do { print $client "ERR cannot write $name: $!\n"; return };
+  binmode $client;
+  my ($got, $buf) = (0, '');
+  while ($got < $size) {
+    my $want = $size - $got < 65536 ? $size - $got : 65536;
+    my $n = read($client, $buf, $want);
+    last unless $n;
+    print $fh $buf or last;
+    $got += $n;
+  }
+  if (!close($fh) || $got != $size) {
+    unlink $part;
+    print $client "ERR short write for $name ($got of $size bytes)\n";
+    return;
+  }
+  chmod 0644, $part;
+  if (rename($part, "$data_dir/$name")) {
+    print $client "OK\n";
+  } else {
+    unlink $part;
+    print $client "ERR rename $name: $!\n";
+  }
+}
+
 my $last_prune = 0;
 while (1) {
   if (time - $last_prune > 60) { prune(); $last_prune = time; }
+  1 while waitpid(-1, 1) > 0;   # reap finished transfers (1 = WNOHANG)
   $server->timeout(30);
   my $client = $server->accept or next;
   $client->timeout(600);
@@ -349,6 +401,19 @@ while (1) {
       }
     }
     print $client "OK\n";
+  } elsif (($cmd eq 'FILE' && defined $arg && $arg =~ $nbk_re && -f "$data_dir/$arg") ||
+           ($cmd eq 'STORE' && defined $arg && $arg =~ /^(\S+) (\d+)$/ && $1 =~ $nbk_re)) {
+    my $pid = fork;
+    if (!defined $pid) {
+      print $client "ERR fork: $!\n";
+    } elsif ($pid == 0) {
+      close $server;
+      if ($cmd eq 'FILE') { send_file($client, $arg); } else { my ($n, $size) = split / /, $arg; store_file($client, $n, $size); }
+      close $client;
+      exit 0;
+    }
+  } elsif ($cmd eq 'REMOVE' && defined $arg && $arg =~ $nbk_re) {
+    if (!-e "$data_dir/$arg" || unlink "$data_dir/$arg") { print $client "OK\n"; } else { print $client "ERR remove $arg: $!\n"; }
   } elsif ($cmd eq 'SEED') {
     is_primary() ? seed_from_primary($client) : seed_from_replica($client);
   } else {

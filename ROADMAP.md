@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.33.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.34.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Physical Backups to S3** *(v0.34.0)*
+  - `type: physical` with `s3` on `spec.backup`, `FirebirdBackup` and `FirebirdScheduledBackup` (clusters with replication): the primary's server writes the `nbackup` file into its data directory, the Job copies it through the primary's segment server (new `FILE` / `STORE` / `REMOVE` commands for plain `*.nbk` names, served from a child process so transfers do not hold up replicas), removes it from the volume and uploads it.
+  - `FirebirdRestore` with `restoreType: physical` and `s3` (or a completed physical `FirebirdBackup` in S3) downloads the chain, stores it next to the database, restores it with `action_nrest` and removes the copies, also when the restore fails.
 - [x] **Offline Bootstrap Seed Kept Usable** *(v0.33.0)*
   - Without a replica holding segments back, the primary keeps the segments after its offline bootstrap seed up to `maxSegmentRetentionHours`, so an instance added later is seeded without locking the primary.
   - A missing or stale seed is refreshed by the primary's init container on a start after a clean stop (verified: the restarted server journals from the header sequence + 1; after an unclean stop it continues the open segment, so the refresh waits). A database that already publishes without a seed now gets one.
@@ -212,7 +215,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `spec.serviceAccountName` for the instance pods and every Job of the cluster; `s3.secretRef` is optional, so S3 can be reached through workload identity (EKS IRSA / Pod Identity) instead of static keys.
   - `firebird.cloudnative-firebird.io/reconciliationDisabled` pauses a single backup, scheduled backup, restore or user.
 - [x] **Admission Validation** *(v0.17.0)*
-  - CRD CEL rules (`x-kubernetes-validations`) and OpenAPI constraints reject invalid specs at apply time, without a webhook: bootstrap sources, cron schedules, S3 references, physical backups with S3, restore paths, `sync` replication, storage shrink, reserved user and role names.
+  - CRD CEL rules (`x-kubernetes-validations`) and OpenAPI constraints reject invalid specs at apply time, without a webhook: bootstrap sources, cron schedules, S3 references, physical backups to S3 without replication, restore paths, `sync` replication, storage shrink, reserved user and role names.
   - `hack/crd-validation/test.sh` runs valid and invalid manifests against the API server in CI; a unit test keeps the operator's own validation in agreement with the same manifests.
 - [x] **Kubernetes Events** *(v0.16.0)*
   - Events on `FirebirdCluster`, `FirebirdBackup`, `FirebirdRestore` and `FirebirdUser` for switchovers, failovers (including `PrimaryNotReady`, CloudNativePG's `PrimaryStatusCheckFailed`), fencing, re-seeding, rolling updates, lagging replicas, volume expansion, reconcile failures, backups, restores and users (CloudNativePG 1.29 / 1.30).

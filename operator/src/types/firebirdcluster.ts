@@ -86,7 +86,7 @@ export interface BackupConfiguration {
    * backups to S3 (see FirebirdScheduledBackupSpec.retentionPolicy).
    */
   retentionPolicy?: string;
-  /** Upload backups to S3 instead of the primary's data directory (logical backups only) */
+  /** Upload backups to S3 instead of the primary's data directory (physical backups need spec.replication on the cluster) */
   s3?: S3BackupConfiguration;
   /**
    * Where the backup runs: "primary" (default) or "prefer-standby", a ready replica when one

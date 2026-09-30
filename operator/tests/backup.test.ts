@@ -226,6 +226,67 @@ describe('restore Jobs', () => {
   });
 });
 
+describe('physical backups and restores with S3', () => {
+  const cluster = makeCluster({ replication: { enabled: true } });
+
+  it('copies the nbackup file through the segment server, removes it from the volume and uploads it', () => {
+    const pod = podOf(buildBackupJob(makeBackup({ type: 'physical', level: 1, s3 }), cluster, 'db-1'));
+    const [backup] = pod.initContainers!;
+    expect(pod.initContainers).toHaveLength(1);
+    const script = backup.args![0];
+    expect(script).toContain('f="nbackup-l1-b1.nbk"');
+    // removal is armed before the backup is taken, so a failed copy leaves nothing behind
+    expect(script.indexOf('trap')).toBeLessThan(script.indexOf('action_nbak'));
+    expect(script).toContain(`trap 'perl /etc/firebird-operator/backup-file.pl remove "$f" || true' EXIT`);
+    expect(script).toContain('action_nbak dbname "$DATABASE_PATH" nbk_file "/var/lib/firebird/data/$f" nbk_level 1');
+    expect(script).toContain('perl /etc/firebird-operator/backup-file.pl get "$f" "/work/$f"; echo "$f" > /work/.name');
+    expect(env(backup, 'FIREBIRD_HOST')?.value).toBe('db-1.db-headless');
+    expect(env(backup, 'SEGMENT_PORT')?.value).toBe('3051');
+    expect(backup.volumeMounts?.map((m) => m.name)).toEqual(['work', 'cluster-config']);
+    expect(pod.volumes).toContainEqual({ name: 'cluster-config', configMap: { name: 'db-config' } });
+    expect(pod.containers[0].name).toBe('upload');
+    expect(pod.containers[0].args![0]).toContain('s3 cp "/work/$f" "s3://bkt/fb/$f"');
+  });
+
+  it('applies S3 retention to logical series only (nbackup chains span schedules)', () => {
+    const sb: FirebirdScheduledBackup = {
+      apiVersion: 'firebird.cloudnative-firebird.io/v1',
+      kind: 'FirebirdScheduledBackup',
+      metadata: { name: 'nightly', namespace: 'default', uid: 'sb' },
+      spec: { clusterName: 'db', schedule: '0 1 * * *', type: 'physical', s3, retentionPolicy: '7d' },
+    };
+    const args = buildScheduledBackupCronJob(sb, cluster).spec!.jobTemplate.spec!.template.spec!.containers[0].args![0];
+    expect(args).not.toContain('retention');
+    const logical = buildScheduledBackupCronJob({ ...sb, spec: { ...sb.spec, type: 'logical' } }, cluster);
+    expect(logical.spec!.jobTemplate.spec!.template.spec!.containers[0].args![0]).toContain('retention');
+  });
+
+  it('downloads the chain, stores it next to the database, restores it and removes the copies', () => {
+    const pod = podOf(
+      buildRestoreJob(
+        makeRestore({ targetDatabase: 'copy.fdb' }),
+        cluster,
+        { type: 'physical', path: 'nbackup-l0-b0.nbk', incrementalPaths: ['nbackup-l1-b1.nbk'], s3 },
+        'db-1',
+      ),
+    );
+    const download = pod.initContainers![0].args![0];
+    expect(download).toContain(`s3 cp 's3://bkt/fb/nbackup-l0-b0.nbk' /work/restore-r1-0.nbk`);
+    expect(download).toContain(`s3 cp 's3://bkt/fb/nbackup-l1-b1.nbk' /work/restore-r1-1.nbk`);
+    const [restore] = pod.containers;
+    const script = restore.args![0];
+    expect(script).toContain(`trap 'perl /etc/firebird-operator/backup-file.pl remove restore-r1-0.nbk restore-r1-1.nbk || true' EXIT`);
+    expect(script).toContain('backup-file.pl put /work/restore-r1-0.nbk restore-r1-0.nbk');
+    expect(script).toContain('backup-file.pl put /work/restore-r1-1.nbk restore-r1-1.nbk');
+    expect(script).toContain(
+      'action_nrest dbname "$TARGET_PATH" nbk_file "/var/lib/firebird/data/restore-r1-0.nbk" nbk_file "/var/lib/firebird/data/restore-r1-1.nbk"',
+    );
+    expect(env(restore, 'FIREBIRD_HOST')?.value).toBe('db-1.db-headless');
+    expect(env(restore, 'TARGET_PATH')?.value).toBe('/var/lib/firebird/data/copy.fdb');
+    expect(pod.volumes?.map((v) => v.name)).toEqual(['work', 'cluster-config']);
+  });
+});
+
 describe('journal archive CronJob', () => {
   it('is only built with replication and journalArchiveS3', () => {
     expect(buildJournalArchiveCronJob(makeCluster())).toBeNull();

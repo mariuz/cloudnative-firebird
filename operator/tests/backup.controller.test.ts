@@ -155,6 +155,15 @@ describe('FirebirdBackupController', () => {
       expect(lastStatus()).toMatchObject({ phase: 'Failed', error: expect.stringContaining('physical') });
     });
 
+    it('takes physical backups to S3 on clusters with replication', async () => {
+      cluster.spec.replication = { enabled: true };
+      const s3 = { bucket: 'b', secretRef: { name: 's' } };
+      await controller.reconcileBackup(makeBackup({ spec: { clusterName: 'test-cluster', type: 'physical', s3 } }));
+      const job = batchApi.createNamespacedJob.mock.calls[0][0].body as V1Job;
+      expect(job.spec?.template.spec?.initContainers?.[0].args?.[0]).toContain('backup-file.pl get');
+      expect(lastStatus()).toMatchObject({ phase: 'Running', location: 's3://b/nbackup-l0-test-backup.nbk' });
+    });
+
     it('retries API errors without failing the backup', async () => {
       customApi.getNamespacedCustomObject.mockRejectedValue(new Error('connection refused'));
       await expect(controller.reconcileBackup(makeBackup())).rejects.toThrow('connection refused');
@@ -202,6 +211,24 @@ describe('FirebirdBackupController', () => {
       await expect(controller.reconcileRestore(makeRestore({ targetDatabase: 'mydb.fdb' }))).rejects.toThrow('cluster database');
       expect(batchApi.createNamespacedJob).not.toHaveBeenCalled();
       expect(lastStatus()).toMatchObject({ phase: 'Failed' });
+    });
+
+    it('restores a physical backup from S3 only on clusters with replication', async () => {
+      const s3 = { bucket: 'b', secretRef: { name: 's' } };
+      objects['firebirdbackups/base'] = makeBackup({
+        metadata: { name: 'base', namespace: 'default' },
+        spec: { clusterName: 'test-cluster', type: 'physical', s3 },
+        status: { phase: 'Completed', backupFileName: 'nbackup-l0-base.nbk' },
+      });
+      const restore = makeRestore({ backupPath: undefined, backupName: 'base' });
+      await expect(controller.reconcileRestore(restore)).rejects.toThrow(/enable spec.replication/);
+      expect(batchApi.createNamespacedJob).not.toHaveBeenCalled();
+
+      cluster.spec.replication = { enabled: true };
+      await controller.reconcileRestore(restore);
+      const job = batchApi.createNamespacedJob.mock.calls[0][0].body as V1Job;
+      expect(job.spec?.template.spec?.initContainers?.[0].args?.[0]).toContain(`'s3://b/nbackup-l0-base.nbk'`);
+      expect(job.spec?.template.spec?.containers[0].args?.[0]).toContain('action_nrest');
     });
 
     it('follows the Job to Completed', async () => {

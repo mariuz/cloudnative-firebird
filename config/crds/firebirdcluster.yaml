@@ -54,6 +54,11 @@ spec:
                 !has(self.spec.bootstrap) || !has(self.spec.bootstrap.clone) ||
                 self.spec.bootstrap.clone.sourceCluster != self.metadata.name
               message: bootstrap clone sourceCluster cannot be the cluster itself
+            - rule: >-
+                !has(self.spec.backup) || !has(self.spec.backup.s3) || !has(self.spec.backup.type) ||
+                self.spec.backup.type != 'physical' ||
+                (has(self.spec.replication) && has(self.spec.replication.enabled) && self.spec.replication.enabled)
+              message: physical backups to S3 copy the nbackup file through the primary's segment server; enable spec.replication
           required:
             - spec
           properties:
@@ -144,8 +149,6 @@ spec:
                   description: Backup configuration
                   type: object
                   x-kubernetes-validations:
-                    - rule: "!has(self.type) || self.type != 'physical' || !has(self.s3)"
-                      message: physical backups are stored in the primary's data directory; S3 upload is supported for logical backups only
                     - rule: "!has(self.verify) || !self.verify || !has(self.type) || self.type != 'physical'"
                       message: verify is supported for logical backups only
                   required:

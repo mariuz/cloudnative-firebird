@@ -13,7 +13,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Persistent storage** via PersistentVolumeClaims, with online volume expansion when `spec.storage.size` grows
 - **Declarative hibernation** (`spec.hibernated`) that scales to zero while keeping data
 - **Journal-based asynchronous replication** (Firebird 4.0+, experimental) with replicas seeded without locking the primary
-- **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
+- **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical and physical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
 - **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
 - **Declarative users** (`FirebirdUser`, after CloudNativePG's `DatabaseRole`) with Secret-backed passwords, role grants and a reclaim policy; users persist across pod restarts
 - **Declarative roles** (`FirebirdRole`): a database role and exactly the privileges it holds on tables, views, procedures, functions, packages, sequences and exceptions
@@ -107,7 +107,7 @@ kubectl port-forward svc/my-firebird-cluster 3050:3050
 
 Invalid specs are rejected when they are applied: the CRDs carry OpenAPI constraints and CEL
 validation rules (`x-kubernetes-validations`) for the same checks the operator runs on every
-reconcile, e.g. mutually exclusive bootstrap sources, cron schedules, physical backups with S3,
+reconcile, e.g. mutually exclusive bootstrap sources, cron schedules, physical backups to S3 without replication,
 restore paths outside the data directory, `sync` replication, shrinking `storage.size` and
 immutable `clusterName` / `username` fields. No admission webhook is needed. The operator still
 validates each reconcile (for objects created before an upgrade) and reports `Degraded`.
@@ -474,9 +474,16 @@ Lease holder, as `<pod>.<cluster>-headless`); they never mount an instance volum
 | logical (`gbak`), no `s3` | primary's data directory | service manager `action_backup` |
 | physical (`nbackup`, level 0-2), no `s3` | primary's data directory | service manager `action_nbak` |
 | logical with `s3` | S3 object `<prefix>/<file>` | `gbak` streams to the Job pod, an `aws` CLI container uploads it |
+| physical with `s3` (needs `replication`) | S3 object `<prefix>/<file>` | `action_nbak` into the data directory, copied to the Job pod through the primary's segment server, removed from the volume, uploaded |
 
-Physical backups are written by the primary's server, so they cannot be uploaded to S3 (rejected
-by validation). The S3 client image defaults to `amazon/aws-cli` and can be changed with
+Physical backups are written by the primary's server into its data directory. With `s3`, the Job
+copies the file through the primary's segment server (the replication sidecar, which only serves
+plain `*.nbk` names in the data directory) and removes it from the volume whether or not the copy
+succeeded, so the volume needs room for one backup at a time; without replication there is no
+such path and physical backups to S3 are rejected. A physical restore from S3 works the other way:
+the Job downloads the files (`backupPath` and `incrementalBackupPaths` are object keys), copies
+them next to the database (`restore-<name>-<n>.nbk`), restores them with `action_nrest` and
+removes them again. The S3 client image defaults to `amazon/aws-cli` and can be changed with
 `s3.clientImage`. Server-side backups share the primary's volume, so they protect against logical
 errors, not against losing the volume.
 
@@ -494,7 +501,7 @@ instance it ran on.
 upload the Job deletes the schedule's objects (`backup-<schedule>-<timestamp>.fbk` under its
 prefix) older than the window, always keeping the newest one, so a stopped schedule never loses
 its last backup. Other schedules and other objects are never touched. Server-side files and
-`nbackup` chains (whose increments depend on a base from another schedule) are not pruned.
+`nbackup` backups, on S3 or not (increments depend on a base from another schedule), are not pruned.
 
 **Verification.** `verify: true` on a `FirebirdBackup`, a `FirebirdScheduledBackup` or
 `spec.backup` restores every logical backup into a scratch database and runs a full validation;
@@ -524,7 +531,7 @@ metadata:
   name: inspect-before-upgrade
 spec:
   clusterName: my-cluster
-  backupName: before-upgrade  # or backupPath (+ s3, or incrementalBackupPaths for nbackup chains)
+  backupName: before-upgrade  # or backupPath (+ s3 and/or incrementalBackupPaths for nbackup chains)
   targetDatabase: before-upgrade.fdb
 ```
 

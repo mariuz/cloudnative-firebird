@@ -40,14 +40,15 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 - [ ] **Point-in-time recovery**: restore an `nbackup` base and replay the archived journal
   segments from S3 up to a target time. Segments are archived, nothing replays them yet.
-- [ ] **Physical backups to S3**: `nbackup` runs in the primary's server and writes to its data
-  directory. Shipping the file needs a transfer path, e.g. a `BACKUP <file>` command on the
-  segment server, or taking the physical copy on a replica (which also keeps the load off the
-  primary).
+- [ ] **Physical backups to S3 without replication**: the file is copied through the segment
+  server, which only runs with replication. Taking the copy on a replica would also keep the load
+  off the primary, but nbackup on a replica (replica mode, read-only) is unverified.
+- [ ] **Leftover database after a failed physical restore**: `action_nrest` leaves a partial
+  target file when it fails, so the Job's retries fail on the existing file (also without S3).
 - [ ] **Retention of server-side and nbackup backups**: `retentionPolicy` is enforced for
   logical backups to S3 only. Server-side files need a deletion path on the primary's volume
-  (e.g. a segment server command, which only exists with replication), and nbackup retention must
-  keep every level 0 that a kept level 1 or 2 depends on (chains span schedules).
+  (the segment server's `REMOVE`, which only exists with replication), and nbackup retention, on S3
+  too, must keep every level 0 that a kept level 1 or 2 depends on (chains span schedules).
 
 ## Users
 

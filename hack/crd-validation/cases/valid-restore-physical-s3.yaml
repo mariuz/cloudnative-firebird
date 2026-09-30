@@ -1,11 +1,13 @@
-# expect: S3 sources are supported for logical restores only
+# expect: valid
 apiVersion: firebird.cloudnative-firebird.io/v1
 kind: FirebirdRestore
 metadata:
   name: r1
 spec:
   clusterName: c1
-  backupPath: x.nbk
+  backupPath: prod/nbackup-l0-x.nbk
+  incrementalBackupPaths:
+    - prod/nbackup-l1-x.nbk
   restoreType: physical
   s3:
     bucket: b

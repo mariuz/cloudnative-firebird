@@ -48,8 +48,6 @@ spec:
               description: FirebirdScheduledBackupSpec defines the desired state of a FirebirdScheduledBackup
               type: object
               x-kubernetes-validations:
-                - rule: "!has(self.type) || self.type != 'physical' || !has(self.s3)"
-                  message: physical backups are stored in the primary's data directory; S3 upload is supported for logical backups only
                 - rule: "!has(self.verify) || !self.verify || !has(self.type) || self.type != 'physical'"
                   message: verify is supported for logical backups only
               required:
