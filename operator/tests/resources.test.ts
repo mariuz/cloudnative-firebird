@@ -661,7 +661,7 @@ describe('buildStatefulSet (config & bootstrap volume mounting)', () => {
     const container = sts.spec?.template?.spec?.containers?.[0];
     expect(container?.env).toContainEqual({ name: 'FIREBIRD_CONF_DefaultCacheMem', value: '128M' });
     expect(container?.volumeMounts?.some((vm) => vm.mountPath.endsWith('firebird.conf'))).toBe(false);
-    expect(sts.spec?.template?.spec?.volumes).toBeUndefined();
+    expect(sts.spec?.template?.spec?.volumes?.map((v) => v.name)).toEqual(['pending-user-drops']);
   });
 
   it('adds WireCrypt=Required to the conf env when TLS is enabled', () => {

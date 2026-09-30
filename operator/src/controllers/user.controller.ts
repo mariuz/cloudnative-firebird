@@ -4,6 +4,7 @@ import {
   CoreV1Api,
   CustomObjectsApi,
   KubeConfig,
+  V1ConfigMap,
   V1Job,
 } from '@kubernetes/client-node';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
@@ -23,6 +24,7 @@ import {
   validateUserSpec,
 } from '../utils/users';
 import { ValidationError } from '../utils/validation';
+import { addPendingDrops, buildPendingDropsConfigMap, pendingDropsConfigMapName } from '../utils/pending-drops';
 import {
   API_GROUP,
   API_VERSION,
@@ -232,7 +234,8 @@ export class FirebirdUserController {
   /**
    * Drops the user (reclaimPolicy "delete") before releasing the finalizer: from every ready
    * instance, then from each instance that holds it (status.instances) once it is ready again.
-   * Instances that stay unready longer than USER_DROP_WAIT_MS keep the user (Warning event).
+   * For instances that stay unready longer than USER_DROP_WAIT_MS the drop is left pending
+   * (utils/pending-drops.ts): the instance drops the user when it starts again.
    */
   private async reconcileDeletion(user: FirebirdUser, log: typeof logger): Promise<void> {
     const { namespace = 'default' } = user.metadata;
@@ -315,12 +318,14 @@ export class FirebirdUserController {
         });
         return;
       }
-      log.warn({ instances: waiting.map((i) => i.name) }, 'Instances not ready; the Firebird user is kept on them');
+      await this.recordPendingDrops(cluster, waiting.map((i) => i.name), firebirdUsername(user));
+      log.warn({ instances: waiting.map((i) => i.name) }, 'Instances not ready; the user is dropped when they start again');
       await this.event(
         user,
         'Warning',
         EventReason.UserFailed,
-        `user ${firebirdUsername(user)} kept on ${names(waiting)}: not ready for ${USER_DROP_WAIT_MS / 60000} minutes`,
+        `user ${firebirdUsername(user)} still on ${names(waiting)} (not ready for ${USER_DROP_WAIT_MS / 60000} minutes): ` +
+          'dropped when they start again',
       );
     }
     if (droppedFrom.length > 0) {
@@ -332,6 +337,27 @@ export class FirebirdUserController {
       );
     }
     await this.ensureFinalizer(user, false);
+  }
+
+  /** Leaves the drop of a user from unready instances to their next start (see utils/pending-drops.ts) */
+  private async recordPendingDrops(cluster: FirebirdCluster, pods: string[], username: string): Promise<void> {
+    const namespace = cluster.metadata.namespace ?? 'default';
+    const name = pendingDropsConfigMapName(cluster.metadata.name);
+    const now = new Date(this.now()).toISOString();
+    let existing: V1ConfigMap | undefined;
+    try {
+      existing = await this.coreApi.readNamespacedConfigMap({ name, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+    if (!existing) {
+      const body = buildPendingDropsConfigMap(cluster, addPendingDrops({}, pods, username, now));
+      await this.coreApi.createNamespacedConfigMap({ namespace, body });
+      return;
+    }
+    // a concurrent change fails the replace (resourceVersion) and the reconcile is retried
+    const data = addPendingDrops(existing.data ?? {}, pods, username, now);
+    await this.coreApi.replaceNamespacedConfigMap({ name, namespace, body: { ...existing, data } });
   }
 
   private async instances(cluster: FirebirdCluster): Promise<Instance[]> {

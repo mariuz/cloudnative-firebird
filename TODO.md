@@ -49,9 +49,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 ## Users
 
-- [ ] **Dropping users from instances unready for long**: the deletion waits 15 minutes for an
-  instance that holds the user; one down longer (or scaled away with its volume kept) keeps it.
-  An instance could drop pending users itself on start, from a list the operator keeps.
 - [ ] **Password without SQL text**: the services API (`action_modify_user`) would keep the
   password out of `MON$STATEMENTS`, but takes it as a command-line argument; pick the lesser risk.
 - [ ] **Existing users on upgrade**: clusters created before v0.12.0 start with a fresh security

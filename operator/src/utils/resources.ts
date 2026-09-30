@@ -24,6 +24,7 @@ import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
 import { bootstrapVolumes, buildBootstrapInitContainers } from './backup';
 import { databaseOnlineCheck } from './fencing';
 import { operatorRollsPods } from './rolling-update';
+import { PENDING_DROPS_DIR, pendingDropsConfigMapName, pendingDropsInitScript } from './pending-drops';
 import {
   PRIMARY_KEY,
   REPLICATION_SCRIPTS,
@@ -105,13 +106,22 @@ export function buildSecurityDbInitContainer(image: string): V1Container {
         '  mv "$d/security.fdb.tmp" "$d/security.fdb"',
         '  echo "security database created from the image"',
         'fi',
+        // users whose FirebirdUser was deleted while this instance was down (utils/pending-drops.ts)
+        pendingDropsInitScript(SECURITY_DB_PATH),
         `printf '%s\n' 'security.db = ${SECURITY_DB_PATH}' '{' '    RemoteAccess = false' '    DefaultDbCachePages = 256' '}' > "$d/databases.conf"`,
         'chown -R firebird:firebird "$d"',
       ].join('\n'),
     ],
-    volumeMounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }],
+    env: [{ name: 'POD_NAME', valueFrom: { fieldRef: { fieldPath: 'metadata.name' } } }],
+    volumeMounts: [
+      { name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR },
+      { name: PENDING_DROPS_VOLUME, mountPath: PENDING_DROPS_DIR, readOnly: true },
+    ],
   };
 }
+
+/** Volume of the pending user drops ConfigMap (optional: it only exists once a drop is pending) */
+const PENDING_DROPS_VOLUME = 'pending-user-drops';
 
 /** Default database file created in each instance */
 export const DEFAULT_DATABASE_NAME = 'mydb.fdb';
@@ -330,6 +340,7 @@ export function buildStatefulSet(
   ];
 
   const volumes = [
+    { name: PENDING_DROPS_VOLUME, configMap: { name: pendingDropsConfigMapName(name), optional: true } },
     ...bootstrapVolumes(cluster),
     ...(usesConfigVolume
       ? [
