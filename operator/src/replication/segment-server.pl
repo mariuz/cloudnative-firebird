@@ -16,6 +16,8 @@
 #                                 replicas applied, sent by the operator) past the retention age,
 #                                 up to SEGMENT_MAX_RETENTION_SECONDS; "none" clears the floor (the
 #                                 segments after the offline bootstrap seed are then kept instead)
+#   "<token> UPLOADED <S>\n"   -> "OK": every archived segment up to S is in the journal archive
+#                                 (object store), sent by the journal archive Job after its upload
 #   "<token> FILE <name>\n"     -> "OK <size>\n" + bytes of the backup file <name> in the data
 #                                 directory, or "ERR <reason>\n" (physical backups to S3)
 #   "<token> STORE <name> <size>\n" + bytes -> "OK\n" once the backup file <name> is written to
@@ -62,6 +64,12 @@ $max_retention = $retention if $max_retention < $retention;
 # lowest segment applied by the replicas, as last reported by the operator; kept on the volume
 # so a restarted primary does not prune what a stopped replica still needs
 my $floor_file = "$base/retain-floor";
+# highest segment the journal archive Job has uploaded (only needed with PRUNE_APPLIED)
+my $uploaded_file = "$base/uploaded-floor";
+# delete segments every replica applied (and, with an archive upload, uploaded) before the
+# retention age: the archive is then bounded by the replicas' progress
+my $prune_applied = ($ENV{PRUNE_APPLIED} // '') eq 'true';
+my $archive_upload = ($ENV{ARCHIVE_UPLOAD} // '') eq 'true';
 my $allow_live = ($ENV{ALLOW_LIVE_SEED} // '') eq 'true';
 my $seed_file = "$base/seed.copy";
 my $bootstrap_seed = "$base/bootstrap-seed.fdb";
@@ -274,6 +282,7 @@ sub prune {
   my $now = time;
   my $floor = slurp($floor_file);
   $floor = undef unless $floor =~ /^\d+$/;
+  my $measured = $floor;   # from the operator, not the bootstrap seed fallback below
   # No replica holds segments back (e.g. a single instance): keep those after the offline bootstrap
   # seed, so a replica added later can still be seeded from it without locking the primary.
   if (!defined $floor && -f $bootstrap_seed) {
@@ -281,10 +290,25 @@ sub prune {
     $seed_seq = header_field($bootstrap_seed, 'Replication sequence') // 0 unless $seed_seq =~ /^\d+$/;
     $floor = $seed_seq;
   }
+  # Early: segments below the floor the operator measured (every replica has pulled and applied
+  # them; the floor segment itself may be partly applied) and, when the journal archive uploads
+  # them, not above the last upload
+  my $applied;
+  if ($prune_applied && defined $measured) {
+    $applied = $measured - 1;
+    if ($archive_upload) {
+      my $uploaded = slurp($uploaded_file);
+      $applied = $uploaded =~ /^\d+$/ ? ($uploaded < $applied ? $uploaded : $applied) : undef;
+    }
+  }
   for my $name (segments()) {
     my $mtime = (stat("$dir/$name"))[9];
     next unless defined $mtime;
     my $age = $now - $mtime;
+    if (defined $applied) {
+      my $seq = segment_sequence("$dir/$name");
+      if (defined $seq && $seq <= $applied) { unlink "$dir/$name"; next; }
+    }
     next if $age < $retention;
     if ($age < $max_retention && defined $floor) {
       my $seq = segment_sequence("$dir/$name");
@@ -392,6 +416,13 @@ while (1) {
       print $client "$seq " . ($now - $mtime) . "\n" if defined $seq && defined $mtime;
     }
     print $client ".\n";
+  } elsif ($cmd eq 'UPLOADED' && defined $arg && $arg =~ /^\d+$/) {
+    if (open(my $fh, '>', "$uploaded_file.tmp")) {
+      print $fh "$arg\n";
+      close $fh;
+      rename "$uploaded_file.tmp", $uploaded_file;
+    }
+    print $client "OK\n";
   } elsif ($cmd eq 'RETAIN' && defined $arg && $arg =~ /^(\d+|none)$/) {
     if ($arg eq 'none') {
       unlink $floor_file;

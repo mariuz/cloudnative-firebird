@@ -721,6 +721,33 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
 
   const labels = { ...clusterLabels(name), 'app.kubernetes.io/component': 'journal-archive' };
   const journals = s3Uri(s3, 'journals/');
+  const upload: V1Container = {
+    name: 'upload',
+    image: s3ClientImage(s3),
+    command: ['/bin/sh', '-c'],
+    // no --delete: the primary prunes segments locally after segmentRetentionHours, while
+    // the object store keeps the full history for point-in-time recovery
+    args: [`set -eu; ${awsCommand(s3)} s3 sync ${WORK_DIR}/segments/ ${shellQuote(journals)}`],
+    env: s3ClientEnv(s3),
+    volumeMounts: [workMount],
+  };
+  const report: V1Container = {
+    // after a successful upload: every listed segment is in the bucket (pruneAppliedSegments
+    // lets the primary delete applied segments only up to there)
+    name: 'report-uploaded',
+    image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+    command: ['perl', `${OPERATOR_CONFIG_DIR}/fetch-segments.pl`],
+    env: [
+      ...superuserClientEnv(cluster),
+      { name: 'FIREBIRD_HOST', value: instanceHost(cluster, primaryPod ?? `${name}-0`) },
+      { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
+      { name: 'OUT_DIR', value: `${WORK_DIR}/segments` },
+      { name: 'LISTED_FILE', value: `${WORK_DIR}/listed-max` },
+      { name: 'REPORT', value: 'true' },
+    ],
+    volumeMounts: [workMount, { name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }],
+  };
+  const reportUploads = Boolean(cluster.spec.replication?.pruneAppliedSegments);
   const podSpec: V1PodSpec = jobPodSpec(cluster, {
     restartPolicy: 'Never',
     initContainers: [
@@ -746,22 +773,14 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
           { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
           { name: 'OUT_DIR', value: `${WORK_DIR}/segments` },
           { name: 'SKIP_FILE', value: `${WORK_DIR}/uploaded` },
+          { name: 'LISTED_FILE', value: `${WORK_DIR}/listed-max` },
         ],
         volumeMounts: [workMount, { name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }],
       },
+      // without pruneAppliedSegments nothing waits for the report: the upload ends the Job
+      ...(reportUploads ? [upload] : []),
     ],
-    containers: [
-      {
-        name: 'upload',
-        image: s3ClientImage(s3),
-        command: ['/bin/sh', '-c'],
-        // no --delete: the primary prunes segments locally after segmentRetentionHours, while
-        // the object store keeps the full history for point-in-time recovery
-        args: [`set -eu; ${awsCommand(s3)} s3 sync ${WORK_DIR}/segments/ ${shellQuote(journals)}`],
-        env: s3ClientEnv(s3),
-        volumeMounts: [workMount],
-      },
-    ],
+    containers: reportUploads ? [report] : [upload],
     volumes: [workVolume, { name: 'cluster-config', configMap: { name: `${name}-config` } }],
   });
 

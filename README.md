@@ -274,6 +274,14 @@ is slow or stopped for a while (a node drain, a long maintenance) then catches u
 instead of needing a re-seed. A replica that is not ready keeps its last known position; one that
 is scaled away no longer holds segments back. The floor is stored on the primary's volume.
 
+With `pruneAppliedSegments: true` the primary deletes segments as soon as every replica has
+applied them (below that floor; the floor segment itself may be partly applied), instead of
+keeping them for `segmentRetentionHours`, so the archive is bounded by the replicas' progress.
+With `journalArchiveS3`, a segment is also kept until the journal archive Job has uploaded it (it
+reports the uploaded segments to the primary after each successful upload). New replicas are then
+seeded from a ready replica, since the primary's offline bootstrap seed needs every segment after
+it. The retention settings still apply to segments no replica has applied.
+
 **Enabling replication on an existing cluster.** Setting `replication.enabled` on a running
 cluster keeps the primary's data. The operator restarts the primary first; its init container
 enables publication on the existing database offline and writes the offline bootstrap seed, as
@@ -641,7 +649,10 @@ a `FirebirdUser` declares again meanwhile is not dropped; an instance scaled awa
 deleted needs nothing.
 
 Security notes: the password is read from the Secret inside the Job and only sent to the servers
-as SQL text, where it can briefly show in `MON$STATEMENTS` or a trace session. Users are not part
+as SQL text, where it can briefly show in `MON$STATEMENTS` or a trace session, to administrators
+only (other users see just their own attachments). The services API is no better: a trace session
+logs its user management requests with the password too (`-ADD <user> -PW <password>`, verified
+with Firebird 5), and it would also put the password on the Job's command line. Users are not part
 of `gbak` backups; keep the `FirebirdUser` objects (for example in Git) to re-create them on a
 restored or cloned cluster.
 
