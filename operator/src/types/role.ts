@@ -28,7 +28,8 @@ export interface FirebirdRoleSpec {
   /** Name of the FirebirdCluster (immutable) */
   clusterName: string;
   /**
-   * Role name, a regular identifier (stored in upper case). Defaults to the resource name with
+   * Role name: a regular identifier (stored in upper case), or a name in double quotes
+   * ('"Sales Team"', "" for a quote) used exactly as written. Defaults to the resource name with
    * "-" replaced by "_".
    */
   roleName?: string;

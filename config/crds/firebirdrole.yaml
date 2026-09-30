@@ -66,15 +66,23 @@ spec:
                       message: clusterName is immutable
                 roleName:
                   description: >-
-                    Firebird role name, a regular identifier stored in upper case (default: the
+                    Firebird role name: a regular identifier, stored in upper case, or a name in double
+                    quotes ("Sales Team", "" for a quote) used exactly as written (default: the
                     resource name with "-" replaced by "_"). Immutable.
                   type: string
-                  maxLength: 63
-                  pattern: '^[A-Za-z][A-Za-z0-9_$]{0,62}$'
+                  maxLength: 130
                   x-kubernetes-validations:
                     - rule: self == oldSelf
                       message: roleName is immutable
-                    - rule: "!(self.upperAscii() in ['RDB$ADMIN', 'PUBLIC'])"
+                    - rule: >-
+                        self.matches('^[A-Za-z][A-Za-z0-9_$]{0,62}$') ||
+                        (self.matches('^"([^"]|"")+"$') && !self.matches('[\\x00-\\x1f\\x7f]') &&
+                        !self.matches('^"\\s') && !self.matches('\\s"$'))
+                      message: >-
+                        roleName must be a regular identifier (letters, digits, "_" and "$", starting with
+                        a letter) or a name in double quotes (no control characters, no leading or
+                        trailing spaces)
+                    - rule: "!(self.upperAscii() in ['RDB$ADMIN', 'PUBLIC']) && !(self in ['\"RDB$ADMIN\"', '\"PUBLIC\"'])"
                       message: system roles cannot be managed
                 privileges:
                   description: >-

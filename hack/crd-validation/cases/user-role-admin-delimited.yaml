@@ -1,0 +1,11 @@
+# expect: use spec.admin
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdUser
+metadata:
+  name: app-user
+spec:
+  clusterName: c1
+  passwordSecret:
+    name: pw
+  roles:
+  - '"RDB$ADMIN"'

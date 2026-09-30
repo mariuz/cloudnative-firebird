@@ -676,6 +676,10 @@ example on an object that does not exist, is retried after five minutes (`kubect
 job/fbrole-<name>`). With `reclaimPolicy: delete` the role is dropped with its privileges and
 memberships.
 
+Role names follow SQL too: `roleName: reporting` is the role `REPORTING`, while a name in double
+quotes is used exactly as written, e.g. `roleName: '"Sales Team"'` (a quote inside is written
+`""`). `FirebirdUser.spec.roles` refers to such a role the same way (`roles: ['"Sales Team"']`).
+
 ### Fencing
 
 Fencing follows CloudNativePG: the `firebird.cloudnative-firebird.io/fencedInstances` annotation

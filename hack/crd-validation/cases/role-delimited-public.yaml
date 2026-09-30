@@ -1,0 +1,8 @@
+# expect: system roles cannot be managed
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRole
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  roleName: '"PUBLIC"'
