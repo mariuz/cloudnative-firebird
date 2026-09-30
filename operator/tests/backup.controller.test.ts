@@ -90,6 +90,14 @@ describe('FirebirdBackupController', () => {
       });
     });
 
+    it('reports a verified backup', async () => {
+      batchApi.readNamespacedJob.mockResolvedValue(complete);
+      await controller.reconcileBackup(
+        makeBackup({ spec: { clusterName: 'test-cluster', verify: true }, status: { phase: 'Running' } }),
+      );
+      expect(lastStatus()).toMatchObject({ phase: 'Completed', verified: true });
+    });
+
     it('marks the backup Completed when the Job completes', async () => {
       batchApi.readNamespacedJob.mockResolvedValue(complete);
       await controller.reconcileBackup(makeBackup({ status: { phase: 'Running', startTime: '2026-01-01T00:00:00.000Z' } }));

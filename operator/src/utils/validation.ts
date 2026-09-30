@@ -195,7 +195,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
         throw new ValidationError('S3 backup secretRef name is required');
       }
     }
-    validateBackupDestination('spec.backup', spec.backup.type, spec.backup.s3);
+    validateBackupDestination('spec.backup', spec.backup.type, spec.backup.s3, spec.backup.verify);
     validateRetention('spec.backup', spec.backup.retentionPolicy);
     validateTarget('spec.backup', spec.backup.target);
   }
@@ -240,11 +240,14 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
  * Physical (nbackup) backups are taken by the primary's server into its own data directory, so
  * they cannot be streamed to a Job for upload.
  */
-function validateBackupDestination(field: string, type?: string, s3?: S3BackupConfiguration): void {
+function validateBackupDestination(field: string, type?: string, s3?: S3BackupConfiguration, verify?: boolean): void {
   if (type === 'physical' && s3) {
     throw new ValidationError(
       `${field}: physical backups are stored in the primary's data directory; S3 upload is supported for logical backups only`,
     );
+  }
+  if (type === 'physical' && verify) {
+    throw new ValidationError(`${field}: verify is supported for logical backups only`);
   }
 }
 
@@ -296,7 +299,7 @@ export function validateBackupSpec(backup: FirebirdBackup): void {
     throw new ValidationError(`Invalid physical backup level: ${backup.spec.level}. Must be 0, 1, or 2.`);
   }
   validateS3('spec', backup.spec.s3);
-  validateBackupDestination('spec', backup.spec.type, backup.spec.s3);
+  validateBackupDestination('spec', backup.spec.type, backup.spec.s3, backup.spec.verify);
   validateTarget('spec', backup.spec.target);
 }
 
@@ -349,6 +352,7 @@ export function validateScheduledBackupSpec(scheduledBackup: {
     s3?: S3BackupConfiguration;
     retentionPolicy?: string;
     target?: string;
+    verify?: boolean;
   };
 }): void {
   if (!scheduledBackup.spec?.clusterName || scheduledBackup.spec.clusterName.trim() === '') {
@@ -364,7 +368,7 @@ export function validateScheduledBackupSpec(scheduledBackup: {
     throw new ValidationError(`Invalid physical backup level: ${scheduledBackup.spec.level}. Must be 0, 1, or 2.`);
   }
   validateS3('spec', scheduledBackup.spec.s3);
-  validateBackupDestination('spec', scheduledBackup.spec.type, scheduledBackup.spec.s3);
+  validateBackupDestination('spec', scheduledBackup.spec.type, scheduledBackup.spec.s3, scheduledBackup.spec.verify);
   validateRetention('spec', scheduledBackup.spec.retentionPolicy);
   validateTarget('spec', scheduledBackup.spec.target);
 }

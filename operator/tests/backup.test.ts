@@ -117,6 +117,38 @@ describe('backup Jobs (S3)', () => {
   });
 });
 
+describe('backup verification', () => {
+  it('restores and validates an S3 backup in the pod before it is uploaded', () => {
+    const pod = podOf(buildBackupJob(makeBackup({ s3, verify: true }), makeCluster()));
+    expect(pod.initContainers?.map((c) => c.name)).toEqual(['firebird-backup', 'verify']);
+    const script = pod.initContainers![1].args![0];
+    expect(script).toContain('gbak -c "/work/$f" "$v"');
+    expect(script).toContain('gfix -v -full "$v"');
+    expect(pod.initContainers![1].volumeMounts).toEqual(pod.initContainers![0].volumeMounts);
+    // without verify, no restore
+    expect(podOf(buildBackupJob(makeBackup({ s3 }), makeCluster())).initContainers?.map((c) => c.name)).toEqual([
+      'firebird-backup',
+    ]);
+  });
+
+  it('restores a server-side backup next to it through the server, validates it and drops the copy', () => {
+    const script = podOf(buildBackupJob(makeBackup({ verify: true }), makeCluster())).containers[0].args![0];
+    expect(script).toContain('action_backup');
+    expect(script).toContain('v="/var/lib/firebird/data/.verify-${f%.*}.fdb"');
+    expect(script).toContain('action_restore bkp_file "/var/lib/firebird/data/$f" dbname "$v" res_replace');
+    expect(script).toContain('action_validate dbname "$v"');
+    expect(script).toContain('echo "drop database;" | isql -q "$FIREBIRD_HOST:$v"');
+    expect(podOf(buildBackupJob(makeBackup(), makeCluster())).containers[0].args![0]).not.toContain('action_restore');
+  });
+
+  it('verifies scheduled backups too, and never physical ones', () => {
+    const cj = buildBackupCronJob(makeCluster({ backup: { enabled: true, s3, verify: true } }));
+    expect(cj.spec!.jobTemplate.spec!.template.spec!.initContainers?.map((c) => c.name)).toContain('verify');
+    const physical = podOf(buildBackupJob(makeBackup({ type: 'physical', verify: true }), makeCluster()));
+    expect(physical.containers[0].args![0]).not.toContain('action_restore');
+  });
+});
+
 describe('backup CronJobs', () => {
   it('builds the cluster backup CronJob with a timestamped file name against the primary', () => {
     const cj = buildBackupCronJob(makeCluster({ backup: { enabled: true, schedule: '0 3 * * *' } }), 'db-2');

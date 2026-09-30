@@ -171,8 +171,11 @@ export function buildBackupPodSpec(
     s3?: S3BackupConfiguration;
     /** Scheduled series and retentionPolicy: expired S3 objects of the series are deleted after the upload */
     retention?: { series: string; policy?: string };
+    /** Restore the backup into a scratch database and validate it (logical backups) */
+    verify?: boolean;
   },
 ): V1PodSpec {
+  const verify = Boolean(options.verify) && options.type !== 'physical';
   const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
   const env: V1EnvVar[] = [
     ...superuserClientEnv(cluster),
@@ -195,7 +198,8 @@ export function buildBackupPodSpec(
           args: [
             `set -eu; f="${options.fileName}"; ` +
               `fbsvcmgr "$FIREBIRD_HOST:service_mgr" ${action}; ` +
-              `echo "backup written to ${FIREBIRD_DATA_DIR}/$f on $FIREBIRD_HOST"`,
+              `echo "backup written to ${FIREBIRD_DATA_DIR}/$f on $FIREBIRD_HOST"` +
+              (verify ? `; ${serverSideVerifyScript()}` : ''),
           ],
           env,
         },
@@ -219,6 +223,19 @@ export function buildBackupPodSpec(
         env,
         volumeMounts: [workMount],
       },
+      // a backup that does not restore and validate is never uploaded
+      ...(verify
+        ? [
+            {
+              name: 'verify',
+              image,
+              command: ['/bin/sh', '-c'],
+              args: [LOCAL_VERIFY_SCRIPT],
+              env,
+              volumeMounts: [workMount],
+            },
+          ]
+        : []),
     ],
     containers: [
       {
@@ -238,6 +255,33 @@ export function buildBackupPodSpec(
     ],
     volumes: [workVolume],
   });
+}
+
+/**
+ * Restores the backup in the Job's work volume into a scratch database with the embedded engine and
+ * validates it (gfix -v -full prints nothing for a sound database)
+ */
+const LOCAL_VERIFY_SCRIPT =
+  `set -eu; f=$(cat ${WORK_DIR}/.name); v=${WORK_DIR}/verify.fdb; ` +
+  `gbak -c "${WORK_DIR}/$f" "$v"; ` +
+  `out=$(gfix -v -full "$v" 2>&1) || { echo "$out"; echo "backup $f does not validate"; exit 1; }; ` +
+  `if [ -n "$out" ]; then echo "$out"; echo "backup $f does not validate"; exit 1; fi; ` +
+  `rm -f "$v"; echo "backup $f restored and validated"`;
+
+/**
+ * Restores a backup kept on the server into a scratch database next to it, validates it online and
+ * drops it again ($f is the backup file name)
+ */
+function serverSideVerifyScript(): string {
+  return (
+    `v="${FIREBIRD_DATA_DIR}/.verify-\${f%.*}.fdb"; set +e; ` +
+    `fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_restore bkp_file "${FIREBIRD_DATA_DIR}/$f" dbname "$v" res_replace; restored=$?; ` +
+    `if [ $restored -eq 0 ]; then out=$(fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_validate dbname "$v" 2>&1); valid=$?; echo "$out"; fi; ` +
+    `echo "drop database;" | isql -q "$FIREBIRD_HOST:$v" >/dev/null 2>&1 || echo "note: could not drop the scratch database $v"; ` +
+    `if [ $restored -ne 0 ]; then echo "backup $f does not restore"; exit 1; fi; ` +
+    `if [ $valid -ne 0 ] || echo "$out" | grep -qi 'errors found'; then echo "backup $f does not validate"; exit 1; fi; ` +
+    `echo "backup $f restored and validated"`
+  );
 }
 
 /** Where a backup with a fixed file name ends up */
@@ -309,6 +353,7 @@ export function buildBackupCronJob(cluster: FirebirdCluster, primaryPod?: string
       fileName: scheduledFileName(name, type, backup?.level),
       s3: backup?.s3,
       retention: { series: name, policy: backup?.retentionPolicy },
+      verify: backup?.verify,
     }),
   );
 }
@@ -341,6 +386,7 @@ export function buildScheduledBackupCronJob(
       fileName: scheduledFileName(sbName, type, spec.level),
       s3: spec.s3,
       retention: { series: sbName, policy: spec.retentionPolicy },
+      verify: spec.verify,
     }),
     (spec.suspend ?? false) || Boolean(cluster.spec.hibernated),
   );
@@ -372,6 +418,7 @@ export function buildBackupJob(backup: FirebirdBackup, cluster: FirebirdCluster,
           level: backup.spec.level,
           fileName: onDemandBackupFileName(backup),
           s3: backup.spec.s3,
+          verify: backup.spec.verify,
         }),
       },
     },

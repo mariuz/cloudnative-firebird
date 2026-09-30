@@ -474,6 +474,14 @@ prefix) older than the window, always keeping the newest one, so a stopped sched
 its last backup. Other schedules and other objects are never touched. Server-side files and
 `nbackup` chains (whose increments depend on a base from another schedule) are not pruned.
 
+**Verification.** `verify: true` on a `FirebirdBackup`, a `FirebirdScheduledBackup` or
+`spec.backup` restores every logical backup into a scratch database and runs a full validation;
+a backup that does not restore or validate fails its Job. A backup to S3 is checked in the Job's
+work volume before it is uploaded (so a bad backup is never stored; the volume needs room for the
+backup and the restored database). A server-side backup is restored next to itself on the
+primary through its service manager (`.verify-<name>.fdb`, temporary disk space and load on the
+primary), validated online and dropped. A verified `FirebirdBackup` reports `status.verified`.
+
 ```yaml
 apiVersion: firebird.cloudnative-firebird.io/v1
 kind: FirebirdBackup          # one-off; FirebirdScheduledBackup takes a cron schedule
