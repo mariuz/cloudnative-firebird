@@ -83,11 +83,11 @@ export interface BackupConfiguration {
   schedule?: string;
   /**
    * How long scheduled backups are kept: "<n>d", "<n>w" or "<n>m" (30 days). Enforced for backups
-   * to S3 and, with replication, server-side backups (see
+   * to S3 and server-side backups (see
    * FirebirdScheduledBackupSpec.retentionPolicy).
    */
   retentionPolicy?: string;
-  /** Upload backups to S3 instead of the primary's data directory (physical backups need spec.replication on the cluster) */
+  /** Upload backups to S3 instead of the primary's data directory */
   s3?: S3BackupConfiguration;
   /**
    * Where the backup runs: "primary" (default) or "prefer-standby", a ready replica when one

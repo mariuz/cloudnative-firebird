@@ -54,11 +54,6 @@ spec:
                 !has(self.spec.bootstrap) || !has(self.spec.bootstrap.clone) ||
                 self.spec.bootstrap.clone.sourceCluster != self.metadata.name
               message: bootstrap clone sourceCluster cannot be the cluster itself
-            - rule: >-
-                !has(self.spec.backup) || !has(self.spec.backup.s3) || !has(self.spec.backup.type) ||
-                self.spec.backup.type != 'physical' ||
-                (has(self.spec.replication) && has(self.spec.replication.enabled) && self.spec.replication.enabled)
-              message: physical backups to S3 copy the nbackup file through the primary's segment server; enable spec.replication
           required:
             - spec
           properties:
@@ -175,7 +170,7 @@ spec:
                     retentionPolicy:
                       description: >-
                         How long scheduled backups are kept: <n>d, <n>w or <n>m (30 days). Enforced for backups
-                        to S3 and, with replication, server-side backups (expired backups of the schedule are deleted
+                        to S3 and server-side backups (expired backups of the schedule are deleted
                         after each backup, the newest is always kept; an nbackup file stays while a kept backup's chain
                         needs it).
                       type: string

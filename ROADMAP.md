@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.42.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.43.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Backup File Server Without Replication** *(v0.43.0)*
+  - Instances of clusters without replication run a `backup-files` sidecar: the segment server in a files-only mode (`FILE` / `STORE` / `REMOVE` / `FILES` for plain `*.nbk` / `*.fbk` names). Physical backups to S3, physical restores from S3 and `retentionPolicy` for server-side backups now work without replication; the replication requirement is gone from the operator and the CRD rules. The cluster ConfigMap always ships its scripts (hashed into the pod template), and the NetworkPolicy admits the cluster's own pods on its port.
 - [x] **Pruning Applied Journal Segments** *(v0.42.0)*
   - `replication.pruneAppliedSegments: true` deletes archived segments on the primary as soon as every replica has applied them (below the measured floor) and, with `journalArchiveS3`, the archive Job has uploaded them: the Job now reports its uploads to the primary's segment server (`UPLOADED`) after a successful sync. The archive is bounded by the replicas' progress instead of `segmentRetentionHours`.
   - Decision on user passwords: they stay in SQL. A Firebird 5 trace logs services API user management with the password as well, and the services API would add the Job's command line; both are visible to administrators only.

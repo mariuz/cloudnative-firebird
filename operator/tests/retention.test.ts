@@ -52,11 +52,14 @@ describe('backup retention', () => {
     expect(uploadArgs(sched.spec?.jobTemplate.spec?.template.spec)).toContain('^backup-db[.]nightly-');
   });
 
-  it('does not prune without a retentionPolicy, or server-side backups without replication', () => {
+  it('does not prune without a retentionPolicy, and prunes server-side backups without replication too', () => {
     const cron = buildBackupCronJob(cluster({ enabled: true, s3 }), 'db-0');
     expect(uploadArgs(cron.spec?.jobTemplate.spec?.template.spec)).not.toContain('retention');
+    // through the instance's backup file server
     const serverSide = buildBackupCronJob(cluster({ enabled: true, retentionPolicy: '7d' }), 'db-0');
-    expect(JSON.stringify(serverSide.spec?.jobTemplate.spec?.template.spec)).not.toContain('retention');
+    const args = serverSide.spec!.jobTemplate.spec!.template.spec!.containers[0].args![0];
+    expect(args).toContain('backup-file.pl list');
+    expect(args).toContain(`grep -E '^backup-db-[0-9]{8}T[0-9]{6}Z[.]fbk$'`);
   });
 
   it('prunes server-side logical backups through the segment server with replication', () => {

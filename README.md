@@ -482,13 +482,15 @@ Lease holder, as `<pod>.<cluster>-headless`); they never mount an instance volum
 | logical (`gbak`), no `s3` | primary's data directory | service manager `action_backup` |
 | physical (`nbackup`, level 0-2), no `s3` | primary's data directory | service manager `action_nbak` |
 | logical with `s3` | S3 object `<prefix>/<file>` | `gbak` streams to the Job pod, an `aws` CLI container uploads it |
-| physical with `s3` (needs `replication`) | S3 object `<prefix>/<file>` | `action_nbak` into the data directory, copied to the Job pod through the primary's segment server, removed from the volume, uploaded |
+| physical with `s3` | S3 object `<prefix>/<file>` | `action_nbak` into the data directory, copied to the Job pod through the primary's backup file server, removed from the volume, uploaded |
 
 Physical backups are written by the primary's server into its data directory. With `s3`, the Job
-copies the file through the primary's segment server (the replication sidecar, which only serves
-plain `*.nbk` names in the data directory) and removes it from the volume whether or not the copy
-succeeded, so the volume needs room for one backup at a time; without replication there is no
-such path and physical backups to S3 are rejected. A physical restore from S3 works the other way:
+copies the file through the primary's backup file server and removes it from the volume whether or
+not the copy succeeded, so the volume needs room for one backup at a time. The backup file server
+is the replication sidecar (`segment-server`), or on clusters without replication a small sidecar
+(`backup-files`, the same script in a files-only mode); it only serves plain `*.nbk` and `*.fbk`
+names in the data directory, to the cluster's own pods (NetworkPolicy), authenticated with the
+SYSDBA password. A physical restore from S3 works the other way:
 the Job downloads the files (`backupPath` and `incrementalBackupPaths` are object keys), copies
 them next to the database (`restore-<name>-<n>.nbk`), restores them with `action_nrest` and
 removes them again. The S3 client image defaults to `amazon/aws-cli` and can be changed with
@@ -508,14 +510,12 @@ instance it ran on.
 `spec.backup` or a `FirebirdScheduledBackup` is enforced for backups to S3: after each
 upload the Job deletes the schedule's objects (`backup-<schedule>-<timestamp>.fbk` under its
 prefix) older than the window, always keeping the newest one, so a stopped schedule never loses
-its last backup. Other schedules and other objects are never touched. On clusters with
-replication, server-side logical backups (`backup-<schedule>-<timestamp>.fbk` in the primary's data
-directory) are pruned the same way after each backup (and its verification), listed and deleted
-through the primary's segment server; without replication there is no deletion path and they are
-kept.
+its last backup. Other schedules and other objects are never touched. Server-side logical
+backups (`backup-<schedule>-<timestamp>.fbk` in the primary's data directory) are pruned the same
+way after each backup (and its verification), listed and deleted through the primary's backup file
+server.
 
-`nbackup` series (`nbackup-l<level>-<schedule>-<timestamp>.nbk`, in S3 or, with replication, on the
-primary) are pruned along their chains: a level 1 or 2 backup builds on the latest earlier level 0
+`nbackup` series (`nbackup-l<level>-<schedule>-<timestamp>.nbk`, in S3 or on the primary) are pruned along their chains: a level 1 or 2 backup builds on the latest earlier level 0
 or 1 of the database, of any schedule, and the Job reads these chains from the primary's
 `RDB$BACKUP_HISTORY`. An expired file is only deleted when no kept backup's chain needs it: a
 weekly level 0 stays while a daily level 1 built on it is kept. Backups of a schedule stored in

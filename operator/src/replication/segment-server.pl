@@ -50,11 +50,15 @@ use strict;
 use warnings;
 use IO::Socket::INET;
 
-my $dir       = $ENV{ARCHIVE_DIR} or die "ARCHIVE_DIR is required\n";
+# FILES_ONLY: only the backup file commands (FILE, STORE, REMOVE, FILES), for instances without
+# replication (physical backups to and restores from S3, retention of server-side backups)
+my $files_only = ($ENV{FILES_ONLY} // '') eq 'true';
+sub required { my ($name) = @_; my $v = $ENV{$name} // ''; die "$name is required\n" if $v eq '' && !$files_only; return $v; }
+my $dir       = required('ARCHIVE_DIR');
 my $database  = $ENV{DATABASE_PATH} or die "DATABASE_PATH is required\n";
-my $source    = $ENV{SOURCE_DIR} or die "SOURCE_DIR is required\n";
-my $base      = $ENV{REPLICATION_DIR} or die "REPLICATION_DIR is required\n";
-my $primary_file = $ENV{PRIMARY_FILE} or die "PRIMARY_FILE is required\n";
+my $source    = required('SOURCE_DIR');
+my $base      = required('REPLICATION_DIR');
+my $primary_file = required('PRIMARY_FILE');
 my $self      = $ENV{POD_NAME} // '';
 my $token     = $ENV{ISC_PASSWORD} // '';
 my $port      = $ENV{SEGMENT_PORT} // 3051;
@@ -83,7 +87,7 @@ $| = 1;
 
 my $server = IO::Socket::INET->new(LocalPort => $port, Listen => 16, ReuseAddr => 1, Proto => 'tcp')
   or die "listen on $port: $!\n";
-print "segment server listening on $port, serving $dir\n";
+print $files_only ? "backup file server listening on $port, serving $data_dir\n" : "segment server listening on $port, serving $dir\n";
 
 sub slurp { my ($f) = @_; open(my $fh, '<', $f) or return ''; local $/; my $v = <$fh>; close $fh; $v //= ''; $v =~ s/\s+$//; return $v; }
 
@@ -359,7 +363,7 @@ sub store_file {
 
 my $last_prune = 0;
 while (1) {
-  if (time - $last_prune > 60) { prune(); $last_prune = time; }
+  if (!$files_only && time - $last_prune > 60) { prune(); $last_prune = time; }
   1 while waitpid(-1, 1) > 0;   # reap finished transfers (1 = WNOHANG)
   $server->timeout(30);
   my $client = $server->accept or next;
@@ -370,6 +374,8 @@ while (1) {
   my ($given, $cmd, $arg) = split / /, $line, 3;
   if (!defined $cmd || $given ne $token) {
     print $client "ERR unauthorized\n";
+  } elsif ($files_only && $cmd !~ /^(?:FILE|STORE|REMOVE|FILES)$/) {
+    print $client "ERR not available without replication\n";
   } elsif ($cmd eq 'LIST') {
     print $client "$_\n" for segments();
     print $client ".\n";

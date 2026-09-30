@@ -104,7 +104,7 @@ export interface FirebirdRestoreSpec {
    * "restore-<name>.fdb"). It must not exist yet and cannot be the cluster database.
    */
   targetDatabase?: string;
-  /** S3 source: backupPath (and incrementalBackupPaths) are object keys relative to s3.prefix; physical restores need spec.replication on the cluster */
+  /** S3 source: backupPath (and incrementalBackupPaths) are object keys relative to s3.prefix */
   s3?: S3BackupConfiguration;
 }
 
@@ -161,12 +161,12 @@ export interface FirebirdScheduledBackupSpec {
   level?: 0 | 1 | 2;
   /**
    * How long backups of this schedule are kept: "<n>d", "<n>w" or "<n>m" (30 days). Enforced for
-   * backups to S3 and, on clusters with replication, server-side backups: each run deletes the
+   * backups to S3 and server-side backups: each run deletes the
    * schedule's backups older than that, always keeping the newest; an nbackup file is kept while
    * a kept backup's chain (from the primary's backup history) needs it.
    */
   retentionPolicy?: string;
-  /** Upload backups to S3 instead of the primary's data directory (physical backups need spec.replication on the cluster) */
+  /** Upload backups to S3 instead of the primary's data directory */
   s3?: S3BackupConfiguration;
   /**
    * Where the backup runs: "primary" (default) or "prefer-standby", a ready replica when one

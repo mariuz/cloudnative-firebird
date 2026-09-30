@@ -43,8 +43,9 @@ import {
  *   cannot create directories, so backup files sit next to the database file.
  * - With S3, a logical backup is streamed to the Job pod by `gbak`; a physical backup is written
  *   by the primary's server into its data directory as usual, then copied to the Job pod through
- *   the primary's segment server (so it needs replication) and removed from the volume. A separate
- *   S3 client container uploads it. The Firebird image ships no S3 client.
+ *   the primary's segment server (or its backup file server without replication) and removed
+ *   from the volume. A separate S3 client container uploads it. The Firebird image ships no S3
+ *   client.
  */
 
 /** Image providing the `aws` CLI for S3 uploads and downloads */
@@ -249,16 +250,11 @@ function configVolume(cluster: FirebirdCluster): V1Volume {
 }
 const configMount: V1VolumeMount = { name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true };
 
-/** Shell command moving nbackup files through the primary's segment server (see backup-file.pl) */
+/**
+ * Shell command moving backup files through the primary's segment server, or its backup file
+ * server without replication (see backup-file.pl)
+ */
 const BACKUP_FILE = `perl ${OPERATOR_CONFIG_DIR}/backup-file.pl`;
-
-/** Physical backups and restores with S3 copy nbackup files through the segment server */
-export function physicalS3NeedsReplication(cluster: FirebirdCluster, what: string): string | undefined {
-  return replicationEnabled(cluster)
-    ? undefined
-    : `${what}: physical backups to and restores from S3 copy the nbackup file through the primary's ` +
-        `segment server; enable spec.replication on cluster ${cluster.metadata.name}`;
-}
 
 /**
  * Pod spec that takes one backup of the primary. `fileName` may contain shell expressions
@@ -291,9 +287,9 @@ export function buildBackupPodSpec(
       options.type === 'physical'
         ? `action_nbak dbname "$DATABASE_PATH" nbk_file "${FIREBIRD_DATA_DIR}/$f" nbk_level ${options.level ?? 0}`
         : `action_backup dbname "$DATABASE_PATH" bkp_file "${FIREBIRD_DATA_DIR}/$f"`;
-    // expired backups are deleted through the primary's segment server (replication only)
+    // expired backups are deleted through the primary's segment server (or backup file server)
     const retention =
-      options.retention?.policy && replicationEnabled(cluster)
+      options.retention?.policy
         ? { series: options.retention.series, seconds: retentionSeconds(options.retention.policy) }
         : undefined;
     return jobPodSpec(cluster, {

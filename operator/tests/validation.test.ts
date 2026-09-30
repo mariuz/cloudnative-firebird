@@ -284,14 +284,12 @@ describe('backup destinations and restore sources', () => {
     spec: { clusterName: 'c', ...spec },
   });
 
-  it('accepts physical backups to S3, on clusters with replication', () => {
+  it('accepts physical backups to S3, with or without replication', () => {
     expect(() => validateBackupSpec(backup({ type: 'physical', s3 }))).not.toThrow();
     expect(() =>
       validateScheduledBackupSpec({ spec: { clusterName: 'c', schedule: '0 1 * * *', type: 'physical', s3 } }),
     ).not.toThrow();
-    expect(() => validateClusterSpec(makeCluster({ backup: { enabled: true, type: 'physical', s3 } }))).toThrow(
-      /enable spec.replication/,
-    );
+    expect(() => validateClusterSpec(makeCluster({ backup: { enabled: true, type: 'physical', s3 } }))).not.toThrow();
     expect(() =>
       validateClusterSpec(makeCluster({ backup: { enabled: true, type: 'physical', s3 }, replication: { enabled: true } })),
     ).not.toThrow();
