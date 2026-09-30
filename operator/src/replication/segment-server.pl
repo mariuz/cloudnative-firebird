@@ -14,7 +14,8 @@
 #                                 (the operator compares it with the replicas' POSITION: lag)
 #   "<token> RETAIN <S>|none\n" -> "OK": keep archived segments after S (the lowest segment the
 #                                 replicas applied, sent by the operator) past the retention age,
-#                                 up to SEGMENT_MAX_RETENTION_SECONDS; "none" clears the floor
+#                                 up to SEGMENT_MAX_RETENTION_SECONDS; "none" clears the floor (the
+#                                 segments after the offline bootstrap seed are then kept instead)
 #
 # The token is the SYSDBA password (ISC_PASSWORD).
 #
@@ -259,6 +260,13 @@ sub prune {
   my $now = time;
   my $floor = slurp($floor_file);
   $floor = undef unless $floor =~ /^\d+$/;
+  # No replica holds segments back (e.g. a single instance): keep those after the offline bootstrap
+  # seed, so a replica added later can still be seeded from it without locking the primary.
+  if (!defined $floor && -f $bootstrap_seed) {
+    my $seed_seq = slurp("$base/bootstrap-seed.seq");
+    $seed_seq = header_field($bootstrap_seed, 'Replication sequence') // 0 unless $seed_seq =~ /^\d+$/;
+    $floor = $seed_seq;
+  }
   for my $name (segments()) {
     my $mtime = (stat("$dir/$name"))[9];
     next unless defined $mtime;

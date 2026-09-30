@@ -207,6 +207,60 @@ describe.skipIf(!hasPerl)('segment-server.pl RETAIN and pruning', () => {
   });
 });
 
+describe.skipIf(!hasPerl)('segment-server.pl keeps the segments after the offline seed', () => {
+  it('without a replica floor, the segments after the bootstrap seed are kept, up to the maximum', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'segsrv-'));
+    for (const d of ['archive', 'source', 'repl']) mkdirSync(join(root, d));
+    const segment = (seq: number, ageSeconds: number) => {
+      const header = Buffer.alloc(48);
+      header.write('FBCHANGELOG', 0, 'latin1');
+      header.writeBigUInt64LE(BigInt(seq), 32);
+      header.writeBigUInt64LE(48n, 40);
+      const path = join(root, 'archive', `mydb.fdb.journal-${String(seq).padStart(9, '0')}`);
+      writeFileSync(path, header);
+      const t = Date.now() / 1000 - ageSeconds;
+      utimesSync(path, t, t);
+    };
+    segment(7, 120); // up to the seed: not needed by a replica seeded from it
+    segment(9, 120); // after the seed: kept
+    segment(10, 7200); // past the maximum retention: deleted anyway
+    writeFileSync(join(root, 'repl', 'bootstrap-seed.fdb'), 'seed');
+    writeFileSync(join(root, 'repl', 'bootstrap-seed.seq'), '8\n');
+    writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
+    const script = join(root, 'segment-server.pl');
+    writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
+    const port = 20000 + Math.floor(Math.random() * 20000);
+    const child = spawn('perl', [script], {
+      env: {
+        ...process.env,
+        ARCHIVE_DIR: join(root, 'archive'),
+        DATABASE_PATH: join(root, 'mydb.fdb'),
+        SOURCE_DIR: join(root, 'source'),
+        REPLICATION_DIR: join(root, 'repl'),
+        PRIMARY_FILE: join(root, 'repl', 'primary'),
+        POD_NAME: 'db-0',
+        ISC_PASSWORD: 'tok',
+        SEGMENT_PORT: String(port),
+        SEGMENT_RETENTION_SECONDS: '60',
+        SEGMENT_MAX_RETENTION_SECONDS: '3600',
+      },
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.on('data', (d) => d.toString().includes('listening') && resolve());
+        child.once('exit', (code) => reject(new Error(`segment server exited ${code}`)));
+      });
+      const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
+        '../src/utils/replication-lag',
+      );
+      const archived = parseArchived(await segmentRequest('127.0.0.1', port, 'tok ARCHIVED'));
+      expect(archived.map((s) => s.sequence)).toEqual([9]);
+    } finally {
+      child.kill();
+    }
+  });
+});
+
 describe('replication lag reconciliation', () => {
   const cluster: FirebirdCluster = {
     apiVersion: 'firebird.cloudnative-firebird.io/v1',

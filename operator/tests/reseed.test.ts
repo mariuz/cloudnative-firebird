@@ -125,11 +125,39 @@ describe('enabling replication on an existing cluster (init-instance.sh)', () =>
     expect(at('if [ -f "$en" ] && [ ! -f "$DATABASE_PATH" ]')).toBeLessThan(at('existing primary database now publishes'));
   });
 
-  it('leaves a database that already publishes without writing a seed from it', () => {
+  it('does not enable publication twice: a database that already publishes gets its seed from the refresh', () => {
     const check = at('RDB$ACTIVE_FLAG');
-    const skip = at('database exists and publishes, but has no offline bootstrap seed');
     expect(check).toBeGreaterThan(0);
-    expect(skip).toBeGreaterThan(check);
-    expect(skip).toBeLessThan(at('existing primary database now publishes'));
+    expect(at('already publishing, without a seed: written by the refresh below')).toBeGreaterThan(check);
+    expect(at('offline bootstrap seed refreshed')).toBeLessThan(nothingToDo);
+  });
+});
+
+describe('refreshing the offline bootstrap seed (init-instance.sh)', () => {
+  const script = REPLICATION_SCRIPTS['init-instance.sh'];
+  const lines = script.split('\n');
+  const at = (text: string) => lines.findIndex((l) => l.includes(text));
+
+  it('refreshes a missing or stale seed on the primary, before the server starts', () => {
+    const block = script.slice(script.indexOf('if [ -f "$DATABASE_PATH" ] && is_primary && ! is_replica_db'), script.indexOf('echo "database exists, nothing to initialise"'));
+    // stale: the database moved on and the segment after the seed is no longer archived
+    expect(block).toContain('if [ "$current" -le "$seed_seq" ] || { [ -n "$first" ] && [ "$first" -le $((seed_seq + 1)) ]; }; then usable=yes; fi');
+    expect(block).toContain('write_seed "$DATABASE_PATH"');
+    expect(at('offline bootstrap seed refreshed')).toBeLessThan(at('echo "database exists, nothing to initialise"'));
+  });
+
+  it('never refreshes while a journal segment is still in use (an unclean stop)', () => {
+    const inUse = at('if [ "$usable" = no ] && segment_in_use "$current"; then');
+    expect(inUse).toBeGreaterThan(0);
+    expect(inUse).toBeLessThan(at('write_seed "$DATABASE_PATH"'));
+    // segment header: u16 state at offset 14 (0 = free), u64 sequence at offset 32
+    expect(script).toContain('od -An -tu2 -j14 -N2 "$f"');
+    expect(script).toContain('od -An -tu8 -j32 -N8 "$f"');
+  });
+
+  it('records the seed sequence next to every seed it writes', () => {
+    expect(script).toContain('seq_of "$1" > "$REPLICATION_DIR/bootstrap-seed.seq.tmp"');
+    expect(script).not.toContain('cp "$work" "$REPLICATION_DIR/bootstrap-seed.fdb.tmp"');
+    expect(script).toContain('rm -f "$REPLICATION_DIR/bootstrap-seed.fdb" "$REPLICATION_DIR/bootstrap-seed.seq"');
   });
 });
