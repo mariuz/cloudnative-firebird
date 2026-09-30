@@ -97,16 +97,23 @@ spec:
                   type: boolean
                 roles:
                   description: >-
-                    Roles granted in the cluster database. They must exist; roles granted
-                    earlier and no longer listed are revoked.
+                    Roles granted in the cluster database: regular identifiers, or names in double
+                    quotes ("Sales Team") for roles with delimited names. They must exist; roles
+                    granted earlier and no longer listed are revoked.
                   type: array
                   maxItems: 64
                   items:
                     type: string
-                    maxLength: 63
-                    pattern: '^[A-Za-z][A-Za-z0-9_$]{0,62}$'
+                    maxLength: 130
                     x-kubernetes-validations:
-                      - rule: self.upperAscii() != 'RDB$ADMIN'
+                      - rule: >-
+                          self.matches('^[A-Za-z][A-Za-z0-9_$]{0,62}$') ||
+                          (self.matches('^"([^"]|"")+"$') && !self.matches('[\\x00-\\x1f\\x7f]') &&
+                          !self.matches('^"\\s') && !self.matches('\\s"$'))
+                        message: >-
+                          roles must be regular identifiers or names in double quotes (no control
+                          characters, no leading or trailing spaces)
+                      - rule: self.upperAscii() != 'RDB$ADMIN' && self != '"RDB$ADMIN"'
                         message: use spec.admin instead of the RDB$ADMIN role
                 reclaimPolicy:
                   description: >-

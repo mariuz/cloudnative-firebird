@@ -21,7 +21,8 @@ export interface FirebirdUserSpec {
   /** Grant the RDB$ADMIN role in the security database (user management rights) */
   admin?: boolean;
   /**
-   * Roles granted to the user in the cluster database. Roles must exist; roles granted
+   * Roles granted to the user in the cluster database: regular identifiers, or names in double
+   * quotes ('"Sales Team"') for roles with delimited names. Roles must exist; roles granted
    * earlier and no longer listed are revoked.
    */
   roles?: string[];

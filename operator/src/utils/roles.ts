@@ -4,6 +4,7 @@ import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster, FirebirdRole, Fireb
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, jobPodSpec, superuserClientEnv } from './resources';
 import { instanceHost } from './replication';
 import { ValidationError } from './validation';
+import { delimited, Identifier, parseIdentifier, sqlString } from './identifiers';
 
 /**
  * Declarative roles (FirebirdRole). Roles and privileges live in the cluster database: with
@@ -43,20 +44,34 @@ const MAX_IDENTIFIER_LENGTH = 63;
 
 /** The object name as written in GRANT: upper-cased, or double-quoted with quotes doubled */
 export function objectIdentifier(object: { name: string; quoted?: boolean }): string {
-  return object.quoted ? `"${object.name.replace(/"/g, '""')}"` : object.name.toUpperCase();
+  return object.quoted ? delimited(object.name) : object.name.toUpperCase();
 }
 
 /** Roles managed elsewhere */
 const RESERVED_ROLES = ['RDB$ADMIN', 'PUBLIC'];
 
-/** Firebird role name: spec.roleName or the resource name, upper-cased as Firebird stores it */
+/** spec.roleName as written, or the resource name with "-" replaced by "_" */
+function specRoleName(role: FirebirdRole): string {
+  return role.spec.roleName ?? role.metadata.name.replace(/-/g, '_');
+}
+
+/**
+ * The role: a regular identifier (upper-cased, as Firebird stores it), or a name in double quotes
+ * used as written. Only valid specs (validateRoleSpec) are parsed.
+ */
+export function roleIdentifier(role: FirebirdRole): Identifier {
+  const value = specRoleName(role);
+  return parseIdentifier(value) ?? { name: value.toUpperCase(), sql: value.toUpperCase() };
+}
+
+/** Firebird role name, as stored in RDB$ROLES */
 export function firebirdRoleName(role: FirebirdRole): string {
-  return (role.spec.roleName ?? role.metadata.name.replace(/-/g, '_')).toUpperCase();
+  return roleIdentifier(role).name;
 }
 
 /** The GRANT statements for the listed privileges, normalized and sorted */
 export function grantStatements(role: FirebirdRole): string[] {
-  const name = firebirdRoleName(role);
+  const name = roleIdentifier(role).sql;
   const statements = (role.spec.privileges ?? []).map((p) => {
     const privileges = [...new Set(p.privileges.map((x) => x.toUpperCase()))].sort();
     const list = privileges.includes('ALL') ? 'ALL' : privileges.join(', ');
@@ -70,14 +85,16 @@ export function validateRoleSpec(role: FirebirdRole): void {
   if (!spec?.clusterName || spec.clusterName.trim() === '') {
     throw new ValidationError('FirebirdRole clusterName is required');
   }
-  const roleName = spec.roleName ?? role.metadata.name.replace(/-/g, '_');
-  if (!IDENTIFIER.test(roleName)) {
+  const roleName = specRoleName(role);
+  const parsed = parseIdentifier(roleName);
+  if (!parsed) {
     throw new ValidationError(
-      `Invalid Firebird role name "${roleName}": letters, digits, "_" and "$", starting with a letter (set spec.roleName)`,
+      `Invalid Firebird role name ${roleName}: letters, digits, "_" and "$", starting with a letter, or a name in ` +
+        'double quotes (1 to 63 characters, no control characters, no leading or trailing spaces) (set spec.roleName)',
     );
   }
-  if (RESERVED_ROLES.includes(roleName.toUpperCase())) {
-    throw new ValidationError(`${roleName.toUpperCase()} is a system role and cannot be managed`);
+  if (RESERVED_ROLES.includes(parsed.name)) {
+    throw new ValidationError(`${parsed.name} is a system role and cannot be managed`);
   }
   for (const p of spec.privileges ?? []) {
     const kind = KINDS[p.object?.kind];
@@ -124,16 +141,16 @@ export function roleJobName(role: FirebirdRole): string {
 
 /** SQL creating the role if needed and making its privileges exactly the listed ones */
 export function applyRoleSql(role: FirebirdRole): string {
-  const name = firebirdRoleName(role);
+  const { name, sql } = roleIdentifier(role);
   return [
     'SET TERM ^;',
     'EXECUTE BLOCK AS BEGIN',
-    `  IF (NOT EXISTS(SELECT 1 FROM RDB$ROLES WHERE RDB$ROLE_NAME = '${name}')) THEN EXECUTE STATEMENT 'CREATE ROLE ${name}';`,
+    `  IF (NOT EXISTS(SELECT 1 FROM RDB$ROLES WHERE RDB$ROLE_NAME = ${sqlString(name)})) THEN EXECUTE STATEMENT ${sqlString(`CREATE ROLE ${sql}`)};`,
     'END^',
     'SET TERM ;^',
     'COMMIT;',
     // one transaction: the role never lacks a privilege it keeps
-    `REVOKE ALL ON ALL FROM ROLE ${name};`,
+    `REVOKE ALL ON ALL FROM ROLE ${sql};`,
     ...grantStatements(role),
     'COMMIT;',
   ].join('\n');
@@ -141,11 +158,11 @@ export function applyRoleSql(role: FirebirdRole): string {
 
 /** SQL dropping the role if it exists (its privileges and memberships go with it) */
 export function dropRoleSql(role: FirebirdRole): string {
-  const name = firebirdRoleName(role);
+  const { name, sql } = roleIdentifier(role);
   return [
     'SET TERM ^;',
     'EXECUTE BLOCK AS BEGIN',
-    `  IF (EXISTS(SELECT 1 FROM RDB$ROLES WHERE RDB$ROLE_NAME = '${name}')) THEN EXECUTE STATEMENT 'DROP ROLE ${name}';`,
+    `  IF (EXISTS(SELECT 1 FROM RDB$ROLES WHERE RDB$ROLE_NAME = ${sqlString(name)})) THEN EXECUTE STATEMENT ${sqlString(`DROP ROLE ${sql}`)};`,
     'END^',
     'SET TERM ;^',
     'COMMIT;',

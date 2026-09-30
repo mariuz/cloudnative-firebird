@@ -4,6 +4,7 @@ import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster, FirebirdUser } from
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, jobPodSpec } from './resources';
 import { instanceHost } from './replication';
 import { ValidationError } from './validation';
+import { Identifier, parseIdentifier, REGULAR_IDENTIFIER, sqlString } from './identifiers';
 
 /**
  * Declarative Firebird users (FirebirdUser, after CloudNativePG's DatabaseRole).
@@ -25,16 +26,24 @@ export const USER_JOB_TARGETS_ANNOTATION = `${API_GROUP}/user-targets`;
 export const USER_JOB_ACTION_LABEL = `${API_GROUP}/user-action`;
 
 /** Regular (unquoted) Firebird identifier */
-const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_$]{0,62}$/;
+const IDENTIFIER = REGULAR_IDENTIFIER;
 
 /** Firebird user name: spec.username or the resource name, upper-cased as Firebird stores it */
 export function firebirdUsername(user: FirebirdUser): string {
   return (user.spec.username ?? user.metadata.name.replace(/-/g, '_')).toUpperCase();
 }
 
-/** Granted roles, upper-cased, sorted and de-duplicated */
-export function desiredRoles(user: FirebirdUser): string[] {
-  return [...new Set((user.spec.roles ?? []).map((r) => r.toUpperCase()))].sort();
+/**
+ * Granted roles as stored (regular names upper-cased, names in double quotes as written), sorted
+ * and de-duplicated. Only valid specs (validateUserSpec) are parsed.
+ */
+export function desiredRoles(user: FirebirdUser): Identifier[] {
+  const roles = new Map<string, Identifier>();
+  for (const r of user.spec.roles ?? []) {
+    const id = parseIdentifier(r) ?? { name: r.toUpperCase(), sql: r.toUpperCase() };
+    roles.set(id.name, id);
+  }
+  return [...roles.values()].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 export function validateUserSpec(user: FirebirdUser): void {
@@ -55,8 +64,11 @@ export function validateUserSpec(user: FirebirdUser): void {
     throw new ValidationError('SYSDBA is managed through the cluster superuserSecret');
   }
   for (const role of spec.roles ?? []) {
-    if (!IDENTIFIER.test(role)) throw new ValidationError(`Invalid role name "${role}"`);
-    if (role.toUpperCase() === 'RDB$ADMIN') throw new ValidationError('Use spec.admin instead of the RDB$ADMIN role');
+    const parsed = parseIdentifier(role);
+    if (!parsed) {
+      throw new ValidationError(`Invalid role name ${role}: a regular identifier, or a name in double quotes`);
+    }
+    if (parsed.name === 'RDB$ADMIN') throw new ValidationError('Use spec.admin instead of the RDB$ADMIN role');
   }
   if (spec.reclaimPolicy && !['retain', 'delete'].includes(spec.reclaimPolicy)) {
     throw new ValidationError(`Invalid reclaimPolicy "${spec.reclaimPolicy}": must be "retain" or "delete"`);
@@ -72,7 +84,8 @@ export function userSpecHash(user: FirebirdUser, secret: { uid?: string; resourc
     username: firebirdUsername(user),
     active: user.spec.active ?? true,
     admin: user.spec.admin ?? false,
-    roles: desiredRoles(user),
+    // stored names: unchanged for regular identifiers, so existing users are not applied again
+    roles: desiredRoles(user).map((r) => r.name),
     secret: `${secret.uid ?? ''}/${secret.resourceVersion ?? ''}/${user.spec.passwordSecret.key ?? 'password'}`,
   });
   return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
@@ -87,17 +100,17 @@ export function userJobName(user: FirebirdUser): string {
 }
 
 /** SQL granting exactly the desired roles (revoking other role memberships) */
-export function grantSql(username: string, roles: string[]): string {
-  const keep = roles.length ? `r NOT IN (${roles.map((r) => `'${r}'`).join(', ')})` : '1 = 1';
+export function grantSql(username: string, roles: Identifier[]): string {
+  const keep = roles.length ? `r NOT IN (${roles.map((r) => sqlString(r.name)).join(', ')})` : '1 = 1';
   return [
     'SET TERM ^;',
     'EXECUTE BLOCK AS DECLARE r VARCHAR(63); BEGIN',
     '  FOR SELECT TRIM(RDB$RELATION_NAME) FROM RDB$USER_PRIVILEGES',
     `    WHERE RDB$USER = '${username}' AND RDB$PRIVILEGE = 'M' AND RDB$USER_TYPE = 8 INTO :r DO`,
-    `    IF (${keep}) THEN EXECUTE STATEMENT 'REVOKE "' || r || '" FROM USER ${username}';`,
+    `    IF (${keep}) THEN EXECUTE STATEMENT 'REVOKE "' || REPLACE(r, '"', '""') || '" FROM USER ${username}';`,
     'END^',
     'SET TERM ;^',
-    ...roles.map((r) => `GRANT ${r} TO USER ${username};`),
+    ...roles.map((r) => `GRANT ${r.sql} TO USER ${username};`),
     'COMMIT;',
   ].join('\n');
 }

@@ -1,0 +1,8 @@
+# expect: no leading or
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRole
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  roleName: '" Sales"'

@@ -10,6 +10,7 @@ import {
   firebirdUsername,
   grantSql,
   userJobName,
+  desiredRoles,
   userSpecHash,
   validateUserSpec,
 } from '../src/utils/users';
@@ -94,10 +95,33 @@ describe('FirebirdUser spec', () => {
 
 describe('user SQL and Jobs', () => {
   it('grants exactly the desired roles and revokes the others', () => {
-    const sql = grantSql('APP', ['READER', 'WRITER']);
-    expect(sql).toContain("IF (r NOT IN ('READER', 'WRITER')) THEN EXECUTE STATEMENT 'REVOKE \"' || r || '\" FROM USER APP'");
+    const id = (name: string) => ({ name, sql: name });
+    const sql = grantSql('APP', [id('READER'), id('WRITER')]);
+    expect(sql).toContain(
+      `IF (r NOT IN ('READER', 'WRITER')) THEN EXECUTE STATEMENT 'REVOKE "' || REPLACE(r, '"', '""') || '" FROM USER APP'`,
+    );
     expect(sql).toContain('GRANT READER TO USER APP;');
     expect(grantSql('APP', [])).toContain('IF (1 = 1)');
+  });
+
+  it('grants roles with delimited names as written, and keeps regular names as before', () => {
+    const user = makeUser({ roles: ['reader', '"Sales Team"', `"it's ""x"""`, 'READER'] });
+    expect(() => validateUserSpec(user)).not.toThrow();
+    expect(desiredRoles(user)).toEqual([
+      { name: 'READER', sql: 'READER' },
+      { name: 'Sales Team', sql: '"Sales Team"' },
+      { name: `it's "x"`, sql: `"it's ""x"""` },
+    ]);
+    const sql = grantSql('APP', desiredRoles(user));
+    expect(sql).toContain(`r NOT IN ('READER', 'Sales Team', 'it''s "x"')`);
+    expect(sql).toContain('GRANT "Sales Team" TO USER APP;');
+    expect(sql).toContain(`GRANT "it's ""x""" TO USER APP;`);
+    for (const bad of ['"Sales Team', '" lead"', '"trail "', '""', '"a\tb"', 'bad name', '"RDB$ADMIN"']) {
+      expect(() => validateUserSpec(makeUser({ roles: [bad] }))).toThrow();
+    }
+    // regular names hash as before: existing users are not applied again
+    const secret = { uid: 's', resourceVersion: '1' };
+    expect(userSpecHash(makeUser({ roles: ['reader'] }), secret)).toBe(userSpecHash(makeUser({ roles: ['READER'] }), secret));
   });
 
   it('drops a user only if it exists', () => {

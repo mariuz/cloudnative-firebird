@@ -118,6 +118,27 @@ describe('FirebirdRole SQL', () => {
     expect(() => bad('ä'.repeat(63))).not.toThrow();
   });
 
+  it('creates, grants to and drops roles with delimited names as written', () => {
+    const role = makeRole({ roleName: `"Sales ""EU"" it's"` });
+    expect(() => validateRoleSpec(role)).not.toThrow();
+    expect(firebirdRoleName(role)).toBe(`Sales "EU" it's`);
+    const sql = applyRoleSql(role);
+    expect(sql).toContain(
+      `IF (NOT EXISTS(SELECT 1 FROM RDB$ROLES WHERE RDB$ROLE_NAME = 'Sales "EU" it''s')) THEN EXECUTE STATEMENT 'CREATE ROLE "Sales ""EU"" it''s"';`,
+    );
+    expect(sql).toContain(`REVOKE ALL ON ALL FROM ROLE "Sales ""EU"" it's";`);
+    expect(sql).toContain(`GRANT INSERT, SELECT ON TABLE ORDERS TO ROLE "Sales ""EU"" it's";`);
+    expect(dropRoleSql(role)).toContain(`THEN EXECUTE STATEMENT 'DROP ROLE "Sales ""EU"" it''s"';`);
+    for (const bad of ['"PUBLIC"', '"RDB$ADMIN"', '" lead"', '"x', '""']) {
+      expect(() => validateRoleSpec(makeRole({ roleName: bad }))).toThrow();
+    }
+    // a lower-case delimited name is a different role than the regular one
+    expect(firebirdRoleName(makeRole({ roleName: '"public"' }))).toBe('public');
+    expect(() => validateRoleSpec(makeRole({ roleName: '"public"' }))).not.toThrow();
+    // regular names keep their SQL and hash
+    expect(applyRoleSql(makeRole({ roleName: 'rpt' }))).toContain(`RDB$ROLE_NAME = 'RPT')) THEN EXECUTE STATEMENT 'CREATE ROLE RPT';`);
+  });
+
   it('builds a Job that runs the SQL on the given instances', () => {
     const job = buildRoleJob(makeCluster(true), makeRole(), { action: 'apply', instances: ['db-1'], hash: 'h', targets: '[]' });
     const env = Object.fromEntries(job.spec!.template.spec!.containers[0].env!.map((e) => [e.name, e.value]));
