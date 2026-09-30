@@ -334,6 +334,26 @@ describe('FirebirdClusterController – basic reconciliation', () => {
   });
 
   describe('reconcile() status lifecycle', () => {
+    it('keeps the phase of an existing cluster while it reconciles', async () => {
+      const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
+      const { mockKubeConfig, mockCustomApi } = makeMockKubeConfig({
+        patchNamespacedCustomObjectStatusImpl,
+      });
+      const controller = new FirebirdClusterController(mockKubeConfig);
+      const cluster = makeCluster();
+      cluster.status = { phase: 'Running', phaseReason: 'All resources reconciled successfully' };
+
+      await controller.reconcile(cluster);
+
+      const firstPatch = (
+        mockCustomApi.patchNamespacedCustomObjectStatus as Mock
+      ).mock.calls[0] as PatchStatusCall;
+      expect(firstPatch[0].body[0].value).toMatchObject({
+        phase: 'Running',
+        phaseReason: 'All resources reconciled successfully',
+      });
+    });
+
     it('sets status to Creating at the start of reconciliation', async () => {
       const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockCustomApi } = makeMockKubeConfig({

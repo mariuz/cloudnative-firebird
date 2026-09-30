@@ -37,6 +37,15 @@ const KINDS: Record<FirebirdRoleObjectKind, { keyword: string; privileges: strin
   exception: { keyword: 'EXCEPTION', privileges: ['USAGE'] },
 };
 
+/** Delimited identifiers: no control characters, no leading or trailing spaces (Firebird ignores trailing ones) */
+const CONTROL = /[\x00-\x1f\x7f]/;
+const MAX_IDENTIFIER_LENGTH = 63;
+
+/** The object name as written in GRANT: upper-cased, or double-quoted with quotes doubled */
+export function objectIdentifier(object: { name: string; quoted?: boolean }): string {
+  return object.quoted ? `"${object.name.replace(/"/g, '""')}"` : object.name.toUpperCase();
+}
+
 /** Roles managed elsewhere */
 const RESERVED_ROLES = ['RDB$ADMIN', 'PUBLIC'];
 
@@ -51,7 +60,7 @@ export function grantStatements(role: FirebirdRole): string[] {
   const statements = (role.spec.privileges ?? []).map((p) => {
     const privileges = [...new Set(p.privileges.map((x) => x.toUpperCase()))].sort();
     const list = privileges.includes('ALL') ? 'ALL' : privileges.join(', ');
-    return `GRANT ${list} ON ${KINDS[p.object.kind].keyword} ${p.object.name.toUpperCase()} TO ROLE ${name};`;
+    return `GRANT ${list} ON ${KINDS[p.object.kind].keyword} ${objectIdentifier(p.object)} TO ROLE ${name};`;
   });
   return [...new Set(statements)].sort();
 }
@@ -73,8 +82,17 @@ export function validateRoleSpec(role: FirebirdRole): void {
   for (const p of spec.privileges ?? []) {
     const kind = KINDS[p.object?.kind];
     if (!kind) throw new ValidationError(`Invalid object kind "${p.object?.kind}": use ${Object.keys(KINDS).join(', ')}`);
-    if (!IDENTIFIER.test(p.object.name ?? '')) {
-      throw new ValidationError(`Invalid ${p.object.kind} name "${p.object.name}": a regular identifier is required`);
+    const objectName = p.object.name ?? '';
+    if (p.object.quoted) {
+      if (!objectName || [...objectName].length > MAX_IDENTIFIER_LENGTH || CONTROL.test(objectName) || objectName.trim() !== objectName) {
+        throw new ValidationError(
+          `Invalid quoted ${p.object.kind} name "${objectName}": 1 to 63 characters, no control characters, no leading or trailing spaces`,
+        );
+      }
+    } else if (!IDENTIFIER.test(objectName)) {
+      throw new ValidationError(
+        `Invalid ${p.object.kind} name "${objectName}": a regular identifier is required (set quoted for a case-sensitive name)`,
+      );
     }
     if (!p.privileges?.length) throw new ValidationError(`No privileges listed on ${p.object.kind} ${p.object.name}`);
     for (const privilege of p.privileges) {

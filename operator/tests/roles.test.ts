@@ -88,6 +88,36 @@ describe('FirebirdRole SQL', () => {
     ).toThrow(/regular identifier/);
   });
 
+  it('grants on quoted, case-sensitive names as delimited identifiers', () => {
+    const role = makeRole({
+      privileges: [
+        { privileges: ['SELECT'], object: { kind: 'table', name: 'Orders', quoted: true } },
+        { privileges: ['INSERT', 'SELECT'], object: { kind: 'table', name: 'my table;x', quoted: true } },
+        { privileges: ['ALL'], object: { kind: 'table', name: 'a"b', quoted: true } },
+        { privileges: ['USAGE'], object: { kind: 'sequence', name: 'seqLower', quoted: true } },
+        { privileges: ['SELECT'], object: { kind: 'table', name: 'orders' } },
+      ],
+    });
+    expect(() => validateRoleSpec(role)).not.toThrow();
+    expect(grantStatements(role)).toEqual([
+      'GRANT ALL ON TABLE "a""b" TO ROLE APP_READER;',
+      'GRANT INSERT, SELECT ON TABLE "my table;x" TO ROLE APP_READER;',
+      'GRANT SELECT ON TABLE "Orders" TO ROLE APP_READER;',
+      'GRANT SELECT ON TABLE ORDERS TO ROLE APP_READER;',
+      'GRANT USAGE ON SEQUENCE "seqLower" TO ROLE APP_READER;',
+    ]);
+    // unquoted names keep their hash, so existing roles are not applied again
+    expect(roleSpecHash(makeRole())).toBe(roleSpecHash(makeRole({ privileges: makeRole().spec.privileges!.map((p) => ({ ...p, object: { ...p.object, quoted: false } })) })));
+    const bad = (name: string) =>
+      validateRoleSpec(makeRole({ privileges: [{ privileges: ['SELECT'], object: { kind: 'table', name, quoted: true } }] }));
+    expect(() => bad('')).toThrow(/quoted table name/);
+    expect(() => bad(' lead')).toThrow(/leading or trailing/);
+    expect(() => bad('trail ')).toThrow(/leading or trailing/);
+    expect(() => bad('new\nline')).toThrow(/control characters/);
+    expect(() => bad('x'.repeat(64))).toThrow(/63 characters/);
+    expect(() => bad('ä'.repeat(63))).not.toThrow();
+  });
+
   it('builds a Job that runs the SQL on the given instances', () => {
     const job = buildRoleJob(makeCluster(true), makeRole(), { action: 'apply', instances: ['db-1'], hash: 'h', targets: '[]' });
     const env = Object.fromEntries(job.spec!.template.spec!.containers[0].env!.map((e) => [e.name, e.value]));

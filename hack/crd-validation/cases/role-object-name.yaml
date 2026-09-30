@@ -1,0 +1,10 @@
+# expect: object name must be a regular identifier
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRole
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  privileges:
+    - privileges: [SELECT]
+      object: { kind: table, name: 'my table' }

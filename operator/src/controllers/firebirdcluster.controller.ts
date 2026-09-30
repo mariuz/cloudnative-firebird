@@ -225,7 +225,12 @@ export class FirebirdClusterController {
         return;
       }
 
-      if (!(await this.updateStatus(cluster, { phase: 'Creating', phaseReason: 'Reconciliation started' }))) {
+      // Only a new cluster starts as Creating: rewriting the phase of a running cluster on every
+      // reconcile made it read Creating until the end of the reconcile (e.g. every resync)
+      const started: Partial<FirebirdClusterStatus> = cluster.status?.phase
+        ? { phase: cluster.status.phase, phaseReason: cluster.status.phaseReason }
+        : { phase: 'Creating', phaseReason: 'Reconciliation started' };
+      if (!(await this.updateStatus(cluster, started))) {
         // deleted since this reconcile was queued (e.g. a resync): recreate nothing
         log.info('Cluster no longer exists; nothing to reconcile');
         return;

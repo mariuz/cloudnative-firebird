@@ -111,6 +111,15 @@ spec:
                         required:
                           - kind
                           - name
+                        x-kubernetes-validations:
+                          - rule: >-
+                              (has(self.quoted) && self.quoted)
+                              ? !self.name.matches('[\\x00-\\x1f\\x7f]') && !self.name.matches('^\\s|\\s$')
+                              : self.name.matches('^[A-Za-z][A-Za-z0-9_$]{0,62}$')
+                            message: >-
+                              object name must be a regular identifier (letters, digits, "_" and "$",
+                              starting with a letter), or set quoted for a case-sensitive name (no
+                              control characters, no leading or trailing spaces)
                         properties:
                           kind:
                             type: string
@@ -123,10 +132,17 @@ spec:
                               - sequence
                               - exception
                           name:
-                            description: Object name, a regular identifier
+                            description: >-
+                              Object name: a regular identifier (stored in upper case), or with quoted
+                              the exact, case-sensitive name
                             type: string
+                            minLength: 1
                             maxLength: 63
-                            pattern: '^[A-Za-z][A-Za-z0-9_$]{0,62}$'
+                          quoted:
+                            description: >-
+                              The name is a delimited identifier: used as written (case-sensitive; spaces,
+                              punctuation and reserved words allowed), as created with CREATE TABLE "Name"
+                            type: boolean
                 reclaimPolicy:
                   description: >-
                     "retain" (default) keeps the role when this resource is deleted; "delete" drops it
