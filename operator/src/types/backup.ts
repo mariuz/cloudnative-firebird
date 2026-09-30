@@ -161,9 +161,9 @@ export interface FirebirdScheduledBackupSpec {
   level?: 0 | 1 | 2;
   /**
    * How long backups of this schedule are kept: "<n>d", "<n>w" or "<n>m" (30 days). Enforced for
-   * logical backups to S3 and, on clusters with replication, server-side logical backups: each run
-   * deletes the schedule's backups older than that, always keeping the newest. nbackup chains are
-   * not pruned.
+   * backups to S3 and, on clusters with replication, server-side backups: each run deletes the
+   * schedule's backups older than that, always keeping the newest; an nbackup file is kept while
+   * a kept backup's chain (from the primary's backup history) needs it.
    */
   retentionPolicy?: string;
   /** Upload backups to S3 instead of the primary's data directory (physical backups need spec.replication on the cluster) */

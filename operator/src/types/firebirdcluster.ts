@@ -82,8 +82,8 @@ export interface BackupConfiguration {
   /** Cron schedule for backups (e.g. "0 2 * * *") */
   schedule?: string;
   /**
-   * How long scheduled backups are kept: "<n>d", "<n>w" or "<n>m" (30 days). Enforced for logical
-   * backups to S3 and, with replication, server-side logical backups (see
+   * How long scheduled backups are kept: "<n>d", "<n>w" or "<n>m" (30 days). Enforced for backups
+   * to S3 and, with replication, server-side backups (see
    * FirebirdScheduledBackupSpec.retentionPolicy).
    */
   retentionPolicy?: string;

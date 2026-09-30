@@ -174,9 +174,10 @@ spec:
                       pattern: '^\s*\S+(\s+\S+){4}\s*$'
                     retentionPolicy:
                       description: >-
-                        How long scheduled backups are kept: <n>d, <n>w or <n>m (30 days). Enforced for logical
-                        backups to S3 and, with replication, server-side logical backups (expired backups of the
-                        schedule are deleted after each backup, the newest is always kept); nbackup chains are not pruned.
+                        How long scheduled backups are kept: <n>d, <n>w or <n>m (30 days). Enforced for backups
+                        to S3 and, with replication, server-side backups (expired backups of the schedule are deleted
+                        after each backup, the newest is always kept; an nbackup file stays while a kept backup's chain
+                        needs it).
                       type: string
                       pattern: '^[1-9][0-9]*[dwm]$'
                     verify:

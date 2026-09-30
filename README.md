@@ -497,15 +497,23 @@ server, so they always run on the primary. `status.instance` of a `FirebirdBacku
 instance it ran on.
 
 **Retention.** `retentionPolicy` (`<n>d`, `<n>w` or `<n>m` for 30 days, as in CloudNativePG) on
-`spec.backup` or a `FirebirdScheduledBackup` is enforced for logical backups to S3: after each
+`spec.backup` or a `FirebirdScheduledBackup` is enforced for backups to S3: after each
 upload the Job deletes the schedule's objects (`backup-<schedule>-<timestamp>.fbk` under its
 prefix) older than the window, always keeping the newest one, so a stopped schedule never loses
 its last backup. Other schedules and other objects are never touched. On clusters with
 replication, server-side logical backups (`backup-<schedule>-<timestamp>.fbk` in the primary's data
 directory) are pruned the same way after each backup (and its verification), listed and deleted
 through the primary's segment server; without replication there is no deletion path and they are
-kept. `nbackup` backups, on S3 or not (increments depend on a base from another schedule), are not
-pruned.
+kept.
+
+`nbackup` series (`nbackup-l<level>-<schedule>-<timestamp>.nbk`, in S3 or, with replication, on the
+primary) are pruned along their chains: a level 1 or 2 backup builds on the latest earlier level 0
+or 1 of the database, of any schedule, and the Job reads these chains from the primary's
+`RDB$BACKUP_HISTORY`. An expired file is only deleted when no kept backup's chain needs it: a
+weekly level 0 stays while a daily level 1 built on it is kept. Backups of a schedule stored in
+another location, taken on demand or by hand, and files the history does not know, count as
+kept; so keep the schedules of one chain in the same location (bucket and prefix, or the primary's
+data directory), or their bases are only freed when those backups' schedule is gone.
 
 **Verification.** `verify: true` on a `FirebirdBackup`, a `FirebirdScheduledBackup` or
 `spec.backup` restores every logical backup into a scratch database and runs a full validation;
