@@ -342,6 +342,12 @@ spec:
                         re-seeded (defaults to 168; never less than segmentRetentionHours)
                       type: integer
                       minimum: 1
+                    pruneAppliedSegments:
+                      description: >-
+                        Delete archived segments on the primary as soon as every replica has applied
+                        them (and, with journalArchiveS3, they are uploaded) instead of keeping them for
+                        segmentRetentionHours (defaults to false)
+                      type: boolean
                     failover:
                       description: >-
                         Automatic failover: when the primary pod has not been ready for delaySeconds,

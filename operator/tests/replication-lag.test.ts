@@ -386,3 +386,73 @@ describe('replication lag reconciliation', () => {
     expect(single.client).not.toHaveBeenCalled();
   });
 });
+
+describe.skipIf(!hasPerl)('segment-server.pl pruneAppliedSegments', () => {
+  /** Starts the real segment server on young segments 7..11 with the given floor files and env */
+  async function archivedAfterStartup(options: { floor?: string; uploaded?: string; env: Record<string, string> }) {
+    const root = mkdtempSync(join(tmpdir(), 'segsrv-'));
+    for (const d of ['archive', 'source', 'repl']) mkdirSync(join(root, d));
+    for (const seq of [7, 8, 9, 10, 11]) {
+      const header = Buffer.alloc(48);
+      header.write('FBCHANGELOG', 0, 'latin1');
+      header.writeBigUInt64LE(BigInt(seq), 32);
+      header.writeBigUInt64LE(48n, 40);
+      writeFileSync(join(root, 'archive', `mydb.fdb.journal-${String(seq).padStart(9, '0')}`), header);
+    }
+    if (options.floor) writeFileSync(join(root, 'repl', 'retain-floor'), options.floor);
+    if (options.uploaded) writeFileSync(join(root, 'repl', 'uploaded-floor'), options.uploaded);
+    writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
+    const script = join(root, 'segment-server.pl');
+    writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
+    const port = 20000 + Math.floor(Math.random() * 20000);
+    const child = spawn('perl', [script], {
+      env: {
+        ...process.env,
+        ARCHIVE_DIR: join(root, 'archive'),
+        DATABASE_PATH: join(root, 'mydb.fdb'),
+        SOURCE_DIR: join(root, 'source'),
+        REPLICATION_DIR: join(root, 'repl'),
+        PRIMARY_FILE: join(root, 'repl', 'primary'),
+        POD_NAME: 'db-0',
+        ISC_PASSWORD: 'tok',
+        SEGMENT_PORT: String(port),
+        SEGMENT_RETENTION_SECONDS: '86400',
+        SEGMENT_MAX_RETENTION_SECONDS: '604800',
+        ...options.env,
+      },
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.on('data', (d) => d.toString().includes('listening') && resolve());
+        child.once('exit', (code) => reject(new Error(`segment server exited ${code}`)));
+      });
+      const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
+        '../src/utils/replication-lag',
+      );
+      const sequences = parseArchived(await segmentRequest('127.0.0.1', port, 'tok ARCHIVED')).map((s) => s.sequence);
+      expect(await segmentRequest('127.0.0.1', port, 'tok UPLOADED 12')).toEqual(['OK']);
+      expect(readFileSync(join(root, 'repl', 'uploaded-floor'), 'utf8')).toBe('12\n');
+      expect(await segmentRequest('127.0.0.1', port, 'tok UPLOADED x')).toEqual(['ERR bad request']);
+      return sequences;
+    } finally {
+      child.kill();
+    }
+  }
+
+  it('deletes young segments below the replicas\' floor that the archive Job has uploaded', async () => {
+    // floor 10: segment 10 may be partly applied; uploaded up to 8
+    expect(
+      await archivedAfterStartup({ floor: '10\n', uploaded: '8\n', env: { PRUNE_APPLIED: 'true', ARCHIVE_UPLOAD: 'true' } }),
+    ).toEqual([9, 10, 11]);
+    // nothing reported as uploaded yet: nothing goes early
+    expect(await archivedAfterStartup({ floor: '10\n', env: { PRUNE_APPLIED: 'true', ARCHIVE_UPLOAD: 'true' } })).toEqual([
+      7, 8, 9, 10, 11,
+    ]);
+  });
+
+  it('without an archive upload only the floor counts; without the option or a floor nothing goes early', async () => {
+    expect(await archivedAfterStartup({ floor: '10\n', env: { PRUNE_APPLIED: 'true' } })).toEqual([10, 11]);
+    expect(await archivedAfterStartup({ floor: '10\n', env: {} })).toEqual([7, 8, 9, 10, 11]);
+    expect(await archivedAfterStartup({ env: { PRUNE_APPLIED: 'true' } })).toEqual([7, 8, 9, 10, 11]);
+  });
+});

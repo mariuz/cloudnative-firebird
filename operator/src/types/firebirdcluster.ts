@@ -198,6 +198,13 @@ export interface ReplicationConfiguration {
    */
   maxSegmentRetentionHours?: number;
   /**
+   * Delete archived segments on the primary as soon as every replica has applied them (and, with
+   * journalArchiveS3, the archive Job has uploaded them), instead of keeping them for
+   * segmentRetentionHours: the archive is bounded by the replicas' progress. New replicas are then
+   * seeded from a replica rather than from the primary's offline bootstrap seed. Defaults to false.
+   */
+  pruneAppliedSegments?: boolean;
+  /**
    * Allow seeding a new replica with a locked copy of the live primary when no ready replica
    * and no usable offline bootstrap seed exist. Off by default: seeding from replicas or the
    * offline seed adds no load to the primary and avoids a suspected commit/lock window

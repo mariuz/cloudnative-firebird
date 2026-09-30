@@ -146,6 +146,13 @@ function replicationEnv(
       name: 'SEGMENT_MAX_RETENTION_SECONDS',
       value: String(maxSegmentRetentionHours(cluster) * 3600),
     },
+    // only when enabled, so the instance pods of other clusters do not change
+    ...(cluster.spec.replication?.pruneAppliedSegments
+      ? [
+          { name: 'PRUNE_APPLIED', value: 'true' },
+          ...(cluster.spec.replication.journalArchiveS3 ? [{ name: 'ARCHIVE_UPLOAD', value: 'true' }] : []),
+        ]
+      : []),
   ];
 }
 

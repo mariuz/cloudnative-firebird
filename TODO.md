@@ -15,9 +15,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   starts after a clean stop, and the segments after it are kept up to `maxSegmentRetentionHours`
   while there is no replica. A primary running longer than that without a restart, and without a
   ready replica, still cannot seed a new one unless live seeding is allowed.
-- [ ] **Prune applied segments early**: segments every replica has applied are still kept for
-  `segmentRetentionHours` (the offline bootstrap seed and the journal archive upload may need
-  them). Deleting them once applied and uploaded would bound the archive by replica progress.
 - [ ] **Failover safety**: the Lease is moved by the operator, not held and renewed by the
   instances (CloudNativePG 1.30's promotion mutex). A primary that is alive but unready (e.g.
   overloaded) is restarted and re-seeded after a failover; one that is partitioned from the other
@@ -49,8 +46,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 ## Users
 
-- [ ] **Password without SQL text**: the services API (`action_modify_user`) would keep the
-  password out of `MON$STATEMENTS`, but takes it as a command-line argument; pick the lesser risk.
 - [ ] **Existing users on upgrade**: clusters created before v0.12.0 start with a fresh security
   database seeded from the image (only SYSDBA); users created by applications before the upgrade
   were already lost on every pod restart and must be re-created (ideally as `FirebirdUser`).

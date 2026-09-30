@@ -326,12 +326,35 @@ describe('journal archive CronJob', () => {
     expect(cj.spec?.schedule).toBe('*/5 * * * *');
     const pod = cj.spec!.jobTemplate.spec!.template.spec!;
     expect(pod.initContainers?.map((c) => c.name)).toEqual(['list-uploaded', 'fetch-segments']);
+    // without pruneAppliedSegments the upload ends the Job, as before
+    expect(pod.containers.map((c) => c.name)).toEqual(['upload']);
+    expect(pod.containers[0].args?.[0]).toContain(`s3 sync /work/segments/ 's3://bkt/fb/journals/'`);
+    expect(pod.volumes?.map((v) => v.name)).toEqual(['work', 'cluster-config']);
+    expect(allMounts([...pod.initContainers!, ...pod.containers])).not.toContain('firebird-data');
+  });
+
+  it('reports the uploaded segments to the primary with pruneAppliedSegments', () => {
+    const cj = buildJournalArchiveCronJob(
+      makeCluster({ replication: { enabled: true, journalArchiveS3: s3, pruneAppliedSegments: true } }),
+      'db-1',
+    )!;
+    const pod = cj.spec!.jobTemplate.spec!.template.spec!;
+    expect(pod.initContainers?.map((c) => c.name)).toEqual(['list-uploaded', 'fetch-segments', 'upload']);
     const fetch = pod.initContainers![1];
     expect(fetch.command).toEqual(['perl', '/etc/firebird-operator/fetch-segments.pl']);
     expect(env(fetch, 'FIREBIRD_HOST')?.value).toBe('db-1.db-headless');
     expect(env(fetch, 'SKIP_FILE')?.value).toBe('/work/uploaded');
-    expect(pod.containers[0].args?.[0]).toContain(`s3 sync /work/segments/ 's3://bkt/fb/journals/'`);
-    expect(pod.containers[0].args?.[0]).not.toContain('--delete');
+    expect(env(fetch, 'LISTED_FILE')?.value).toBe('/work/listed-max');
+    const upload = pod.initContainers![2];
+    expect(upload.args?.[0]).toContain(`s3 sync /work/segments/ 's3://bkt/fb/journals/'`);
+    expect(upload.args?.[0]).not.toContain('--delete');
+    // only after a successful upload: the primary learns which segments are in the bucket
+    const report = pod.containers[0];
+    expect(report.name).toBe('report-uploaded');
+    expect(report.command).toEqual(['perl', '/etc/firebird-operator/fetch-segments.pl']);
+    expect(env(report, 'REPORT')?.value).toBe('true');
+    expect(env(report, 'LISTED_FILE')?.value).toBe('/work/listed-max');
+    expect(env(report, 'FIREBIRD_HOST')?.value).toBe('db-1.db-headless');
     expect(pod.volumes?.map((v) => v.name)).toEqual(['work', 'cluster-config']);
     expect(allMounts([...pod.initContainers!, ...pod.containers])).not.toContain('firebird-data');
   });

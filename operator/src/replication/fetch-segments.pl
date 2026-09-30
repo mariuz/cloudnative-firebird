@@ -2,6 +2,10 @@
 # Journal archive Job: fetches the primary's archived journal segments from its segment server
 # (LIST / GET, see segment-server.pl) into OUT_DIR, skipping the names listed in SKIP_FILE
 # (segments already in the object store). Exits non-zero on any error so the Job retries.
+# The highest listed segment sequence is written to LISTED_FILE: once the upload succeeded, every
+# segment up to it is in the object store.
+#
+# With REPORT=true it only tells the primary's segment server that (UPLOADED <S>), after the upload.
 use strict;
 use warnings;
 use IO::Socket::INET;
@@ -12,6 +16,7 @@ my $skip  = $ENV{SKIP_FILE} // '';
 my $token = $ENV{ISC_PASSWORD} // '';
 my $port  = $ENV{SEGMENT_PORT} // 3051;
 my $name_re = qr/^[A-Za-z0-9._-]+\.journal-\d+$/;
+my $listed_file = $ENV{LISTED_FILE} // '';
 $| = 1;
 
 sub request {
@@ -21,6 +26,19 @@ sub request {
   $sock->timeout(60);
   print $sock "$token $line\n";
   return $sock;
+}
+
+if (($ENV{REPORT} // '') eq 'true') {
+  my $max = '';
+  if ($listed_file ne '' && open(my $fh, '<', $listed_file)) { $max = <$fh> // ''; close $fh; }
+  $max =~ s/\s+$//;
+  if ($max !~ /^\d+$/) { print "nothing listed, nothing to report\n"; exit 0; }
+  my $s = request("UPLOADED $max");
+  my $reply = <$s> // '';
+  close $s;
+  die "server: " . ($reply eq '' ? "no reply\n" : $reply) unless $reply =~ /^OK/;
+  print "reported segments up to $max as uploaded to $host\n";
+  exit 0;
 }
 
 my %done;
@@ -39,6 +57,13 @@ while (my $l = <$sock>) {
   push @names, $l if $l =~ $name_re;
 }
 close $sock;
+
+if ($listed_file ne '') {
+  my ($max) = sort { $b <=> $a } map { /journal-(\d+)$/ ? $1 + 0 : () } @names;
+  open(my $fh, '>', $listed_file) or die "write $listed_file: $!\n";
+  print $fh (defined $max ? "$max\n" : '');
+  close $fh;
+}
 
 my $fetched = 0;
 for my $name (sort @names) {
