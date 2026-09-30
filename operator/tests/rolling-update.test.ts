@@ -247,6 +247,22 @@ describe('rolling update reconciliation', () => {
     expect(back.status().rollingUpdate).toBeUndefined();
   });
 
+  it('keeps the primary restart when a reconcile starts from a stale copy of the cluster', async () => {
+    const s = setup([pod('db-0', 'db-old'), pod('db-1', 'db-new'), pod('db-2', 'db-new')]);
+    await s.controller.reconcile(makeCluster());
+    const restarted = s.status().rollingUpdate;
+    const failover = { enabled: true, delaySeconds: 1 };
+    const spec = makeCluster({ replication: { enabled: true, failover } });
+    // the stored status has the restart; the watch copy this reconcile starts from predates it
+    const stored = { ...spec, status: { rollingUpdate: restarted } };
+    const stale = setup([pod('db-0', 'db-new', { ready: false }), pod('db-1', 'db-new'), pod('db-2', 'db-new')]);
+    stale.fn('getNamespacedCustomObject').mockResolvedValue(stored);
+    await stale.controller.reconcile({ ...spec, status: { rollingUpdate: { revision: 'db-new', outdatedInstances: ['db-0'], message: '' } } } as FirebirdCluster);
+    expect(stale.status().rollingUpdate?.primaryRestart).toMatchObject({ pod: 'db-0' });
+    expect(stale.status().primaryNotReadySince).toBeUndefined();
+    expect(stale.fn('createNamespacedJob')).not.toHaveBeenCalled();
+  });
+
   it('requests a switchover through the targetPrimary annotation', async () => {
     const s = setup([pod('db-0', 'db-old'), pod('db-1', 'db-new'), pod('db-2', 'db-new')]);
     await s.controller.reconcile(makeCluster({ primaryUpdateMethod: 'switchover' }));
