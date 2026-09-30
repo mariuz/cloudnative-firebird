@@ -266,17 +266,24 @@ describe('physical backups and restores with S3', () => {
     expect(pod.containers[0].args![0]).toContain('s3 cp "/work/$f" "s3://bkt/fb/$f"');
   });
 
-  it('applies S3 retention to logical series only (nbackup chains span schedules)', () => {
+  it('prunes nbackup series in S3 along their chains, read from the primary\'s history', () => {
     const sb: FirebirdScheduledBackup = {
       apiVersion: 'firebird.cloudnative-firebird.io/v1',
       kind: 'FirebirdScheduledBackup',
       metadata: { name: 'nightly', namespace: 'default', uid: 'sb' },
       spec: { clusterName: 'db', schedule: '0 1 * * *', type: 'physical', s3, retentionPolicy: '7d' },
     };
-    const args = buildScheduledBackupCronJob(sb, cluster).spec!.jobTemplate.spec!.template.spec!.containers[0].args![0];
-    expect(args).not.toContain('retention');
-    const logical = buildScheduledBackupCronJob({ ...sb, spec: { ...sb.spec, type: 'logical' } }, cluster);
-    expect(logical.spec!.jobTemplate.spec!.template.spec!.containers[0].args![0]).toContain('retention');
+    const pod = buildScheduledBackupCronJob(sb, cluster).spec!.jobTemplate.spec!.template.spec!;
+    const backup = pod.initContainers![0].args![0];
+    expect(backup).toContain('from rdb$backup_history order by rdb$backup_id');
+    expect(backup.indexOf('backup-file.pl get')).toBeLessThan(backup.indexOf('rdb$backup_history'));
+    expect(backup).toContain('> /work/history');
+    const upload = pod.containers[0].args![0];
+    expect(upload).toContain(`grep -E '^nbackup-l[0-2]-nightly-[0-9]{8}T[0-9]{6}Z[.]nbk$'`);
+    expect(upload).toContain(' /work/history /work/all /work/series > /work/expired');
+    // without a retentionPolicy there is no history query
+    const plain = buildScheduledBackupCronJob({ ...sb, spec: { ...sb.spec, retentionPolicy: undefined } }, cluster);
+    expect(plain.spec!.jobTemplate.spec!.template.spec!.initContainers![0].args![0]).not.toContain('rdb$backup_history');
   });
 
   it('downloads the chain, stores it next to the database, restores it and removes the copies', () => {

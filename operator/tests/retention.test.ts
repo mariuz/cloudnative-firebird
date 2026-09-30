@@ -79,9 +79,13 @@ describe('backup retention', () => {
 
     const sched = buildScheduledBackupCronJob(scheduled({ retentionPolicy: '1w' }), repl(undefined), 'db-0');
     expect(sched.spec!.jobTemplate.spec!.template.spec!.containers[0].args![0]).toContain('^backup-db[.]nightly-');
-    // nbackup chains span schedules: never pruned
+    // nbackup series: chains read from the history, which is written first
     const physical = buildBackupCronJob(repl({ enabled: true, type: 'physical', retentionPolicy: '7d' }), 'db-0');
-    expect(JSON.stringify(physical.spec?.jobTemplate.spec?.template.spec)).not.toContain('retention');
+    const script = physical.spec!.jobTemplate.spec!.template.spec!.containers[0].args![0];
+    expect(script.indexOf('action_nbak')).toBeLessThan(script.indexOf('rdb$backup_history'));
+    expect(script.indexOf('> $rt/history')).toBeLessThan(script.indexOf('backup-file.pl list'));
+    expect(script).toContain(`grep -E '^nbackup-l[0-2]-db-[0-9]{8}T[0-9]{6}Z[.]nbk$'`);
+    expect(script).toContain(' $rt/history $rt/all $rt/series > $rt/expired');
     expect(serverSideRetentionScript('x', 60)).toMatch(/^rt=\$\(mktemp -d\); .*; rm -rf "\$rt"$/);
   });
 
