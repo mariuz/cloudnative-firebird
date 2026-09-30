@@ -83,7 +83,7 @@ spec:
                   type: string
                   enum: [primary, prefer-standby]
                 s3:
-                  description: Upload the backup to S3 instead of the primary's data directory (physical backups need spec.replication on the cluster)
+                  description: Upload the backup to S3 instead of the primary's data directory
                   type: object
                   required:
                     - bucket

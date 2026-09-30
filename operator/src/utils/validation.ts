@@ -196,11 +196,6 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       }
     }
     validateBackupDestination('spec.backup', spec.backup.type, spec.backup.verify);
-    if (spec.backup.type === 'physical' && spec.backup.s3 && !spec.replication?.enabled) {
-      throw new ValidationError(
-        "spec.backup: physical backups to S3 copy the nbackup file through the primary's segment server; enable spec.replication",
-      );
-    }
     validateRetention('spec.backup', spec.backup.retentionPolicy);
     validateTarget('spec.backup', spec.backup.target);
   }

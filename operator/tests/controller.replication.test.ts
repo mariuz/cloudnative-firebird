@@ -329,7 +329,8 @@ describe('FirebirdClusterController – replication integration', () => {
         .body;
       const podSpec = createdSts.spec?.template?.spec;
       expect(podSpec?.initContainers?.map((c: { name: string }) => c.name)).toEqual(['security-db-init']);
-      expect(podSpec?.containers?.map((c: { name: string }) => c.name)).toEqual(['firebird']);
+      // only the backup file server sidecar
+      expect(podSpec?.containers?.map((c: { name: string }) => c.name)).toEqual(['firebird', 'backup-files']);
     });
 
     it('updates status to Running after successful reconciliation without replication', async () => {

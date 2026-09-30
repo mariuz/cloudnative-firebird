@@ -20,7 +20,6 @@ import {
   buildScheduledBackupCronJob,
   jobOutcome,
   onDemandBackupFileName,
-  physicalS3NeedsReplication,
   restoreTargetDatabase,
 } from '../utils/backup';
 import { cronJobNeedsUpdate, databaseName, FIREBIRD_DATA_DIR, instancePodSelector } from '../utils/resources';
@@ -154,10 +153,6 @@ export class FirebirdBackupController {
     try {
       validateBackupSpec(backup);
       const cluster = await this.getCluster(namespace, backup.spec.clusterName);
-      if (backup.spec.type === 'physical' && backup.spec.s3) {
-        const problem = physicalS3NeedsReplication(cluster, `FirebirdBackup ${name}`);
-        if (problem) throw new ValidationError(problem);
-      }
       const jobName = `backup-${name}`;
       const fileName = onDemandBackupFileName(backup);
       const base = { jobName, backupFileName: fileName, location: backupLocation(fileName, backup.spec.s3) };
@@ -232,10 +227,6 @@ export class FirebirdBackupController {
 
     validateScheduledBackupSpec(scheduledBackup);
     const cluster = await this.getCluster(namespace, scheduledBackup.spec.clusterName);
-    if (scheduledBackup.spec.type === 'physical' && scheduledBackup.spec.s3) {
-      const problem = physicalS3NeedsReplication(cluster, `FirebirdScheduledBackup ${name}`);
-      if (problem) throw new ValidationError(problem);
-    }
     const desired = buildScheduledBackupCronJob(scheduledBackup, cluster, await this.backupInstance(cluster, scheduledBackup.spec));
     const cronName = desired.metadata!.name!;
 
@@ -334,10 +325,6 @@ export class FirebirdBackupController {
             error: `waiting for FirebirdBackup ${restore.spec.backupName} to complete`,
           });
           return;
-        }
-        if (source.type === 'physical' && source.s3) {
-          const problem = physicalS3NeedsReplication(cluster, `FirebirdRestore ${name}`);
-          if (problem) throw new ValidationError(problem);
         }
         if (cluster.spec.hibernated) {
           await this.updateRestoreStatus(restore, { ...base, phase: 'Pending', error: 'cluster is hibernated' });

@@ -1,4 +1,4 @@
-# expect: enable spec.replication
+# expect: valid
 apiVersion: firebird.cloudnative-firebird.io/v1
 kind: FirebirdCluster
 metadata:

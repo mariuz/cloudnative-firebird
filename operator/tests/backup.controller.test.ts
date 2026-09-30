@@ -150,9 +150,9 @@ describe('FirebirdBackupController', () => {
 
     it('marks an invalid spec Failed', async () => {
       await expect(
-        controller.reconcileBackup(makeBackup({ spec: { clusterName: 'test-cluster', type: 'physical', s3: { bucket: 'b', secretRef: { name: 's' } } } })),
+        controller.reconcileBackup(makeBackup({ spec: { clusterName: 'test-cluster', type: 'physical', verify: true } })),
       ).rejects.toThrow(ValidationError);
-      expect(lastStatus()).toMatchObject({ phase: 'Failed', error: expect.stringContaining('physical') });
+      expect(lastStatus()).toMatchObject({ phase: 'Failed', error: expect.stringContaining('verify') });
     });
 
     it('takes physical backups to S3 on clusters with replication', async () => {
@@ -213,7 +213,7 @@ describe('FirebirdBackupController', () => {
       expect(lastStatus()).toMatchObject({ phase: 'Failed' });
     });
 
-    it('restores a physical backup from S3 only on clusters with replication', async () => {
+    it('restores a physical backup from S3, with or without replication', async () => {
       const s3 = { bucket: 'b', secretRef: { name: 's' } };
       objects['firebirdbackups/base'] = makeBackup({
         metadata: { name: 'base', namespace: 'default' },
@@ -221,10 +221,7 @@ describe('FirebirdBackupController', () => {
         status: { phase: 'Completed', backupFileName: 'nbackup-l0-base.nbk' },
       });
       const restore = makeRestore({ backupPath: undefined, backupName: 'base' });
-      await expect(controller.reconcileRestore(restore)).rejects.toThrow(/enable spec.replication/);
-      expect(batchApi.createNamespacedJob).not.toHaveBeenCalled();
-
-      cluster.spec.replication = { enabled: true };
+      // without replication the files go through the instance's backup file server
       await controller.reconcileRestore(restore);
       const job = batchApi.createNamespacedJob.mock.calls[0][0].body as V1Job;
       expect(job.spec?.template.spec?.initContainers?.[0].args?.[0]).toContain(`'s3://b/nbackup-l0-base.nbk'`);

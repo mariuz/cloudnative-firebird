@@ -33,6 +33,7 @@ import {
   DEMOTE_KEY,
   SEED_SOURCES_KEY,
   SEGMENT_PORT,
+  OPERATOR_CONFIG_DIR,
   buildReplicationConf,
   buildReplicationContainers,
   instanceHost,
@@ -156,6 +157,48 @@ export function superuserClientEnv(cluster: FirebirdCluster): Array<{ name: stri
   ];
 }
 
+/**
+ * Sidecar of instances without replication: the segment server in its files-only mode, through
+ * which backup and restore Jobs copy, list and delete backup files in the data directory (with
+ * replication the segment server sidecar does this)
+ */
+export function buildBackupFilesContainer(cluster: FirebirdCluster, image: string): V1Container {
+  return {
+    name: 'backup-files',
+    image,
+    command: ['perl', `${OPERATOR_CONFIG_DIR}/segment-server.pl`],
+    ports: [{ name: 'segments', containerPort: SEGMENT_PORT, protocol: 'TCP' }],
+    env: [
+      ...superuserClientEnv(cluster),
+      { name: 'FILES_ONLY', value: 'true' },
+      { name: 'DATABASE_PATH', value: `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}` },
+      { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
+      { name: 'POD_NAME', valueFrom: { fieldRef: { fieldPath: 'metadata.name' } } },
+    ],
+    volumeMounts: [
+      { name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR },
+      { name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true },
+    ],
+  };
+}
+
+/** Scripts the backup file server of instances without replication runs */
+const BACKUP_FILE_SCRIPTS = ['segment-server.pl', 'backup-file.pl'];
+
+/** The cluster ConfigMap entries of the backup file server (instances without replication) */
+function backupFilesConfigData(): Record<string, string> {
+  return Object.fromEntries(BACKUP_FILE_SCRIPTS.map((name) => [name, REPLICATION_SCRIPTS[name]]));
+}
+
+/** Pod template annotation carrying the hash of the backup file server's scripts (no replication) */
+export const BACKUP_FILES_HASH_ANNOTATION = `${API_GROUP}/backup-files-hash`;
+
+function backupFilesHash(): string {
+  const data = backupFilesConfigData();
+  const canonical = Object.keys(data).sort().map((key) => `${key}\0${data[key]}`).join('\0');
+  return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+}
+
 /** Pod template annotation carrying the hash of the replication configuration */
 export const REPLICATION_CONFIG_HASH_ANNOTATION = `${API_GROUP}/replication-config-hash`;
 
@@ -255,7 +298,8 @@ export function buildStatefulSet(
       })
     : undefined;
   if (replication) initContainers.push(replication.initContainer);
-  const usesConfigVolume = Boolean(spec.bootstrap?.initSql || replication);
+  // the backup file server (or the replication sidecars) run the scripts in the cluster ConfigMap
+  const usesConfigVolume = true;
 
   const containers = [
     {
@@ -336,7 +380,7 @@ export function buildStatefulSet(
           },
         ]
       : []),
-    ...(replication?.sidecars ?? []),
+    ...(replication?.sidecars ?? [buildBackupFilesContainer(cluster, image)]),
   ];
 
   const volumes = [
@@ -397,16 +441,15 @@ export function buildStatefulSet(
       template: {
         metadata: {
           labels,
-          ...(secretHash || replication
-            ? {
-                annotations: {
-                  ...(secretHash ? { 'firebird.cloudnative-firebird.io/superuser-secret-hash': secretHash } : {}),
-                  // replication.conf is mounted via subPath, which does not follow ConfigMap
-                  // updates; hashing it into the template rolls the pods when it changes
-                  ...(replication ? { [REPLICATION_CONFIG_HASH_ANNOTATION]: replicationConfigHash(cluster) } : {}),
-                },
-              }
-            : {}),
+          annotations: {
+            ...(secretHash ? { 'firebird.cloudnative-firebird.io/superuser-secret-hash': secretHash } : {}),
+            // replication.conf is mounted via subPath, which does not follow ConfigMap
+            // updates; hashing it into the template rolls the pods when it changes (the scripts
+            // are read once at start, too)
+            ...(replication
+              ? { [REPLICATION_CONFIG_HASH_ANNOTATION]: replicationConfigHash(cluster) }
+              : { [BACKUP_FILES_HASH_ANNOTATION]: backupFilesHash() }),
+          },
         },
         spec: {
           ...serviceAccount(cluster),
@@ -974,6 +1017,8 @@ export function buildConfigMap(
     // planned switchover (always present, like reseed)
     data[PROMOTE_KEY] = directives(options?.promote);
     data[DEMOTE_KEY] = directives(options?.demote);
+  } else {
+    Object.assign(data, backupFilesConfigData());
   }
 
   if (Object.keys(data).length === 0) return null;
@@ -1151,7 +1196,8 @@ export function buildNetworkPolicy(cluster: FirebirdCluster, clones: CloneTarget
     _from: [{ podSelector: { matchLabels: { [CLUSTER_LABEL]: name } } }],
     ports: [
       { protocol: 'TCP', port: 3050 },
-      ...(replicationEnabled(cluster) ? [{ protocol: 'TCP', port: SEGMENT_PORT }] : []),
+      // the segment server, or the backup file server without replication (backup Jobs)
+      { protocol: 'TCP', port: SEGMENT_PORT },
     ],
   };
   ingressRules.push(intraClusterRule);

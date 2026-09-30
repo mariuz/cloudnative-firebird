@@ -37,12 +37,9 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 - [ ] **Point-in-time recovery**: restore an `nbackup` base and replay the archived journal
   segments from S3 up to a target time. Segments are archived, nothing replays them yet.
-- [ ] **Physical backups to S3 without replication**: the file is copied through the segment
-  server, which only runs with replication. Taking the copy on a replica would also keep the load
-  off the primary, but nbackup on a replica (replica mode, read-only) is unverified.
-- [ ] **Retention of server-side backups without replication**: `retentionPolicy` prunes backups
-  in S3, and server-side backups on clusters with replication (through the segment server).
-  Without replication there is no deletion path on the primary's volume.
+- [ ] **Physical backups from a replica**: physical backups always run on the primary (its server
+  writes the file); taking them on a replica would keep the load off the primary, but nbackup on a
+  replica (replica mode, read-only) is unverified.
 
 ## Users
 

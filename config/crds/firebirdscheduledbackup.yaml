@@ -82,7 +82,7 @@ spec:
                 retentionPolicy:
                   description: >-
                     How long scheduled backups are kept: <n>d, <n>w or <n>m (30 days). Enforced for backups
-                    to S3 and, with replication, server-side backups (expired backups of the schedule are deleted
+                    to S3 and server-side backups (expired backups of the schedule are deleted
                     after each backup, the newest is always kept; an nbackup file stays while a kept backup's chain
                     needs it).
                   type: string

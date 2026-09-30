@@ -742,7 +742,7 @@ describe('FirebirdClusterController – basic reconciliation', () => {
       expect(mockCoreApi.createNamespacedConfigMap).toHaveBeenCalledTimes(1);
     });
 
-    it('deletes ConfigMap when config is no longer specified and ConfigMap exists', async () => {
+    it('keeps the cluster ConfigMap without config: it ships the backup file server scripts', async () => {
       const readNamespacedConfigMapImpl = vi.fn().mockImplementation(async ({ name }: { name: string }) => {
         if (name === 'test-cluster-config') {
           return { metadata: { name: 'test-cluster-config' } };
@@ -759,7 +759,7 @@ describe('FirebirdClusterController – basic reconciliation', () => {
 
       await controller.reconcile(cluster);
 
-      expect(mockCoreApi.deleteNamespacedConfigMap).toHaveBeenCalledTimes(1);
+      expect(mockCoreApi.deleteNamespacedConfigMap).not.toHaveBeenCalled();
     });
   });
 

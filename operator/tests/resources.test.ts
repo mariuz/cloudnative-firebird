@@ -237,8 +237,23 @@ describe('buildStatefulSet (replication)', () => {
     for (const cluster of [makeCluster({ replication: { enabled: false } }), makeCluster()]) {
       const podSpec = podSpecOf(cluster);
       expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['security-db-init']);
-      expect(podSpec?.containers?.map((c) => c.name)).toEqual(['firebird']);
+      expect(podSpec?.containers?.map((c) => c.name)).toEqual(['firebird', 'backup-files']);
     }
+  });
+
+  it('runs the segment server in its files-only mode as the backup file server without replication', () => {
+    const podSpec = podSpecOf(makeCluster());
+    const files = podSpec!.containers!.find((c) => c.name === 'backup-files')!;
+    expect(files.command).toEqual(['perl', '/etc/firebird-operator/segment-server.pl']);
+    const env = Object.fromEntries(files.env!.map((e) => [e.name, e.value]));
+    expect(env).toMatchObject({ FILES_ONLY: 'true', DATABASE_PATH: '/var/lib/firebird/data/mydb.fdb', SEGMENT_PORT: '3051' });
+    expect(files.env).toContainEqual({ name: 'ISC_USER', value: 'SYSDBA' });
+    expect(files.ports).toEqual([{ name: 'segments', containerPort: 3051, protocol: 'TCP' }]);
+    expect(files.volumeMounts?.map((m) => m.name)).toEqual(['firebird-data', 'cluster-config']);
+    // the scripts are read at start: a new version rolls the pods
+    const sts = buildStatefulSet(makeCluster());
+    expect(sts.spec!.template.metadata!.annotations!['firebird.cloudnative-firebird.io/backup-files-hash']).toMatch(/^[0-9a-f]{16}$/);
+    expect(Object.keys(buildConfigMap(makeCluster())!.data!).sort()).toEqual(['backup-file.pl', 'segment-server.pl']);
   });
 
   it('seeds replicas in an init container and ships segments with two sidecars', () => {
@@ -550,9 +565,9 @@ describe('podDisruptionBudgetNeedsUpdate', () => {
 });
 
 describe('buildConfigMap & configMapNeedsUpdate', () => {
-  it('returns null when neither config nor bootstrap initSql is provided', () => {
+  it('only ships the backup file server scripts when neither config nor bootstrap initSql is provided', () => {
     const cluster = makeCluster();
-    expect(buildConfigMap(cluster)).toBeNull();
+    expect(Object.keys(buildConfigMap(cluster)!.data!).sort()).toEqual(['backup-file.pl', 'segment-server.pl']);
   });
 
   it('creates ConfigMap with custom firebird.conf settings', () => {
@@ -661,7 +676,7 @@ describe('buildStatefulSet (config & bootstrap volume mounting)', () => {
     const container = sts.spec?.template?.spec?.containers?.[0];
     expect(container?.env).toContainEqual({ name: 'FIREBIRD_CONF_DefaultCacheMem', value: '128M' });
     expect(container?.volumeMounts?.some((vm) => vm.mountPath.endsWith('firebird.conf'))).toBe(false);
-    expect(sts.spec?.template?.spec?.volumes?.map((v) => v.name)).toEqual(['pending-user-drops']);
+    expect(sts.spec?.template?.spec?.volumes?.map((v) => v.name)).toEqual(['pending-user-drops', 'cluster-config']);
   });
 
   it('adds WireCrypt=Required to the conf env when TLS is enabled', () => {
@@ -727,7 +742,7 @@ describe('Monitoring Exporter Sidecar & PodMonitor', () => {
     });
     const sts = buildStatefulSet(cluster);
     const containers = sts.spec?.template?.spec?.containers;
-    expect(containers?.length).toBe(2);
+    expect(containers?.map((c) => c.name)).toEqual(['firebird', 'firebird-exporter', 'backup-files']);
     expect(containers?.[1].name).toBe('firebird-exporter');
     expect(containers?.[1].image).toBe('prom/firebird-exporter:v1.2.0');
     expect(containers?.[1].ports?.[0].containerPort).toBe(9108);
@@ -1041,9 +1056,10 @@ describe('buildNetworkPolicy (intra-cluster traffic)', () => {
     expect(buildNetworkPolicy(source).spec?.ingress).toHaveLength(2);
   });
 
-  it('does not open the segment port without replication', () => {
+  it('opens the backup file server port to the cluster\'s own pods only, without replication', () => {
     const np = buildNetworkPolicy(makeCluster({ networkPolicy: { enabled: true } }));
-    const ports = (np.spec?.ingress ?? []).flatMap((rule) => rule.ports ?? []).map((p) => p.port);
-    expect(ports).not.toContain(3051);
+    const withPort = (np.spec?.ingress ?? []).filter((rule) => (rule.ports ?? []).some((p) => p.port === 3051));
+    expect(withPort).toHaveLength(1);
+    expect(withPort[0]._from).toEqual([{ podSelector: { matchLabels: { 'firebird.cloudnative-firebird.io/cluster': 'test-cluster' } } }]);
   });
 });
