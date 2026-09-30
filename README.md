@@ -632,8 +632,13 @@ With `reclaimPolicy: delete`, deleting the resource drops the user from every re
 revokes its grants. An instance that holds the user (per `status.instances`) but is not ready at
 the time is waited for: the resource stays in phase `Dropping` (`status.droppedFrom` lists where
 the user is gone) and the user is dropped there once the instance is ready again. After 15
-minutes the finalizer is released anyway and a Warning event names the instances that keep the
-user.
+minutes the finalizer is released and the drop is left pending (Warning event): it is recorded in
+the ConfigMap `<cluster>-pending-user-drops`, the instance's `security-db-init` container drops
+the user from its security database the next time it starts, before the server accepts any
+connection, and once the instance is ready the operator drops it again through a Job
+(`drop-users-<pod>`, in case it became ready without a restart) and clears the entry. A user that
+a `FirebirdUser` declares again meanwhile is not dropped; an instance scaled away with its volume
+deleted needs nothing.
 
 Security notes: the password is read from the Secret inside the Job and only sent to the servers
 as SQL text, where it can briefly show in `MON$STATEMENTS` or a trace session. Users are not part

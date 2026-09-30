@@ -10,11 +10,22 @@ import {
   PatchStrategy,
   PolicyV1Api,
   setHeaderOptions,
+  V1ConfigMap,
+  V1Job,
   V1MicroTime,
   V1StatefulSet,
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
-import { buildBackupCronJob, buildJournalArchiveCronJob } from '../utils/backup';
+import { buildBackupCronJob, buildJournalArchiveCronJob, jobOutcome } from '../utils/backup';
+import {
+  PENDING_DROP_USERS_ANNOTATION,
+  buildPendingDropJob,
+  formatPendingDrops,
+  parsePendingDrops,
+  pendingDropJobName,
+  pendingDropsConfigMapName,
+} from '../utils/pending-drops';
+import { firebirdUsername } from '../utils/users';
 import { recordClusterMetrics, recordReconcile } from '../utils/metrics';
 import { RESEED_VOLUME, dataClaimName, planVolumeRecreation } from '../utils/volume-recreation';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
@@ -87,6 +98,7 @@ import {
   FirebirdCluster,
   FirebirdClusterCondition,
   FirebirdClusterStatus,
+  FirebirdUser,
   ReplicaLagStatus,
   VolumeRecreationStatus,
   SegmentRetentionStatus,
@@ -289,6 +301,7 @@ export class FirebirdClusterController {
       await this.reconcilePodDisruptionBudget(cluster, log);
       await this.reconcileNetworkPolicy(cluster, log);
       await this.reconcileBackupCronJob(cluster, primaryPod, log);
+      await this.reconcilePendingUserDrops(cluster, log);
       await this.reconcileAutoSweepCronJob(cluster, primaryPod, log);
       await this.reconcileDiagnosticsCronJob(cluster, primaryPod, log);
       await this.reconcilePodMonitor(cluster, log);
@@ -1157,6 +1170,93 @@ export class FirebirdClusterController {
    * Rolling update with the primary last (utils/rolling-update.ts): restarts at most one outdated
    * instance per reconcile, or asks for a switchover to an updated replica.
    */
+  /**
+   * Drops users whose FirebirdUser was deleted while an instance was not ready (utils/pending-drops.ts)
+   * once that instance is ready, through a Job, and clears the entries. A user that a FirebirdUser of
+   * the cluster declares again is not dropped; an instance scaled away with its volume gone needs
+   * nothing.
+   */
+  private async reconcilePendingUserDrops(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    if (cluster.spec.hibernated) return;
+    const cmName = pendingDropsConfigMapName(name);
+    let cm: V1ConfigMap;
+    try {
+      cm = await this.coreApi.readNamespacedConfigMap({ name: cmName, namespace });
+    } catch (err) {
+      if (isNotFound(err)) return;
+      throw err;
+    }
+    const entries = Object.entries(cm.data ?? {});
+    if (entries.length === 0) return;
+
+    const users = (await this.customApi.listNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: 'firebirdusers',
+    })) as { items?: FirebirdUser[] };
+    const declared = new Set(
+      (users.items ?? [])
+        .filter((u) => u.spec?.clusterName === name && !u.metadata?.deletionTimestamp)
+        .map((u) => firebirdUsername(u)),
+    );
+    const [pods, pvcs] = await Promise.all([
+      this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) }),
+      this.coreApi.listNamespacedPersistentVolumeClaim({ namespace, labelSelector: `${CLUSTER_LABEL}=${name}` }),
+    ]);
+
+    const data: Record<string, string> = {};
+    for (const [pod, value] of entries) {
+      let drops = parsePendingDrops(String(value)).filter((d) => !declared.has(d.username));
+      const ordinal = Number(pod.slice(name.length + 1));
+      if (ordinal >= cluster.spec.instances && !pvcs.items.some((p) => p.metadata?.name === dataClaimName(pod))) {
+        drops = [];
+      }
+      const jobName = pendingDropJobName(pod);
+      let job: V1Job | undefined;
+      try {
+        job = await this.batchApi.readNamespacedJob({ name: jobName, namespace });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+      if (job) {
+        const outcome = jobOutcome(job);
+        if (outcome === 'Completed') {
+          const done = String(job.metadata?.annotations?.[PENDING_DROP_USERS_ANNOTATION] ?? '').split(' ');
+          drops = drops.filter((d) => !done.includes(d.username));
+          log.info({ pod, users: done }, 'Pending user drops applied');
+        }
+        if (outcome !== 'Running') {
+          // a failed Job is retried on a later reconcile
+          await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
+        }
+      } else if (drops.length > 0) {
+        const podObj = pods.items.find((p) => p.metadata?.name === pod);
+        if (podObj && isPodReady(podObj)) {
+          const body = buildPendingDropJob(cluster, pod, drops.map((d) => d.username), !replicationEnabled(cluster));
+          try {
+            await this.batchApi.createNamespacedJob({ namespace, body });
+            log.info({ pod, users: drops.map((d) => d.username) }, 'Dropping users left pending on an instance');
+          } catch (err) {
+            if ((err as { code?: number })?.code !== 409) throw err;
+          }
+        }
+      }
+      if (drops.length > 0) data[pod] = formatPendingDrops(drops);
+    }
+
+    const unchanged =
+      Object.keys(data).length === entries.length && entries.every(([pod, value]) => data[pod] === formatPendingDrops(parsePendingDrops(String(value))));
+    if (unchanged) return;
+    if (Object.keys(data).length === 0) {
+      await this.coreApi.deleteNamespacedConfigMap({ name: cmName, namespace });
+    } else {
+      // a concurrent change (a new pending drop) fails the replace; retried on the next reconcile
+      await this.coreApi.replaceNamespacedConfigMap({ name: cmName, namespace, body: { ...cm, data } });
+    }
+  }
+
   private async reconcileRollingUpdate(
     cluster: FirebirdCluster,
     statefulSet: V1StatefulSet,

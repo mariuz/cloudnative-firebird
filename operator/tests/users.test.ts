@@ -186,6 +186,9 @@ describe('FirebirdUserController', () => {
       listNamespacedPod: vi.fn().mockResolvedValue({ items: (opts.readyPods ?? ['db-0', 'db-1']).map(readyPod) }),
       listNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({ items: ['db-0', 'db-1'].map(pvc) }),
       readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: 'db-1' } }),
+      readNamespacedConfigMap: vi.fn().mockRejectedValue(notFound),
+      createNamespacedConfigMap: vi.fn().mockResolvedValue({}),
+      replaceNamespacedConfigMap: vi.fn().mockResolvedValue({}),
       createNamespacedEvent: vi.fn().mockResolvedValue({}),
     };
     const kubeConfig = new KubeConfig();
@@ -393,17 +396,26 @@ describe('FirebirdUserController', () => {
     expect(s.api.patchNamespacedCustomObject.mock.calls[0][0].body[1].value).toEqual([]);
   });
 
-  it(`keeps the user on instances unready for ${USER_DROP_WAIT_MS / 60000} minutes and releases the finalizer`, async () => {
-    const s = setup({
-      readyPods: ['db-0'],
-      job: dropJob(['db-0']),
-      now: Date.parse('2026-09-27T12:00:00Z') + USER_DROP_WAIT_MS,
-    });
+  it(`leaves the drop pending on instances unready for ${USER_DROP_WAIT_MS / 60000} minutes and releases the finalizer`, async () => {
+    const now = Date.parse('2026-09-27T12:00:00Z') + USER_DROP_WAIT_MS;
+    const s = setup({ readyPods: ['db-0'], job: dropJob(['db-0']), now });
     await s.controller.reconcileUser(deletingHolder());
     expect(s.created()).toHaveLength(0);
     expect(s.api.patchNamespacedCustomObject.mock.calls[0][0].body[1].value).toEqual([]);
     const warning = s.api.createNamespacedEvent.mock.calls.map((c) => c[0].body).find((e) => e.type === 'Warning');
-    expect(warning?.message).toMatch(/kept on db-1/);
+    expect(warning?.message).toMatch(/still on db-1 .*dropped when they start again/);
+    // recorded for the instance's next start (and the operator's drop Job once it is ready)
+    const cm = s.api.createNamespacedConfigMap.mock.calls[0][0].body;
+    expect(cm.metadata.name).toBe('db-pending-user-drops');
+    expect(cm.data).toEqual({ 'db-1': `APP_USER ${new Date(now).toISOString()}\n` });
+
+    // an existing entry of another user is kept
+    const again = setup({ readyPods: ['db-0'], job: dropJob(['db-0']), now });
+    again.api.readNamespacedConfigMap.mockResolvedValue({ metadata: { name: 'db-pending-user-drops' }, data: { 'db-1': 'OTHER 2026-01-01T00:00:00Z\n' } });
+    await again.controller.reconcileUser(deletingHolder());
+    expect(again.api.replaceNamespacedConfigMap.mock.calls[0][0].body.data['db-1']).toBe(
+      `APP_USER ${new Date(now).toISOString()}\nOTHER 2026-01-01T00:00:00Z\n`,
+    );
   });
 
   it('releases the finalizer without dropping when the cluster is gone', async () => {
