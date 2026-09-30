@@ -112,6 +112,8 @@ interface SwitchoverResult {
   reseed: Record<string, string>;
   status?: SwitchoverStatus;
   primaryNotReadySince?: string;
+  /** The stored rolling update status (the reconcile may have started from a stale watch copy) */
+  rollingUpdate?: RollingUpdateStatus;
 }
 
 /** Whether a switchover or failover is between its start and its completion */
@@ -274,7 +276,7 @@ export class FirebirdClusterController {
           ? 'instances are being re-seeded or restarted'
           : undefined;
       const rollingUpdate = statefulSetExisted
-        ? await this.reconcileRollingUpdate(cluster, statefulSet, primaryPod, fencing.fenced, busy, switchover.status, log)
+        ? await this.reconcileRollingUpdate(cluster, statefulSet, primaryPod, fencing.fenced, busy, switchover, log)
         : undefined;
 
       if (cluster.spec.replication?.enabled) {
@@ -510,6 +512,7 @@ export class FirebirdClusterController {
     const { name, namespace = 'default' } = cluster.metadata;
     const result: SwitchoverResult = { primaryPod, promote: {}, demote: {}, restart: [], reseed: {} };
     result.status = cluster.status?.switchover;
+    result.rollingUpdate = cluster.status?.rollingUpdate;
     if (!replicationEnabled(cluster) || cluster.spec.hibernated) return result;
 
     // the switchover state machine acts on the latest stored state, never on a stale watch copy
@@ -527,6 +530,7 @@ export class FirebirdClusterController {
       // not readable: use the object this reconcile started with
     }
     const state = current.status?.switchover;
+    result.rollingUpdate = current.status?.rollingUpdate;
     const desired = current.metadata.annotations?.[TARGET_PRIMARY_ANNOTATION]?.trim();
     const inFlight = state && (state.phase === 'Electing' || state.phase === 'Stopping' || state.phase === 'Promoting');
     const failover = cluster.spec.replication?.failover;
@@ -1159,9 +1163,13 @@ export class FirebirdClusterController {
     primaryPod: string,
     fenced: string[],
     busy: string | undefined,
-    lastSwitchover: SwitchoverStatus | undefined,
+    switchover: SwitchoverResult,
     log: Logger,
   ): Promise<RollingUpdateStatus | undefined> {
+    const lastSwitchover = switchover.status;
+    // from the stored status: a stale copy would lose the primary restart (and with it the grace
+    // automatic failover gives the restarted primary)
+    const stored = switchover.rollingUpdate;
     const { name, namespace = 'default' } = cluster.metadata;
     if (!operatorRollsPods(cluster) || cluster.spec.hibernated) return undefined;
     const pods = instancePods(
@@ -1170,15 +1178,15 @@ export class FirebirdClusterController {
     );
     const plan = planRollingUpdate({ cluster, statefulSet, pods, primaryPod, fenced, busy, lastSwitchover });
     // the StatefulSet controller has not observed the latest template yet: keep the last status
-    if (!plan) return cluster.status?.rollingUpdate;
+    if (!plan) return stored;
     const primary = pods.find((p) => p.metadata?.name === primaryPod);
     // automatic failover leaves the restarted primary alone until it is ready again
-    let primaryRestart = cluster.status?.rollingUpdate?.primaryRestart;
+    let primaryRestart = stored?.primaryRestart;
     if (primaryRestart && (primaryRestart.pod !== primaryPod || (primary && isPodReady(primary) && primary.metadata?.uid !== primaryRestart.uid))) {
       primaryRestart = undefined;
     }
     if (plan.outdated.length === 0) {
-      if (cluster.status?.rollingUpdate && !primaryRestart) {
+      if (stored && !primaryRestart) {
         await this.event(cluster, 'Normal', EventReason.RollingUpdateCompleted, `all instances run revision ${plan.revision}`);
       }
       return primaryRestart

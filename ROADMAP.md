@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.38.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.39.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Rolling Updates Without Spurious Failovers** *(v0.39.0)*
+  - Fix: a reconcile that started from a stale copy of the cluster rewrote the status without the rolling update's record of the primary restart, so automatic failover no longer waited for the restarted primary and promoted a replica (seen once in the kind tests). The rolling update now reads its state from the stored cluster, like the switchover state machine.
 - [x] **Retention of nbackup Chains** *(v0.38.0)*
   - `retentionPolicy` now prunes physical (`nbackup`) series too, in S3 and (with replication) on the primary. Chains span schedules (a level N backup builds on the latest earlier level N-1 of the database, verified with Firebird 5), so the Job reads them from the primary's `RDB$BACKUP_HISTORY` and deletes an expired file only when no kept backup's chain needs it. Backups of other locations, on-demand ones and files unknown to the history count as kept.
 - [x] **Clean Retries of Failed Physical Restores** *(v0.37.0)*
