@@ -420,6 +420,45 @@ jobs:
           timeout 120 bash -c 'while kubectl get firebirdcluster repl -o jsonpath={.status.fencedInstances} | grep -q repl-2; do sleep 3; done'
           echo "user dropped from every instance"
 
+      - name: Verify declarative roles
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          privs() {
+            kubectl exec "$1" -c firebird -- bash -c \
+              "echo \"select trim(rdb\\\$relation_name) || ':' || trim(rdb\\\$privilege) from rdb\\\$user_privileges where rdb\\\$user = 'REPORTING' order by 1;\" | isql -q localhost:$DB" \
+              | grep -oE '^[A-Z_]+:[A-Z]' | tr '\n' ' '
+          }
+          wait_privs() {
+            for n in $(seq 1 36); do [ "$(privs "$1")" = "$2" ] && return 0; sleep 5; done
+            echo "$1 has privileges [$(privs "$1")], expected [$2]"; kubectl get firebirdrole reporting -o yaml; kubectl logs job/fbrole-reporting || true; return 1
+          }
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRole
+          metadata:
+            name: reporting
+          spec:
+            clusterName: repl
+            privileges:
+              - privileges: [SELECT]
+                object: { kind: table, name: app }
+            reclaimPolicy: delete
+          EOF
+          timeout 300 bash -c 'until [ "$(kubectl get firebirdrole reporting -o jsonpath={.status.phase})" = "Applied" ]; do sleep 5; done' \
+            || { kubectl get firebirdrole reporting -o yaml; kubectl logs job/fbrole-reporting || true; exit 1; }
+          # applied on the primary, replicated to the replicas
+          wait_privs repl-0 'APP:S '
+          wait_privs repl-1 'APP:S '
+          # declarative: a privilege removed from the spec is revoked
+          kubectl patch firebirdrole reporting --type merge -p '{"spec":{"privileges":[{"privileges":["INSERT"],"object":{"kind":"table","name":"app"}}]}}'
+          wait_privs repl-0 'APP:I '
+          wait_privs repl-1 'APP:I '
+          # reclaimPolicy delete drops the role
+          kubectl delete firebirdrole reporting --timeout=180s
+          wait_privs repl-0 ''
+          [ "$(kubectl exec repl-0 -c firebird -- bash -c "echo \"select count(*) from rdb\\\$roles where rdb\\\$role_name = 'REPORTING';\" | isql -q localhost:$DB" | awk '$1 ~ /^[0-9]+$/ { print $1 }')" = 0 ]
+          echo "role applied, updated and dropped"
+
       - name: Verify re-seeding a replica
         run: |
           DB=/var/lib/firebird/data/mydb.fdb

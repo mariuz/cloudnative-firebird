@@ -54,6 +54,7 @@ rules:
       - firebird.cloudnative-firebird.io
     resources:
       - firebirdusers
+      - firebirdroles
     verbs:
       - get
       - list
@@ -64,6 +65,7 @@ rules:
       - firebird.cloudnative-firebird.io
     resources:
       - firebirdusers/status
+      - firebirdroles/status
     verbs:
       - get
       - update

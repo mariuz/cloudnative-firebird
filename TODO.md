@@ -52,9 +52,8 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 ## Users
 
-- [ ] **Role management**: `FirebirdUser` grants roles that must already exist. Declaring roles
-  (and their privileges) would complete the picture, e.g. a `FirebirdRole` resource or a
-  `Database`-like resource as in CloudNativePG.
+- [ ] **Quoted identifiers in roles**: `FirebirdRole` privileges name objects by regular
+  (upper-cased) identifiers; objects created with quoted, case-sensitive names cannot be listed.
 - [ ] **Dropping users from instances unready for long**: the deletion waits 15 minutes for an
   instance that holds the user; one down longer (or scaled away with its volume kept) keeps it.
   An instance could drop pending users itself on start, from a list the operator keeps.

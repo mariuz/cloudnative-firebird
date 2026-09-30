@@ -1,0 +1,174 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: firebirdroles.firebird.cloudnative-firebird.io
+spec:
+  group: firebird.cloudnative-firebird.io
+  names:
+    kind: FirebirdRole
+    listKind: FirebirdRoleList
+    plural: firebirdroles
+    singular: firebirdrole
+    shortNames:
+      - fbrole
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterName
+        - name: Role
+          type: string
+          jsonPath: .status.roleName
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          description: >-
+            FirebirdRole manages a role of the cluster database and exactly the privileges it holds.
+            Privileges not listed are revoked; memberships of users in the role are kept.
+          type: object
+          required:
+            - spec
+          x-kubernetes-validations:
+            - rule: >-
+                has(self.spec.roleName) ||
+                (self.metadata.name.matches('^[A-Za-z][A-Za-z0-9-]{0,62}$') &&
+                !(self.metadata.name.upperAscii() in ['RDB$ADMIN', 'PUBLIC']))
+              message: the resource name is not a valid Firebird role name (letters, digits and "-"); set spec.roleName
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - clusterName
+              properties:
+                clusterName:
+                  description: FirebirdCluster name (immutable)
+                  type: string
+                  minLength: 1
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: clusterName is immutable
+                roleName:
+                  description: >-
+                    Firebird role name, a regular identifier stored in upper case (default: the
+                    resource name with "-" replaced by "_"). Immutable.
+                  type: string
+                  maxLength: 63
+                  pattern: '^[A-Za-z][A-Za-z0-9_$]{0,62}$'
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: roleName is immutable
+                    - rule: "!(self.upperAscii() in ['RDB$ADMIN', 'PUBLIC'])"
+                      message: system roles cannot be managed
+                privileges:
+                  description: >-
+                    Privileges held by the role. Privileges the role holds that are not listed are
+                    revoked.
+                  type: array
+                  maxItems: 256
+                  items:
+                    type: object
+                    required:
+                      - privileges
+                      - object
+                    x-kubernetes-validations:
+                      - rule: >-
+                          self.object.kind in ['table', 'view']
+                          ? self.privileges.all(p, p.upperAscii() in ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'REFERENCES', 'ALL'])
+                          : self.object.kind in ['sequence', 'exception']
+                          ? self.privileges.all(p, p.upperAscii() == 'USAGE')
+                          : self.privileges.all(p, p.upperAscii() == 'EXECUTE')
+                        message: >-
+                          privileges must match the object kind: SELECT, INSERT, UPDATE, DELETE,
+                          REFERENCES or ALL on tables and views; EXECUTE on procedures, functions and
+                          packages; USAGE on sequences and exceptions
+                    properties:
+                      privileges:
+                        type: array
+                        minItems: 1
+                        maxItems: 6
+                        items:
+                          type: string
+                          maxLength: 10
+                      object:
+                        type: object
+                        required:
+                          - kind
+                          - name
+                        properties:
+                          kind:
+                            type: string
+                            enum:
+                              - table
+                              - view
+                              - procedure
+                              - function
+                              - package
+                              - sequence
+                              - exception
+                          name:
+                            description: Object name, a regular identifier
+                            type: string
+                            maxLength: 63
+                            pattern: '^[A-Za-z][A-Za-z0-9_$]{0,62}$'
+                reclaimPolicy:
+                  description: >-
+                    "retain" (default) keeps the role when this resource is deleted; "delete" drops it
+                    (with its privileges and memberships)
+                  type: string
+                  enum:
+                    - retain
+                    - delete
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Applying
+                    - Applied
+                    - Failed
+                    - Dropping
+                message:
+                  type: string
+                roleName:
+                  type: string
+                appliedHash:
+                  description: With replication, the spec applied on the primary (the database replicates)
+                  type: string
+                instances:
+                  description: Without replication, the spec applied to each instance's database
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      hash:
+                        type: string
+                      volume:
+                        type: string
+                jobName:
+                  type: string
+                lastFailureTime:
+                  type: string
+                  format: date-time
+                failedHash:
+                  type: string

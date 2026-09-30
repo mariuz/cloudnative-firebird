@@ -1,0 +1,15 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRole
+metadata:
+  name: app-reader
+spec:
+  clusterName: c1
+  privileges:
+    - privileges: [SELECT, INSERT]
+      object: { kind: table, name: orders }
+    - privileges: [EXECUTE]
+      object: { kind: procedure, name: ship_order }
+    - privileges: [USAGE]
+      object: { kind: sequence, name: order_seq }
+  reclaimPolicy: delete
