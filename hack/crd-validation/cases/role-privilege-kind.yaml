@@ -1,0 +1,10 @@
+# expect: privileges must match the object kind
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRole
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  privileges:
+    - privileges: [SELECT]
+      object: { kind: procedure, name: ship_order }

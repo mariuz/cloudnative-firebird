@@ -63,6 +63,9 @@ export const EventReason = {
   UserApplied: 'UserApplied',
   UserFailed: 'UserFailed',
   UserDropped: 'UserDropped',
+  RoleApplied: 'RoleApplied',
+  RoleFailed: 'RoleFailed',
+  RoleDropped: 'RoleDropped',
 } as const;
 
 export class EventRecorder {

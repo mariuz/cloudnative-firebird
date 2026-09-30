@@ -76,6 +76,11 @@ vi.mock('../src/controllers/user.controller', () => ({
   FirebirdUserController: vi.fn().mockImplementation(() => ({ reconcileUser: mockReconcileUser })),
 }));
 
+const mockReconcileRole = vi.fn().mockResolvedValue(undefined);
+vi.mock('../src/controllers/role.controller', () => ({
+  FirebirdRoleController: vi.fn().mockImplementation(() => ({ reconcileRole: mockReconcileRole })),
+}));
+
 // Mock the health server so no real HTTP port is opened during tests
 const mockHealthStart = vi.fn();
 const mockHealthStop = vi.fn();
@@ -125,10 +130,11 @@ describe('Operator – lifecycle', () => {
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdscheduledbackups',
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdrestores',
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdusers',
+        '/apis/firebird.cloudnative-firebird.io/v1/firebirdroles',
         '/api/v1/pods',
       ]);
       // only instance pods, not Job pods
-      expect(mockWatchFn.mock.calls[5][1]).toEqual({ labelSelector: INSTANCE_POD_WATCH_SELECTOR });
+      expect(mockWatchFn.mock.calls[6][1]).toEqual({ labelSelector: INSTANCE_POD_WATCH_SELECTOR });
     });
 
     it('watches the correct API path for FirebirdCluster resources', async () => {
@@ -163,7 +169,7 @@ describe('Operator – lifecycle', () => {
       const { operator } = makeOperator();
       await operator.start();
       operator.stop();
-      expect(mockWatchAbort).toHaveBeenCalledTimes(6);
+      expect(mockWatchAbort).toHaveBeenCalledTimes(7);
     });
 
     it('marks the operator as not ready', async () => {

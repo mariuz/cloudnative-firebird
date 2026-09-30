@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.31.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.32.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Declarative Roles** *(v0.32.0)*
+  - `FirebirdRole`: a role of the cluster database and exactly the privileges it holds (tables, views, procedures, functions, packages, sequences, exceptions). Revoke-all and grant in one transaction, so removed privileges go and none is missing in between; memberships are kept. Applied on the primary with replication, on every instance without; `reclaimPolicy: delete` drops the role. CRD CEL rules check privileges against the object kind.
 - [x] **Re-creating a Replica's Volume** *(v0.31.0)*
   - `firebird.cloudnative-firebird.io/reseed=volume` on a replica pod replaces its PVC (a lost node with local storage, a broken disk): the operator deletes the claim and the pod, deletes the pod again until the StatefulSet has created a new claim, and the replica is seeded on the empty volume. Tracked in `status.recreatingVolumes`; the primary and standalone instances are refused.
 - [x] **Backup Verification** *(v0.30.0)*

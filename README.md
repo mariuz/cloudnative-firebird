@@ -16,6 +16,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
 - **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
 - **Declarative users** (`FirebirdUser`, after CloudNativePG's `DatabaseRole`) with Secret-backed passwords, role grants and a reclaim policy; users persist across pod restarts
+- **Declarative roles** (`FirebirdRole`): a database role and exactly the privileges it holds on tables, views, procedures, functions, packages, sequences and exceptions
 - **Automatic failover** (opt-in) to the most advanced replica; the old primary is re-seeded when it returns
 - **Planned switchover** with the `targetPrimary` annotation: no data loss, the other replicas continue without re-seeding
 - **Rolling updates with the primary last** (`primaryUpdateStrategy` / `primaryUpdateMethod`, as in CloudNativePG): replicas are restarted one at a time, then the primary is restarted or switched over
@@ -556,10 +557,11 @@ spec:
 ```
 
 **Pausing a resource.** The annotation `firebird.cloudnative-firebird.io/reconciliationDisabled:
-"true"` on a `FirebirdBackup`, `FirebirdScheduledBackup`, `FirebirdRestore` or `FirebirdUser`
+"true"` on a `FirebirdBackup`, `FirebirdScheduledBackup`, `FirebirdRestore`, `FirebirdUser` or `FirebirdRole`
 (CloudNativePG 1.29 `cnpg.io/reconciliationDisabled`) makes the operator leave it, its status and
 its Jobs / CronJob alone until the annotation is removed; a new backup or restore created with it
-does not start. Deleting a paused `FirebirdUser` keeps the Firebird user (as with `retain`).
+does not start. Deleting a paused `FirebirdUser` or `FirebirdRole` keeps the Firebird user or role
+(as with `retain`).
 Clusters are paused with `spec.suspended`.
 
 With replication enabled, only the primary bootstraps; replicas are then seeded by replication.
@@ -611,6 +613,38 @@ as SQL text, where it can briefly show in `MON$STATEMENTS` or a trace session. U
 of `gbak` backups; keep the `FirebirdUser` objects (for example in Git) to re-create them on a
 restored or cloned cluster.
 
+### Roles
+
+A `FirebirdRole` declares a role of the cluster database and exactly the privileges it holds;
+users get it through `FirebirdUser.spec.roles`:
+
+```yaml
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRole
+metadata:
+  name: reporting            # role REPORTING (or set spec.roleName)
+spec:
+  clusterName: my-cluster
+  privileges:
+    - privileges: [SELECT]
+      object: { kind: table, name: orders }         # table or view: SELECT, INSERT, UPDATE, DELETE, REFERENCES, ALL
+    - privileges: [EXECUTE]
+      object: { kind: procedure, name: monthly_report }  # procedure, function, package: EXECUTE
+    - privileges: [USAGE]
+      object: { kind: sequence, name: report_seq }  # sequence, exception: USAGE
+  reclaimPolicy: delete      # drop the role when this resource is deleted (default: retain)
+```
+
+A Job creates the role if it does not exist, then revokes everything the role holds and grants
+the listed privileges in one transaction: privileges removed from the spec (or granted by hand)
+are revoked, and none is ever missing in between. Memberships (users granted the role) are kept.
+With replication the Job runs on the primary and the privileges replicate (`status.appliedHash`);
+without it, every instance's database gets them (`status.instances`, applied again on a new
+volume). Object names are regular identifiers (stored in upper case); a Job that fails, for
+example on an object that does not exist, is retried after five minutes (`kubectl logs
+job/fbrole-<name>`). With `reclaimPolicy: delete` the role is dropped with its privileges and
+memberships.
+
 ### Fencing
 
 Fencing follows CloudNativePG: the `firebird.cloudnative-firebird.io/fencedInstances` annotation
@@ -649,6 +683,7 @@ The operator records Kubernetes events on its resources (CloudNativePG 1.29 / 1.
 | `FirebirdBackup` | `BackupStarted`, `BackupCompleted`, `BackupFailed` (warning) |
 | `FirebirdRestore` | `RestoreStarted`, `RestoreCompleted`, `RestoreFailed` (warning) |
 | `FirebirdUser` | `UserApplied`, `UserFailed` (warning), `UserDropped` |
+| `FirebirdRole` | `RoleApplied`, `RoleFailed` (warning), `RoleDropped` |
 
 Events are recorded on transitions; a repeated event (e.g. the same reconcile error) increments
 the count of the previous one for ten minutes, like client-go's event recorder.

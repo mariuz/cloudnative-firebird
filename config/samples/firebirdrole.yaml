@@ -1,0 +1,12 @@
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRole
+metadata:
+  name: reader              # role READER (or set spec.roleName); grant it with FirebirdUser.spec.roles
+spec:
+  clusterName: my-cluster
+  privileges:
+    - privileges: [SELECT]
+      object: { kind: table, name: orders }
+    - privileges: [EXECUTE]
+      object: { kind: procedure, name: monthly_report }
+  reclaimPolicy: delete     # drop the role when this resource is deleted (default: retain)

@@ -14,5 +14,5 @@ spec:
   clusterName: my-cluster
   passwordSecret:
     name: app-user-password
-  roles: [reader]           # roles must exist in the database
+  roles: [reader]           # roles must exist in the database (e.g. declared with FirebirdRole)
   reclaimPolicy: delete     # drop the Firebird user when this resource is deleted (default: retain)
