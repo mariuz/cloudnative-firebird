@@ -41,7 +41,9 @@ import {
  * - Without S3, the primary's server writes the backup through the service manager
  *   (`gbak -se` / `nbackup` service actions) into its own data directory. The service manager
  *   cannot create directories, so backup files sit next to the database file.
- * - With S3 (logical backups only), `gbak` streams the backup to the Job pod, and a separate
+ * - With S3, a logical backup is streamed to the Job pod by `gbak`; a physical backup is written
+ *   by the primary's server into its data directory as usual, then copied to the Job pod through
+ *   the primary's segment server (so it needs replication) and removed from the volume. A separate
  *   S3 client container uploads it. The Firebird image ships no S3 client.
  */
 
@@ -157,6 +159,23 @@ function ownerReference(kind: string, name: string, uid: string | undefined): V1
 const workVolume: V1Volume = { name: 'work', emptyDir: {} };
 const workMount: V1VolumeMount = { name: 'work', mountPath: WORK_DIR };
 
+/** The cluster ConfigMap, which ships backup-file.pl (replication clusters only) */
+function configVolume(cluster: FirebirdCluster): V1Volume {
+  return { name: 'cluster-config', configMap: { name: `${cluster.metadata.name}-config` } };
+}
+const configMount: V1VolumeMount = { name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true };
+
+/** Shell command moving nbackup files through the primary's segment server (see backup-file.pl) */
+const BACKUP_FILE = `perl ${OPERATOR_CONFIG_DIR}/backup-file.pl`;
+
+/** Physical backups and restores with S3 copy nbackup files through the segment server */
+export function physicalS3NeedsReplication(cluster: FirebirdCluster, what: string): string | undefined {
+  return replicationEnabled(cluster)
+    ? undefined
+    : `${what}: physical backups to and restores from S3 copy the nbackup file through the primary's ` +
+        `segment server; enable spec.replication on cluster ${cluster.metadata.name}`;
+}
+
 /**
  * Pod spec that takes one backup of the primary. `fileName` may contain shell expressions
  * (a timestamp for scheduled backups); it is evaluated once, when the backup starts.
@@ -207,22 +226,38 @@ export function buildBackupPodSpec(
     });
   }
 
-  // logical backup streamed to this pod, then uploaded
   const s3 = options.s3;
+  const physical = options.type === 'physical';
   return jobPodSpec(cluster, {
     restartPolicy: 'Never',
     initContainers: [
-      {
-        name: 'firebird-backup',
-        image,
-        command: ['/bin/sh', '-c'],
-        args: [
-          `set -eu; f="${options.fileName}"; ` +
-            `gbak -b "$FIREBIRD_HOST:$DATABASE_PATH" "${WORK_DIR}/$f"; echo "$f" > ${WORK_DIR}/.name`,
-        ],
-        env,
-        volumeMounts: [workMount],
-      },
+      physical
+        ? {
+            // written next to the database by the primary's server, copied here, then removed
+            // from the volume whether or not the copy succeeded
+            name: 'firebird-backup',
+            image,
+            command: ['/bin/sh', '-c'],
+            args: [
+              `set -eu; f="${options.fileName}"; trap '${BACKUP_FILE} remove "$f" || true' EXIT; ` +
+                `fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_nbak dbname "$DATABASE_PATH" nbk_file "${FIREBIRD_DATA_DIR}/$f" nbk_level ${options.level ?? 0}; ` +
+                `${BACKUP_FILE} get "$f" "${WORK_DIR}/$f"; echo "$f" > ${WORK_DIR}/.name`,
+            ],
+            env: [...env, { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) }],
+            volumeMounts: [workMount, configMount],
+          }
+        : {
+            // logical backup streamed to this pod
+            name: 'firebird-backup',
+            image,
+            command: ['/bin/sh', '-c'],
+            args: [
+              `set -eu; f="${options.fileName}"; ` +
+                `gbak -b "$FIREBIRD_HOST:$DATABASE_PATH" "${WORK_DIR}/$f"; echo "$f" > ${WORK_DIR}/.name`,
+            ],
+            env,
+            volumeMounts: [workMount],
+          },
       // a backup that does not restore and validate is never uploaded
       ...(verify
         ? [
@@ -245,7 +280,7 @@ export function buildBackupPodSpec(
         args: [
           `set -eu; f=$(cat ${WORK_DIR}/.name); ` +
             `${awsCommand(s3)} s3 cp "${WORK_DIR}/$f" "s3://${s3.bucket}/${s3KeyPrefix(s3)}$f"` +
-            (options.retention?.policy
+            (options.retention?.policy && !physical
               ? `; ${s3RetentionScript(s3, options.retention.series, retentionSeconds(options.retention.policy))}`
               : ''),
         ],
@@ -253,7 +288,7 @@ export function buildBackupPodSpec(
         volumeMounts: [workMount],
       },
     ],
-    volumes: [workVolume],
+    volumes: physical ? [workVolume, configVolume(cluster)] : [workVolume],
   });
 }
 
@@ -451,7 +486,46 @@ export function buildRestoreJob(
   ];
 
   let podSpec: V1PodSpec;
-  if (source.s3) {
+  if (source.s3 && source.type === 'physical') {
+    // nbackup files are downloaded here, copied next to the database through the primary's segment
+    // server for the server to restore them, then removed from the volume again
+    const s3 = source.s3;
+    const keys = [source.path, ...(source.incrementalPaths ?? [])];
+    const serverNames = keys.map((_, i) => `restore-${restoreName}-${i}.nbk`);
+    podSpec = jobPodSpec(cluster, {
+      restartPolicy: 'Never',
+      initContainers: [
+        {
+          name: 'download',
+          image: s3ClientImage(s3),
+          command: ['/bin/sh', '-c'],
+          args: [
+            'set -eu; ' +
+              keys.map((k, i) => `${awsCommand(s3)} s3 cp ${shellQuote(s3Uri(s3, k))} ${WORK_DIR}/${serverNames[i]}`).join('; '),
+          ],
+          env: s3ClientEnv(s3),
+          volumeMounts: [workMount],
+        },
+      ],
+      containers: [
+        {
+          name: 'firebird-restore',
+          image,
+          command: ['/bin/sh', '-c'],
+          args: [
+            `set -eu; trap '${BACKUP_FILE} remove ${serverNames.join(' ')} || true' EXIT; ` +
+              serverNames.map((n) => `${BACKUP_FILE} put ${WORK_DIR}/${n} ${n}; `).join('') +
+              `fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_nrest dbname "$TARGET_PATH" ` +
+              serverNames.map((n) => `nbk_file "${FIREBIRD_DATA_DIR}/${n}"`).join(' ') +
+              '; echo "restored into $TARGET_PATH"',
+          ],
+          env: [...env, { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) }],
+          volumeMounts: [workMount, configMount],
+        },
+      ],
+      volumes: [workVolume, configVolume(cluster)],
+    });
+  } else if (source.s3) {
     const s3 = source.s3;
     podSpec = jobPodSpec(cluster, {
       restartPolicy: 'Never',

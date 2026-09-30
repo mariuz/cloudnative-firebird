@@ -47,8 +47,6 @@ spec:
               x-kubernetes-validations:
                 - rule: has(self.backupName) != has(self.backupPath)
                   message: exactly one of backupName and backupPath is required
-                - rule: "!has(self.backupPath) || !has(self.s3) || !has(self.restoreType) || self.restoreType != 'physical'"
-                  message: physical restores read nbackup files from the primary's data directory; S3 sources are supported for logical restores only
                 - rule: >-
                     !has(self.backupPath) || has(self.s3) ||
                     (!self.backupPath.matches('(^|/)[.][.](/|$)') &&
@@ -79,7 +77,7 @@ spec:
                   type: string
                   maxLength: 1024
                 incrementalBackupPaths:
-                  description: nbackup level 1 and 2 files applied on top of backupPath by a physical restore
+                  description: nbackup level 1 and 2 files applied on top of backupPath by a physical restore (paths like backupPath, or object keys with s3)
                   type: array
                   maxItems: 16
                   items:

@@ -1,4 +1,4 @@
-# expect: logical backups only
+# expect: valid
 apiVersion: firebird.cloudnative-firebird.io/v1
 kind: FirebirdBackup
 metadata:

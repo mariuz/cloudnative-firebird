@@ -91,7 +91,7 @@ export interface FirebirdRestoreSpec {
    * directory (relative, or absolute within it), or the object key relative to s3.prefix
    */
   backupPath?: string;
-  /** nbackup level 1 and 2 files applied on top of backupPath by a physical restore */
+  /** nbackup level 1 and 2 files applied on top of backupPath by a physical restore (paths like backupPath, or object keys with s3) */
   incrementalBackupPaths?: string[];
   /**
    * Restore strategy:
@@ -104,7 +104,7 @@ export interface FirebirdRestoreSpec {
    * "restore-<name>.fdb"). It must not exist yet and cannot be the cluster database.
    */
   targetDatabase?: string;
-  /** S3 source for backupPath (logical backups only) */
+  /** S3 source: backupPath (and incrementalBackupPaths) are object keys relative to s3.prefix; physical restores need spec.replication on the cluster */
   s3?: S3BackupConfiguration;
 }
 
@@ -165,7 +165,7 @@ export interface FirebirdScheduledBackupSpec {
    * the newest. Server-side files and nbackup chains are not pruned.
    */
   retentionPolicy?: string;
-  /** Upload backups to S3 instead of the primary's data directory (logical backups only) */
+  /** Upload backups to S3 instead of the primary's data directory (physical backups need spec.replication on the cluster) */
   s3?: S3BackupConfiguration;
   /**
    * Where the backup runs: "primary" (default) or "prefer-standby", a ready replica when one

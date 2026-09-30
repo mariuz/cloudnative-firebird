@@ -284,14 +284,17 @@ describe('backup destinations and restore sources', () => {
     spec: { clusterName: 'c', ...spec },
   });
 
-  it('rejects S3 upload of physical backups everywhere', () => {
-    expect(() => validateBackupSpec(backup({ type: 'physical', s3 }))).toThrow(/logical backups only/);
+  it('accepts physical backups to S3, on clusters with replication', () => {
+    expect(() => validateBackupSpec(backup({ type: 'physical', s3 }))).not.toThrow();
     expect(() =>
       validateScheduledBackupSpec({ spec: { clusterName: 'c', schedule: '0 1 * * *', type: 'physical', s3 } }),
-    ).toThrow(/logical backups only/);
+    ).not.toThrow();
     expect(() => validateClusterSpec(makeCluster({ backup: { enabled: true, type: 'physical', s3 } }))).toThrow(
-      /logical backups only/,
+      /enable spec.replication/,
     );
+    expect(() =>
+      validateClusterSpec(makeCluster({ backup: { enabled: true, type: 'physical', s3 }, replication: { enabled: true } })),
+    ).not.toThrow();
     expect(() => validateBackupSpec(backup({ type: 'logical', s3 }))).not.toThrow();
   });
 
@@ -329,12 +332,17 @@ describe('backup destinations and restore sources', () => {
     expect(() => validateRestoreSpec(restore({ backupPath: 'nightly/x.fbk', s3 }))).not.toThrow();
   });
 
-  it('rejects physical restores from S3 and misplaced incremental paths', () => {
-    expect(() => validateRestoreSpec(restore({ restoreType: 'physical', backupPath: 'x.nbk', s3 }))).toThrow(/logical restores only/);
+  it('accepts physical restores from S3 and rejects misplaced incremental paths', () => {
+    expect(() =>
+      validateRestoreSpec(restore({ restoreType: 'physical', backupPath: 'x.nbk', incrementalBackupPaths: ['p/y.nbk'], s3 })),
+    ).not.toThrow();
     expect(() => validateRestoreSpec(restore({ backupPath: 'x.fbk', incrementalBackupPaths: ['y'] }))).toThrow(/physical/);
     expect(() =>
       validateRestoreSpec(restore({ restoreType: 'physical', backupPath: 'l0.nbk', incrementalBackupPaths: ['l1.nbk'] })),
     ).not.toThrow();
+    expect(() =>
+      validateRestoreSpec(restore({ restoreType: 'physical', backupPath: 'l0.nbk', incrementalBackupPaths: ['../l1.nbk'] })),
+    ).toThrow(/\.\./);
   });
 
   it('rejects bootstrap recovery combined with clone', () => {

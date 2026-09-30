@@ -1,4 +1,4 @@
-# expect: enable spec.replication
+# expect: valid
 apiVersion: firebird.cloudnative-firebird.io/v1
 kind: FirebirdCluster
 metadata:
@@ -14,3 +14,5 @@ spec:
       bucket: b
       secretRef:
         name: s3-creds
+  replication:
+    enabled: true

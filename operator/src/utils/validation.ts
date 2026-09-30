@@ -195,7 +195,12 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
         throw new ValidationError('S3 backup secretRef name is required');
       }
     }
-    validateBackupDestination('spec.backup', spec.backup.type, spec.backup.s3, spec.backup.verify);
+    validateBackupDestination('spec.backup', spec.backup.type, spec.backup.verify);
+    if (spec.backup.type === 'physical' && spec.backup.s3 && !spec.replication?.enabled) {
+      throw new ValidationError(
+        "spec.backup: physical backups to S3 copy the nbackup file through the primary's segment server; enable spec.replication",
+      );
+    }
     validateRetention('spec.backup', spec.backup.retentionPolicy);
     validateTarget('spec.backup', spec.backup.target);
   }
@@ -240,12 +245,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
  * Physical (nbackup) backups are taken by the primary's server into its own data directory, so
  * they cannot be streamed to a Job for upload.
  */
-function validateBackupDestination(field: string, type?: string, s3?: S3BackupConfiguration, verify?: boolean): void {
-  if (type === 'physical' && s3) {
-    throw new ValidationError(
-      `${field}: physical backups are stored in the primary's data directory; S3 upload is supported for logical backups only`,
-    );
-  }
+function validateBackupDestination(field: string, type?: string, verify?: boolean): void {
   if (type === 'physical' && verify) {
     throw new ValidationError(`${field}: verify is supported for logical backups only`);
   }
@@ -299,7 +299,7 @@ export function validateBackupSpec(backup: FirebirdBackup): void {
     throw new ValidationError(`Invalid physical backup level: ${backup.spec.level}. Must be 0, 1, or 2.`);
   }
   validateS3('spec', backup.spec.s3);
-  validateBackupDestination('spec', backup.spec.type, backup.spec.s3, backup.spec.verify);
+  validateBackupDestination('spec', backup.spec.type, backup.spec.verify);
   validateTarget('spec', backup.spec.target);
 }
 
@@ -326,17 +326,13 @@ export function validateRestoreSpec(restore: FirebirdRestore): void {
     );
   }
   validateS3('spec', spec.s3);
-  if (spec.backupPath) {
-    if (spec.restoreType === 'physical' && spec.s3) {
-      throw new ValidationError('Physical restores read nbackup files from the primary\'s data directory; S3 sources are supported for logical restores only');
-    }
-    if (!spec.s3) validateServerPath('backupPath', spec.backupPath);
-  }
+  if (spec.backupPath && !spec.s3) validateServerPath('backupPath', spec.backupPath);
   if (spec.incrementalBackupPaths?.length) {
     if (spec.restoreType !== 'physical' || spec.backupName) {
       throw new ValidationError('incrementalBackupPaths applies to physical restores from backupPath only');
     }
-    spec.incrementalBackupPaths.forEach((p, i) => validateServerPath(`incrementalBackupPaths[${i}]`, p));
+    // with s3 they are object keys relative to s3.prefix, like backupPath
+    if (!spec.s3) spec.incrementalBackupPaths.forEach((p, i) => validateServerPath(`incrementalBackupPaths[${i}]`, p));
   }
 }
 
@@ -368,7 +364,7 @@ export function validateScheduledBackupSpec(scheduledBackup: {
     throw new ValidationError(`Invalid physical backup level: ${scheduledBackup.spec.level}. Must be 0, 1, or 2.`);
   }
   validateS3('spec', scheduledBackup.spec.s3);
-  validateBackupDestination('spec', scheduledBackup.spec.type, scheduledBackup.spec.s3, scheduledBackup.spec.verify);
+  validateBackupDestination('spec', scheduledBackup.spec.type, scheduledBackup.spec.verify);
   validateRetention('spec', scheduledBackup.spec.retentionPolicy);
   validateTarget('spec', scheduledBackup.spec.target);
 }

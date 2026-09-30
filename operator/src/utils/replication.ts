@@ -49,6 +49,7 @@ export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.from
     'replica-control.pl',
     'enable-publication.sql',
     'fetch-segments.pl',
+    'backup-file.pl',
     'set-repl-seq.pl',
     'switchover.pl',
     'failover.pl',

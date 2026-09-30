@@ -48,8 +48,6 @@ spec:
               description: FirebirdBackupSpec defines the desired state of a FirebirdBackup
               type: object
               x-kubernetes-validations:
-                - rule: "!has(self.type) || self.type != 'physical' || !has(self.s3)"
-                  message: physical backups are stored in the primary's data directory; S3 upload is supported for logical backups only
                 - rule: "!has(self.verify) || !self.verify || !has(self.type) || self.type != 'physical'"
                   message: verify is supported for logical backups only
               required:
@@ -85,7 +83,7 @@ spec:
                   type: string
                   enum: [primary, prefer-standby]
                 s3:
-                  description: Upload the backup to S3 instead of the primary's data directory (logical backups only)
+                  description: Upload the backup to S3 instead of the primary's data directory (physical backups need spec.replication on the cluster)
                   type: object
                   required:
                     - bucket

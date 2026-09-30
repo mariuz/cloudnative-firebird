@@ -904,6 +904,7 @@ describe('buildConfigMap (replication)', () => {
     const cm = buildConfigMap(makeCluster({ replication: { enabled: true } }), { primaryPod: 'test-cluster-1' });
     expect(cm?.data?.primary).toBe('test-cluster-1.test-cluster-headless');
     expect(Object.keys(cm?.data ?? {}).sort()).toEqual([
+      'backup-file.pl',
       'demote',
       'enable-publication.sql',
       'failover.pl',
