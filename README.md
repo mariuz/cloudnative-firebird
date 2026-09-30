@@ -437,8 +437,23 @@ The operator sees the annotation on the pod right away, lists the request in the
 and restarts the pod; its replication init container discards the database and the replication state (not the
 security database, so users stay) and seeds it again from another ready replica or the primary's
 offline seed. The primary is never re-seeded. `status.reseedingInstances` lists requests until the
-new pod is ready. Unlike CloudNativePG, the PVC is kept: with a StatefulSet, deleting the claim of a
-pod that is immediately recreated can deadlock, and wiping the data achieves the same result.
+new pod is ready. The PVC is kept, which is enough when the data is bad but the volume is fine.
+
+When the volume itself is lost or unusable (local storage on a node that is gone, a broken disk),
+ask for a new one:
+
+```bash
+kubectl annotate pod my-cluster-2 firebird.cloudnative-firebird.io/reseed=volume
+```
+
+The operator records the request in `status.recreatingVolumes`, deletes the claim
+(`firebird-data-my-cluster-2`) and the pod, and deletes the pod again while the StatefulSet
+recreates it against the old, terminating claim (or waits for a claim it only creates with a new
+pod). Once a new claim exists, the pod starts on an empty volume and is seeded like a new replica;
+its users (`FirebirdUser`) are applied again, since the volume changed. The request ends when the
+pod is ready (`VolumeRecreated` event). Only replicas of a replication cluster qualify: the primary
+(switch over first) and standalone instances would start with an empty database, so the annotation
+is ignored there.
 
 Known issues and open work are tracked in [ISSUES.md](ISSUES.md) and [TODO.md](TODO.md).
 

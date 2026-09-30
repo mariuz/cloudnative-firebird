@@ -46,6 +46,8 @@ export const EventReason = {
   FencingFailed: 'FencingFailed',
   ReseedStarted: 'ReseedStarted',
   ReseedCompleted: 'ReseedCompleted',
+  VolumeRecreating: 'VolumeRecreating',
+  VolumeRecreated: 'VolumeRecreated',
   RollingUpdate: 'RollingUpdate',
   RollingUpdateCompleted: 'RollingUpdateCompleted',
   ReplicaLagging: 'ReplicaLagging',

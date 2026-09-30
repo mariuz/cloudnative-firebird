@@ -670,6 +670,17 @@ spec:
                           type: string
                         time:
                           type: string
+                recreatingVolumes:
+                  description: Replicas whose volume is being re-created (reseed=volume annotation)
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      pod:
+                        type: string
+                      claimUid:
+                        description: UID of the claim being replaced
+                        type: string
                 reseedingInstances:
                   description: Replicas being re-seeded (reseed pod annotation)
                   type: array

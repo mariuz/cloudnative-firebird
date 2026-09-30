@@ -71,9 +71,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **In-place configuration reloads**: every template change restarts the instances, even
   settings Firebird could apply without a restart. CloudNativePG reloads PostgreSQL in place when
   possible.
-- [ ] **Re-creating a replica's volume** (lost node with local storage): re-seeding keeps the PVC.
-  Deleting it needs the pod deleted repeatedly until the claim is gone, because the StatefulSet
-  recreates the pod against the terminating claim.
 - [ ] **Non-root instances**: the official image runs the server as root (its entrypoint edits
   `/opt/firebird/*.conf` and the server needs its firebird-owned lock directory), so instance pods
   meet the `baseline` Pod Security Standard, not `restricted`. Running as the `firebird` user

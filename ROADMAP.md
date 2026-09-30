@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.30.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.31.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Re-creating a Replica's Volume** *(v0.31.0)*
+  - `firebird.cloudnative-firebird.io/reseed=volume` on a replica pod replaces its PVC (a lost node with local storage, a broken disk): the operator deletes the claim and the pod, deletes the pod again until the StatefulSet has created a new claim, and the replica is seeded on the empty volume. Tracked in `status.recreatingVolumes`; the primary and standalone instances are refused.
 - [x] **Backup Verification** *(v0.30.0)*
   - `verify: true` on backups, scheduled backups and `spec.backup` restores each logical backup into a scratch database (`gbak -c`) and runs a full validation; a backup that does not restore or validate fails. S3 backups are checked in the Job before upload; server-side backups through the primary's service manager, the scratch database dropped afterwards. `status.verified` on `FirebirdBackup`.
 - [x] **Clones Through NetworkPolicies** *(v0.29.0)*

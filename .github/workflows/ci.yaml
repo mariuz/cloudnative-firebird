@@ -438,6 +438,27 @@ jobs:
           timeout 120 bash -c 'while kubectl get firebirdcluster repl -o jsonpath={.status.reseedingInstances} | grep -q repl-2; do sleep 5; done'
           echo "replica re-seeded and following the primary"
 
+      - name: Verify re-creating a replica's volume
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          count() { kubectl exec "$1" -c firebird -- bash -c "echo 'select count(*) from app;' | isql -q localhost:$DB" | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          old_claim=$(kubectl get pvc firebird-data-repl-2 -o jsonpath={.metadata.uid})
+          kubectl annotate pod repl-2 firebird.cloudnative-firebird.io/reseed=volume
+          # the operator deletes the claim and the pod until the StatefulSet made a new claim
+          timeout 300 bash -c "until c=\$(kubectl get pvc firebird-data-repl-2 -o jsonpath={.metadata.uid} 2>/dev/null) && [ -n \"\$c\" ] && [ \"\$c\" != '$old_claim' ]; do sleep 3; done" \
+            || { kubectl get pvc,pods; kubectl get firebirdcluster repl -o jsonpath='{.status.recreatingVolumes}'; exit 1; }
+          timeout 300 bash -c 'until kubectl get pod repl-2 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/repl-2 --for=condition=Ready --timeout=300s
+          timeout 120 bash -c 'while kubectl get firebirdcluster repl -o jsonpath={.status.recreatingVolumes} | grep -q repl-2; do sleep 5; done'
+          # a new, empty volume: seeded like a new replica
+          kubectl logs repl-2 -c replication-init | tee /tmp/repl-2-volume.log
+          grep -qE 'replica seed|offline seed' /tmp/repl-2-volume.log
+          expected=$(count repl-0)
+          for n in $(seq 1 36); do [ "$(count repl-2)" = "$expected" ] && break; sleep 5; done
+          [ "$(count repl-2)" = "$expected" ]
+          kubectl get events --field-selector involvedObject.name=repl,reason=VolumeRecreated -o name | grep -q .
+          echo "replica runs on a new volume ($old_claim replaced) and follows the primary"
+
       - name: Verify planned switchover
         run: |
           DB=/var/lib/firebird/data/mydb.fdb

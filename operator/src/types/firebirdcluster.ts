@@ -430,6 +430,13 @@ export interface SegmentRetentionStatus {
   replicas?: Array<{ name: string; appliedSequence: number }>;
 }
 
+/** A replica whose volume is being re-created */
+export interface VolumeRecreationStatus {
+  pod: string;
+  /** UID of the claim being replaced: the request is done once a new claim serves a ready pod */
+  claimUid: string;
+}
+
 /** Replication progress of one replica */
 export interface ReplicaLagStatus {
   name: string;
@@ -498,6 +505,8 @@ export interface FirebirdClusterStatus {
   switchover?: SwitchoverStatus;
   /** Replicas being re-seeded (reseed annotation) */
   reseedingInstances?: string[];
+  /** Replicas whose volume is being re-created (reseed=volume annotation) */
+  recreatingVolumes?: VolumeRecreationStatus[];
   /** Label selector of the instance pods, for the scale subresource (HPA / VPA) */
   selector?: string;
   /** Rolling update in progress (replication clusters, primary last) */
