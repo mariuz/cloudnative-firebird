@@ -16,6 +16,7 @@ import {
 import { Logger } from 'pino';
 import { buildBackupCronJob, buildJournalArchiveCronJob } from '../utils/backup';
 import { recordClusterMetrics, recordReconcile } from '../utils/metrics';
+import { RESEED_VOLUME, dataClaimName, planVolumeRecreation } from '../utils/volume-recreation';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { PRIMARY_RESTART_GRACE_SECONDS, operatorRollsPods, planRollingUpdate } from '../utils/rolling-update';
 import { chooseBackupInstance } from '../utils/backup-target';
@@ -87,6 +88,7 @@ import {
   FirebirdClusterCondition,
   FirebirdClusterStatus,
   ReplicaLagStatus,
+  VolumeRecreationStatus,
   SegmentRetentionStatus,
   RollingUpdateStatus,
   SwitchoverStatus,
@@ -231,6 +233,7 @@ export class FirebirdClusterController {
 
       const switchover = await this.reconcileSwitchover(cluster, await this.resolvePrimaryPod(cluster, log), log);
       const primaryPod = switchover.primaryPod;
+      const recreatingVolumes = await this.reconcileVolumeRecreation(cluster, primaryPod, log);
       const reseed = await this.resolveReseeds(cluster, primaryPod, log);
       Object.assign(reseed.requests, switchover.reseed);
       const seedSourcePods = (await this.resolveSeedSources(cluster, primaryPod)).filter(
@@ -260,6 +263,8 @@ export class FirebirdClusterController {
       const fencing = await this.reconcileFencing(cluster, log);
       const busy = switchoverInFlight(switchover.status)
         ? `${switchover.status?.kind ?? 'switchover'} in progress`
+        : recreatingVolumes.length > 0
+          ? `volume of ${recreatingVolumes.map((r) => r.pod).join(', ')} being re-created`
         : Object.keys(reseed.requests).length > 0 || reseed.restart.length > 0 || switchover.restart.length > 0
           ? 'instances are being re-seeded or restarted'
           : undefined;
@@ -344,6 +349,7 @@ export class FirebirdClusterController {
         fencedInstances: fencing.fenced,
         selector: podSelector(cluster),
         reseedingInstances: Object.keys(reseed.requests).sort(),
+        recreatingVolumes,
         rollingUpdate,
         ...(switchover.status ? { switchover: switchover.status } : {}),
         primaryNotReadySince: switchover.primaryNotReadySince,
@@ -877,6 +883,69 @@ export class FirebirdClusterController {
       await this.event(cluster, 'Normal', EventReason.ReseedStarted, `re-seeding ${podName} (reseed annotation)`);
     }
     return result;
+  }
+
+  /**
+   * Re-creates the volume of replicas annotated reseed=volume (see utils/volume-recreation.ts):
+   * deletes the claim and the pod, and the pod again until the StatefulSet made a new claim.
+   */
+  private async reconcileVolumeRecreation(
+    cluster: FirebirdCluster,
+    primaryPod: string,
+    log: Logger,
+  ): Promise<VolumeRecreationStatus[]> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    // only replicas of a replication cluster can be re-created (others would start empty)
+    if (!replicationEnabled(cluster) || cluster.spec.hibernated) return cluster.status?.recreatingVolumes ?? [];
+    const pods = instancePods(
+      (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items,
+      name,
+    );
+    const requested = pods.some((p) => p.metadata?.annotations?.[RESEED_ANNOTATION] === RESEED_VOLUME);
+    if (!requested && !cluster.status?.recreatingVolumes?.length) return [];
+    const claims = await this.coreApi.listNamespacedPersistentVolumeClaim({
+      namespace,
+      labelSelector: `${CLUSTER_LABEL}=${name}`,
+    });
+    const plan = planVolumeRecreation({
+      cluster,
+      primaryPod,
+      pods,
+      claims: claims.items,
+      replication: replicationEnabled(cluster),
+    });
+    for (const { pod, reason } of plan.ignored) {
+      log.warn({ pod, reason }, 'Ignoring the reseed=volume annotation');
+    }
+    // the requests outlive the annotated pods: recorded before anything is deleted, and kept in the
+    // in-memory status so a failure later in this reconcile does not drop them
+    cluster.status = { ...(cluster.status ?? {}), recreatingVolumes: plan.recreating };
+    if (plan.started.length > 0) await this.updateStatus(cluster, {});
+    for (const pod of plan.started) {
+      log.info({ pod }, 'Re-creating the volume of a replica');
+      await this.event(cluster, 'Normal', EventReason.VolumeRecreating, `re-creating the volume of ${pod} (reseed=volume annotation)`);
+    }
+    for (const pod of plan.deleteClaims) {
+      try {
+        await this.coreApi.deleteNamespacedPersistentVolumeClaim({ name: dataClaimName(pod), namespace });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+    }
+    // the claim is released (pvc-protection) once no pod uses it; a pod recreated against the old
+    // claim, or waiting for a claim the StatefulSet only creates with a new pod, is deleted again
+    for (const pod of plan.deletePods) {
+      try {
+        await this.coreApi.deleteNamespacedPod({ name: pod, namespace });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+    }
+    for (const pod of plan.completed) {
+      log.info({ pod }, 'Replica volume re-created and seeded');
+      await this.event(cluster, 'Normal', EventReason.VolumeRecreated, `${pod} runs on a new volume and was seeded`);
+    }
+    return plan.recreating;
   }
 
   /**
