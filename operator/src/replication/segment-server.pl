@@ -16,14 +16,16 @@
 #                                 replicas applied, sent by the operator) past the retention age,
 #                                 up to SEGMENT_MAX_RETENTION_SECONDS; "none" clears the floor (the
 #                                 segments after the offline bootstrap seed are then kept instead)
-#   "<token> FILE <name>\n"     -> "OK <size>\n" + bytes of the nbackup file <name> in the data
+#   "<token> FILE <name>\n"     -> "OK <size>\n" + bytes of the backup file <name> in the data
 #                                 directory, or "ERR <reason>\n" (physical backups to S3)
-#   "<token> STORE <name> <size>\n" + bytes -> "OK\n" once the nbackup file <name> is written to
+#   "<token> STORE <name> <size>\n" + bytes -> "OK\n" once the backup file <name> is written to
 #                                 the data directory (physical restores from S3)
-#   "<token> REMOVE <name>\n"   -> "OK\n": deletes the nbackup file <name> from the data directory
+#   "<token> REMOVE <name>\n"   -> "OK\n": deletes the backup file <name> from the data directory
+#                                 (physical backups to S3, retention of server-side backups)
+#   "<token> FILES\n"           -> the backup file names in the data directory, one per line, then ".\n"
 #
-# FILE, STORE and REMOVE only accept plain "*.nbk" names (no directories), so they cannot touch
-# the database, the journal or the replication state. FILE and STORE run in a child process, so a
+# FILE, STORE, REMOVE and FILES only handle plain "*.nbk" and "*.fbk" names (no directories), so
+# they cannot touch the database, the journal or the replication state. FILE and STORE run in a child process, so a
 # large transfer does not hold up replicas and the operator.
 #
 # The token is the SYSDBA password (ISC_PASSWORD).
@@ -66,7 +68,7 @@ my $bootstrap_seed = "$base/bootstrap-seed.fdb";
 my $pause_flag = "$base/.pause-pull";
 my $pause_ack  = "$base/.pull-paused";
 my $name_re   = qr/^[A-Za-z0-9._-]+\.journal-\d+$/;
-my $nbk_re    = qr/^[A-Za-z0-9][A-Za-z0-9._-]*\.nbk$/;
+my $backup_re = qr/^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:nbk|fbk)$/;
 (my $data_dir = $database) =~ s{/[^/]*$}{};
 $data_dir = '.' if $data_dir eq '';
 $| = 1;
@@ -401,8 +403,8 @@ while (1) {
       }
     }
     print $client "OK\n";
-  } elsif (($cmd eq 'FILE' && defined $arg && $arg =~ $nbk_re && -f "$data_dir/$arg") ||
-           ($cmd eq 'STORE' && defined $arg && $arg =~ /^(\S+) (\d+)$/ && $1 =~ $nbk_re)) {
+  } elsif (($cmd eq 'FILE' && defined $arg && $arg =~ $backup_re && -f "$data_dir/$arg") ||
+           ($cmd eq 'STORE' && defined $arg && $arg =~ /^(\S+) (\d+)$/ && $1 =~ $backup_re)) {
     my $pid = fork;
     if (!defined $pid) {
       print $client "ERR fork: $!\n";
@@ -412,8 +414,14 @@ while (1) {
       close $client;
       exit 0;
     }
-  } elsif ($cmd eq 'REMOVE' && defined $arg && $arg =~ $nbk_re) {
+  } elsif ($cmd eq 'REMOVE' && defined $arg && $arg =~ $backup_re) {
     if (!-e "$data_dir/$arg" || unlink "$data_dir/$arg") { print $client "OK\n"; } else { print $client "ERR remove $arg: $!\n"; }
+  } elsif ($cmd eq 'FILES') {
+    if (opendir(my $dh, $data_dir)) {
+      print $client "$_\n" for sort grep { $_ =~ $backup_re && -f "$data_dir/$_" } readdir($dh);
+      closedir($dh);
+    }
+    print $client ".\n";
   } elsif ($cmd eq 'SEED') {
     is_primary() ? seed_from_primary($client) : seed_from_replica($client);
   } else {

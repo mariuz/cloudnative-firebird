@@ -4,6 +4,7 @@ import {
   buildScheduledBackupCronJob,
   retentionSeconds,
   s3RetentionScript,
+  serverSideRetentionScript,
 } from '../src/utils/backup';
 import { validateClusterSpec, validateScheduledBackupSpec } from '../src/utils/validation';
 import { FirebirdCluster, FirebirdScheduledBackup } from '../src/types';
@@ -51,11 +52,37 @@ describe('backup retention', () => {
     expect(uploadArgs(sched.spec?.jobTemplate.spec?.template.spec)).toContain('^backup-db[.]nightly-');
   });
 
-  it('does not prune without a retentionPolicy, or for server-side backups', () => {
+  it('does not prune without a retentionPolicy, or server-side backups without replication', () => {
     const cron = buildBackupCronJob(cluster({ enabled: true, s3 }), 'db-0');
     expect(uploadArgs(cron.spec?.jobTemplate.spec?.template.spec)).not.toContain('retention');
     const serverSide = buildBackupCronJob(cluster({ enabled: true, retentionPolicy: '7d' }), 'db-0');
     expect(JSON.stringify(serverSide.spec?.jobTemplate.spec?.template.spec)).not.toContain('retention');
+  });
+
+  it('prunes server-side logical backups through the segment server with replication', () => {
+    const repl = (backup: FirebirdCluster['spec']['backup']): FirebirdCluster => ({
+      ...cluster(backup),
+      spec: { ...cluster(backup).spec, replication: { enabled: true } },
+    });
+    const pod = buildBackupCronJob(repl({ enabled: true, retentionPolicy: '7d', verify: true }), 'db-0').spec!.jobTemplate.spec!.template.spec!;
+    const [c] = pod.containers;
+    const args = c.args![0];
+    // after the backup and its verification, never before
+    expect(args.indexOf('action_backup')).toBeLessThan(args.indexOf('backup-file.pl list'));
+    expect(args.indexOf('restored and validated')).toBeLessThan(args.indexOf('backup-file.pl list'));
+    expect(args).toContain(`grep -E '^backup-db-[0-9]{8}T[0-9]{6}Z[.]fbk$'`);
+    expect(args).toContain(`perl /etc/firebird-operator/backup-file.pl remove "$k"`);
+    expect(args).toContain(`- ${7 * 86400} ))`);
+    expect(c.env?.find((e) => e.name === 'SEGMENT_PORT')?.value).toBe('3051');
+    expect(c.volumeMounts?.map((m) => m.name)).toEqual(['cluster-config']);
+    expect(pod.volumes).toEqual([{ name: 'cluster-config', configMap: { name: 'db-config' } }]);
+
+    const sched = buildScheduledBackupCronJob(scheduled({ retentionPolicy: '1w' }), repl(undefined), 'db-0');
+    expect(sched.spec!.jobTemplate.spec!.template.spec!.containers[0].args![0]).toContain('^backup-db[.]nightly-');
+    // nbackup chains span schedules: never pruned
+    const physical = buildBackupCronJob(repl({ enabled: true, type: 'physical', retentionPolicy: '7d' }), 'db-0');
+    expect(JSON.stringify(physical.spec?.jobTemplate.spec?.template.spec)).not.toContain('retention');
+    expect(serverSideRetentionScript('x', 60)).toMatch(/^rt=\$\(mktemp -d\); .*; rm -rf "\$rt"$/);
   });
 
   it('validates the retentionPolicy format', () => {

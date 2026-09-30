@@ -89,21 +89,45 @@ export function retentionSeconds(policy: string): number {
 }
 
 /**
- * Shell that deletes the S3 objects of a scheduled backup series ("backup-<series>-<timestamp>.fbk")
- * older than the retention window, after an upload. The newest object of the series and the one
- * just uploaded ($f) are always kept, so a stopped schedule never loses its last backup. Timestamps
- * are compared as strings (fixed-width UTC); other series and other files are never touched.
+ * Shell that deletes the backups of a scheduled series ("backup-<series>-<timestamp>.fbk") older
+ * than the retention window, after a new backup ($f). The newest backup of the series and $f are
+ * always kept, so a stopped schedule never loses its last backup. Timestamps are compared as
+ * strings (fixed-width UTC); other series and other files are never touched. `list` prints the
+ * file names, `remove` deletes "$k", `tmp` is a writable directory.
  */
-export function s3RetentionScript(s3: S3BackupConfiguration, series: string, seconds: number): string {
-  const re = `^backup-${series.replace(/[.]/g, '[.]')}-[0-9]{8}T[0-9]{6}Z[.]fbk$`;
-  const dir = `s3://${s3.bucket}/${s3KeyPrefix(s3)}`;
+function retentionScript(o: { list: string; remove: string; tmp: string; series: string; seconds: number }): string {
+  const re = `^backup-${o.series.replace(/[.]/g, '[.]')}-[0-9]{8}T[0-9]{6}Z[.]fbk$`;
   return (
-    `cutoff=$(date -u -d "@$(( $(date +%s) - ${seconds} ))" +%Y%m%dT%H%M%SZ); ` +
-    `${awsCommand(s3)} s3 ls ${shellQuote(dir)} | awk '{ print $4 }' | grep -E ${shellQuote(re)} | sort > ${WORK_DIR}/series; ` +
-    `newest=$(tail -n 1 ${WORK_DIR}/series); ` +
-    `awk -v c="$cutoff" -v n="$newest" -v f="$f" '$0 != n && $0 != f { ts = $0; sub(/^.*-/, "", ts); sub(/[.]fbk$/, "", ts); if (ts < c) print }' ${WORK_DIR}/series > ${WORK_DIR}/expired; ` +
-    `while read -r k; do ${awsCommand(s3)} s3 rm ${shellQuote(dir)}"$k"; echo "retention: deleted $k"; done < ${WORK_DIR}/expired; ` +
-    `echo "retention: kept $(( $(wc -l < ${WORK_DIR}/series) - $(wc -l < ${WORK_DIR}/expired) )) backup(s) of ${series} newer than $cutoff or newest"`
+    `cutoff=$(date -u -d "@$(( $(date +%s) - ${o.seconds} ))" +%Y%m%dT%H%M%SZ); ` +
+    `${o.list} | grep -E ${shellQuote(re)} | sort > ${o.tmp}/series; ` +
+    `newest=$(tail -n 1 ${o.tmp}/series); ` +
+    `awk -v c="$cutoff" -v n="$newest" -v f="$f" '$0 != n && $0 != f { ts = $0; sub(/^.*-/, "", ts); sub(/[.]fbk$/, "", ts); if (ts < c) print }' ${o.tmp}/series > ${o.tmp}/expired; ` +
+    `while read -r k; do ${o.remove}; echo "retention: deleted $k"; done < ${o.tmp}/expired; ` +
+    `echo "retention: kept $(( $(wc -l < ${o.tmp}/series) - $(wc -l < ${o.tmp}/expired) )) backup(s) of ${o.series} newer than $cutoff or newest"`
+  );
+}
+
+/** Retention of a logical backup series in S3 (after the upload) */
+export function s3RetentionScript(s3: S3BackupConfiguration, series: string, seconds: number): string {
+  const dir = `s3://${s3.bucket}/${s3KeyPrefix(s3)}`;
+  return retentionScript({
+    list: `${awsCommand(s3)} s3 ls ${shellQuote(dir)} | awk '{ print $4 }'`,
+    remove: `${awsCommand(s3)} s3 rm ${shellQuote(dir)}"$k"`,
+    tmp: WORK_DIR,
+    series,
+    seconds,
+  });
+}
+
+/**
+ * Retention of a logical backup series in the primary's data directory, listed and deleted
+ * through its segment server (clusters with replication)
+ */
+export function serverSideRetentionScript(series: string, seconds: number): string {
+  return (
+    'rt=$(mktemp -d); ' +
+    retentionScript({ list: `${BACKUP_FILE} list`, remove: `${BACKUP_FILE} remove "$k" >/dev/null`, tmp: '$rt', series, seconds }) +
+    '; rm -rf "$rt"'
   );
 }
 
@@ -207,6 +231,12 @@ export function buildBackupPodSpec(
       options.type === 'physical'
         ? `action_nbak dbname "$DATABASE_PATH" nbk_file "${FIREBIRD_DATA_DIR}/$f" nbk_level ${options.level ?? 0}`
         : `action_backup dbname "$DATABASE_PATH" bkp_file "${FIREBIRD_DATA_DIR}/$f"`;
+    // expired logical backups are deleted through the primary's segment server (replication only);
+    // nbackup files are not, since increments depend on a base from another schedule
+    const retention =
+      options.retention?.policy && options.type !== 'physical' && replicationEnabled(cluster)
+        ? { series: options.retention.series, seconds: retentionSeconds(options.retention.policy) }
+        : undefined;
     return jobPodSpec(cluster, {
       restartPolicy: 'Never',
       containers: [
@@ -218,11 +248,14 @@ export function buildBackupPodSpec(
             `set -eu; f="${options.fileName}"; ` +
               `fbsvcmgr "$FIREBIRD_HOST:service_mgr" ${action}; ` +
               `echo "backup written to ${FIREBIRD_DATA_DIR}/$f on $FIREBIRD_HOST"` +
-              (verify ? `; ${serverSideVerifyScript()}` : ''),
+              (verify ? `; ${serverSideVerifyScript()}` : '') +
+              (retention ? `; ${serverSideRetentionScript(retention.series, retention.seconds)}` : ''),
           ],
-          env,
+          env: retention ? [...env, { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) }] : env,
+          ...(retention ? { volumeMounts: [configMount] } : {}),
         },
       ],
+      ...(retention ? { volumes: [configVolume(cluster)] } : {}),
     });
   }
 

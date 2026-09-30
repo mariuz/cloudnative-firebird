@@ -1,10 +1,12 @@
 #!/usr/bin/perl
-# Backup and restore Jobs: move nbackup files between the primary's data directory and the Job pod
-# through the primary's segment server (FILE / STORE / REMOVE, see segment-server.pl):
+# Backup and restore Jobs: move backup files between the primary's data directory and the Job pod,
+# and list or delete them there, through the primary's segment server (FILE / STORE / REMOVE /
+# FILES, see segment-server.pl):
 #
 #   backup-file.pl get <name> <local file>     copy the server file <name> to <local file>
 #   backup-file.pl put <local file> <name>     copy <local file> to the server file <name>
 #   backup-file.pl remove <name>...            delete server files (missing files are fine)
+#   backup-file.pl list                        print the server's backup file names
 #
 # Exits non-zero on any error so the Job retries.
 use strict;
@@ -59,6 +61,17 @@ if ($mode eq 'get' && @args == 2) {
   close $s;
   die "server: " . ($reply eq '' ? "no reply\n" : $reply) unless $reply =~ /^OK/;
   print "copied $file ($size bytes) to $name on $host\n";
+} elsif ($mode eq 'list' && !@args) {
+  my $s = request('FILES');
+  my $done = 0;
+  while (my $l = <$s>) {
+    $l =~ s/\r?\n$//;
+    if ($l eq '.') { $done = 1; last; }
+    die "server: $l\n" if $l =~ /^ERR/;
+    print "$l\n";
+  }
+  close $s;
+  die "server: incomplete listing\n" unless $done;
 } elsif ($mode eq 'remove' && @args) {
   for my $name (@args) {
     my $s = request("REMOVE $name");
@@ -68,5 +81,5 @@ if ($mode eq 'get' && @args == 2) {
     print "removed $name on $host\n";
   }
 } else {
-  die "usage: backup-file.pl get <name> <file> | put <file> <name> | remove <name>...\n";
+  die "usage: backup-file.pl get <name> <file> | put <file> <name> | remove <name>... | list\n";
 }

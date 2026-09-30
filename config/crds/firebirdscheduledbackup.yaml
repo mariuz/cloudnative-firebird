@@ -82,8 +82,8 @@ spec:
                 retentionPolicy:
                   description: >-
                     How long scheduled backups are kept: <n>d, <n>w or <n>m (30 days). Enforced for logical
-                    backups to S3 (expired objects of the schedule are deleted after each upload, the newest
-                    is always kept); server-side files and nbackup chains are not pruned.
+                    backups to S3 and, with replication, server-side logical backups (expired backups of the
+                    schedule are deleted after each backup, the newest is always kept); nbackup chains are not pruned.
                   type: string
                   pattern: '^[1-9][0-9]*[dwm]$'
                 verify:
