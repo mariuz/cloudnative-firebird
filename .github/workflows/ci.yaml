@@ -395,6 +395,8 @@ jobs:
 
           # users live in the security database on the instance volume: they survive pod re-creation
           kubectl delete pod repl-1 --wait=true
+          # kubectl wait fails at once while the StatefulSet has not re-created the pod yet
+          timeout 300 bash -c 'until kubectl get pod repl-1 >/dev/null 2>&1; do sleep 3; done'
           kubectl wait pod/repl-1 --for=condition=Ready --timeout=300s
           wait_login repl-1
           echo "user survived pod re-creation"
@@ -569,7 +571,9 @@ jobs:
           # no writes happened while the primary was down: nothing is lost here
           [ "$(count "$new")" = "$before" ]
           for i in $(seq 201 210); do sql "$new" "insert into app values ($i, 'after failover'); commit;" >/dev/null; done
-          # the old primary comes back re-seeded, as a read-only replica
+          # the old primary comes back re-seeded, as a read-only replica (the operator deletes the
+          # pod for that: wait until the StatefulSet re-created it)
+          timeout 300 bash -c "until kubectl get pod $old >/dev/null 2>&1; do sleep 3; done"
           kubectl wait pod/"$old" --for=condition=Ready --timeout=300s
           kubectl logs "$old" -c replication-init | grep 're-seed requested'
           for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$new" ] || wait_count "$pod" $((before + 10)); done
