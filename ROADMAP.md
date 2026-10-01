@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.47.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.48.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Default Image Setting and CI per Firebird Version** *(v0.48.0)*
+  - The operator's `FIREBIRD_DEFAULT_IMAGE` environment variable sets the Firebird image of clusters without `spec.imageName` (CloudNativePG's operator-wide default image), e.g. a mirror in a private registry; the default stays `firebirdsql/firebird:latest`.
+  - The kind integration tests run once per Firebird version (default image, `firebirdsql/firebird:4`, `firebirdsql/firebird:6-snapshot`) by setting it, and check the version the instances run. The snapshot run is reported without failing the workflow.
 - [x] **Firebird 4 and 6 Verified** *(v0.47.0)*
   - Replication (seeding, switchover, failover, re-seeding, fencing), backups, restores and point-in-time recovery verified end to end with operator-generated pods on `firebirdsql/firebird:4` (4.0.7) and `firebirdsql/firebird:6-snapshot` (6.0.0.2191), besides Firebird 5.
   - Firebird 6 (ODS 14) moved the header page fields: `set-repl-seq.pl` (switchover, failover) now reads the ODS version and uses the ODS 13 or 14 layout, and refuses an unknown one.

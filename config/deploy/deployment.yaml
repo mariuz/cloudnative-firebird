@@ -36,6 +36,9 @@ spec:
               value: production
             - name: LOG_LEVEL
               value: info
+            # Firebird image of clusters without spec.imageName (default firebirdsql/firebird:latest)
+            # - name: FIREBIRD_DEFAULT_IMAGE
+            #   value: firebirdsql/firebird:5
             - name: OPERATOR_NAMESPACE
               valueFrom:
                 fieldRef:

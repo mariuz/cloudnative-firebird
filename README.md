@@ -68,7 +68,8 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 ### Firebird versions
 
 The operator runs the official [`firebirdsql/firebird`](https://hub.docker.com/r/firebirdsql/firebird)
-images (`spec.imageName`, default `firebirdsql/firebird:latest`, currently 5.0). Replication,
+images (`spec.imageName`; without it the operator's `FIREBIRD_DEFAULT_IMAGE` environment variable,
+or `firebirdsql/firebird:latest`, currently 5.0). Replication,
 planned switchover, failover, fencing, re-seeding, backups and restores, and point-in-time
 recovery (into a running cluster or as a bootstrap) were verified end to end with:
 
@@ -78,7 +79,9 @@ recovery (into a running cluster or as a bootstrap) were verified end to end wit
 | `firebirdsql/firebird:5` (`latest`) | 5.0.4 | 13.1 |
 | `firebirdsql/firebird:6-snapshot` | 6.0.0.2191 (snapshot, commit 4ca39c2) | 14.0 |
 
-Firebird 6 is not released yet: a snapshot is a development build, and its on-disk structure can
+CI runs the kind integration tests on each of these images (the operator's
+`FIREBIRD_DEFAULT_IMAGE`; failures on the Firebird 6 snapshot are reported without failing the
+workflow). Firebird 6 is not released yet: a snapshot is a development build, and its on-disk structure can
 still change before the release. Two Firebird 6 changes matter to the operator, both handled:
 the header page layout of ODS 14 (switchover writes the replication sequence there), and header
 statistics through the service manager, which Firebird 6 refuses for a database in full shutdown

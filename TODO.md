@@ -34,9 +34,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   (ODS 13.1) and the 6.0 snapshot (ODS 14.0, new header page layout, handled). Re-verify for
   the Firebird 6 release and every later major version (an unknown ODS is refused, not
   guessed), or replace them with supported mechanisms if Firebird adds any.
-- [ ] **CI on several Firebird versions**: the kind integration tests run the default image only
-  (`latest`, Firebird 5); Firebird 4 and the 6 snapshot were verified with operator-generated
-  pods in Docker.
 
 ## Backups and restore
 
