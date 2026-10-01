@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.48.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.49.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Commit/TIP Window Confirmed** *(v0.49.0)*
+  - ISSUES.md issue 2 confirmed on Firebird 5.0.4: `hack/repro/tip-window.sh` finds transactions committed in the journal before a backup lock but not in the copy in 18 of 20 level-0 backups under 8 writers, and replicas built with Firebird's documented procedure lose 2 transactions per run (3 of 3). The operator's live seed replays them (replica identical in 4 of 4 runs); `replica-seed-race.sh` gains persistent connections and `ROWS`.
+  - A cluster deleted while it is reconciled no longer logs "Reconciliation failed": when a call fails with 404 and the cluster itself is gone (its StatefulSet garbage-collected under the reconcile), the reconcile stops quietly instead of recording a failure and a `ReconcileFailed` event.
 - [x] **Default Image Setting and CI per Firebird Version** *(v0.48.0)*
   - The operator's `FIREBIRD_DEFAULT_IMAGE` environment variable sets the Firebird image of clusters without `spec.imageName` (CloudNativePG's operator-wide default image), e.g. a mirror in a private registry; the default stays `firebirdsql/firebird:latest`.
   - The kind integration tests run once per Firebird version (default image, `firebirdsql/firebird:4`, `firebirdsql/firebird:6-snapshot`) by setting it, and check the version the instances run. The snapshot run is reported without failing the workflow.

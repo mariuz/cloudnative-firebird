@@ -11,7 +11,7 @@ own containers and removes them when it finishes.
 | # | Issue | Kind | Reproduces |
 |---|-------|------|------------|
 | 1 | A publishing database hangs under concurrent connect / commit / disconnect | Firebird bug, open | Yes: 7 of 7 runs on 5.0.4, 3 of 3 on the 6.0 snapshot, 2 of 3 on 4.0.7; 0 of 7 with pooled connections or without publication |
-| 2 | Commit journaled before its TIP state: lock-based replica copies may miss a transaction | Firebird, suspected | Not reproduced |
+| 2 | Commit journaled before its TIP state: lock-based replica copies miss transactions | Firebird behaviour, handled | Yes: window transactions in 18 of 20 backups; 2 transactions lost in 3 of 3 documented-procedure replicas (8 writers) |
 | 3 | A physical copy inherits publication; a publishing replica fast-forwards past segments | Expected behaviour, handled | Yes, always |
 | 4 | `nbackup -B 0` copies record the still-active segment | Expected behaviour, handled | Yes, always |
 | 5 | `gstat -h` omits "Replication sequence" while it is 0 | Minor | Yes, always |
@@ -78,32 +78,41 @@ not a supported access pattern.
 
 ---
 
-## 2. Commit journaled before its TIP state (suspected, not reproduced)
+## 2. Commit journaled before its TIP state: lock-based copies miss transactions (confirmed)
 
-**What might happen.** In `TRA_commit` (`src/jrd/tra.cpp`), `REPL_trans_commit()` journals the
-commit before `TRA_set_state()` marks the transaction committed in the TIP. If a backup lock
-lands between the two, the commit is recorded in replication segment *S* while the TIP write
-goes to the delta file. The copy would hold the transaction as uncommitted, and a replica built
-from it with Firebird's documented procedure would skip segment *S* and miss that transaction.
+**What happens.** In `TRA_commit` (`src/jrd/tra.cpp`), `REPL_trans_commit()` journals the
+commit before `TRA_set_state()` marks the transaction committed in the TIP. A backup lock
+(`ALTER DATABASE BEGIN BACKUP`, `nbackup -L`, `nbackup -B`) that lands between the two switches
+the journal (`REPL_journal_switch` in `src/jrd/nbak.cpp`) after the commit was journaled in
+segment *S*, while the TIP write goes to the delta file. The copy holds the transaction as not
+committed, although the journal has its commit in a segment the copy's header (sequence *S*)
+says it includes. A replica built from the copy with Firebird's documented procedure
+(`nbackup -SEQ -F`, `gfix -replica read_only`) skips segment *S* and never commits it.
 
-**Status.** Not reproduced. `hack/repro/replica-seed-race.sh` follows the documented
-procedure: `nbackup -L`, copy, `-N`, then `nbackup -SEQ -F` and `gfix -replica read_only` on
-the copy.
-
-| Configuration | Attempts | Missing transactions |
-|---------------|----------|----------------------|
-| 1 writer, lock from the server's container | 2 | none |
-| 1 writer, lock from another container | 3 | none |
-| 4 writers, lock from the server's container | 1 | none (a second attempt hit issue 1) |
-
-The transaction losses seen early in development coincided with issue 3 (the replica copy still
-had publication enabled), which on its own makes a replica skip segments.
+**Reproduce.**
 
 ```sh
-hack/repro/replica-seed-race.sh
-WRITERS=4 CONNECTIONS=persistent hack/repro/replica-seed-race.sh
-LOCK_FROM=sidecar hack/repro/replica-seed-race.sh
+hack/repro/tip-window.sh                                        # counts window transactions per backup
+WRITERS=8 CONNECTIONS=persistent ROWS=3000 hack/repro/replica-seed-race.sh   # documented procedure: rows missing
 ```
+
+`tip-window.sh` takes level-0 backups (`action_nbak`, like the operator's physical backups) under
+8 writers, restores each with its sequence (`nbackup -SEQ -R`) and lists the transactions whose
+commit (a block ending with `opCommitTransaction`) is in a segment <= *S* but which the copy holds
+as not committed (`RDB$GET_TRANSACTION_CN` -2). Persistent connections avoid issue 1.
+
+**Observed** (Firebird 5.0.4):
+
+| Test | Runs | Result |
+|------|------|--------|
+| `tip-window.sh`, 8 writers | 20 backups | 27 window transactions, in 18 of the 20 copies |
+| `replica-seed-race.sh`, 8 writers, persistent connections | 3 | 2 transactions lost on the replica in every run |
+| `replica-seed-race.sh`, 1 to 4 writers (earlier) | 6 | none lost |
+| the operator's live seed (`allowLiveSeedFromPrimary`), 8 writers | 4 | replica identical to the primary; e.g. 4 window transactions replayed from segment 3 |
+
+With per-row conflicts the loss is partly masked: the next transaction's update of the missing
+row is applied as an insert ("record being updated does not exist, inserting instead"), so the
+row counts match and only the lost transaction's other changes are missing.
 
 **Operator handling.** New replicas are seeded without locking the primary:
 
@@ -114,7 +123,12 @@ LOCK_FROM=sidecar hack/repro/replica-seed-race.sh
    `spec.replication.allowLiveSeedFromPrimary: true`. For those seeds, the new replica lists
    the copy's uncommitted transactions (`RDB$GET_TRANSACTION_CN <= 0`) that the primary's
    journal contains in its replica control file, so Firebird replays exactly those
-   transactions.
+   transactions: the window transactions are among them.
+
+Point-in-time recovery plans the same way (`pitr-plan.pl`, which also covers transactions
+started after the copy's next transaction and checks that each starts in the segments it has).
+Plain physical restores are not affected: a window transaction was not yet committed for its
+client when the lock was taken, so the restored database is consistent as of the lock.
 
 ---
 

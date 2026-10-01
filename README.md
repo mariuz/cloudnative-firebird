@@ -271,7 +271,9 @@ other instances are read-only replicas:
 - A new replica is seeded from a **ready replica** (locked through that replica's server), or
   from the primary's offline bootstrap seed while every later segment is still archived. The
   live primary is only locked when `replication.allowLiveSeedFromPrimary` is set, so seeding
-  adds no load to the primary.
+  adds no load to the primary. A locked copy of a primary under load holds some transactions as
+  uncommitted although their commit is already journaled ([ISSUES.md](ISSUES.md), issue 2,
+  confirmed): a live seed lists them in the replica's control file, so they are replayed.
 - The seed stays usable: while no replica holds segments back (a single instance), the primary
   keeps the segments after the seed up to `maxSegmentRetentionHours` (7 days by default), so an
   instance added later can be seeded from it. Once they are pruned, the primary's init container

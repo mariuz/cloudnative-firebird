@@ -9,7 +9,7 @@
 # transaction uncommitted, and the replica skips segment S because its header says S is included.
 #
 #   ./replica-seed-race.sh                                  # prints rows missing or different on the replica
-#   WRITERS=4 CONNECTIONS=persistent ./replica-seed-race.sh # heavier load (persistent: avoids issue 1)
+#   WRITERS=8 CONNECTIONS=persistent ROWS=3000 ./replica-seed-race.sh # heavier load (persistent: avoids issue 1)
 #   LOCK_FROM=sidecar ./replica-seed-race.sh                # take the lock from another container
 set -u
 . "$(dirname "$0")/common.sh"
@@ -17,8 +17,14 @@ work=$(mktemp -d)
 start_server fb-race-primary "$work/p" 1
 # WRITERS concurrent writers (default 1), each committing insert+update with no pause
 WRITERS=${WRITERS:-1}
+ROWS=${ROWS:-150}
 for w in $(seq 1 "$WRITERS"); do
-  docker exec -d fb-race-primary sh -c "for i in \$(seq ${w}0000 ${w}0150); do echo \"insert into app values (\$i, 'w'); update app set note = 'u' where id = \$i - 1; commit;\" | isql -q localhost:$DB; done; touch /tmp/done$w"
+  if [ "${CONNECTIONS:-per-commit}" = persistent ]; then
+    # one connection per writer (a connection pool): per-commit connections hit issue 1 under load
+    docker exec -d fb-race-primary sh -c "for i in \$(seq ${w}0000 \$((${w}0000 + $ROWS))); do echo \"insert into app values (\$i, 'w'); update app set note = 'u' where id = \$i - 1; commit;\"; done | isql -q localhost:$DB; touch /tmp/done$w"
+  else
+    docker exec -d fb-race-primary sh -c "for i in \$(seq ${w}0000 \$((${w}0000 + $ROWS))); do echo \"insert into app values (\$i, 'w'); update app set note = 'u' where id = \$i - 1; commit;\" | isql -q localhost:$DB; done; touch /tmp/done$w"
+  fi
 done
 sleep 5
 
