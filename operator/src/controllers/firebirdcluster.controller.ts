@@ -418,6 +418,12 @@ export class FirebirdClusterController {
 
       log.info('Reconciliation complete');
     } catch (err) {
+      // a cluster deleted while it was reconciled: its resources are garbage-collected under the
+      // reconcile (e.g. the StatefulSet patch fails with 404), which is not a failure
+      if (isNotFound(err) && !(await this.clusterExists(cluster))) {
+        log.info('Cluster deleted during reconciliation; stopping');
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       log.error({ err }, 'Reconciliation failed');
       recordReconcile(cluster, 'error');
@@ -2000,6 +2006,23 @@ export class FirebirdClusterController {
    * Update the status sub-resource of a FirebirdCluster. Returns false when the cluster no longer
    * exists (deleted while a reconcile of it was running); other failures are logged.
    */
+  /** Whether the cluster resource still exists (errors other than 404 count as existing) */
+  private async clusterExists(cluster: FirebirdCluster): Promise<boolean> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    try {
+      await this.customApi.getNamespacedCustomObject({
+        group: API_GROUP,
+        version: API_VERSION,
+        namespace,
+        plural: RESOURCE_PLURAL,
+        name,
+      });
+      return true;
+    } catch (err) {
+      return !isNotFound(err);
+    }
+  }
+
   async updateStatus(
     cluster: FirebirdCluster,
     status: Partial<FirebirdClusterStatus>,
