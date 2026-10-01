@@ -20,6 +20,7 @@ import {
   buildScheduledBackupCronJob,
   jobOutcome,
   onDemandBackupFileName,
+  pointInTimeSourceError,
   restoreTargetDatabase,
 } from '../utils/backup';
 import { cronJobNeedsUpdate, databaseName, FIREBIRD_DATA_DIR, instancePodSelector } from '../utils/resources';
@@ -326,6 +327,8 @@ export class FirebirdBackupController {
           });
           return;
         }
+        const pitrError = pointInTimeSourceError(restore, cluster, source);
+        if (pitrError) throw new ValidationError(pitrError);
         if (cluster.spec.hibernated) {
           await this.updateRestoreStatus(restore, { ...base, phase: 'Pending', error: 'cluster is hibernated' });
           return;

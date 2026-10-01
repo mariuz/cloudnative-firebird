@@ -1,0 +1,10 @@
+# expect: pointInTime applies to physical restores only
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRestore
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  backupPath: x.fbk
+  restoreType: logical
+  pointInTime: {}

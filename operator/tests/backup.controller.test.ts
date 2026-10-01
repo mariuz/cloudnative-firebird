@@ -228,6 +228,26 @@ describe('FirebirdBackupController', () => {
       expect(job.spec?.template.spec?.containers[0].args?.[0]).toContain('action_nrest');
     });
 
+    it('replays the journal archive for pointInTime, and fails without one or with a logical backup', async () => {
+      objects['firebirdbackups/logical'] = makeBackup({
+        metadata: { name: 'logical', namespace: 'default' },
+        status: { phase: 'Completed', backupFileName: 'backup-logical.fbk' },
+      });
+      await expect(
+        controller.reconcileRestore(makeRestore({ backupPath: undefined, backupName: 'logical', pointInTime: {} })),
+      ).rejects.toThrow('physical');
+      const physical = makeRestore({ backupPath: 'l0.nbk', restoreType: 'physical', pointInTime: {} });
+      await expect(controller.reconcileRestore(physical)).rejects.toThrow('journal archive');
+      expect(batchApi.createNamespacedJob).not.toHaveBeenCalled();
+      expect(lastStatus()).toMatchObject({ phase: 'Failed', error: expect.stringContaining('journalArchiveS3') });
+
+      cluster.spec.replication = { enabled: true, journalArchiveS3: { bucket: 'j' } };
+      await controller.reconcileRestore(physical);
+      const job = batchApi.createNamespacedJob.mock.calls[0][0].body as V1Job;
+      expect(job.spec?.template.spec?.containers.map((c) => c.name)).toEqual(['firebird-restore', 'journal-fetch']);
+      expect(lastStatus()).toMatchObject({ phase: 'Restoring' });
+    });
+
     it('follows the Job to Completed', async () => {
       batchApi.readNamespacedJob.mockResolvedValue(complete);
       await controller.reconcileRestore(makeRestore({}, { phase: 'Restoring' }));

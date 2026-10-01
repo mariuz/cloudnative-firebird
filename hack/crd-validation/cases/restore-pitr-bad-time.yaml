@@ -1,0 +1,11 @@
+# expect: spec.pointInTime.targetTime
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRestore
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  backupPath: l0.nbk
+  restoreType: physical
+  pointInTime:
+    targetTime: yesterday

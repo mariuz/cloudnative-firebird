@@ -5,6 +5,10 @@
 # The highest listed segment sequence is written to LISTED_FILE: once the upload succeeded, every
 # segment up to it is in the object store.
 #
+# Each fetched segment gets an empty companion file "<segment>.archived-<YYYYMMDDTHHMMSSZ>", the
+# time the primary archived it (ARCHIVED): point-in-time recovery picks the segments archived up to
+# its target time from these names.
+#
 # With REPORT=true it only tells the primary's segment server that (UPLOADED <S>), after the upload.
 use strict;
 use warnings;
@@ -65,6 +69,21 @@ if ($listed_file ne '') {
   close $fh;
 }
 
+# archive time of each segment, from its age on the primary (ARCHIVED)
+my %archived;
+my $asock = request('ARCHIVED');
+my $now = time;
+while (my $l = <$asock>) {
+  $l =~ s/\r?\n$//;
+  last if $l eq '.';
+  die "server: $l\n" if $l =~ /^ERR/;
+  if ($l =~ /^(\d+) (-?\d+)$/) {
+    my @t = gmtime($now - ($2 > 0 ? $2 : 0));
+    $archived{$1 + 0} = sprintf('%04d%02d%02dT%02d%02d%02dZ', $t[5] + 1900, $t[4] + 1, @t[3, 2, 1, 0]);
+  }
+}
+close $asock;
+
 my $fetched = 0;
 for my $name (sort @names) {
   next if $done{$name};
@@ -85,6 +104,11 @@ for my $name (sort @names) {
   close $fh;
   close $s;
   rename("$out/.$name.part", "$out/$name") or die "rename $name: $!\n";
+  my ($seq) = $name =~ /journal-(\d+)$/;
+  if (defined $seq && $archived{$seq + 0}) {
+    open(my $mark, '>', "$out/$name.archived-$archived{$seq + 0}") or die "write marker for $name: $!\n";
+    close $mark;
+  }
   $fetched++;
 }
 printf "fetched %d new segment(s) of %d archived on %s\n", $fetched, scalar(@names), $host;

@@ -4,27 +4,29 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createServer } from 'net';
-import { REPLICATION_SCRIPTS } from '../src/utils/replication';
+import { JOB_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
+
+const SCRIPTS: Record<string, string> = { ...REPLICATION_SCRIPTS, ...JOB_SCRIPTS };
 
 const hasPerl = spawnSync('perl', ['-v']).status === 0;
 const dir = mkdtempSync(join(tmpdir(), 'fb-repl-scripts-'));
 
 describe('replication scripts shipped to instance pods', () => {
-  it.each(Object.keys(REPLICATION_SCRIPTS).filter((name) => name.endsWith('.pl')))(
+  it.each(Object.keys(SCRIPTS).filter((name) => name.endsWith('.pl')))(
     '%s compiles with core perl only',
     (name) => {
       if (!hasPerl) return;
       const file = join(dir, name);
-      writeFileSync(file, REPLICATION_SCRIPTS[name]);
+      writeFileSync(file, SCRIPTS[name]);
       expect(() => execFileSync('perl', ['-c', file], { stdio: 'pipe' })).not.toThrow();
       // the Firebird image ships perl-base only; HTTP::Tiny, File::Copy, Digest::* are absent
-      expect(REPLICATION_SCRIPTS[name]).not.toMatch(/^use (HTTP::|File::Copy|Digest::|LWP)/m);
+      expect(SCRIPTS[name]).not.toMatch(/^use (HTTP::|File::Copy|Digest::|LWP)/m);
     },
   );
 
-  it('init-instance.sh is valid POSIX sh', () => {
-    const file = join(dir, 'init-instance.sh');
-    writeFileSync(file, REPLICATION_SCRIPTS['init-instance.sh']);
+  it.each(Object.keys(SCRIPTS).filter((name) => name.endsWith('.sh')))('%s is valid POSIX sh', (name) => {
+    const file = join(dir, name);
+    writeFileSync(file, SCRIPTS[name]);
     expect(() => execFileSync('sh', ['-n', file], { stdio: 'pipe' })).not.toThrow();
   });
 
@@ -129,13 +131,14 @@ describe('replication scripts shipped to instance pods', () => {
         requests.push(line);
         const [, cmd, name] = line.split(' ');
         if (cmd === 'LIST') sock.end(Object.keys(segments).join('\n') + '\nnot-a-segment\n.\n');
+        else if (cmd === 'ARCHIVED') sock.end('1 7200\n2 3600\n3 60\n.\n');
         else sock.end(`OK ${segments[name].length}\n${segments[name]}`);
       });
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;
     const script = join(dir, 'fetch-segments.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['fetch-segments.pl']);
+    writeFileSync(script, JOB_SCRIPTS['fetch-segments.pl']);
     const out = mkdtempSync(join(tmpdir(), 'fb-segments-'));
     const skip = join(out, 'uploaded');
     writeFileSync(skip, 'mydb.fdb.journal-0000000001\n');
@@ -148,9 +151,100 @@ describe('replication scripts shipped to instance pods', () => {
     });
     server.close();
 
-    expect(requests).toEqual(['tok LIST', 'tok GET mydb.fdb.journal-0000000002', 'tok GET mydb.fdb.journal-0000000003']);
-    expect(readdirSync(segDir).sort()).toEqual(['mydb.fdb.journal-0000000002', 'mydb.fdb.journal-0000000003']);
+    expect(requests).toEqual([
+      'tok LIST',
+      'tok ARCHIVED',
+      'tok GET mydb.fdb.journal-0000000002',
+      'tok GET mydb.fdb.journal-0000000003',
+    ]);
+    const files = readdirSync(segDir).sort();
+    expect(files.filter((f) => !f.includes('.archived-'))).toEqual(['mydb.fdb.journal-0000000002', 'mydb.fdb.journal-0000000003']);
     expect(readFileSync(join(segDir, 'mydb.fdb.journal-0000000003'), 'utf8')).toBe('three');
+    // archive time markers (empty), for point-in-time recovery: now minus the age on the primary
+    const markers = files.filter((f) => f.includes('.archived-'));
+    expect(markers).toHaveLength(2);
+    const at = (seq: string) => {
+      const m = markers.find((f) => f.startsWith(`mydb.fdb.journal-000000000${seq}.archived-`))!;
+      const [, y, mo, d, h, mi, sec] = /archived-(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(m)!;
+      return Date.UTC(+y, +mo - 1, +d, +h, +mi, +sec);
+    };
+    expect(Math.abs(at('3') - (Date.now() - 60_000))).toBeLessThan(10_000);
+    expect(Math.abs(at('2') - (Date.now() - 3_600_000))).toBeLessThan(10_000);
+    expect(readFileSync(join(segDir, markers[0]), 'utf8')).toBe('');
+  });
+});
+
+describe('pitr-plan.pl', () => {
+  const BEGIN = 1;
+  const END = 2;
+  /** A journal segment: [transaction, flags] blocks with a few payload bytes each */
+  const segment = (seq: number, blocks: Array<[number, number]>): Buffer => {
+    const body = Buffer.concat(
+      blocks.map(([tra, flags]) => {
+        const b = Buffer.alloc(16 + 3);
+        b.writeBigUInt64LE(BigInt(tra), 0);
+        b.writeUInt16LE(1, 8);
+        b.writeUInt16LE(flags, 10);
+        b.writeUInt32LE(3, 12);
+        return b;
+      }),
+    );
+    const h = Buffer.alloc(48);
+    h.write('FBCHANGELOG', 0, 'latin1');
+    h.writeUInt16LE(1, 12);
+    h.writeUInt16LE(3, 14);
+    h.writeBigUInt64LE(BigInt(seq), 32);
+    h.writeBigUInt64LE(BigInt(48 + body.length), 40);
+    return Buffer.concat([h, body]);
+  };
+  // backup at segment 5, transactions 100..109 in the copy; 100 and 105 not committed in it
+  const SEGMENTS: Record<number, Array<[number, number]>> = {
+    4: [[90, BEGIN | END], [100, BEGIN]],
+    5: [[100, 0], [105, BEGIN], [101, BEGIN | END]],
+    6: [[100, END], [112, BEGIN], [105, END], [112, END]],
+  };
+  const plan = (seqs: number[], extra: Record<number, Array<[number, number]>> = {}) => {
+    const segDir = mkdtempSync(join(tmpdir(), 'fb-pitr-'));
+    for (const seq of seqs) {
+      writeFileSync(join(segDir, `db.fdb.journal-${String(seq).padStart(9, '0')}`), segment(seq, extra[seq] ?? SEGMENTS[seq]));
+    }
+    const candidates = join(segDir, 'candidates');
+    writeFileSync(candidates, '100\n105\n');
+    const control = join(segDir, '{GUID}');
+    const script = join(dir, 'pitr-plan.pl');
+    writeFileSync(script, JOB_SCRIPTS['pitr-plan.pl']);
+    const r = spawnSync('perl', [script, segDir, '5', '100', '110', candidates, '6', control], { encoding: 'utf8' });
+    return { status: r.status, out: r.stdout + r.stderr, control };
+  };
+
+  it('asks for earlier segments until every open transaction starts in the directory', () => {
+    if (!hasPerl) return;
+    const r = plan([5, 6]);
+    expect(r.status).toBe(3);
+    expect(r.out).toContain('need 4');
+    expect(r.out).toContain('100 started before segment 5');
+  });
+
+  it('records the transactions open in the backup from their first segment', () => {
+    if (!hasPerl) return;
+    const r = plan([4, 5, 6]);
+    expect(r.status).toBe(0);
+    expect(r.out).toContain('replay: segments 6 to 6, and 2 transaction(s) open in the backup (100 from segment 4, 105 from segment 5)');
+    const out = readFileSync(r.control);
+    expect(out.subarray(0, 9).toString()).toBe('FBREPLCTL');
+    expect(out.readUInt32LE(12)).toBe(2); // txn_count
+    expect(out.readBigUInt64LE(16)).toBe(5n); // applied up to the backup's segment
+    expect(out.readUInt32LE(24)).toBe(0);
+    expect(out.readBigUInt64LE(32)).toBe(5n); // db_sequence: the restored header's
+    expect([out.readBigUInt64LE(40), out.readBigUInt64LE(48), out.readBigUInt64LE(56), out.readBigUInt64LE(64)]).toEqual([100n, 4n, 105n, 5n]);
+  });
+
+  it('refuses a gap, and changes after the backup of a transaction complete in it', () => {
+    if (!hasPerl) return;
+    expect(plan([4, 6]).out).toContain('segment 5 is missing');
+    const late = plan([4, 5, 6], { 6: [[101, END]] });
+    expect(late.status).toBe(1);
+    expect(late.out).toContain('transaction 101 is complete in the backup but has changes in segment 6');
   });
 });
 

@@ -48,7 +48,6 @@ export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.from
     'init-instance.sh',
     'replica-control.pl',
     'enable-publication.sql',
-    'fetch-segments.pl',
     'backup-file.pl',
     'set-repl-seq.pl',
     'switchover.pl',
@@ -56,6 +55,17 @@ export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.from
   ].map(
     (name) => [name, readFileSync(join(SCRIPT_DIR, name), 'utf8')],
   ),
+);
+
+/**
+ * Scripts only Jobs run (journal archive, point-in-time recovery), shipped in every cluster's
+ * ConfigMap. Not part of any pod template hash: changing them restarts no instance.
+ */
+export const JOB_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
+  ['fetch-segments.pl', 'pitr-plan.pl', 'pitr-restore.sh'].map((name) => [
+    name,
+    readFileSync(join(SCRIPT_DIR, name), 'utf8'),
+  ]),
 );
 
 /** Returns true when journal replication is configured for the cluster */

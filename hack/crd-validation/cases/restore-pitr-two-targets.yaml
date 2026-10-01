@@ -1,0 +1,12 @@
+# expect: targetTime and targetSegment are mutually exclusive
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRestore
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  backupPath: l0.nbk
+  restoreType: physical
+  pointInTime:
+    targetTime: "2026-10-01T10:15:00Z"
+    targetSegment: 42
