@@ -8,9 +8,14 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Report the publication hang upstream** ([ISSUES.md](ISSUES.md) issue 1) with
   `hack/repro/publication-under-load.sh`, capture thread stacks of the hung server, and track the
   fix version. Replication stays experimental until then.
-- [ ] **Confirm or rule out the commit/TIP window** ([ISSUES.md](ISSUES.md) issue 2) with more
-  `hack/repro/replica-seed-race.sh` runs; until then keep `allowLiveSeedFromPrimary` off by
-  default.
+- [ ] **Report the commit/TIP window upstream** ([ISSUES.md](ISSUES.md) issue 2, confirmed):
+  replicas created with Firebird's documented procedure (`nbackup -L`, `-SEQ -F`) lose the
+  transactions committed at the moment of the lock (`hack/repro/replica-seed-race.sh`).
+- [ ] **Live seeds by default**: the operator's live seed handles the window (verified, 4 of 4
+  runs under 8 writers), but it plans with transactions in [OAT, next) only; move it to
+  `pitr-plan.pl` (transactions started after the copy's next transaction, first-block check),
+  then consider making live seeding the fallback when the offline seed is stale, which would
+  also refresh seeding online (next item).
 - [ ] **Refresh the offline bootstrap seed online**: the seed is refreshed when the primary
   starts after a clean stop, and the segments after it are kept up to `maxSegmentRetentionHours`
   while there is no replica. A primary running longer than that without a restart, and without a
