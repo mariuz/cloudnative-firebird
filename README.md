@@ -12,7 +12,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **StatefulSet-based** deployment for stable pod identity and storage
 - **Persistent storage** via PersistentVolumeClaims, with online volume expansion when `spec.storage.size` grows
 - **Declarative hibernation** (`spec.hibernated`) that scales to zero while keeping data
-- **Journal-based asynchronous replication** (Firebird 4.0+, experimental) with replicas seeded without locking the primary
+- **Journal-based asynchronous replication** (Firebird 4, 5 and the 6.0 snapshot, experimental) with replicas seeded without locking the primary
 - **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical and physical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
 - **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
 - **Declarative users** (`FirebirdUser`, after CloudNativePG's `DatabaseRole`) with Secret-backed passwords, role grants and a reclaim policy; users persist across pod restarts
@@ -64,6 +64,26 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 
 - Kubernetes cluster (1.24+)
 - `kubectl` configured to point at your cluster
+
+### Firebird versions
+
+The operator runs the official [`firebirdsql/firebird`](https://hub.docker.com/r/firebirdsql/firebird)
+images (`spec.imageName`, default `firebirdsql/firebird:latest`, currently 5.0). Replication,
+planned switchover, failover, fencing, re-seeding, backups and restores, and point-in-time
+recovery (into a running cluster or as a bootstrap) were verified end to end with:
+
+| Image | Server | ODS |
+|-------|--------|-----|
+| `firebirdsql/firebird:4` | 4.0.7 | 13.0 |
+| `firebirdsql/firebird:5` (`latest`) | 5.0.4 | 13.1 |
+| `firebirdsql/firebird:6-snapshot` | 6.0.0.2191 (snapshot, commit 4ca39c2) | 14.0 |
+
+Firebird 6 is not released yet: a snapshot is a development build, and its on-disk structure can
+still change before the release. Two Firebird 6 changes matter to the operator, both handled:
+the header page layout of ODS 14 (switchover writes the replication sequence there), and header
+statistics through the service manager, which Firebird 6 refuses for a database in full shutdown
+([ISSUES.md](ISSUES.md), issue 7). Firebird 6 also names journal segments
+`<database>_<guid>.journal-<n>`.
 
 ### Install the CRDs
 

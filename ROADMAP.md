@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.46.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.47.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Firebird 4 and 6 Verified** *(v0.47.0)*
+  - Replication (seeding, switchover, failover, re-seeding, fencing), backups, restores and point-in-time recovery verified end to end with operator-generated pods on `firebirdsql/firebird:4` (4.0.7) and `firebirdsql/firebird:6-snapshot` (6.0.0.2191), besides Firebird 5.
+  - Firebird 6 (ODS 14) moved the header page fields: `set-repl-seq.pl` (switchover, failover) now reads the ODS version and uses the ODS 13 or 14 layout, and refuses an unknown one.
+  - Firebird 6 refuses header statistics for a database in full shutdown (ISSUES.md, issue 7): switchover reads the old primary's final sequence through its segment server (`HEADER`, from the header page on disk), and the fencing Job takes the refusal as "in full shutdown".
 - [x] **Bootstrap to a Point in Time** *(v0.46.0)*
   - `bootstrap.recovery.pointInTime` (with `incrementalPaths` and a required `journalS3`): before the StatefulSet exists, the operator creates the first instance's volume under the StatefulSet's claim name and runs the Job `<cluster>-pitr-recovery` on it (CloudNativePG's recovery Job). The Job replays the journal archive like a point-in-time `FirebirdRestore` and leaves the database where the instances' init containers expect a restored one (`.bootstrap.fdb` with replication). The cluster stays `Creating` until it completes, then the StatefulSet adopts the volume. Kubernetes 1.24+ has no native sidecars, so the S3 client runs alongside the Firebird container in a Job rather than in init containers.
   - Validated by the operator and CRD CEL rules: an nbackup source in S3, a journal archive other than the new cluster's own, replication for more than one instance.

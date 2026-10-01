@@ -78,7 +78,11 @@ export function buildFencingJob(cluster: FirebirdCluster, pod: string, action: F
     'app.kubernetes.io/component': 'fencing',
     [FENCING_ACTION_LABEL]: action,
   };
-  const header = 'hdr=$(fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_db_stats dbname "$DATABASE_PATH" sts_hdr_pages); ';
+  // Firebird 6 refuses header statistics for a database in full shutdown ("database ... shutdown"):
+  // that answer means fenced as well
+  const header =
+    'hdr=$(fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_db_stats dbname "$DATABASE_PATH" sts_hdr_pages 2>&1) || ' +
+    '{ echo "$hdr" | grep -q "^database .* shutdown" || { echo "$hdr" >&2; exit 1; }; hdr="full shutdown"; }; ';
   const script =
     action === 'fence'
       ? header +
