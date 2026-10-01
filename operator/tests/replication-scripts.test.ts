@@ -117,6 +117,63 @@ describe('replication scripts shipped to instance pods', () => {
     expect(out.readBigUInt64LE(64)).toBe(7n);
   });
 
+  describe('replica-control.pl --next (live seeds)', () => {
+    /** Runs replica-control.pl against a stand-in segment server answering `reply(command)` */
+    const plan = async (reply: (cmd: string) => string) => {
+      const { createServer } = await import('net');
+      const requests: string[] = [];
+      const server = createServer((sock) => {
+        sock.once('data', (buf) => {
+          const line = buf.toString().trim();
+          requests.push(line);
+          sock.end(reply(line.split(' ')[1]));
+        });
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const port = (server.address() as { port: number }).port;
+      const script = join(dir, 'replica-control.pl');
+      writeFileSync(script, REPLICATION_SCRIPTS['replica-control.pl']);
+      const target = join(dir, `{GUID-${requests.length}-${Math.random()}}`);
+      const result = await new Promise<{ code: number | null; text: string }>((resolve) => {
+        const child = spawn('perl', [script, '--next', '40', '127.0.0.1', '9', '9', target, '30', '12'], {
+          env: { ...process.env, SEGMENT_PORT: String(port), ISC_PASSWORD: 'tok' },
+        });
+        let text = '';
+        child.stdout.on('data', (d) => (text += d));
+        child.stderr.on('data', (d) => (text += d));
+        child.on('exit', (code) => resolve({ code, text }));
+      });
+      server.close();
+      return { ...result, requests, target };
+    };
+
+    it('records the candidates and the transactions after the copy\'s next one from PLAN', async () => {
+      if (!hasPerl) return;
+      // 12 began in segment 2 (long before the lock), 41 started after the copy's next transaction
+      const r = await plan(() => '12 2 1\n30 9 1\n41 9 1\n.\n');
+      expect(r.code).toBe(0);
+      expect(r.requests).toEqual(['tok PLAN 9 40 30,12']);
+      const out = readFileSync(r.target);
+      expect(out.readUInt32LE(12)).toBe(3);
+      expect([40, 48, 56, 64, 72, 80].map((o) => out.readBigUInt64LE(o))).toEqual([12n, 2n, 30n, 9n, 41n, 9n]);
+    });
+
+    it('refuses a transaction whose first archived block does not begin it', async () => {
+      if (!hasPerl) return;
+      const r = await plan(() => '12 4 0\n.\n');
+      expect(r.code).not.toBe(0);
+      expect(r.text).toContain('transaction 12 began before the oldest archived segment');
+    });
+
+    it('falls back to TXNS on a segment server without PLAN', async () => {
+      if (!hasPerl) return;
+      const r = await plan((cmd) => (cmd === 'PLAN' ? 'ERR bad request\n' : '12 5\n.\n'));
+      expect(r.code).toBe(0);
+      expect(r.requests).toEqual(['tok PLAN 9 40 30,12', 'tok TXNS 9 30,12']);
+      expect(readFileSync(r.target).readUInt32LE(12)).toBe(1);
+    });
+  });
+
   it('fetch-segments.pl fetches archived segments that are not uploaded yet', async () => {
     if (!hasPerl) return;
     const segments: Record<string, string> = {

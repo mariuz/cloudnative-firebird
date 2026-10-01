@@ -108,7 +108,8 @@ as not committed (`RDB$GET_TRANSACTION_CN` -2). Persistent connections avoid iss
 | `tip-window.sh`, 8 writers | 20 backups | 27 window transactions, in 18 of the 20 copies |
 | `replica-seed-race.sh`, 8 writers, persistent connections | 3 | 2 transactions lost on the replica in every run |
 | `replica-seed-race.sh`, 1 to 4 writers (earlier) | 6 | none lost |
-| the operator's live seed (`allowLiveSeedFromPrimary`), 8 writers | 4 | replica identical to the primary; e.g. 4 window transactions replayed from segment 3 |
+| the operator's live seed (`allowLiveSeedFromPrimary`), 8 writers | 6 | replica identical to the primary; e.g. 4 window transactions replayed from segment 3 |
+| the same with a transaction of 200 000 rows journaled two segments before the lock and committed after it | 1 | replica identical (224 008 rows); the transaction replayed from segment 1 |
 
 With per-row conflicts the loss is partly masked: the next transaction's update of the missing
 row is applied as an insert ("record being updated does not exist, inserting instead"), so the
@@ -121,9 +122,13 @@ row counts match and only the lost transaction's other changes are missing.
    database was created in the init container, before the server started;
 3. a locked copy of the live primary is used only with
    `spec.replication.allowLiveSeedFromPrimary: true`. For those seeds, the new replica lists
-   the copy's uncommitted transactions (`RDB$GET_TRANSACTION_CN <= 0`) that the primary's
-   journal contains in its replica control file, so Firebird replays exactly those
-   transactions: the window transactions are among them.
+   in its replica control file the copy's uncommitted transactions (`RDB$GET_TRANSACTION_CN
+   <= 0`) and the transactions numbered from the copy's next transaction on that the primary's
+   journal has blocks of in segments <= *S*, each from its first segment (`PLAN` on the
+   primary's segment server, which scans its whole archive), so Firebird replays exactly those
+   transactions: the window transactions are among them. A transaction whose first archived
+   block does not begin it (it began in a segment already pruned) fails the seed rather than
+   being replayed partially.
 
 Point-in-time recovery plans the same way (`pitr-plan.pl`, which also covers transactions
 started after the copy's next transaction and checks that each starts in the segments it has).

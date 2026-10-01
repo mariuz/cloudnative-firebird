@@ -103,5 +103,5 @@ print $out pack('a10 v V Q< V x4 Q<', 'FBREPLCTL', 1, scalar(@active), $base, 0,
 print $out pack('Q< Q<', $_, $first{$_}) for @active;
 close $out or die "write $control.tmp: $!\n";
 rename("$control.tmp", $control) or die "rename $control: $!\n";
-print "replay: segments " . ($base + 1) . " to $last, and " . scalar(@active) . " transaction(s) open in the backup"
+print "replay: " . ($last > $base ? "segments " . ($base + 1) . " to $last, and " : '') . scalar(@active) . " transaction(s) open in the backup"
   . (@active ? " (" . join(', ', map { "$_ from segment $first{$_}" } @active) . ")" : '') . "\n";

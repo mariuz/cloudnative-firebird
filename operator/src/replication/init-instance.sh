@@ -251,7 +251,8 @@ case "$kind" in
     candidates=""
     if [ "$kind" = live ]; then
       # Transactions not committed in the copy: open at lock time, or committed on the primary
-      # with the commit journaled before the lock but the commit mark written after it.
+      # with the commit journaled before the lock but the commit mark written after it
+      # (ISSUES.md, issue 2).
       candidates=$(printf '%s\n' 'SET TERM ^;' \
         "EXECUTE BLOCK RETURNS (t BIGINT) AS BEGIN t = $oat; WHILE (t < $next) DO BEGIN
            IF (COALESCE(RDB\$GET_TRANSACTION_CN(t), 0) <= 0) THEN SUSPEND; t = t + 1; END END^" |
@@ -261,7 +262,11 @@ case "$kind" in
     echo "ALTER DATABASE DISABLE PUBLICATION; COMMIT;" | isql -q "$work"
     gfix -replica read_only "$work"
     # shellcheck disable=SC2086 # candidates is a space-separated id list
-    perl "$SCRIPT_DIR/replica-control.pl" "$primary" "$seq" "$(seq_of "$work")" "$SOURCE_DIR/.control.tmp" $candidates
+    # live copies: transactions started at or after the copy's next transaction count as well
+    next_opt=""
+    [ "$kind" = live ] && next_opt="--next $next"
+    # shellcheck disable=SC2086 # next_opt and candidates are space-separated words
+    perl "$SCRIPT_DIR/replica-control.pl" $next_opt "$primary" "$seq" "$(seq_of "$work")" "$SOURCE_DIR/.control.tmp" $candidates
     ;;
 esac
 

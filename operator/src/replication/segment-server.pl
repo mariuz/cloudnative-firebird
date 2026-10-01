@@ -7,6 +7,10 @@
 #   "<token> SEED\n"           -> "OK <dbsize> <ctlsize> <kind>\n" + database bytes + control bytes
 #   "<token> TXNS <S> <ids>\n" -> "<id> <segment>" for each listed transaction with blocks in
 #                                 archived segments <= S (its first such segment), then ".\n"
+#   "<token> PLAN <S> <next> <ids>\n" -> "<id> <segment> <begins>" for each listed transaction, and
+#                                 each transaction numbered <next> or above, with blocks in archived
+#                                 segments <= S: its first such segment, and 1 when that block begins
+#                                 the transaction (0: it began in a segment no longer archived)
 #   "<token> POSITION\n"       -> replica: "OK <sequence> <offset> <pending>", the replica control
 #                                 file position and the number of received segments beyond it;
 #                                 primary: "OK primary" (used by planned switchover)
@@ -150,8 +154,11 @@ sub archived_sequences {
   return sort { $a <=> $b } grep { defined } map { segment_sequence("$dir/$_") } segments();
 }
 
+# First archived segment <= $upto holding a block of each wanted transaction (and, with $next, of
+# every transaction numbered $next or above), and whether that block begins the transaction
+# (BLOCK_BEGIN_TRANS): returns { id => [segment, begins] }
 sub first_segments {
-  my ($upto, $wanted) = @_;   # $wanted: hashref of transaction ids
+  my ($upto, $wanted, $next) = @_;   # $wanted: hashref of transaction ids
   my %first;
   my @files = map { [$_, segment_sequence("$dir/$_")] } segments();
   for my $entry (sort { $a->[1] <=> $b->[1] } grep { defined $_->[1] && $_->[1] <= $upto } @files) {
@@ -163,8 +170,10 @@ sub first_segments {
     while ($pos + 16 <= $length) {
       seek($fh, $pos, 0);
       last unless read($fh, my $blk, 16) == 16;
-      my ($tra, undef, undef, $len) = unpack('Q< v v V', $blk);
-      $first{$tra} //= $seq if $wanted->{$tra};
+      my ($tra, undef, $flags, $len) = unpack('Q< v v V', $blk);
+      if ($tra && !$first{$tra} && ($wanted->{$tra} || (defined $next && $tra >= $next))) {
+        $first{$tra} = [$seq, ($flags & 1) ? 1 : 0];
+      }
       $pos += 16 + $len;
     }
     close $fh;
@@ -421,7 +430,16 @@ while (1) {
       print $client "ERR segment $upto not archived yet\n";
     } else {
       my $first = first_segments($upto, \%wanted);
-      print $client "$_ $first->{$_}\n" for sort { $a <=> $b } keys %$first;
+      print $client "$_ $first->{$_}[0]\n" for sort { $a <=> $b } keys %$first;
+      print $client ".\n";
+    }
+  } elsif ($cmd eq 'PLAN' && defined $arg && $arg =~ /^(\d+) (\d+) ([\d,]*)$/) {
+    my ($upto, $next, %wanted) = ($1, $2, map { $_ => 1 } grep { length } split /,/, $3);
+    if (!wait_for(120, sub { my @s = archived_sequences(); @s && $s[-1] >= $upto })) {
+      print $client "ERR segment $upto not archived yet\n";
+    } else {
+      my $first = first_segments($upto, \%wanted, $next);
+      print $client "$_ $first->{$_}[0] $first->{$_}[1]\n" for sort { $a <=> $b } keys %$first;
       print $client ".\n";
     }
   } elsif ($cmd eq 'HEADER') {

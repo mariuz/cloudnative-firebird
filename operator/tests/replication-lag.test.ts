@@ -523,3 +523,64 @@ describe.skipIf(!hasPerl)('segment-server.pl HEADER', () => {
     }
   });
 });
+
+describe.skipIf(!hasPerl)('segment-server.pl PLAN', () => {
+  /** A journal segment with [transaction, flags] blocks (BEGIN 1, END 2) */
+  const segment = (seq: number, blocks: Array<[number, number]>) => {
+    const body = Buffer.concat(
+      blocks.map(([tra, flags]) => {
+        const b = Buffer.alloc(19);
+        b.writeBigUInt64LE(BigInt(tra), 0);
+        b.writeUInt16LE(flags, 10);
+        b.writeUInt32LE(3, 12);
+        return b;
+      }),
+    );
+    const h = Buffer.alloc(48);
+    h.write('FBCHANGELOG', 0, 'latin1');
+    h.writeBigUInt64LE(BigInt(seq), 32);
+    h.writeBigUInt64LE(BigInt(48 + body.length), 40);
+    return Buffer.concat([h, body]);
+  };
+
+  it('reports first segments, ids after the next transaction, and whether each block begins it', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'segsrv-'));
+    for (const d of ['archive', 'source', 'repl']) mkdirSync(join(root, d));
+    // segment 1 was pruned: 7 began there, so its first archived block (segment 2) does not begin it
+    writeFileSync(join(root, 'archive', 'db.fdb.journal-000000002'), segment(2, [[7, 0], [12, 1], [5, 3]]));
+    writeFileSync(join(root, 'archive', 'db.fdb.journal-000000003'), segment(3, [[12, 0], [41, 1], [30, 1]]));
+    writeFileSync(join(root, 'archive', 'db.fdb.journal-000000004'), segment(4, [[50, 1]]));
+    const script = join(root, 'segment-server.pl');
+    writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
+    writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
+    const port = 20000 + Math.floor(Math.random() * 20000);
+    const child = spawn('perl', [script], {
+      env: {
+        ...process.env,
+        ARCHIVE_DIR: join(root, 'archive'),
+        DATABASE_PATH: join(root, 'db.fdb'),
+        SOURCE_DIR: join(root, 'source'),
+        REPLICATION_DIR: join(root, 'repl'),
+        PRIMARY_FILE: join(root, 'repl', 'primary'),
+        POD_NAME: 'db-0',
+        ISC_PASSWORD: 'tok',
+        SEGMENT_PORT: String(port),
+      },
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.on('data', (d) => d.toString().includes('listening') && resolve());
+        child.once('exit', (code) => reject(new Error(`segment server exited ${code}`)));
+      });
+      const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
+        '../src/utils/replication-lag',
+      );
+      // candidates 7, 12 and 99 (not journaled); next transaction 40: 41 counts, 50 is after S
+      expect(await segmentRequest('127.0.0.1', port, 'tok PLAN 3 40 7,12,99')).toEqual(['7 2 0', '12 2 1', '41 3 1']);
+      // the older command is unchanged
+      expect(await segmentRequest('127.0.0.1', port, 'tok TXNS 3 7,12')).toEqual(['7 2', '12 2']);
+    } finally {
+      child.kill();
+    }
+  });
+});
