@@ -324,7 +324,7 @@ export interface FirebirdClusterSpec {
   instances: number;
   /**
    * Docker image name for Firebird.
-   * Defaults to firebirdsql/firebird:latest
+   * Defaults to the operator's FIREBIRD_DEFAULT_IMAGE, or firebirdsql/firebird:latest
    */
   imageName?: string;
   /** Reference to the Secret containing the superuser password (SYSDBA) */
@@ -600,8 +600,12 @@ export interface FirebirdClusterList {
   items: FirebirdCluster[];
 }
 
-/** Default Firebird Docker image */
-export const DEFAULT_FIREBIRD_IMAGE = 'firebirdsql/firebird:latest';
+/**
+ * Firebird image of clusters without spec.imageName: the operator's FIREBIRD_DEFAULT_IMAGE
+ * environment variable (e.g. a mirror in a private registry, or another Firebird version), or
+ * firebirdsql/firebird:latest. Changing it updates those clusters like any image change.
+ */
+export const DEFAULT_FIREBIRD_IMAGE = process.env.FIREBIRD_DEFAULT_IMAGE?.trim() || 'firebirdsql/firebird:latest';
 
 /** API group for the FirebirdCluster CRD */
 export const API_GROUP = 'firebird.cloudnative-firebird.io';

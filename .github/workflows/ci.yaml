@@ -39,9 +39,20 @@ jobs:
         run: npm test -- --coverage
 
   integration-tests:
-    name: Integration Tests (kind)
+    # one run per Firebird version: the operator's FIREBIRD_DEFAULT_IMAGE (unset: latest, Firebird 5)
+    # applies to every cluster below, none sets spec.imageName
+    name: Integration Tests (kind${{ matrix.firebird.suffix }})
     runs-on: ubuntu-latest
     needs: unit-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        firebird:
+          - { suffix: "", image: "" }
+          - { suffix: ", Firebird 4", image: "firebirdsql/firebird:4" }
+          # a development build: its failures are reported but do not fail the workflow
+          - { suffix: ", Firebird 6 snapshot", image: "firebirdsql/firebird:6-snapshot", experimental: true }
+    continue-on-error: ${{ matrix.firebird.experimental == true }}
     steps:
       - uses: actions/checkout@v4
 
@@ -80,6 +91,10 @@ jobs:
           # Patch deployment to use the locally built image and avoid pulling from registry
           sed 's|image: ghcr.io/mariuz/cloudnative-firebird:latest|image: cloudnative-firebird:ci|;s|imagePullPolicy: Always|imagePullPolicy: Never|' \
             config/deploy/deployment.yaml | kubectl apply -f -
+          if [ -n "${{ matrix.firebird.image }}" ]; then
+            kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system \
+              FIREBIRD_DEFAULT_IMAGE="${{ matrix.firebird.image }}"
+          fi
 
       - name: Wait for operator to be ready
         run: |
@@ -140,6 +155,15 @@ jobs:
           kubectl exec test-cluster-0 -- bash -c \
             "echo \"select 'rows=' || count(*) from ci_probe;\" | isql localhost:/var/lib/firebird/data/mydb.fdb" | tee /tmp/probe.txt
           grep -q 'rows=1' /tmp/probe.txt
+
+      - name: Verify the Firebird version under test
+        run: |
+          want="${{ matrix.firebird.image }}"
+          want=${want:-firebirdsql/firebird:latest}
+          image=$(kubectl get pod test-cluster-0 -o jsonpath='{.spec.containers[?(@.name=="firebird")].image}')
+          echo "instance image: $image (expected $want)"
+          [ "$image" = "$want" ]
+          kubectl exec test-cluster-0 -c firebird -- sh -c 'isql -z </dev/null | head -n 1'
 
       - name: Verify spec updates are patched onto the StatefulSet
         run: |
