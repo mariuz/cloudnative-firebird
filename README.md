@@ -605,8 +605,44 @@ Clusters are paused with `spec.suspended`.
 
 With replication enabled, only the primary bootstraps; replicas are then seeded by replication.
 With `replication.journalArchiveS3`, a CronJob copies archived journal segments from the
-primary's segment server to `<prefix>/journals/` (replaying them for point-in-time recovery is
-not implemented yet; see TODO.md).
+primary's segment server to `<prefix>/journals/`, each with an empty marker object
+`<segment>.archived-<YYYYMMDDTHHMMSSZ>` recording when the primary archived it.
+
+**Point-in-time recovery.** A physical restore with `pointInTime` replays the archived journal on
+top of an `nbackup` chain (taken on the primary), up to a target:
+
+```yaml
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRestore
+metadata:
+  name: before-the-bad-deploy
+spec:
+  clusterName: my-cluster
+  restoreType: physical
+  backupPath: nbackup-l0-weekly-20261001T000000Z.nbk
+  incrementalBackupPaths: [nbackup-l1-daily-20261004T000000Z.nbk]
+  s3: { bucket: firebird-backups, prefix: my-cluster, secretRef: { name: s3-credentials } }
+  pointInTime:
+    targetTime: "2026-10-04T10:15:00Z"   # or targetSegment: 1234; neither: every archived segment
+    # journalS3: {...}                   # default: the cluster's replication.journalArchiveS3
+```
+
+The restore Job restores the chain into a scratch database in the Job pod, keeping its
+replication sequence (`nbackup -SEQ -R`), makes it a read-only replica and lets a private Firebird
+server in the pod apply the archived segments to it, like a replica would. It then makes the
+database a normal one and restores it into the target database on the primary, like any physical
+restore. The `nbackup` lock switches the journal to a new segment, so the segments after the
+backup's sequence hold exactly the later changes; transactions still open in the backup are
+replayed from their first segment (the Job fetches earlier segments when one started before the
+backup). The Job checks that no transaction complete in the backup has changes after it.
+
+Segments are applied whole: `targetTime` recovers every segment archived at or before it, so the
+recovery point is up to `replication.archiveTimeoutSeconds` (plus the archive delay) before the
+target; transactions not committed by the end of the last segment are rolled back. A target before
+the backup fails the restore. The Job pod needs room for the database twice (scratch database and
+its level-0 copy) plus the chain and the segments. Segments uploaded before v0.45.0 have no
+marker: their upload time stands in for the archive time, which only makes `targetTime` more
+conservative. Server-side chains work too (`backupPath` names directly in the data directory).
 
 ### Users
 

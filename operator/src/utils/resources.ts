@@ -28,6 +28,7 @@ import { PENDING_DROPS_DIR, pendingDropsConfigMapName, pendingDropsInitScript } 
 import {
   PRIMARY_KEY,
   REPLICATION_SCRIPTS,
+  JOB_SCRIPTS,
   RESEED_KEY,
   PROMOTE_KEY,
   DEMOTE_KEY,
@@ -1020,6 +1021,7 @@ export function buildConfigMap(
   } else {
     Object.assign(data, backupFilesConfigData());
   }
+  Object.assign(data, JOB_SCRIPTS);
 
   if (Object.keys(data).length === 0) return null;
 

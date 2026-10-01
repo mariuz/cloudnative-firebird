@@ -4,10 +4,10 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.44.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.45.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
-> (failover, synchronous replication, point-in-time recovery). The latest CloudNativePG changes
+> (failover, synchronous replication). The latest CloudNativePG changes
 > (1.28 – 1.30.1) are reviewed in [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md).
 > Firebird-level problems found along the way are in [ISSUES.md](ISSUES.md), open work in
 > [TODO.md](TODO.md).
@@ -58,10 +58,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 - [x] **Cloud Object Storage Support (S3, GCS, Azure Blob)** *(v0.4.0)*
   - Direct upload of backup archives (`gbak` / `nbackup`) to object storage.
   - Secret-based cloud credentials management (`AWS_ACCESS_KEY_ID`, `GCS_KEY`, etc.).
-- [x] **Point-In-Time Recovery (PITR) & Journal Archiving** *(archiving since v0.5.0, working since v0.10.0)*
+- [x] **Point-In-Time Recovery (PITR) & Journal Archiving** *(archiving since v0.5.0, working since v0.10.0, replay since v0.45.0)*
   - Continuous archiving of Firebird 4.0+ replication journal files to object storage.
-  - Replay of archived journal segments on top of `nbackup` base backups for exact timestamp recovery:
-    not implemented yet (TODO.md).
+  - Replay of archived journal segments on top of `nbackup` base backups up to a target time or
+    segment (`FirebirdRestore.spec.pointInTime`), at segment granularity.
 - [x] **Dedicated Backup CRDs** *(v0.4.0)*
   - `FirebirdBackup`: On-demand backup custom resource.
   - `FirebirdScheduledBackup`: Cron-based scheduled backup custom resource with retention rules.
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Point-In-Time Recovery** *(v0.45.0)*
+  - `FirebirdRestore.spec.pointInTime` (`targetTime`, `targetSegment`, or every archived segment; `journalS3` defaults to the cluster's journal archive): the restore Job restores the `nbackup` chain into a scratch database with its replication sequence (`nbackup -SEQ -R`), makes it a read-only replica and lets a private Firebird server in the Job pod apply the archived segments, then restores the result into the target database on the primary. An S3 client container in the pod lists the archive and downloads the segments the replay asks for.
+  - The `nbackup` lock switches the journal (`BEGIN BACKUP`), so the segments after the backup's sequence hold the later changes; `pitr-plan.pl` writes the replica control file with every transaction open in the backup (not committed in it, or started after its next transaction) and its first segment, fetching earlier segments until each one starts in the directory, and refuses a transaction complete in the backup with changes after it. Verified with Firebird 5: concurrent writers, a long transaction open across both backups whose journal blocks were flushed segments before the base, and cuts between segments.
+  - The journal archive Job records each segment's archive time as an empty marker object (`<segment>.archived-<time>`, from `ARCHIVED`). The Job scripts (`fetch-segments.pl`, `pitr-plan.pl`, `pitr-restore.sh`) are no longer hashed into the instance pod templates.
 - [x] **Physical Backups From a Replica** *(v0.44.0)*
   - `target: prefer-standby` now applies to physical backups to S3: `nbackup` runs in the chosen replica's server (verified with Firebird 5 on a read-only replica, while it keeps applying the primary's segments) and the file is copied through its segment server. Chains live in the backup history of the instance they were taken on. A physical restore clears the replica mode such a backup carries (`prp_rm_none`), so the restored database is writable.
 - [x] **Backup File Server Without Replication** *(v0.43.0)*
@@ -254,7 +258,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Failover / Promotion** | Automated Failover | Election of the most advanced replica (opt-in) | **v0.14.0 (Done)** |
 | **Physical Backup** | Barman Cloud / `pg_basebackup` | `nbackup` (Level 0-2) | **v0.3.0 (Done)** |
 | **Logical Backup** | `pg_dump` / CronJob | `gbak` CronJob & CRDs | **v0.1.0 (Done)** |
-| **PITR (Point-In-Time)** | Continuous Archiving | Journal Archiving to S3 | **v0.5.0 (Done)** |
+| **PITR (Point-In-Time)** | Continuous Archiving | Journal Archiving to S3, replay onto `nbackup` chains | **v0.45.0 (Done)** |
 | **Bootstrap / Restore** | From Backup / Clone | Dedicated Restore & Bootstrap | **v0.5.0 (Done)** |
 | **Node Maintenance** | PDB / Drain Handling | PDB Reconciled | **v0.2.0 (Done)** |
 | **Volume Expansion** | PVC Resize | In-place PVC Expansion | **v0.6.0 (Done)** |

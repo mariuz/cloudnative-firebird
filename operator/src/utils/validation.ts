@@ -329,7 +329,26 @@ export function validateRestoreSpec(restore: FirebirdRestore): void {
     // with s3 they are object keys relative to s3.prefix, like backupPath
     if (!spec.s3) spec.incrementalBackupPaths.forEach((p, i) => validateServerPath(`incrementalBackupPaths[${i}]`, p));
   }
+  const pitr = spec.pointInTime;
+  if (pitr) {
+    if (spec.restoreType && spec.restoreType !== 'physical') {
+      throw new ValidationError('pointInTime applies to physical restores only');
+    }
+    if (pitr.targetTime !== undefined && pitr.targetSegment !== undefined) {
+      throw new ValidationError('pointInTime.targetTime and pointInTime.targetSegment are mutually exclusive');
+    }
+    if (pitr.targetTime !== undefined && (!RFC3339.test(pitr.targetTime) || Number.isNaN(Date.parse(pitr.targetTime)))) {
+      throw new ValidationError(`Invalid pointInTime.targetTime "${pitr.targetTime}": must be an RFC 3339 time, e.g. 2026-10-01T10:15:00Z`);
+    }
+    if (pitr.targetSegment !== undefined && (!Number.isSafeInteger(pitr.targetSegment) || pitr.targetSegment < 1)) {
+      throw new ValidationError('pointInTime.targetSegment must be a positive integer');
+    }
+    validateS3('spec.pointInTime.journalS3', pitr.journalS3);
+  }
 }
+
+/** RFC 3339 date-time (with a time zone offset), as accepted by pointInTime.targetTime */
+const RFC3339 = /^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
 
 /**
  * Validates a FirebirdScheduledBackup custom resource specification.

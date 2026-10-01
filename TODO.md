@@ -35,8 +35,13 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 ## Backups and restore
 
-- [ ] **Point-in-time recovery**: restore an `nbackup` base and replay the archived journal
-  segments from S3 up to a target time. Segments are archived, nothing replays them yet.
+- [ ] **Recovery points within a segment**: point-in-time recovery applies whole journal
+  segments (the journal has no timestamps); a target time lands on the end of the last segment
+  archived before it. A shorter `archiveTimeoutSeconds` narrows the gap.
+- [ ] **Point-in-time recovery from a replica's backup**: the replica's applied position lives in
+  its replica control file, which the backup does not carry; such restores are refused.
+- [ ] **Bootstrap a cluster to a point in time** (`bootstrap.recovery` with a recovery target),
+  instead of restoring into a new database file of a running cluster.
 
 ## Users
 

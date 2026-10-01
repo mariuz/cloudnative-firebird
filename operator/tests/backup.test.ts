@@ -8,7 +8,9 @@ import {
   buildJournalArchiveCronJob,
   buildRestoreJob,
   buildScheduledBackupCronJob,
+  compactUtc,
   jobOutcome,
+  pointInTimeSourceError,
   s3Uri,
   shellQuote,
 } from '../src/utils/backup';
@@ -312,6 +314,67 @@ describe('physical backups and restores with S3', () => {
     expect(env(restore, 'FIREBIRD_HOST')?.value).toBe('db-1.db-headless');
     expect(env(restore, 'TARGET_PATH')?.value).toBe('/var/lib/firebird/data/copy.fdb');
     expect(pod.volumes?.map((v) => v.name)).toEqual(['work', 'cluster-config']);
+  });
+});
+
+describe('point-in-time recovery', () => {
+  const journals = { bucket: 'arch', prefix: 'prod', secretRef: { name: 'arch-creds' } };
+  const replicated = makeCluster({ replication: { enabled: true, journalArchiveS3: journals } });
+  const chain = { type: 'physical' as const, path: 'nbackup-l0-a.nbk', incrementalPaths: ['nbackup-l1-b.nbk'], s3 };
+
+  it('restores the chain, replays the journal archive and restores the result on the primary', () => {
+    const restore = makeRestore({ restoreType: 'physical', pointInTime: { targetTime: '2026-10-01T12:15:30+02:00' } });
+    const pod = podOf(buildRestoreJob(restore, replicated, chain, 'db-1'));
+    const download = pod.initContainers![0];
+    expect(download.env).toContainEqual(expect.objectContaining({ name: 'AWS_ACCESS_KEY_ID', valueFrom: { secretKeyRef: { name: 's3-creds', key: 'AWS_ACCESS_KEY_ID' } } }));
+    expect(download.args![0]).toContain(`s3 cp 's3://bkt/fb/nbackup-l0-a.nbk' /work/chain/0.nbk`);
+    expect(download.args![0]).toContain(`s3 cp 's3://bkt/fb/nbackup-l1-b.nbk' /work/chain/1.nbk`);
+    const [firebird, fetch] = pod.containers;
+    expect(firebird.args![0]).toMatch(/^set -eu; \. \/etc\/firebird-operator\/pitr-restore\.sh; out=\$\(fbsvcmgr/);
+    expect(firebird.args![0]).toContain('action_nrest dbname "$TARGET_PATH" nbk_file "/var/lib/firebird/data/restore-$RESTORE_NAME-pitr.nbk"');
+    expect(env(firebird, 'TARGET_TIME')?.value).toBe('20261001T101530Z');
+    expect(env(firebird, 'TARGET_SEGMENT')).toBeUndefined();
+    expect(env(firebird, 'CHAIN_COUNT')?.value).toBe('2');
+    expect(env(firebird, 'SERVER_CHAIN')).toBeUndefined();
+    expect(env(firebird, 'RESTORE_NAME')?.value).toBe('r1');
+    expect(env(firebird, 'FIREBIRD_HOST')?.value).toBe('db-1.db-headless');
+    // the journal archive is read with its own credentials
+    expect(fetch.name).toBe('journal-fetch');
+    expect(fetch.env).toContainEqual(expect.objectContaining({ valueFrom: { secretKeyRef: { name: 'arch-creds', key: 'AWS_ACCESS_KEY_ID' } } }));
+    expect(fetch.args![0]).toContain(`aws s3 ls 's3://arch/prod/journals/' > $W/journals.tmp`);
+    expect(fetch.args![0]).toContain(`s3 cp --only-show-errors 's3://arch/prod/journals/'"$s" "$W/segments/$s"`);
+    expect(fetch.args![0]).toContain('case "$s" in *[!A-Za-z0-9._-]*)');
+    expect(pod.securityContext?.runAsNonRoot).toBe(true);
+    expect(pod.volumes?.map((v) => v.name)).toEqual(['work', 'cluster-config']);
+  });
+
+  it('takes a server-side chain through the file server, and a journal archive of its own', () => {
+    const restore = makeRestore({
+      restoreType: 'physical',
+      pointInTime: { targetSegment: 42, journalS3: { bucket: 'other' } },
+    });
+    const pod = podOf(
+      buildRestoreJob(restore, makeCluster(), { type: 'physical', path: '/var/lib/firebird/data/l0.nbk', incrementalPaths: ['l1.nbk'] }),
+    );
+    expect(pod.initContainers).toEqual([]);
+    expect(env(pod.containers[0], 'SERVER_CHAIN')?.value).toBe('l0.nbk l1.nbk');
+    expect(env(pod.containers[0], 'TARGET_SEGMENT')?.value).toBe('42');
+    expect(pod.containers[1].args![0]).toContain(`s3 ls 's3://other/journals/'`);
+  });
+
+  it('needs a physical backup, a journal archive and server-side files the file server serves', () => {
+    const restore = makeRestore({ restoreType: 'physical', pointInTime: {} });
+    expect(pointInTimeSourceError(restore, replicated, chain)).toBeUndefined();
+    expect(pointInTimeSourceError(makeRestore(), makeCluster(), chain)).toBeUndefined();
+    expect(pointInTimeSourceError(restore, replicated, { type: 'logical', path: 'b.fbk' })).toContain('physical');
+    expect(pointInTimeSourceError(restore, makeCluster(), chain)).toContain('journal archive');
+    expect(pointInTimeSourceError(restore, replicated, { type: 'physical', path: 'backups/l0.nbk' })).toContain('backups/l0.nbk');
+    expect(pointInTimeSourceError(restore, replicated, { type: 'physical', path: '/var/lib/firebird/data/l0.nbk' })).toBeUndefined();
+  });
+
+  it('converts target times to the archive markers\' UTC form', () => {
+    expect(compactUtc('2026-10-01T10:15:30Z')).toBe('20261001T101530Z');
+    expect(compactUtc('2026-10-01T10:15:30.999-01:00')).toBe('20261001T111530Z');
   });
 });
 

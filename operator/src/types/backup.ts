@@ -106,6 +106,26 @@ export interface FirebirdRestoreSpec {
   targetDatabase?: string;
   /** S3 source: backupPath (and incrementalBackupPaths) are object keys relative to s3.prefix */
   s3?: S3BackupConfiguration;
+  /**
+   * Point-in-time recovery (physical restores): the journal segments archived after the backup
+   * are replayed on top of it, up to the target. Without a target, every archived segment is
+   * applied. The backup must have been taken on the primary.
+   */
+  pointInTime?: PointInTimeRecovery;
+}
+
+/** Recovery target and journal archive of a point-in-time recovery */
+export interface PointInTimeRecovery {
+  /**
+   * Recover the changes of every journal segment archived at or before this time (RFC 3339,
+   * e.g. "2026-10-01T10:15:00Z"). Segments are applied whole, so the recovery point is the end of
+   * the last such segment: at most replication.archiveTimeoutSeconds before the target.
+   */
+  targetTime?: string;
+  /** Recover up to the end of this journal segment (mutually exclusive with targetTime) */
+  targetSegment?: number;
+  /** Journal archive to replay; defaults to the cluster's spec.replication.journalArchiveS3 */
+  journalS3?: S3BackupConfiguration;
 }
 
 /**

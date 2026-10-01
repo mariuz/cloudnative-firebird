@@ -581,7 +581,9 @@ export function buildRestoreJob(
   ];
 
   let podSpec: V1PodSpec;
-  if (source.s3 && source.type === 'physical') {
+  if (restore.spec.pointInTime) {
+    podSpec = pointInTimePodSpec(restore, cluster, source, env);
+  } else if (source.s3 && source.type === 'physical') {
     // nbackup files are downloaded here, copied next to the database through the primary's segment
     // server for the server to restore them, then removed from the volume again
     const s3 = source.s3;
@@ -675,6 +677,120 @@ export function buildRestoreJob(
     },
     spec: { backoffLimit: 2, template: { metadata: { labels }, spec: podSpec } },
   };
+}
+
+/** Backup file names the segment server's FILE command serves (see segment-server.pl) */
+const SERVER_BACKUP_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:nbk|fbk)$/;
+
+/** Journal archive a point-in-time recovery replays: its own journalS3, or the cluster's */
+export function pointInTimeJournalS3(restore: FirebirdRestore, cluster: FirebirdCluster): S3BackupConfiguration | undefined {
+  return restore.spec.pointInTime?.journalS3 ?? cluster.spec.replication?.journalArchiveS3;
+}
+
+/** Problem with a point-in-time recovery's source that the spec alone does not show, if any */
+export function pointInTimeSourceError(restore: FirebirdRestore, cluster: FirebirdCluster, source: BackupSource): string | undefined {
+  if (!restore.spec.pointInTime) return undefined;
+  if (source.type !== 'physical') return 'pointInTime needs a physical (nbackup) backup';
+  if (!pointInTimeJournalS3(restore, cluster)) {
+    return "pointInTime needs a journal archive: set pointInTime.journalS3, or the cluster's spec.replication.journalArchiveS3";
+  }
+  if (!source.s3) {
+    const bad = [source.path, ...(source.incrementalPaths ?? [])].find((p) => !SERVER_BACKUP_FILE.test(serverFileName(p)));
+    if (bad !== undefined) {
+      return `pointInTime from server-side backups needs nbackup files directly in ${FIREBIRD_DATA_DIR} named *.nbk: ${bad}`;
+    }
+  }
+  return undefined;
+}
+
+/** A server-side path as a name in the data directory (unchanged when it is in a subdirectory) */
+function serverFileName(path: string): string {
+  return path.startsWith(`${FIREBIRD_DATA_DIR}/`) ? path.slice(FIREBIRD_DATA_DIR.length + 1) : path;
+}
+
+/** RFC 3339 time as the compact UTC form of archive time markers (YYYYMMDDTHHMMSSZ) */
+export function compactUtc(time: string): string {
+  return new Date(time).toISOString().replace(/\.\d+Z$/, 'Z').replace(/[-:]/g, '');
+}
+
+/**
+ * Pod of a point-in-time recovery (see pitr-restore.sh): the Firebird container restores the
+ * chain into a scratch database, replays the archived journal segments on it with a private
+ * server, and restores the result into the target database on the primary. A second container
+ * runs the S3 client: it lists the journal archive and downloads the segments the Firebird
+ * container asks for (the Firebird image ships no S3 client).
+ */
+function pointInTimePodSpec(restore: FirebirdRestore, cluster: FirebirdCluster, source: BackupSource, env: V1EnvVar[]): V1PodSpec {
+  const pitr = restore.spec.pointInTime!;
+  const journalS3 = pointInTimeJournalS3(restore, cluster)!;
+  const journals = s3Uri(journalS3, 'journals/');
+  const paths = [source.path, ...(source.incrementalPaths ?? [])];
+  const nbk = `"${FIREBIRD_DATA_DIR}/restore-$RESTORE_NAME-pitr.nbk"`;
+  const fail = 'fail() { echo "$1" > /work/fetcher.failed; echo "$1" >&2; exit 1; }; ';
+  const initContainers: V1Container[] = source.s3
+    ? [
+        {
+          name: 'download',
+          image: s3ClientImage(source.s3),
+          command: ['/bin/sh', '-c'],
+          args: [
+            `set -eu; mkdir -p ${WORK_DIR}/chain; ` +
+              paths.map((k, i) => `${awsCommand(source.s3!)} s3 cp ${shellQuote(s3Uri(source.s3!, k))} ${WORK_DIR}/chain/${i}.nbk`).join('; '),
+          ],
+          env: s3ClientEnv(source.s3),
+          volumeMounts: [workMount],
+        },
+      ]
+    : [];
+  const fetcher: V1Container = {
+    name: 'journal-fetch',
+    image: s3ClientImage(journalS3),
+    command: ['/bin/sh', '-c'],
+    args: [
+      `set -eu; W=${WORK_DIR}; mkdir -p $W/segments $W/req; ${fail}` +
+        // an empty or missing prefix lists nothing and exits non-zero without an error message
+        `${awsCommand(journalS3)} s3 ls ${shellQuote(journals)} > $W/journals.tmp 2> $W/ls.err || ` +
+        '[ ! -s $W/ls.err ] || fail "listing the journal archive failed: $(cat $W/ls.err)"; ' +
+        'mv $W/journals.tmp $W/journals.list; start=$(date +%s); ' +
+        'while [ ! -f $W/finished ]; do ' +
+        'for r in $W/req/*.req; do [ -f "$r" ] || continue; err=""; ' +
+        'for s in $(cat "$r"); do ' +
+        'case "$s" in *[!A-Za-z0-9._-]*) err="invalid segment name $s"; break ;; esac; ' +
+        `${awsCommand(journalS3)} s3 cp --only-show-errors ${shellQuote(journals)}"$s" "$W/segments/$s" 2> $W/cp.err || ` +
+        '{ err="$s: $(cat $W/cp.err)"; break; }; done; ' +
+        'if [ -z "$err" ]; then mv "$r" "${r%.req}.ok"; else echo "$err" > "${r%.req}.err"; rm -f "$r"; fi; done; ' +
+        // the Firebird container writes the time while it runs: stop when it was killed
+        'hb=$(cat $W/heartbeat 2>/dev/null || true); [ $(( $(date +%s) - ${hb:-$start} )) -lt 300 ] || ' +
+        'fail "the Firebird container stopped"; sleep 1; done',
+    ],
+    env: s3ClientEnv(journalS3),
+    volumeMounts: [workMount],
+  };
+  return jobPodSpec(cluster, {
+    restartPolicy: 'Never',
+    initContainers,
+    containers: [
+      {
+        name: 'firebird-restore',
+        image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+        command: ['/bin/sh', '-c'],
+        args: [`set -eu; . ${OPERATOR_CONFIG_DIR}/pitr-restore.sh; ${physicalRestoreScript([nbk])}`],
+        env: [
+          ...env,
+          { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
+          { name: 'SCRIPT_DIR', value: OPERATOR_CONFIG_DIR },
+          { name: 'RESTORE_NAME', value: restore.metadata.name },
+          { name: 'CHAIN_COUNT', value: String(paths.length) },
+          ...(source.s3 ? [] : [{ name: 'SERVER_CHAIN', value: paths.map(serverFileName).join(' ') }]),
+          ...(pitr.targetTime !== undefined ? [{ name: 'TARGET_TIME', value: compactUtc(pitr.targetTime) }] : []),
+          ...(pitr.targetSegment !== undefined ? [{ name: 'TARGET_SEGMENT', value: String(pitr.targetSegment) }] : []),
+        ],
+        volumeMounts: [workMount, configMount],
+      },
+      fetcher,
+    ],
+    volumes: [workVolume, configVolume(cluster)],
+  });
 }
 
 /**

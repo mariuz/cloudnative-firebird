@@ -56,6 +56,8 @@ spec:
                     !has(self.incrementalBackupPaths) || size(self.incrementalBackupPaths) == 0 ||
                     (has(self.restoreType) && self.restoreType == 'physical' && !has(self.backupName))
                   message: incrementalBackupPaths applies to physical restores from backupPath only
+                - rule: "!has(self.pointInTime) || !has(self.restoreType) || self.restoreType == 'physical'"
+                  message: pointInTime applies to physical restores only
               required:
                 - clusterName
               properties:
@@ -128,6 +130,57 @@ spec:
                         name:
                           type: string
                           minLength: 1
+                pointInTime:
+                  description: >-
+                    Point-in-time recovery (physical restores): the journal segments archived after the
+                    backup are replayed on top of it, up to the target (every archived segment without one).
+                    The backup must have been taken on the primary.
+                  type: object
+                  x-kubernetes-validations:
+                    - rule: "!(has(self.targetTime) && has(self.targetSegment))"
+                      message: targetTime and targetSegment are mutually exclusive
+                  properties:
+                    targetTime:
+                      description: >-
+                        Recover the changes of every journal segment archived at or before this time
+                        (RFC 3339). Segments are applied whole: the recovery point is the end of the last
+                        such segment, at most replication.archiveTimeoutSeconds before the target.
+                      type: string
+                      format: date-time
+                    targetSegment:
+                      description: Recover up to the end of this journal segment
+                      type: integer
+                      format: int64
+                      minimum: 1
+                    journalS3:
+                      description: Journal archive to replay (defaults to the cluster's spec.replication.journalArchiveS3)
+                      type: object
+                      required:
+                        - bucket
+                      properties:
+                        endpoint:
+                          type: string
+                        bucket:
+                          type: string
+                          minLength: 1
+                        region:
+                          type: string
+                        prefix:
+                          type: string
+                        clientImage:
+                          description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                          type: string
+                        secretRef:
+                          description: >-
+                            Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                            credentials of its environment (workload identity through serviceAccountName, instance profile)
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
+                              minLength: 1
             status:
               description: FirebirdRestoreStatus defines the observed state of FirebirdRestore
               type: object
