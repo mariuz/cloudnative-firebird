@@ -1,4 +1,4 @@
-import { FirebirdCluster, FirebirdBackup, FirebirdRestore, S3BackupConfiguration } from '../types';
+import { FirebirdCluster, FirebirdBackup, FirebirdRestore, PointInTimeRecovery, S3BackupConfiguration } from '../types';
 import { parseQuantity } from './storage';
 
 export class ValidationError extends Error {
@@ -161,6 +161,31 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       }
       if (s3.secretRef && (!s3.secretRef.name || s3.secretRef.name.trim() === '')) {
         throw new ValidationError('Bootstrap recovery S3 secretRef name is required');
+      }
+    }
+    const { pointInTime, incrementalPaths } = spec.bootstrap.recovery;
+    if (incrementalPaths?.length && !pointInTime) {
+      throw new ValidationError('bootstrap.recovery.incrementalPaths applies to point-in-time recovery only');
+    }
+    if (pointInTime) {
+      if (!s3 || !sourcePath) {
+        throw new ValidationError('bootstrap.recovery.pointInTime needs s3 and sourcePath (an nbackup level 0 object key)');
+      }
+      if (!pointInTime.journalS3) {
+        throw new ValidationError('bootstrap.recovery.pointInTime.journalS3 is required (the source cluster\'s journal archive)');
+      }
+      validatePointInTime('bootstrap.recovery.pointInTime', pointInTime);
+      const own = spec.replication?.journalArchiveS3;
+      if (own && sameS3Location(own, pointInTime.journalS3)) {
+        throw new ValidationError(
+          'bootstrap.recovery.pointInTime.journalS3 is this cluster\'s own replication.journalArchiveS3: ' +
+            'the recovered cluster would archive its segments over the ones it recovers from',
+        );
+      }
+      if (spec.instances > 1 && !spec.replication?.enabled) {
+        throw new ValidationError(
+          'bootstrap.recovery.pointInTime with more than one instance needs replication: only the first instance is recovered',
+        );
       }
     }
   }
@@ -334,17 +359,28 @@ export function validateRestoreSpec(restore: FirebirdRestore): void {
     if (spec.restoreType && spec.restoreType !== 'physical') {
       throw new ValidationError('pointInTime applies to physical restores only');
     }
-    if (pitr.targetTime !== undefined && pitr.targetSegment !== undefined) {
-      throw new ValidationError('pointInTime.targetTime and pointInTime.targetSegment are mutually exclusive');
-    }
-    if (pitr.targetTime !== undefined && (!RFC3339.test(pitr.targetTime) || Number.isNaN(Date.parse(pitr.targetTime)))) {
-      throw new ValidationError(`Invalid pointInTime.targetTime "${pitr.targetTime}": must be an RFC 3339 time, e.g. 2026-10-01T10:15:00Z`);
-    }
-    if (pitr.targetSegment !== undefined && (!Number.isSafeInteger(pitr.targetSegment) || pitr.targetSegment < 1)) {
-      throw new ValidationError('pointInTime.targetSegment must be a positive integer');
-    }
-    validateS3('spec.pointInTime.journalS3', pitr.journalS3);
+    validatePointInTime('pointInTime', pitr);
   }
+}
+
+/** Validates a point-in-time recovery target and journal archive (`field` names it in messages) */
+function validatePointInTime(field: string, pitr: PointInTimeRecovery): void {
+  if (pitr.targetTime !== undefined && pitr.targetSegment !== undefined) {
+    throw new ValidationError(`${field}.targetTime and ${field}.targetSegment are mutually exclusive`);
+  }
+  if (pitr.targetTime !== undefined && (!RFC3339.test(pitr.targetTime) || Number.isNaN(Date.parse(pitr.targetTime)))) {
+    throw new ValidationError(`Invalid ${field}.targetTime "${pitr.targetTime}": must be an RFC 3339 time, e.g. 2026-10-01T10:15:00Z`);
+  }
+  if (pitr.targetSegment !== undefined && (!Number.isSafeInteger(pitr.targetSegment) || pitr.targetSegment < 1)) {
+    throw new ValidationError(`${field}.targetSegment must be a positive integer`);
+  }
+  validateS3(`spec.${field}.journalS3`, pitr.journalS3);
+}
+
+/** Whether two S3 locations are the same bucket and prefix (on the same endpoint) */
+function sameS3Location(a: S3BackupConfiguration, b: S3BackupConfiguration): boolean {
+  const prefix = (s: S3BackupConfiguration) => (s.prefix ?? '').replace(/^\/+|\/+$/g, '');
+  return a.bucket === b.bucket && prefix(a) === prefix(b) && (a.endpoint ?? '') === (b.endpoint ?? '');
 }
 
 /** RFC 3339 date-time (with a time zone offset), as accepted by pointInTime.targetTime */

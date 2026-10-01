@@ -644,6 +644,33 @@ its level-0 copy) plus the chain and the segments. Segments uploaded before v0.4
 marker: their upload time stands in for the archive time, which only makes `targetTime` more
 conservative. Server-side chains work too (`backupPath` names directly in the data directory).
 
+**Bootstrapping a cluster to a point in time.** A new cluster can start from the recovered
+database instead (CloudNativePG's `bootstrap.recovery` with a recovery target):
+
+```yaml
+spec:
+  instances: 3
+  replication: { enabled: true, journalArchiveS3: { bucket: firebird-backups, prefix: my-cluster-restored } }
+  bootstrap:
+    recovery:
+      sourcePath: nbackup-l0-weekly-20261001T000000Z.nbk          # nbackup level 0 object key
+      incrementalPaths: [nbackup-l1-daily-20261004T000000Z.nbk]
+      s3: { bucket: firebird-backups, prefix: my-cluster, secretRef: { name: s3-credentials } }
+      pointInTime:
+        targetTime: "2026-10-04T10:15:00Z"
+        journalS3: { bucket: firebird-backups, prefix: my-cluster, secretRef: { name: s3-credentials } }
+```
+
+Before the StatefulSet exists, the operator creates the first instance's volume (under the
+StatefulSet's claim name, so the StatefulSet adopts it) and runs the Job `<cluster>-pitr-recovery`
+on it (as the Firebird user, with `fsGroup` making the new volume writable). The Job replays the
+journal as above and leaves the database where a restored one is expected; the cluster stays
+`Creating` ("Recovering the database to a point in time") until it completes. The instances then
+start as for any bootstrap: with replication the primary enables publication on it and the other
+instances are seeded from it. A failed Job leaves the cluster `Degraded`; delete the Job to retry.
+`journalS3` is required here and must not be the new cluster's own `journalArchiveS3` (it would
+archive its segments over the ones it recovers from); more than one instance needs replication.
+
 ### Users
 
 Firebird users live in the **security database**, which the official image keeps on the container

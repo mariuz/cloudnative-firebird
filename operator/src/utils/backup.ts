@@ -15,6 +15,7 @@ import {
   FirebirdCluster,
   FirebirdRestore,
   FirebirdScheduledBackup,
+  PointInTimeRecovery,
   RESOURCE_KIND,
   S3BackupConfiguration,
 } from '../types';
@@ -22,6 +23,7 @@ import {
   clusterLabels,
   databaseName,
   FIREBIRD_DATA_DIR,
+  FIREBIRD_UID,
   jobPodSpec,
   superuserClientEnv,
   withTemplateHash,
@@ -721,23 +723,56 @@ export function compactUtc(time: string): string {
  * container asks for (the Firebird image ships no S3 client).
  */
 function pointInTimePodSpec(restore: FirebirdRestore, cluster: FirebirdCluster, source: BackupSource, env: V1EnvVar[]): V1PodSpec {
-  const pitr = restore.spec.pointInTime!;
-  const journalS3 = pointInTimeJournalS3(restore, cluster)!;
-  const journals = s3Uri(journalS3, 'journals/');
   const paths = [source.path, ...(source.incrementalPaths ?? [])];
   const nbk = `"${FIREBIRD_DATA_DIR}/restore-$RESTORE_NAME-pitr.nbk"`;
+  return replayPodSpec(cluster, {
+    chain: source.s3 ? { s3: source.s3, keys: paths } : undefined,
+    journalS3: pointInTimeJournalS3(restore, cluster)!,
+    target: restore.spec.pointInTime!,
+    command: `set -eu; . ${OPERATOR_CONFIG_DIR}/pitr-restore.sh; ${physicalRestoreScript([nbk])}`,
+    env: [
+      ...env,
+      { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
+      { name: 'RESTORE_NAME', value: restore.metadata.name },
+      { name: 'CHAIN_COUNT', value: String(paths.length) },
+      ...(source.s3 ? [] : [{ name: 'SERVER_CHAIN', value: paths.map(serverFileName).join(' ') }]),
+    ],
+  });
+}
+
+/**
+ * Pod replaying a journal archive onto an nbackup chain (pitr-restore.sh): the Firebird container,
+ * and the S3 client container serving its segment downloads. An S3 chain is downloaded first by
+ * an init container (with the chain's own credentials).
+ */
+function replayPodSpec(
+  cluster: FirebirdCluster,
+  options: {
+    chain?: { s3: S3BackupConfiguration; keys: string[] };
+    journalS3: S3BackupConfiguration;
+    target: PointInTimeRecovery;
+    command: string;
+    env: V1EnvVar[];
+    /** Further volumes and their mounts in the Firebird container */
+    volumes?: V1Volume[];
+    mounts?: V1VolumeMount[];
+    securityContext?: V1PodSpec['securityContext'];
+  },
+): V1PodSpec {
+  const { chain, journalS3, target } = options;
+  const journals = s3Uri(journalS3, 'journals/');
   const fail = 'fail() { echo "$1" > /work/fetcher.failed; echo "$1" >&2; exit 1; }; ';
-  const initContainers: V1Container[] = source.s3
+  const initContainers: V1Container[] = chain
     ? [
         {
           name: 'download',
-          image: s3ClientImage(source.s3),
+          image: s3ClientImage(chain.s3),
           command: ['/bin/sh', '-c'],
           args: [
             `set -eu; mkdir -p ${WORK_DIR}/chain; ` +
-              paths.map((k, i) => `${awsCommand(source.s3!)} s3 cp ${shellQuote(s3Uri(source.s3!, k))} ${WORK_DIR}/chain/${i}.nbk`).join('; '),
+              chain.keys.map((k, i) => `${awsCommand(chain.s3)} s3 cp ${shellQuote(s3Uri(chain.s3, k))} ${WORK_DIR}/chain/${i}.nbk`).join('; '),
           ],
-          env: s3ClientEnv(source.s3),
+          env: s3ClientEnv(chain.s3),
           volumeMounts: [workMount],
         },
       ]
@@ -769,28 +804,87 @@ function pointInTimePodSpec(restore: FirebirdRestore, cluster: FirebirdCluster, 
   return jobPodSpec(cluster, {
     restartPolicy: 'Never',
     initContainers,
+    ...(options.securityContext ? { securityContext: options.securityContext } : {}),
     containers: [
       {
         name: 'firebird-restore',
         image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
         command: ['/bin/sh', '-c'],
-        args: [`set -eu; . ${OPERATOR_CONFIG_DIR}/pitr-restore.sh; ${physicalRestoreScript([nbk])}`],
+        args: [options.command],
         env: [
-          ...env,
-          { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
+          ...options.env,
           { name: 'SCRIPT_DIR', value: OPERATOR_CONFIG_DIR },
-          { name: 'RESTORE_NAME', value: restore.metadata.name },
-          { name: 'CHAIN_COUNT', value: String(paths.length) },
-          ...(source.s3 ? [] : [{ name: 'SERVER_CHAIN', value: paths.map(serverFileName).join(' ') }]),
-          ...(pitr.targetTime !== undefined ? [{ name: 'TARGET_TIME', value: compactUtc(pitr.targetTime) }] : []),
-          ...(pitr.targetSegment !== undefined ? [{ name: 'TARGET_SEGMENT', value: String(pitr.targetSegment) }] : []),
+          ...(target.targetTime !== undefined ? [{ name: 'TARGET_TIME', value: compactUtc(target.targetTime) }] : []),
+          ...(target.targetSegment !== undefined ? [{ name: 'TARGET_SEGMENT', value: String(target.targetSegment) }] : []),
         ],
-        volumeMounts: [workMount, configMount],
+        volumeMounts: [workMount, configMount, ...(options.mounts ?? [])],
       },
       fetcher,
     ],
-    volumes: [workVolume, configVolume(cluster)],
+    volumes: [workVolume, configVolume(cluster), ...(options.volumes ?? [])],
   });
+}
+
+/** Name of the PersistentVolumeClaim of an instance (the StatefulSet's claim template "firebird-data") */
+export function instanceDataClaimName(cluster: FirebirdCluster, ordinal: number): string {
+  return `firebird-data-${cluster.metadata.name}-${ordinal}`;
+}
+
+/** Name of the Job that recovers a new cluster's database to a point in time */
+export function recoveryBootstrapJobName(cluster: FirebirdCluster): string {
+  return `${cluster.metadata.name}-pitr-recovery`;
+}
+
+/**
+ * Job recovering a new cluster's database to a point in time (bootstrap.recovery.pointInTime),
+ * before its StatefulSet exists: it mounts the first instance's volume (created by the operator
+ * with the StatefulSet's claim name, so the StatefulSet adopts it) and leaves the recovered
+ * database where the instance's init containers expect a restored one.
+ */
+export function buildRecoveryBootstrapJob(cluster: FirebirdCluster): V1Job {
+  const { name, namespace = 'default', uid } = cluster.metadata;
+  const recovery = cluster.spec.bootstrap!.recovery!;
+  const keys = [recovery.sourcePath!, ...(recovery.incrementalPaths ?? [])];
+  const labels = { ...clusterLabels(name), 'app.kubernetes.io/component': 'pitr-recovery' };
+  const target = replicationEnabled(cluster)
+    ? `${FIREBIRD_DATA_DIR}/.bootstrap.fdb`
+    : `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`;
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: recoveryBootstrapJobName(cluster),
+      namespace,
+      labels,
+      ownerReferences: [ownerReference(RESOURCE_KIND, name, uid)],
+    },
+    spec: {
+      backoffLimit: 2,
+      template: {
+        metadata: { labels },
+        spec: replayPodSpec(cluster, {
+          chain: { s3: recovery.s3!, keys },
+          journalS3: recovery.pointInTime!.journalS3!,
+          target: recovery.pointInTime!,
+          command: `set -eu; . ${OPERATOR_CONFIG_DIR}/pitr-restore.sh`,
+          env: [
+            { name: 'LOCAL_TARGET', value: target },
+            { name: 'CHAIN_COUNT', value: String(keys.length) },
+          ],
+          volumes: [{ name: 'firebird-data', persistentVolumeClaim: { claimName: instanceDataClaimName(cluster, 0) } }],
+          mounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }],
+          // a new volume's root belongs to root: the group makes it writable for the Firebird user
+          securityContext: {
+            runAsNonRoot: true,
+            runAsUser: FIREBIRD_UID,
+            runAsGroup: FIREBIRD_UID,
+            fsGroup: FIREBIRD_UID,
+            seccompProfile: { type: 'RuntimeDefault' },
+          },
+        }),
+      },
+    },
+  };
 }
 
 /**
@@ -923,6 +1017,8 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
 export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Container[] {
   const bootstrap = cluster.spec.bootstrap;
   if (!bootstrap?.recovery && !bootstrap?.clone) return [];
+  // recovered by a Job before the instances start (buildRecoveryBootstrapJob)
+  if (bootstrap.recovery?.pointInTime) return [];
 
   const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
   const replicated = replicationEnabled(cluster);
@@ -1018,5 +1114,6 @@ export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Contai
 
 /** Volumes needed by the bootstrap init containers, beyond the data and config volumes */
 export function bootstrapVolumes(cluster: FirebirdCluster): V1Volume[] {
-  return cluster.spec.bootstrap?.recovery?.s3 ? [workVolume] : [];
+  const recovery = cluster.spec.bootstrap?.recovery;
+  return recovery?.s3 && !recovery.pointInTime ? [workVolume] : [];
 }

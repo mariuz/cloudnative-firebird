@@ -1,0 +1,17 @@
+# expect: pointInTime with more than one instance needs replication
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 2
+  storage:
+    size: 1Gi
+  bootstrap:
+    recovery:
+      sourcePath: l0.nbk
+      s3:
+        bucket: backups
+      pointInTime:
+        journalS3:
+          bucket: backups

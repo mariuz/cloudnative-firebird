@@ -60,6 +60,8 @@ export const EventReason = {
   RestoreStarted: 'RestoreStarted',
   RestoreCompleted: 'RestoreCompleted',
   RestoreFailed: 'RestoreFailed',
+  RecoveryStarted: 'RecoveryStarted',
+  RecoveryCompleted: 'RecoveryCompleted',
   UserApplied: 'UserApplied',
   UserFailed: 'UserFailed',
   UserDropped: 'UserDropped',

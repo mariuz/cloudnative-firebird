@@ -1,3 +1,4 @@
+import type { PointInTimeRecovery } from './backup';
 import type { V1PodSecurityContext, V1SecurityContext } from '@kubernetes/client-node';
 /**
  * Type definitions for the FirebirdCluster Custom Resource Definition.
@@ -273,6 +274,15 @@ export interface BackupRecoveryConfiguration {
   sourcePath?: string;
   /** S3 cloud storage source configuration */
   s3?: S3BackupConfiguration;
+  /**
+   * Point-in-time recovery: sourcePath is an nbackup level 0 object key (with
+   * incrementalPaths on top), and the journal archive in pointInTime.journalS3 (required) is
+   * replayed on it up to the target. A recovery Job prepares the first instance's volume
+   * before the instances start.
+   */
+  pointInTime?: PointInTimeRecovery;
+  /** nbackup level 1 and 2 object keys applied on top of sourcePath (pointInTime only) */
+  incrementalPaths?: string[];
 }
 
 /**

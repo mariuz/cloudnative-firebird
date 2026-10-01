@@ -16,7 +16,14 @@ import {
   V1StatefulSet,
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
-import { buildBackupCronJob, buildJournalArchiveCronJob, jobOutcome } from '../utils/backup';
+import {
+  buildBackupCronJob,
+  buildJournalArchiveCronJob,
+  buildRecoveryBootstrapJob,
+  instanceDataClaimName,
+  jobOutcome,
+  recoveryBootstrapJobName,
+} from '../utils/backup';
 import {
   PENDING_DROP_USERS_ANNOTATION,
   buildPendingDropJob,
@@ -267,6 +274,19 @@ export class FirebirdClusterController {
         } catch (err) {
           if (!isNotFound(err)) throw err; // already gone
         }
+      }
+      // a point-in-time bootstrap prepares the first volume before the StatefulSet exists
+      const recovering = await this.reconcileRecoveryBootstrap(cluster, log);
+      if (recovering) {
+        await this.updateStatus(cluster, {
+          phase: 'Creating',
+          phaseReason: recovering,
+          conditions: [
+            this.makeCondition('Ready', 'False', 'Recovering', recovering),
+            this.makeCondition('Progressing', 'True', 'Recovering', recovering),
+          ],
+        });
+        return;
       }
       // lag is published as pod annotations before read-only routing evaluates them
       const lag = await this.reconcileReplicationLag(cluster, primaryPod, switchover.status, log);
@@ -1092,6 +1112,63 @@ export class FirebirdClusterController {
   }
 
   /** Reconcile the StatefulSet for the cluster and return ready replica count and secret hash */
+  /**
+   * Point-in-time bootstrap (bootstrap.recovery.pointInTime). Before the StatefulSet exists, the
+   * operator creates the first instance's volume under the StatefulSet's claim name (the
+   * StatefulSet adopts it) and runs a Job that leaves the recovered database on it. Returns a
+   * status message while the recovery runs, undefined once the StatefulSet may be created.
+   */
+  private async reconcileRecoveryBootstrap(cluster: FirebirdCluster, log: Logger): Promise<string | undefined> {
+    if (!cluster.spec.bootstrap?.recovery?.pointInTime) return undefined;
+    const { name, namespace = 'default' } = cluster.metadata;
+    try {
+      await this.appsApi.readNamespacedStatefulSet({ name, namespace });
+      return undefined; // recovered (or created) already
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+
+    const claimName = instanceDataClaimName(cluster, 0);
+    try {
+      await this.coreApi.readNamespacedPersistentVolumeClaim({ name: claimName, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+      const template = buildStatefulSet(cluster).spec!.volumeClaimTemplates![0];
+      log.info({ claimName }, 'Creating the first instance volume for point-in-time recovery');
+      await this.coreApi.createNamespacedPersistentVolumeClaim({
+        namespace,
+        body: {
+          apiVersion: 'v1',
+          kind: 'PersistentVolumeClaim',
+          metadata: { ...template.metadata, name: claimName, namespace },
+          spec: template.spec,
+        },
+      });
+    }
+
+    const jobName = recoveryBootstrapJobName(cluster);
+    let job: V1Job;
+    try {
+      job = await this.batchApi.readNamespacedJob({ name: jobName, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+      log.info({ jobName }, 'Starting point-in-time recovery');
+      await this.batchApi.createNamespacedJob({ namespace, body: buildRecoveryBootstrapJob(cluster) });
+      await this.event(cluster, 'Normal', EventReason.RecoveryStarted, `recovering the database to a point in time (Job ${jobName})`);
+      return `Recovering the database to a point in time (Job ${jobName})`;
+    }
+    switch (jobOutcome(job)) {
+      case 'Completed':
+        log.info({ jobName }, 'Point-in-time recovery completed');
+        await this.event(cluster, 'Normal', EventReason.RecoveryCompleted, `database recovered by Job ${jobName}; starting the instances`);
+        return undefined;
+      case 'Failed':
+        throw new Error(`point-in-time recovery Job ${jobName} failed; see its pod logs, then delete the Job to retry`);
+      default:
+        return `Recovering the database to a point in time (Job ${jobName})`;
+    }
+  }
+
   private async reconcileStatefulSet(
     cluster: FirebirdCluster,
     log: Logger,

@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.45.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.46.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Bootstrap to a Point in Time** *(v0.46.0)*
+  - `bootstrap.recovery.pointInTime` (with `incrementalPaths` and a required `journalS3`): before the StatefulSet exists, the operator creates the first instance's volume under the StatefulSet's claim name and runs the Job `<cluster>-pitr-recovery` on it (CloudNativePG's recovery Job). The Job replays the journal archive like a point-in-time `FirebirdRestore` and leaves the database where the instances' init containers expect a restored one (`.bootstrap.fdb` with replication). The cluster stays `Creating` until it completes, then the StatefulSet adopts the volume. Kubernetes 1.24+ has no native sidecars, so the S3 client runs alongside the Firebird container in a Job rather than in init containers.
+  - Validated by the operator and CRD CEL rules: an nbackup source in S3, a journal archive other than the new cluster's own, replication for more than one instance.
 - [x] **Point-In-Time Recovery** *(v0.45.0)*
   - `FirebirdRestore.spec.pointInTime` (`targetTime`, `targetSegment`, or every archived segment; `journalS3` defaults to the cluster's journal archive): the restore Job restores the `nbackup` chain into a scratch database with its replication sequence (`nbackup -SEQ -R`), makes it a read-only replica and lets a private Firebird server in the Job pod apply the archived segments, then restores the result into the target database on the primary. An S3 client container in the pod lists the archive and downloads the segments the replay asks for.
   - The `nbackup` lock switches the journal (`BEGIN BACKUP`), so the segments after the backup's sequence hold the later changes; `pitr-plan.pl` writes the replica control file with every transaction open in the backup (not committed in it, or started after its next transaction) and its first segment, fetching earlier segments until each one starts in the directory, and refuses a transaction complete in the backup with changes after it. Verified with Firebird 5: concurrent writers, a long transaction open across both backups whose journal blocks were flushed segments before the base, and cuts between segments.
