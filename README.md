@@ -498,13 +498,17 @@ removes them again. The S3 client image defaults to `amazon/aws-cli` and can be 
 errors, not against losing the volume.
 
 **Backups from a replica.** `target: prefer-standby` (CloudNativePG's `target`) on
-`spec.backup`, a `FirebirdBackup` or a `FirebirdScheduledBackup` takes logical backups to S3 from a
-replica instead of the primary: `gbak` reads the read-only replica and streams the backup to the
-Job pod, so the primary carries no backup load. The replica is the ready, unfenced, non-lagging one
-with the lowest ordinal (a scheduled backup keeps using it while it stays healthy); without one the
-backup runs on the primary. Physical backups and server-side files are written by the primary's
-server, so they always run on the primary. `status.instance` of a `FirebirdBackup` names the
-instance it ran on.
+`spec.backup`, a `FirebirdBackup` or a `FirebirdScheduledBackup` takes backups to S3 from a
+replica instead of the primary, so the primary carries no backup load: `gbak` reads the read-only
+replica and streams a logical backup to the Job pod, and a physical backup runs `nbackup` in the
+replica's server, its file copied through the replica's segment server. The replica is the ready,
+unfenced, non-lagging one with the lowest ordinal (a scheduled backup keeps using it while it stays
+healthy); without one the backup runs on the primary. Server-side files belong on the primary's
+volume, so those backups always run on the primary. `status.instance` of a `FirebirdBackup` names
+the instance it ran on. An `nbackup` chain lives in the backup history of the database it was
+taken on, so the schedules of one chain should share a target: a level 1 or 2 on an instance
+without a level 0 fails ("Cannot find record ... backup level 0"). A physical restore clears the
+replica mode a backup taken on a replica carries, so the restored database is writable.
 
 **Retention.** `retentionPolicy` (`<n>d`, `<n>w` or `<n>m` for 30 days, as in CloudNativePG) on
 `spec.backup` or a `FirebirdScheduledBackup` is enforced for backups to S3: after each

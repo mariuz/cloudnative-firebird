@@ -27,11 +27,13 @@ describe('backup target', () => {
     expect(choose({ primaryPod: 'db-1' })).toBe('db-0');
   });
 
-  it('uses the primary by default, for physical and for server-side backups', () => {
+  it('uses the primary by default and for server-side backups; physical backups to S3 may use a replica', () => {
     expect(choose({ target: undefined })).toBe('db-0');
     expect(choose({ target: 'primary' })).toBe('db-0');
-    expect(choose({ type: 'physical' })).toBe('db-0');
     expect(choose({ s3: undefined })).toBe('db-0');
+    expect(choose({ type: 'physical', s3: undefined })).toBe('db-0');
+    // nbackup runs in the replica's server, the file is copied through its segment server
+    expect(choose({ type: 'physical' })).toBe('db-1');
   });
 
   it('skips unready, fenced, lagging and scaled-away replicas, falling back to the primary', () => {

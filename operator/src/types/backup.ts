@@ -25,7 +25,7 @@ export interface FirebirdBackupSpec {
   s3?: S3BackupConfiguration;
   /**
    * Where the backup runs: "primary" (default) or "prefer-standby", a ready replica when one
-   * qualifies (logical backups to S3 only; others always run on the primary)
+   * qualifies (backups to S3 only; server-side backups always run on the primary)
    */
   target?: 'primary' | 'prefer-standby';
   /**
@@ -170,7 +170,7 @@ export interface FirebirdScheduledBackupSpec {
   s3?: S3BackupConfiguration;
   /**
    * Where the backup runs: "primary" (default) or "prefer-standby", a ready replica when one
-   * qualifies (logical backups to S3 only; others always run on the primary)
+   * qualifies (backups to S3 only; server-side backups always run on the primary)
    */
   target?: 'primary' | 'prefer-standby';
   /**

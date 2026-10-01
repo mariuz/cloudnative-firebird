@@ -231,6 +231,9 @@ describe('restore Jobs', () => {
     expect(fixup).toBeGreaterThan(guard);
     expect(drop).toBeGreaterThan(fixup);
     expect(script).toContain('exit $rc');
+    // a backup taken on a replica restores as a read-only replica: made a normal database
+    expect(script.indexOf('prp_replica_mode prp_rm_none')).toBeGreaterThan(script.indexOf('exit $rc'));
+    expect(script.indexOf('prp_replica_mode prp_rm_none')).toBeLessThan(script.indexOf('echo "restored into'));
     // logical restores (gbak removes its own partial file) are unchanged
     const logical = podOf(buildRestoreJob(makeRestore(), makeCluster(), { type: 'logical', path: 'b.fbk' })).containers[0].args![0];
     expect(logical).not.toContain('action_nfix');

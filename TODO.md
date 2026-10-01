@@ -37,9 +37,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 - [ ] **Point-in-time recovery**: restore an `nbackup` base and replay the archived journal
   segments from S3 up to a target time. Segments are archived, nothing replays them yet.
-- [ ] **Physical backups from a replica**: physical backups always run on the primary (its server
-  writes the file); taking them on a replica would keep the load off the primary, but nbackup on a
-  replica (replica mode, read-only) is unverified.
 
 ## Users
 
