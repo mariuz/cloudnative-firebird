@@ -40,8 +40,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   archived before it. A shorter `archiveTimeoutSeconds` narrows the gap.
 - [ ] **Point-in-time recovery from a replica's backup**: the replica's applied position lives in
   its replica control file, which the backup does not carry; such restores are refused.
-- [ ] **Bootstrap a cluster to a point in time** (`bootstrap.recovery` with a recovery target),
-  instead of restoring into a new database file of a running cluster.
 
 ## Users
 

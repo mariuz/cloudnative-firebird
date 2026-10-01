@@ -1,7 +1,12 @@
 #!/bin/sh
-# Point-in-time recovery Job (FirebirdRestore with pointInTime), Firebird container. Sourced by
-# the container's command, which restores the level-0 backup "$nbk" this leaves in the primary's
-# data directory into TARGET_PATH (the EXIT trap removes it afterwards).
+# Point-in-time recovery Job, Firebird container.
+#
+# FirebirdRestore with pointInTime: sourced by the container's command, which restores the level-0
+# backup "$nbk" this leaves in the primary's data directory into TARGET_PATH (the EXIT trap removes
+# it afterwards).
+# Cluster bootstrap (bootstrap.recovery.pointInTime, LOCAL_TARGET set): the Job mounts the first
+# instance's volume; the scratch database lives there and is moved to LOCAL_TARGET at the end.
+# Nothing is done when LOCAL_TARGET exists already (a retried Job).
 #
 # 1. Restores the nbackup chain into a scratch database here (nbackup -SEQ -R keeps the
 #    replication sequence S of the last backup in the chain).
@@ -29,6 +34,13 @@ DB=$W/db/pitr.fdb
 SRC=$W/source
 mkdir -p "$W/db" "$SRC" "$W/req" "$W/lock" "$W/fb"
 trap 'touch "$W/finished"' EXIT
+if [ -n "${LOCAL_TARGET:-}" ]; then
+  if [ -f "$LOCAL_TARGET" ]; then echo "$LOCAL_TARGET exists: recovered already"; exit 0; fi
+  # on the volume, next to the target: the final move is a rename
+  DB="$(dirname "$LOCAL_TARGET")/.pitr-recovery/pitr.fdb"
+  rm -rf "$(dirname "$DB")"
+  mkdir -p "$(dirname "$DB")"
+fi
 ( while :; do date +%s > "$W/heartbeat"; sleep 20; done ) &
 heartbeat=$!
 
@@ -179,6 +191,13 @@ if [ "$L" -gt "$S" ]; then
 fi
 "$FB/gfix" -user SYSDBA -replica none "$DB"
 echo "recovered to the end of segment $L (archived at $(time_of "$L"))"
+
+if [ -n "${LOCAL_TARGET:-}" ]; then
+  mv "$DB" "$LOCAL_TARGET"
+  rm -rf "$(dirname "$DB")"
+  echo "recovered database in place at $LOCAL_TARGET"
+  exit 0
+fi
 
 # 5. into the target database on the primary
 nbk="restore-$RESTORE_NAME-pitr.nbk"

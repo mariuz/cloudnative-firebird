@@ -1,0 +1,16 @@
+# expect: pointInTime needs s3, sourcePath and pointInTime.journalS3
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  bootstrap:
+    recovery:
+      sourcePath: l0.nbk
+      s3:
+        bucket: backups
+      pointInTime:
+        targetSegment: 12

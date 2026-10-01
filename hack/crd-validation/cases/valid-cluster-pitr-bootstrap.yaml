@@ -1,0 +1,23 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 2
+  storage:
+    size: 1Gi
+  replication:
+    enabled: true
+  bootstrap:
+    recovery:
+      sourcePath: prod/nbackup-l0-weekly-20261001T000000Z.nbk
+      incrementalPaths:
+        - prod/nbackup-l1-daily-20261004T000000Z.nbk
+      s3:
+        bucket: backups
+      pointInTime:
+        targetTime: "2026-10-04T10:15:00Z"
+        journalS3:
+          bucket: backups
+          prefix: prod

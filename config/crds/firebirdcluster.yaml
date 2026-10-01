@@ -72,6 +72,10 @@ spec:
               x-kubernetes-validations:
                 - rule: "!has(self.bootstrap) || !has(self.bootstrap.clone) || !has(self.bootstrap.recovery)"
                   message: bootstrap recovery and clone are mutually exclusive
+                - rule: >-
+                    !has(self.bootstrap) || !has(self.bootstrap.recovery) || !has(self.bootstrap.recovery.pointInTime) ||
+                    self.instances <= 1 || (has(self.replication) && has(self.replication.enabled) && self.replication.enabled)
+                  message: bootstrap.recovery.pointInTime with more than one instance needs replication
               required:
                 - instances
                 - storage
@@ -472,6 +476,10 @@ spec:
                       x-kubernetes-validations:
                         - rule: has(self.s3) || (has(self.sourcePath) && self.sourcePath != '')
                           message: bootstrap recovery requires either sourcePath or s3
+                        - rule: "!has(self.incrementalPaths) || size(self.incrementalPaths) == 0 || has(self.pointInTime)"
+                          message: bootstrap.recovery.incrementalPaths applies to point-in-time recovery only
+                        - rule: "!has(self.pointInTime) || (has(self.s3) && has(self.sourcePath) && has(self.pointInTime.journalS3))"
+                          message: bootstrap.recovery.pointInTime needs s3, sourcePath and pointInTime.journalS3
                       properties:
                         sourcePath:
                           description: >-
@@ -507,6 +515,65 @@ spec:
                                 name:
                                   type: string
                                   minLength: 1
+                        incrementalPaths:
+                          description: nbackup level 1 and 2 object keys applied on top of sourcePath (pointInTime only)
+                          type: array
+                          maxItems: 16
+                          items:
+                            type: string
+                            maxLength: 1024
+                        pointInTime:
+                          description: >-
+                            Point-in-time recovery: sourcePath is an nbackup level 0 object key (with
+                            incrementalPaths on top), and the journal archive in journalS3 (required)
+                            is replayed on it up to the target, by a Job that prepares the first
+                            instance's volume before the instances start.
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "!(has(self.targetTime) && has(self.targetSegment))"
+                              message: targetTime and targetSegment are mutually exclusive
+                          properties:
+                            targetTime:
+                              description: >-
+                                Recover the changes of every journal segment archived at or before this time
+                                (RFC 3339). Segments are applied whole: the recovery point is the end of the last
+                                such segment, at most replication.archiveTimeoutSeconds before the target.
+                              type: string
+                              format: date-time
+                            targetSegment:
+                              description: Recover up to the end of this journal segment
+                              type: integer
+                              format: int64
+                              minimum: 1
+                            journalS3:
+                              description: Journal archive to replay (defaults to the cluster's spec.replication.journalArchiveS3)
+                              type: object
+                              required:
+                                - bucket
+                              properties:
+                                endpoint:
+                                  type: string
+                                bucket:
+                                  type: string
+                                  minLength: 1
+                                region:
+                                  type: string
+                                prefix:
+                                  type: string
+                                clientImage:
+                                  description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                                  type: string
+                                secretRef:
+                                  description: >-
+                                    Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                                    credentials of its environment (workload identity through serviceAccountName, instance profile)
+                                  type: object
+                                  required:
+                                    - name
+                                  properties:
+                                    name:
+                                      type: string
+                                      minLength: 1
                     clone:
                       description: Target source cluster configuration for cluster-to-cluster cloning
                       type: object
