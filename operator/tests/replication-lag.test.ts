@@ -456,3 +456,70 @@ describe.skipIf(!hasPerl)('segment-server.pl pruneAppliedSegments', () => {
     expect(await archivedAfterStartup({ env: { PRUNE_APPLIED: 'true' } })).toEqual([7, 8, 9, 10, 11]);
   });
 });
+
+describe.skipIf(!hasPerl)('segment-server.pl HEADER', () => {
+  // header page: ODS version at 18, then hdr_end and the clumps (66 / 128 in ODS 13, 36 / 148 in ODS 14)
+  const page = (ods: number, seq?: number) => {
+    const [endAt, start] = ods === 14 ? [36, 148] : [66, 128];
+    const p = Buffer.alloc(8192);
+    p[0] = 1;
+    p.writeUInt16LE(8192, 16);
+    p.writeUInt16LE(0x8000 | ods, 18);
+    let at = start;
+    p[at] = 6; // HDR_difference_file, skipped
+    p[at + 1] = 3;
+    at += 5;
+    if (seq !== undefined) {
+      p[at] = 11;
+      p[at + 1] = 8;
+      p.writeBigUInt64LE(BigInt(seq), at + 2);
+      at += 10;
+    }
+    p[at] = 0;
+    p.writeUInt16LE(at, endAt);
+    return p;
+  };
+
+  it('reads the replication sequence from the header page of either layout', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'segsrv-'));
+    for (const d of ['archive', 'source', 'repl']) mkdirSync(join(root, d));
+    const db = join(root, 'mydb.fdb');
+    const script = join(root, 'segment-server.pl');
+    writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
+    writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
+    const port = 20000 + Math.floor(Math.random() * 20000);
+    const child = spawn('perl', [script], {
+      env: {
+        ...process.env,
+        ARCHIVE_DIR: join(root, 'archive'),
+        DATABASE_PATH: db,
+        SOURCE_DIR: join(root, 'source'),
+        REPLICATION_DIR: join(root, 'repl'),
+        PRIMARY_FILE: join(root, 'repl', 'primary'),
+        POD_NAME: 'db-0',
+        ISC_PASSWORD: 'tok',
+        SEGMENT_PORT: String(port),
+      },
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.on('data', (d) => d.toString().includes('listening') && resolve());
+        child.once('exit', (code) => reject(new Error(`segment server exited ${code}`)));
+      });
+      const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
+        '../src/utils/replication-lag',
+      );
+      const header = () => segmentRequest('127.0.0.1', port, 'tok HEADER');
+      writeFileSync(db, page(13, 53));
+      expect(await header()).toEqual(['OK 53']);
+      writeFileSync(db, page(14, 4242));
+      expect(await header()).toEqual(['OK 4242']);
+      writeFileSync(db, page(14));
+      expect(await header()).toEqual(['OK 0']);
+      writeFileSync(db, page(15, 1));
+      expect((await header())[0]).toMatch(/^ERR cannot read the header/);
+    } finally {
+      child.kill();
+    }
+  });
+});

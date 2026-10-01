@@ -25,6 +25,10 @@
 #   "<token> REMOVE <name>\n"   -> "OK\n": deletes the backup file <name> from the data directory
 #                                 (physical backups to S3, retention of server-side backups)
 #   "<token> FILES\n"           -> the backup file names in the data directory, one per line, then ".\n"
+#   "<token> HEADER\n"          -> "OK <sequence>": the replication sequence in the database header
+#                                 page on disk (planned switchover, once the old primary is in full
+#                                 shutdown: Firebird 6 refuses header statistics through the
+#                                 service manager then, and gstat reads local files only)
 #
 # FILE, STORE, REMOVE and FILES only handle plain "*.nbk" and "*.fbk" names (no directories), so
 # they cannot touch the database, the journal or the replication state. FILE and STORE run in a child process, so a
@@ -94,6 +98,30 @@ sub slurp { my ($f) = @_; open(my $fh, '<', $f) or return ''; local $/; my $v = 
 sub is_primary {
   my $primary = slurp($primary_file);
   return $primary eq '' || $primary =~ /^\Q$self\E(\.|$)/;
+}
+
+# Replication sequence (HDR_repl_seq clump, 0 without one) from the header page of a database file
+# on disk; undef if unreadable. Header layout as in set-repl-seq.pl: u16 page size at 16, u16 ODS
+# version at 18, hdr_end and the clumps at 66 / 128 (ODS 13) or 36 / 148 (ODS 14).
+sub header_sequence {
+  my ($file) = @_;
+  my %layout = (13 => [66, 128], 14 => [36, 148]);
+  open(my $fh, '<:raw', $file) or return undef;
+  my $n = read($fh, my $page, 65536);
+  close $fh;
+  return undef unless $n && $n >= 4096 && ord(substr($page, 0, 1)) == 1;
+  my $ods = unpack('v', substr($page, 18, 2)) & 0x7fff;
+  my $layout = $layout{$ods} or return undef;
+  my ($end_at, $p) = @$layout;
+  my $end = unpack('v', substr($page, $end_at, 2));
+  return undef if $end > length($page);
+  while ($p < $end) {
+    my ($type, $len) = unpack('C C', substr($page, $p, 2));
+    last if $type == 0;
+    return unpack('Q<', substr($page, $p + 2, 8)) if $type == 11 && $len == 8;
+    $p += 2 + $len;
+  }
+  return 0;
 }
 
 sub segments {
@@ -396,6 +424,9 @@ while (1) {
       print $client "$_ $first->{$_}\n" for sort { $a <=> $b } keys %$first;
       print $client ".\n";
     }
+  } elsif ($cmd eq 'HEADER') {
+    my $seq = header_sequence($database);
+    print $client (defined $seq ? "OK $seq\n" : "ERR cannot read the header of $database\n");
   } elsif ($cmd eq 'POSITION') {
     if (is_primary()) {
       print $client "OK primary\n";

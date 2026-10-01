@@ -10,12 +10,13 @@ own containers and removes them when it finishes.
 
 | # | Issue | Kind | Reproduces |
 |---|-------|------|------------|
-| 1 | A publishing database hangs under concurrent connect / commit / disconnect | Firebird bug, open | Yes: 7 of 7 runs; 0 of 7 with pooled connections or without publication |
+| 1 | A publishing database hangs under concurrent connect / commit / disconnect | Firebird bug, open | Yes: 7 of 7 runs on 5.0.4, 3 of 3 on the 6.0 snapshot, 2 of 3 on 4.0.7; 0 of 7 with pooled connections or without publication |
 | 2 | Commit journaled before its TIP state: lock-based replica copies may miss a transaction | Firebird, suspected | Not reproduced |
 | 3 | A physical copy inherits publication; a publishing replica fast-forwards past segments | Expected behaviour, handled | Yes, always |
 | 4 | `nbackup -B 0` copies record the still-active segment | Expected behaviour, handled | Yes, always |
 | 5 | `gstat -h` omits "Replication sequence" while it is 0 | Minor | Yes, always |
 | 6 | The official image keeps the security database on the container filesystem | Image behaviour, handled | Yes, always |
+| 7 | Firebird 6 refuses header statistics for a database in full shutdown | Firebird 6 behaviour, handled | Yes, always (6.0 snapshot) |
 
 ---
 
@@ -47,6 +48,14 @@ each. Every commit is an insert plus an update, made through its own `isql` conn
 | on | one per commit | 60 s | 2 | both hung (after 10 s) |
 | off | one per commit | 3 s | 3 | all completed |
 | on | persistent (one per writer) | 3 s | 2 | both completed |
+
+Other Firebird versions (`IMAGE=... hack/repro/publication-under-load.sh`, publication on, one
+connection per commit, 3 s archive timeout):
+
+| Image | Server | Runs | Result |
+|-------|--------|------|--------|
+| `firebirdsql/firebird:6-snapshot` | 6.0.0.2191 | 3 | all hung (after 10 s) |
+| `firebirdsql/firebird:4` | 4.0.7 | 3 | 1 hung (after 20 s), 1 stopped progressing while the server still answered, 1 completed |
 
 A single writer that connects once per commit did not hang in any run, so the concurrency
 matters. The replication log (`replication.log`) records nothing when the server hangs.
@@ -154,6 +163,27 @@ StatefulSet recreates it: "Your user name and password are not defined".
 `/var/lib/firebird/data/system/security.fdb` on first start and writes a `databases.conf` whose
 `security.db` alias (used by the entrypoint for SYSDBA) points there; the server uses it through
 `SecurityDatabase`. Users are managed with `FirebirdUser` (README, "Users").
+
+---
+
+## 7. Firebird 6 refuses header statistics for a database in full shutdown
+
+**What happens.** On the Firebird 6.0 snapshot (`firebirdsql/firebird:6-snapshot`, server
+`LI-T6.0.0.2191`), `fbsvcmgr host:service_mgr action_db_stats dbname <db> sts_hdr_pages` fails
+with `database <db> shutdown` once the database is in full shutdown. Firebird 4 and 5 return the
+header, with "full shutdown" in its attributes. `gstat -h host:<db>` no longer reads a database
+on another host either: it fails with `No such file or directory`.
+
+```sh
+fbsvcmgr host:service_mgr action_properties dbname /db prp_shutdown_mode prp_sm_full prp_force_shutdown 0
+fbsvcmgr host:service_mgr action_db_stats dbname /db sts_hdr_pages   # Firebird 6: "database /db shutdown"
+```
+
+**Handling.** Planned switchover reads the old primary's final replication sequence after the
+full shutdown: when the service manager refuses, it asks the old primary's segment server
+(`HEADER`), which reads the sequence from the header page on disk (nothing writes it in full
+shutdown). The fencing Job takes that error as "in full shutdown". The readiness probe treats
+any failure as not ready, so a fenced instance stays unready either way.
 
 ---
 

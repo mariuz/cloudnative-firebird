@@ -2,7 +2,8 @@
 # Planned switchover, first phase (run as a Job by the operator):
 #
 #   1. stop writes on the old primary: full shutdown through its service manager (idempotent);
-#   2. read its final replication sequence S from the header;
+#   2. read its final replication sequence S from the header (through its segment server when the
+#      server refuses header statistics in full shutdown, as Firebird 6 does);
 #   3. wait until segment S is archived on the old primary;
 #   4. wait until the target and every other ready replica has applied everything up to S
 #      (POSITION on their segment servers: control file at S or beyond, nothing pending).
@@ -27,10 +28,13 @@ my $timeout = $ENV{TIMEOUT_SECONDS} // 300;
 my $name_re = qr/^[A-Za-z0-9._-]+\.journal-(\d+)$/;
 $| = 1;
 
+# Header statistics of the old primary through its service manager; undef when the server refuses
+# them because the database is in full shutdown (Firebird 6: "database ... shutdown")
 sub header {
   my $out = `fbsvcmgr "$old:service_mgr" action_db_stats dbname "$db" sts_hdr_pages 2>&1`;
-  die "cannot read the header of $old: $out" if $?;
-  return $out;
+  return $out unless $?;
+  return undef if $out =~ /^database .* shutdown\s*$/m;
+  die "cannot read the header of $old: $out";
 }
 
 sub request {
@@ -56,7 +60,8 @@ sub wait_until {
 }
 
 # 1. stop writes
-if (header() =~ /full shutdown/) {
+my $before = header();
+if (!defined $before || $before =~ /full shutdown/) {
   print "$old already shut down\n";
 } else {
   system('fbsvcmgr', "$old:service_mgr", 'action_properties', 'dbname', $db,
@@ -65,9 +70,17 @@ if (header() =~ /full shutdown/) {
   print "writes stopped: $old is in full shutdown\n";
 }
 
-# 2. final sequence (no header entry while it is 0)
-my ($final) = header() =~ /Replication sequence:\s*(\d+)/;
-$final //= 0;
+# 2. final sequence (no header entry while it is 0); from the header page on disk, through the old
+# primary's segment server, when its server refuses header statistics in full shutdown
+my $stats = header();
+my $final;
+if (defined $stats) {
+  ($final) = $stats =~ /Replication sequence:\s*(\d+)/;
+  $final //= 0;
+} else {
+  my $r = request($old, 'HEADER') or die "cannot reach the segment server of $old\n";
+  ($final) = ($r->[0] // '') =~ /^OK (\d+)$/ or die "cannot read the header of $old: " . ($r->[0] // 'no reply') . "\n";
+}
 print "final replication sequence of $old: $final\n";
 
 # 3. the last segment is archived when the journal is closed

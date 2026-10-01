@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, Mock } from 'vitest';
 import { KubeConfig, V1Job } from '@kubernetes/client-node';
+import { spawnSync } from 'child_process';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import {
   FENCED_INSTANCES_ANNOTATION,
   FENCING_ACTION_LABEL,
@@ -73,6 +77,51 @@ describe('fencing Jobs', () => {
       ]),
     );
     expect(j.spec?.template.spec?.volumes).toBeUndefined();
+  });
+
+  it('reads the database state from the header statistics, or from Firebird 6 refusing them', () => {
+    // fbsvcmgr stand-in: header statistics answer per $STATS ("online", "full", "fb6", "down")
+    const run = (action: 'fence' | 'unfence', stats: string) => {
+      const dir = mkdtempSync(join(tmpdir(), 'fb-fence-'));
+      const fake = join(dir, 'fbsvcmgr');
+      writeFileSync(
+        fake,
+        [
+          '#!/bin/sh',
+          'case "$*" in *action_properties*) echo "$*" >> "$(dirname "$0")/calls"; exit 0 ;; esac',
+          'case "$STATS" in',
+          '  online) echo "	Attributes		force write" ;;',
+          '  full) echo "	Attributes		force write, full shutdown" ;;',
+          '  fb6) echo "database /var/lib/firebird/data/mydb.fdb shutdown"; exit 1 ;;',
+          '  *) echo "Unable to complete network request to host"; exit 1 ;;',
+          'esac',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(fake, 0o755);
+      const script = buildFencingJob(makeCluster(), 'db-1', action).spec!.template.spec!.containers[0].args![0];
+      const r = spawnSync('sh', ['-c', script], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, STATS: stats, FIREBIRD_HOST: 'db-1', DATABASE_PATH: '/db' },
+      });
+      let calls = '';
+      try {
+        calls = readFileSync(join(dir, 'calls'), 'utf8');
+      } catch {
+        // no service action
+      }
+      return { status: r.status, out: r.stdout + r.stderr, calls };
+    };
+    expect(run('fence', 'online')).toMatchObject({ status: 0, calls: expect.stringContaining('prp_sm_full') });
+    expect(run('fence', 'full')).toMatchObject({ status: 0, out: expect.stringContaining('already fenced'), calls: '' });
+    expect(run('fence', 'fb6')).toMatchObject({ status: 0, out: expect.stringContaining('already fenced'), calls: '' });
+    expect(run('unfence', 'fb6')).toMatchObject({ status: 0, calls: expect.stringContaining('prp_online_mode prp_sm_normal') });
+    expect(run('unfence', 'online')).toMatchObject({ status: 0, out: expect.stringContaining('already online'), calls: '' });
+    // any other failure fails the Job
+    const down = run('unfence', 'down');
+    expect(down.status).not.toBe(0);
+    expect(down.out).toContain('Unable to complete network request');
+    expect(down.calls).toBe('');
   });
 
   it('unfences by bringing the database online', () => {
