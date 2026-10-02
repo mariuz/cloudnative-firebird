@@ -145,7 +145,7 @@ function replicationEnv(
     { name: 'RESEED_FILE', value: `${OPERATOR_CONFIG_DIR}/${RESEED_KEY}` },
     { name: 'PROMOTE_FILE', value: `${OPERATOR_CONFIG_DIR}/${PROMOTE_KEY}` },
     { name: 'DEMOTE_FILE', value: `${OPERATOR_CONFIG_DIR}/${DEMOTE_KEY}` },
-    { name: 'ALLOW_LIVE_SEED', value: String(Boolean(cluster.spec.replication?.allowLiveSeedFromPrimary)) },
+    { name: 'ALLOW_LIVE_SEED', value: String(cluster.spec.replication?.allowLiveSeedFromPrimary !== false) },
     { name: 'SCRIPT_DIR', value: OPERATOR_CONFIG_DIR },
     { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
     {

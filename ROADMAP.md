@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.50.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.51.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Live Seeds by Default** *(v0.51.0)*
+  - `replication.allowLiveSeedFromPrimary` defaults to true: when no replica is ready and the offline bootstrap seed is stale, a new replica is seeded from a locked copy of the live primary instead of waiting for the primary's next clean restart, so seeding no longer depends on restarts. Ready replicas and the offline seed still come first; `false` keeps the primary from ever being locked. Safe since the commit/TIP window is confirmed and handled (v0.49.0) and live seeds plan with `PLAN` (v0.50.0); verified with the setting unset (window transactions replayed, replica identical) and opted out (seed refused).
 - [x] **Stricter Live Seed Planning** *(v0.50.0)*
   - Live seeds (`allowLiveSeedFromPrimary`) ask the primary's segment server with the new `PLAN` command, which scans the whole archive like `TXNS` and also returns the transactions numbered from the copy's next transaction on with blocks before the lock, and whether each first block begins its transaction. `replica-control.pl --next` records them all and refuses a transaction that began in a pruned segment instead of replaying it partially; against an older primary it falls back to `TXNS`.
   - Verified with operator-generated pods: 8 writers (replica identical, window transactions replayed), and a 200 000-row transaction journaled two segments before the lock and committed after it (replayed from segment 1, replica identical). A first attempt with `pitr-plan.pl` over the segments up to the lock only missed that transaction: a live seed cannot see the segments after the lock, so the plan is made where the whole archive is.

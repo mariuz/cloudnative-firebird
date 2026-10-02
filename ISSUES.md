@@ -120,8 +120,9 @@ row counts match and only the lost transaction's other changes are missing.
 1. a ready replica serves the seed copy: nothing commits on a replica, so it has no window;
 2. otherwise the primary serves its *offline bootstrap seed*, a plain file copy taken when the
    database was created in the init container, before the server started;
-3. a locked copy of the live primary is used only with
-   `spec.replication.allowLiveSeedFromPrimary: true`. For those seeds, the new replica lists
+3. otherwise a locked copy of the live primary (`spec.replication.allowLiveSeedFromPrimary`,
+   on by default since v0.51.0; `false` never locks the primary). For those seeds, the new
+   replica lists
    in its replica control file the copy's uncommitted transactions (`RDB$GET_TRANSACTION_CN
    <= 0`) and the transactions numbered from the copy's next transaction on that the primary's
    journal has blocks of in segments <= *S*, each from its first segment (`PLAN` on the

@@ -269,17 +269,22 @@ other instances are read-only replicas:
   SYSDBA password, and never open a live database file directly (all access goes through the
   local server).
 - A new replica is seeded from a **ready replica** (locked through that replica's server), or
-  from the primary's offline bootstrap seed while every later segment is still archived. The
-  live primary is only locked when `replication.allowLiveSeedFromPrimary` is set, so seeding
-  adds no load to the primary. A locked copy of a primary under load holds some transactions as
-  uncommitted although their commit is already journaled ([ISSUES.md](ISSUES.md), issue 2,
-  confirmed): a live seed lists them in the replica's control file, so they are replayed.
+  from the primary's offline bootstrap seed while every later segment is still archived, and
+  only otherwise from a **locked copy of the live primary** (`replication.allowLiveSeedFromPrimary`,
+  on by default; `false` never locks the primary, and a new replica then waits for a ready
+  replica or a fresh offline seed). A locked copy of a primary under load holds some
+  transactions as uncommitted although their commit is already journaled
+  ([ISSUES.md](ISSUES.md), issue 2, confirmed): the new replica's control file lists every
+  transaction open in the copy from its first archived segment, so they are replayed, and a
+  transaction whose start is no longer archived fails the seed rather than being replayed
+  partially.
 - The seed stays usable: while no replica holds segments back (a single instance), the primary
   keeps the segments after the seed up to `maxSegmentRetentionHours` (7 days by default), so an
   instance added later can be seeded from it. Once they are pruned, the primary's init container
   takes a fresh offline copy the next time the primary starts after a clean stop (a rolling
   update, a restart). After an unclean stop the server goes on writing the journal segment it
-  had open, so the refresh waits for the next clean restart.
+  had open, so the refresh waits for the next clean restart. Until then a new replica is seeded
+  from a live copy (unless `allowLiveSeedFromPrimary: false`).
 
 ```yaml
 spec:
