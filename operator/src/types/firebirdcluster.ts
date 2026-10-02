@@ -549,6 +549,21 @@ export interface FailoverConfiguration {
   enabled?: boolean;
   /** How long the primary must be unavailable before a failover starts (default 30) */
   delaySeconds?: number;
+  /**
+   * Primary isolation check (CloudNativePG's isolationCheck): the primary puts its database into
+   * full shutdown when it has reached neither the Kubernetes API server nor any other instance for
+   * timeoutSeconds, so clients cut off with it cannot write while a replica is promoted. Enabled
+   * by default with automatic failover.
+   */
+  isolationCheck?: IsolationCheckConfiguration;
+}
+
+/** Primary isolation check settings */
+export interface IsolationCheckConfiguration {
+  /** Whether the primary fences itself when isolated (default true) */
+  enabled?: boolean;
+  /** How long the primary may be isolated before it fences itself (default 20) */
+  timeoutSeconds?: number;
 }
 
 /** State of a planned switchover */

@@ -1,7 +1,7 @@
 import { V1Job } from '@kubernetes/client-node';
 import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, jobPodSpec } from './resources';
-import { OPERATOR_CONFIG_DIR, SEGMENT_PORT, instanceHost } from './replication';
+import { OPERATOR_CONFIG_DIR, SEGMENT_PORT, instanceHost, isolationCheckTimeoutSeconds } from './replication';
 
 /**
  * Planned switchover, requested with the targetPrimary annotation (CloudNativePG's
@@ -79,6 +79,19 @@ export function buildSwitchoverJob(
 /** How long the election waits for replicas to apply the segments they already received */
 export const FAILOVER_SETTLE_SECONDS = 60;
 export const DEFAULT_FAILOVER_DELAY_SECONDS = 30;
+/** Time the isolation check may need beyond its timeout to fence (check interval and timeouts) */
+export const ISOLATION_FENCE_MARGIN_SECONDS = 10;
+
+/**
+ * How long the primary must be unavailable before a failover starts: failover.delaySeconds, but
+ * never less than an isolated primary needs to fence itself, so a promoted replica cannot
+ * coexist with a primary still accepting writes on the other side of a partition.
+ */
+export function effectiveFailoverDelaySeconds(cluster: FirebirdCluster): number {
+  const delay = cluster.spec.replication?.failover?.delaySeconds ?? DEFAULT_FAILOVER_DELAY_SECONDS;
+  const isolation = isolationCheckTimeoutSeconds(cluster);
+  return isolation === undefined ? delay : Math.max(delay, isolation + ISOLATION_FENCE_MARGIN_SECONDS);
+}
 
 export function failoverJobName(cluster: FirebirdCluster): string {
   return `${cluster.metadata.name}-failover`;

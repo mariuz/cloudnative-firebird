@@ -13,6 +13,9 @@ spec:
     failover:
       enabled: true
       delaySeconds: 30
+      isolationCheck:
+        enabled: true
+        timeoutSeconds: 20
   backup:
     enabled: true
     type: logical

@@ -39,7 +39,7 @@ import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { PRIMARY_RESTART_GRACE_SECONDS, operatorRollsPods, planRollingUpdate } from '../utils/rolling-update';
 import { chooseBackupInstance } from '../utils/backup-target';
 import {
-  DEFAULT_FAILOVER_DELAY_SECONDS,
+  effectiveFailoverDelaySeconds,
   TARGET_PRIMARY_ANNOTATION,
   buildFailoverJob,
   buildSwitchoverJob,
@@ -96,7 +96,14 @@ import {
   segmentRequest,
   segmentRetention,
 } from '../utils/replication-lag';
-import { RESEED_ANNOTATION, RESEED_KEY, SEGMENT_PORT, instanceHost, replicationEnabled } from '../utils/replication';
+import {
+  RESEED_ANNOTATION,
+  RESEED_KEY,
+  SEGMENT_PORT,
+  instanceHost,
+  isolationCheckTimeoutSeconds,
+  replicationEnabled,
+} from '../utils/replication';
 import { planVolumeExpansion } from '../utils/storage';
 import { validateClusterSpec } from '../utils/validation';
 import {
@@ -611,10 +618,16 @@ export class FirebirdClusterController {
       await this.event(cluster, type, reason ?? defaultReason, status.message ?? `${status.phase}`);
     };
 
+    // A primary that fenced itself while cut off from the cluster (isolation check) and still
+    // holds the Lease: nothing was promoted meanwhile, so it is brought back online
+    if (!inFlight && failover?.enabled && !primaryReady && !fenced.includes(primaryPod) && podOf(primaryPod)) {
+      if (await this.rejoinIsolatedPrimary(cluster, primaryPod, log)) return result;
+    }
+
     // Automatic failover: the primary has not been ready for failover.delaySeconds
     if (!inFlight && failover?.enabled) {
       const restart = current.status?.rollingUpdate?.primaryRestart;
-      const graceMs = Math.max(PRIMARY_RESTART_GRACE_SECONDS, failover.delaySeconds ?? DEFAULT_FAILOVER_DELAY_SECONDS) * 1000;
+      const graceMs = Math.max(PRIMARY_RESTART_GRACE_SECONDS, effectiveFailoverDelaySeconds(cluster)) * 1000;
       const plannedRestart = restart?.pod === primaryPod && Date.now() - Date.parse(restart.time) < graceMs;
       if (primaryReady || fenced.includes(primaryPod) || plannedRestart) {
         // a fenced primary is never failed over, a primary restarted by a rolling update not yet
@@ -623,10 +636,10 @@ export class FirebirdClusterController {
         const since = current.status?.primaryNotReadySince ?? now;
         result.primaryNotReadySince = since;
         if (!current.status?.primaryNotReadySince) {
-          const delay = failover.delaySeconds ?? DEFAULT_FAILOVER_DELAY_SECONDS;
+          const delay = effectiveFailoverDelaySeconds(cluster);
           await this.event(cluster, 'Warning', EventReason.PrimaryNotReady, `primary ${primaryPod} is not ready; failover in ${delay}s unless it recovers`);
         }
-        const delayMs = (failover.delaySeconds ?? DEFAULT_FAILOVER_DELAY_SECONDS) * 1000;
+        const delayMs = effectiveFailoverDelaySeconds(cluster) * 1000;
         const recentFailure =
           state?.kind === 'failover' && state.phase === 'Failed' && state.from === primaryPod &&
           Date.now() - Date.parse(state.completionTime ?? now) < delayMs;
@@ -1857,6 +1870,36 @@ export class FirebirdClusterController {
       log.warn({ err }, 'Could not list the clusters cloning from this one');
       return undefined;
     }
+  }
+
+  /**
+   * Asks the primary's segment server whether its isolation check fenced it, and if so brings its
+   * database back online (REJOIN). The caller has checked that the pod still holds the Lease and
+   * no switchover or failover is under way. Returns true when the primary was rejoined.
+   */
+  private async rejoinIsolatedPrimary(cluster: FirebirdCluster, primaryPod: string, log: Logger): Promise<boolean> {
+    if (isolationCheckTimeoutSeconds(cluster) === undefined) return false;
+    const namespace = cluster.metadata.namespace ?? 'default';
+    const token = await this.superuserPassword(cluster);
+    if (token === undefined) return false;
+    const host = `${instanceHost(cluster, primaryPod)}.${namespace}.svc`;
+    try {
+      const reply = await this.segmentClient(host, SEGMENT_PORT, `${token} ISOLATION`);
+      if (!reply[0]?.startsWith('OK fenced')) return false;
+      const answer = await this.segmentClient(host, SEGMENT_PORT, `${token} REJOIN`);
+      if (answer[0] !== 'OK') throw new Error(answer[0] ?? 'no answer');
+    } catch (err) {
+      log.debug({ err, primary: primaryPod }, 'Could not check or lift the isolation fence of the primary');
+      return false;
+    }
+    log.warn({ primary: primaryPod }, 'Primary had fenced itself while isolated; still the primary: brought back online');
+    await this.event(
+      cluster,
+      'Normal',
+      EventReason.PrimaryRejoined,
+      `primary ${primaryPod} fenced itself while cut off from the cluster and still holds the Lease: database back online`,
+    );
+    return true;
   }
 
   /** Reconcile the primary leader lease object for HA election */

@@ -926,6 +926,7 @@ describe('buildConfigMap (replication)', () => {
       'fetch-seed.pl',
       'fetch-segments.pl',
       'init-instance.sh',
+      'isolation-check.pl',
       'pitr-plan.pl',
       'pitr-restore.sh',
       'primary',

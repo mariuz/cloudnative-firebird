@@ -1,0 +1,15 @@
+# expect: should be greater than or equal to 5
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 2
+  storage:
+    size: 1Gi
+  replication:
+    enabled: true
+    failover:
+      enabled: true
+      isolationCheck:
+        timeoutSeconds: 1

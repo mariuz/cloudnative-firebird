@@ -52,6 +52,7 @@ export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.from
     'set-repl-seq.pl',
     'switchover.pl',
     'failover.pl',
+    'isolation-check.pl',
   ].map(
     (name) => [name, readFileSync(join(SCRIPT_DIR, name), 'utf8')],
   ),
@@ -163,6 +164,30 @@ function replicationEnv(
           ...(cluster.spec.replication.journalArchiveS3 ? [{ name: 'ARCHIVE_UPLOAD', value: 'true' }] : []),
         ]
       : []),
+    ...isolationCheckEnv(cluster),
+  ];
+}
+
+/**
+ * Primary isolation check (isolation-check.pl, started by the segment server), with automatic
+ * failover only: only then can a replica be promoted while the primary is cut off.
+ */
+export function isolationCheckTimeoutSeconds(cluster: FirebirdCluster): number | undefined {
+  const failover = cluster.spec.replication?.failover;
+  if (!failover?.enabled || failover.isolationCheck?.enabled === false) return undefined;
+  return failover.isolationCheck?.timeoutSeconds ?? DEFAULT_ISOLATION_TIMEOUT_SECONDS;
+}
+
+export const DEFAULT_ISOLATION_TIMEOUT_SECONDS = 20;
+
+function isolationCheckEnv(cluster: FirebirdCluster): V1EnvVar[] {
+  const timeout = isolationCheckTimeoutSeconds(cluster);
+  // only when enabled, so the instance pods of other clusters do not change
+  if (timeout === undefined) return [];
+  return [
+    { name: 'ISOLATION_TIMEOUT_SECONDS', value: String(timeout) },
+    { name: 'POD_IP', valueFrom: { fieldRef: { fieldPath: 'status.podIP' } } },
+    { name: 'PEERS_SERVICE', value: `${cluster.metadata.name}-headless` },
   ];
 }
 

@@ -37,6 +37,7 @@ export const EventReason = {
   SwitchoverFailed: 'SwitchoverFailed',
   PrimaryNotReady: 'PrimaryNotReady',
   FailoverStarted: 'FailoverStarted',
+  PrimaryRejoined: 'PrimaryRejoined',
   FailoverCancelled: 'FailoverCancelled',
   FailingOver: 'FailingOver',
   FailoverCompleted: 'FailoverCompleted',

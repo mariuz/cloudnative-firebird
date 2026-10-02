@@ -436,6 +436,27 @@ there), because it may have committed transactions that never reached a replica.
 - A fenced primary is never failed over, and there is no failover without a ready replica.
 - `status.switchover` reports the failover (`kind: failover`, phases `Electing`, `Promoting`,
   `Completed` or `Failed`).
+- **Isolation check** (CloudNativePG's `isolationCheck`, on by default with failover): the
+  primary's replication sidecar checks every 5 seconds whether it can reach the Kubernetes API
+  server or the segment server of any other instance (through the headless Service). When it has
+  reached neither for `timeoutSeconds`, it puts its database into full shutdown, like a fenced
+  instance: clients cut off with it (e.g. on a partitioned node) cannot keep writing to a primary
+  that a failover replaces on the other side. The failover delay is raised to at least
+  `timeoutSeconds + 10`, so the old primary has fenced itself before a replica is promoted. If
+  the operator reaches it again while it still holds the Lease (no failover happened), it brings
+  the database back online (`PrimaryRejoined` event); otherwise it is re-seeded as above.
+
+```yaml
+    failover:
+      enabled: true
+      isolationCheck:
+        enabled: true        # default
+        timeoutSeconds: 20   # default, 5 to 3600
+```
+
+A primary that reaches the API server or any replica is never fenced, so a partition that leaves
+the primary and its clients with one of those (but not with the operator's view of readiness)
+is not covered.
 
 ### Rolling Updates
 
@@ -827,7 +848,7 @@ The operator records Kubernetes events on its resources (CloudNativePG 1.29 / 1.
 
 | Resource | Reasons |
 |---|---|
-| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`; `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReconcileFailed` (warning) |
+| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`; `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReconcileFailed` (warning) |
 | `FirebirdBackup` | `BackupStarted`, `BackupCompleted`, `BackupFailed` (warning) |
 | `FirebirdRestore` | `RestoreStarted`, `RestoreCompleted`, `RestoreFailed` (warning) |
 | `FirebirdUser` | `UserApplied`, `UserFailed` (warning), `UserDropped` |
