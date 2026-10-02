@@ -6,8 +6,9 @@
 #     (the copy was taken while it had applied everything it received) and set db_sequence to
 #     the copy's own header value.
 #
-#   replica-control.pl <primary-host> <S> <db-sequence> <control-file> [candidate-id ...]
-#     Seed copied from the primary (offline bootstrap seed, or a live locked copy):
+#   replica-control.pl [--next <id>] <primary-host> <S> <db-sequence> <control-file> [candidate-id ...]
+#     Seed copied from the primary (offline bootstrap seed, or a live locked copy; --next, the
+#     copy's next transaction, for live copies):
 # The seed copy contains every change journaled in segments <= S, except transactions whose
 # commit was journaled before the nbackup lock but whose commit mark (TIP) was written after it
 # (Firebird journals the commit before setting the TIP state). Those, and transactions still
@@ -42,23 +43,49 @@ if (@ARGV && $ARGV[0] eq '--adopt') {
   exit 0;
 }
 
+my $next;
+if (@ARGV && $ARGV[0] eq '--next') { (undef, $next) = splice(@ARGV, 0, 2); }
 my ($host, $seq, $dbseq, $target, @candidates) = @ARGV;
-die "usage: replica-control.pl <host> <S> <db-sequence> <control-file> [ids...]\n" unless defined $target;
+die "usage: replica-control.pl [--next <id>] <host> <S> <db-sequence> <control-file> [ids...]\n" unless defined $target;
 my $port = $ENV{SEGMENT_PORT} // 3051;
 
-my %start;
-if (@candidates) {
+# one request to the primary's segment server; undef when it does not know the command
+sub ask {
+  my ($line) = @_;
   my $sock = IO::Socket::INET->new(PeerHost => $host, PeerPort => $port, Proto => 'tcp', Timeout => 10)
     or die "connect $host:$port: $!\n";
   $sock->timeout(300);
-  print $sock (($ENV{ISC_PASSWORD} // '') . " TXNS $seq " . join(',', @candidates) . "\n");
-  while (my $line = <$sock>) {
-    $line =~ s/\r?\n$//;
-    last if $line eq '.';
-    die "server: $line\n" if $line =~ /^ERR/;
-    $start{$1} = $2 if $line =~ /^(\d+) (\d+)$/;
+  print $sock (($ENV{ISC_PASSWORD} // '') . " $line\n");
+  my @lines;
+  while (my $l = <$sock>) {
+    $l =~ s/\r?\n$//;
+    last if $l eq '.';
+    if ($l =~ /^ERR/) {
+      close $sock;
+      return undef if $l eq 'ERR bad request';
+      die "server: $l\n";
+    }
+    push @lines, $l;
   }
   close $sock;
+  return \@lines;
+}
+
+# With --next (live seeds), PLAN also covers transactions numbered <next> or above with blocks in
+# segments <= S, and tells whether each first block begins its transaction: one that began in a
+# segment no longer archived cannot be replayed whole, so the seed fails rather than replaying it
+# partially. An older segment server only knows TXNS (the candidates' first segments).
+my %start;
+my $plan = defined $next ? ask("PLAN $seq $next " . join(',', @candidates)) : undef;
+if ($plan) {
+  for (@$plan) {
+    next unless /^(\d+) (\d+) ([01])$/;
+    die "transaction $1 began before the oldest archived segment of $host ($2 is its first); cannot seed from this copy\n" unless $3;
+    $start{$1} = $2;
+  }
+} elsif (@candidates) {
+  my $lines = ask("TXNS $seq " . join(',', @candidates)) // die "server: TXNS not supported\n";
+  for (@$lines) { $start{$1} = $2 if /^(\d+) (\d+)$/; }
 }
 
 my @active = sort { $a <=> $b } keys %start;
