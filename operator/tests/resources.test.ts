@@ -282,17 +282,17 @@ describe('buildStatefulSet (replication)', () => {
     expect(podSpec?.initContainers?.find((c) => c.name === 'replication-init')?.command).toEqual(['sh', '/etc/firebird-operator/init-instance.sh']);
   });
 
-  it('passes seed sources and the live-seed opt-in to the replication containers', () => {
-    const env = podSpecOf(
-      makeCluster({ replication: { enabled: true, allowLiveSeedFromPrimary: true } }),
-    )?.initContainers?.find((c) => c.name === 'replication-init')?.env;
+  it('passes seed sources and live seeding (on unless opted out) to the replication containers', () => {
+    const envOf = (allowLiveSeedFromPrimary?: boolean) =>
+      podSpecOf(makeCluster({ replication: { enabled: true, allowLiveSeedFromPrimary } }))?.initContainers?.find(
+        (c) => c.name === 'replication-init',
+      )?.env;
+    const env = envOf(undefined);
     expect(env).toContainEqual({ name: 'SEED_SOURCES_FILE', value: '/etc/firebird-operator/seed-sources' });
     expect(env).toContainEqual({ name: 'ALLOW_LIVE_SEED', value: 'true' });
     expect(env).toContainEqual({ name: 'REPLICATION_DIR', value: '/var/lib/firebird/data/replication' });
-    expect(podSpecOf(makeCluster({ replication: { enabled: true } }))?.initContainers?.find((c) => c.name === 'replication-init')?.env).toContainEqual({
-      name: 'ALLOW_LIVE_SEED',
-      value: 'false',
-    });
+    expect(envOf(true)).toContainEqual({ name: 'ALLOW_LIVE_SEED', value: 'true' });
+    expect(envOf(false)).toContainEqual({ name: 'ALLOW_LIVE_SEED', value: 'false' });
   });
 
   it('gives the sidecars the data volume, the scripts and SYSDBA credentials', () => {

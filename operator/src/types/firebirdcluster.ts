@@ -207,9 +207,10 @@ export interface ReplicationConfiguration {
   pruneAppliedSegments?: boolean;
   /**
    * Allow seeding a new replica with a locked copy of the live primary when no ready replica
-   * and no usable offline bootstrap seed exist. Off by default: seeding from replicas or the
-   * offline seed adds no load to the primary and avoids a suspected commit/lock window
-   * (ISSUES.md, issue 2).
+   * and no usable offline bootstrap seed exist (default true). The copy's in-flight
+   * transactions, including those of the commit/TIP window (ISSUES.md, issue 2), are replayed
+   * on the new replica. false never locks the primary: a new replica then waits for a ready
+   * replica or a fresh offline seed (the primary's next clean restart).
    */
   allowLiveSeedFromPrimary?: boolean;
   /**

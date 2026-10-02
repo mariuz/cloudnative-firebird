@@ -52,7 +52,7 @@
 #            kind "replica"; the new replica adopts the control file.
 #   primary: serve the offline bootstrap seed written when the database was created, while every
 #            journal segment after it is still archived. kind "offline".
-#            Otherwise, only when ALLOW_LIVE_SEED=true, lock the live primary (kind "live"): the
+#            Otherwise, when ALLOW_LIVE_SEED=true (allowLiveSeedFromPrimary, by default), lock the live primary (kind "live"): the
 #            new replica then replays the copy's uncommitted transactions found via TXNS.
 use strict;
 use warnings;
@@ -302,7 +302,7 @@ sub seed_from_primary {
     print "bootstrap seed (sequence $seed_seq) is older than the archived segments\n";
   }
   if (!$allow_live) {
-    print $client "ERR no safe seed source on the primary; add a replica seed source or set allowLiveSeedFromPrimary\n";
+    print $client "ERR no safe seed source on the primary; add a replica seed source, restart the primary cleanly for a fresh offline seed, or allow live seeds (allowLiveSeedFromPrimary)\n";
     print "seed refused: no usable bootstrap seed and live seeding is not allowed\n";
     return;
   }

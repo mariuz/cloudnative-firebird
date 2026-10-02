@@ -11,14 +11,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Report the commit/TIP window upstream** ([ISSUES.md](ISSUES.md) issue 2, confirmed):
   replicas created with Firebird's documented procedure (`nbackup -L`, `-SEQ -F`) lose the
   transactions committed at the moment of the lock (`hack/repro/replica-seed-race.sh`).
-- [ ] **Live seeds by default**: live seeds now plan like point-in-time recovery (`PLAN`:
-  transactions after the copy's next transaction, first-block check; verified under 8 writers
-  and with a transaction spanning segments). Making live seeding the fallback when the offline
-  seed is stale would refresh seeding online (next item); it locks the primary for the copy.
-- [ ] **Refresh the offline bootstrap seed online**: the seed is refreshed when the primary
-  starts after a clean stop, and the segments after it are kept up to `maxSegmentRetentionHours`
-  while there is no replica. A primary running longer than that without a restart, and without a
-  ready replica, still cannot seed a new one unless live seeding is allowed.
 - [ ] **Failover safety**: the Lease is moved by the operator, not held and renewed by the
   instances (CloudNativePG 1.30's promotion mutex). A primary that is alive but unready (e.g.
   overloaded) is restarted and re-seeded after a failover; one that is partitioned from the other
