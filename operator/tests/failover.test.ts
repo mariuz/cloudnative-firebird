@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, Mock } from 'vitest';
-import { KubeConfig, V1Job } from '@kubernetes/client-node';
+import { KubeConfig, V1Job, loadYaml } from '@kubernetes/client-node';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
 import {
   buildFailoverJob,
@@ -302,5 +304,36 @@ describe('synchronous replication and failover, switchover, re-seeding', () => {
     const detached = setup({ pods: [pod('db-0', 'u0'), annotated, pod('db-2', 'u2')] });
     await detached.controller.reconcile(syncCluster({ synchronous: { ...attached, phase: 'Detached' } }));
     expect(detached.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name)).toContain('db-1');
+  });
+});
+
+describe('status written by the operator', () => {
+  type Schema = { properties?: Record<string, Schema>; items?: Schema; additionalProperties?: unknown; 'x-kubernetes-preserve-unknown-fields'?: boolean };
+  const crd = loadYaml(readFileSync(join(__dirname, '..', '..', 'config', 'crds', 'firebirdcluster.yaml'), 'utf8')) as {
+    spec: { versions: Array<{ schema: { openAPIV3Schema: Schema } }> };
+  };
+  const statusSchema = crd.spec.versions[0].schema.openAPIV3Schema.properties!.status;
+  /** Paths in value the schema does not declare: the API server would prune them */
+  const undeclared = (value: unknown, schema: Schema, path: string): string[] => {
+    if (Array.isArray(value)) return schema.items ? value.flatMap((v, i) => undeclared(v, schema.items!, `${path}[${i}]`)) : [];
+    if (value === null || typeof value !== 'object') return [];
+    if (schema['x-kubernetes-preserve-unknown-fields'] || (schema.additionalProperties && !schema.properties)) return [];
+    return Object.entries(value).flatMap(([k, v]) =>
+      schema.properties?.[k] ? undeclared(v, schema.properties[k], `${path}.${k}`) : [`${path}.${k}`],
+    );
+  };
+
+  it('declares every status field in the CRD (undeclared ones are pruned)', async () => {
+    const s = setup({ pods: [pod('db-0', 'u0'), pod('db-1', 'u1'), pod('db-2', 'u2')] });
+    const cluster: FirebirdCluster = {
+      ...makeCluster({
+        synchronous: { standby: 'db-1', primary: 'db-0', phase: 'Attached', time: longAgo, unavailableSince: longAgo, retryAfter: longAgo },
+      }),
+      spec: { instances: 3, storage: { size: '1Gi' }, replication: { enabled: true, mode: 'sync', failover: { enabled: true } } },
+    };
+    await s.controller.reconcile(cluster);
+    const written = s.status();
+    expect(written.synchronous).toBeDefined();
+    expect(undeclared(written, statusSchema, 'status')).toEqual([]);
   });
 });

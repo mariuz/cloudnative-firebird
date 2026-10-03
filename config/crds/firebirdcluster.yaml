@@ -832,6 +832,30 @@ spec:
                       type: object
                       additionalProperties:
                         type: string
+                synchronous:
+                  description: Synchronous replication (replication.mode sync), the standby and its state
+                  type: object
+                  properties:
+                    standby:
+                      type: string
+                    primary:
+                      type: string
+                    phase:
+                      type: string
+                      enum:
+                        - Attaching
+                        - Attached
+                        - Detaching
+                        - Detached
+                        - Failed
+                    message:
+                      type: string
+                    time:
+                      type: string
+                    unavailableSince:
+                      type: string
+                    retryAfter:
+                      type: string
                 replicationStatus:
                   description: Detailed replication status details
                   type: object
