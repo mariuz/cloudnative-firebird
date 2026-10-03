@@ -102,6 +102,7 @@ function makeMockKubeConfig({
     readNamespacedStatefulSet: readNamespacedStatefulSetImpl,
     createNamespacedStatefulSet: createNamespacedStatefulSetImpl,
     patchNamespacedStatefulSet: patchNamespacedStatefulSetImpl,
+    deleteNamespacedStatefulSet: vi.fn().mockResolvedValue({}),
   };
   const mockBatchApi = {
     readNamespacedCronJob: readNamespacedCronJobImpl,
@@ -255,9 +256,42 @@ describe('FirebirdClusterController – basic reconciliation', () => {
   });
 
   describe('reconcile() StatefulSet management', () => {
+    it('re-creates a StatefulSet without parallel pod management, orphaning its pods', async () => {
+      // OrderedReady (the default) before; gone once the orphaning delete went through
+      const readNamespacedStatefulSetImpl = vi
+        .fn()
+        .mockResolvedValueOnce({ metadata: { name: 'test-cluster' }, spec: { replicas: 1 }, status: { readyReplicas: 1 } })
+        .mockResolvedValueOnce({ metadata: { name: 'test-cluster' }, spec: { replicas: 1 } })
+        .mockRejectedValue(notFoundError);
+      const patchNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
+      const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({ readNamespacedStatefulSetImpl, patchNamespacedStatefulSetImpl });
+      await new FirebirdClusterController(mockKubeConfig).reconcile(makeCluster());
+      expect(mockAppsApi.deleteNamespacedStatefulSet).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'test-cluster', propagationPolicy: 'Orphan' }),
+      );
+      const created = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0].body;
+      expect(created.spec.podManagementPolicy).toBe('Parallel');
+      expect(patchNamespacedStatefulSetImpl).not.toHaveBeenCalled();
+    });
+
+    it('creates the replacement on a later reconcile while the old StatefulSet is still being deleted', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout'] });
+      try {
+        const readNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({ metadata: { name: 'test-cluster' }, spec: { replicas: 1 } });
+        const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({ readNamespacedStatefulSetImpl });
+        const done = new FirebirdClusterController(mockKubeConfig).reconcile(makeCluster());
+        await vi.runAllTimersAsync();
+        await done;
+        expect(mockAppsApi.deleteNamespacedStatefulSet).toHaveBeenCalled();
+        expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('patches the StatefulSet when it exists and replicas have changed', async () => {
       const outdatedSts = {
-        spec: { replicas: 1, template: { spec: { containers: [{ image: 'old' }] } } },
+        spec: { replicas: 1, podManagementPolicy: 'Parallel', template: { spec: { containers: [{ image: 'old' }] } } },
       };
       const readNamespacedStatefulSetImpl = vi.fn().mockResolvedValue(outdatedSts);
       const patchNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({});
@@ -334,10 +368,12 @@ describe('FirebirdClusterController – basic reconciliation', () => {
   });
 
   describe('reconcile() status lifecycle', () => {
-    it('keeps the phase of an existing cluster while it reconciles', async () => {
+    it('keeps the phase of an existing cluster while it reconciles, and does not rewrite its status first', async () => {
       const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
+      const getNamespacedCustomObjectImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockCustomApi } = makeMockKubeConfig({
         patchNamespacedCustomObjectStatusImpl,
+        getNamespacedCustomObjectImpl,
       });
       const controller = new FirebirdClusterController(mockKubeConfig);
       const cluster = makeCluster();
@@ -345,13 +381,21 @@ describe('FirebirdClusterController – basic reconciliation', () => {
 
       await controller.reconcile(cluster);
 
-      const firstPatch = (
-        mockCustomApi.patchNamespacedCustomObjectStatus as Mock
-      ).mock.calls[0] as PatchStatusCall;
-      expect(firstPatch[0].body[0].value).toMatchObject({
-        phase: 'Running',
-        phaseReason: 'All resources reconciled successfully',
-      });
+      // only the final status write: a write from this copy at the start would drop what the
+      // previous reconcile stored meanwhile
+      const calls = (mockCustomApi.patchNamespacedCustomObjectStatus as Mock).mock.calls as PatchStatusCall[];
+      expect(calls).toHaveLength(1);
+      expect(calls.map((c) => c[0].body[0].value.phase)).not.toContain('Creating');
+    });
+
+    it('stops when an existing cluster was deleted since the reconcile was queued', async () => {
+      const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
+      const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({ patchNamespacedCustomObjectStatusImpl });
+      const cluster = makeCluster();
+      cluster.status = { phase: 'Running' };
+      await new FirebirdClusterController(mockKubeConfig).reconcile(cluster);
+      expect(patchNamespacedCustomObjectStatusImpl).not.toHaveBeenCalled();
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled();
     });
 
     it('sets status to Creating at the start of reconciliation', async () => {
@@ -687,6 +731,7 @@ describe('FirebirdClusterController – basic reconciliation', () => {
   describe('reconcile() readyInstances tracking', () => {
     it('sets phase to Creating when readyReplicas is less than instances', async () => {
       const readNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({
+        spec: { podManagementPolicy: 'Parallel' },
         status: { readyReplicas: 0 },
       });
       const patchNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({
@@ -710,6 +755,7 @@ describe('FirebirdClusterController – basic reconciliation', () => {
 
     it('sets phase to Running when readyReplicas equals instances', async () => {
       const readNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({
+        spec: { podManagementPolicy: 'Parallel' },
         status: { readyReplicas: 3 },
       });
       const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});

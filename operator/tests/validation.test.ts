@@ -141,11 +141,17 @@ describe('validateClusterSpec', () => {
     expect(() => validateClusterSpec(makeCluster({ serviceType: 'LoadBalancer' }))).not.toThrow();
   });
 
-  it('accepts async replication and rejects sync until it is implemented', () => {
+  it('accepts async replication, and sync with a standby to attach', () => {
     expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, mode: 'async' } }))).not.toThrow();
-    expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, mode: 'sync' } }))).toThrow(
-      /'sync' is not supported yet/,
+    expect(() => validateClusterSpec(makeCluster({ instances: 2, replication: { enabled: true, mode: 'sync' } }))).not.toThrow();
+    expect(() => validateClusterSpec(makeCluster({ instances: 1, replication: { enabled: true, mode: 'sync' } }))).toThrow(
+      /'sync' needs at least 2 instances/,
     );
+    const sync = (synchronous: object) =>
+      validateClusterSpec(makeCluster({ instances: 2, replication: { enabled: true, mode: 'sync', synchronous } as never }));
+    expect(() => sync({ dataDurability: 'preferred', standbyUnavailableSeconds: 10 })).not.toThrow();
+    expect(() => sync({ dataDurability: 'maybe' })).toThrow(/dataDurability/);
+    expect(() => sync({ standbyUnavailableSeconds: 0 })).toThrow(/standbyUnavailableSeconds/);
   });
 
   it.each(['/var/lib/firebird/data/repl', '/var/lib/firebird/data/a/b_c-1'])(

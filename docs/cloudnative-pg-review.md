@@ -50,6 +50,7 @@ Status: **done** (in this repository), **planned** (listed in [ROADMAP.md](../RO
 - `search_path` pinning (CVE-2026-55769), SCRAM password encoding (CVE-2026-55765), TLS client
   certificates for roles, `pg_hba` pod selectors: PostgreSQL-specific. Firebird client access is
   restricted by the generated NetworkPolicy.
-- Quorum-based failover (1.28): depends on synchronous replication, which is not supported yet.
+- Quorum-based failover (1.28): synchronous replication attaches one standby (v0.53.0), which a
+  failover promotes without loss; a quorum of several standbys is not implemented.
 - Barman Cloud plugin migration: backups here run as Jobs with a configurable S3 client image
   (`s3.clientImage`), so the transport is already outside the operator image.

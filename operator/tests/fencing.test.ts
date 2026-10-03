@@ -201,7 +201,7 @@ describe('FirebirdClusterController – fencing', () => {
   const readyStatefulSet = (ready: number) =>
     vi.fn().mockResolvedValue({
       metadata: { name: 'db' },
-      spec: { replicas: 3, template: { spec: { containers: [{ name: 'firebird' }] } } },
+      spec: { replicas: 3, podManagementPolicy: 'Parallel', template: { spec: { containers: [{ name: 'firebird' }] } } },
       status: { readyReplicas: ready },
     });
 

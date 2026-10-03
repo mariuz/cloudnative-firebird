@@ -36,6 +36,7 @@ const existingStatefulSet = (cluster: FirebirdCluster, size = '1Gi') => ({
   metadata: { name: cluster.metadata.name },
   spec: {
     replicas: cluster.spec.instances,
+    podManagementPolicy: 'Parallel',
     template: { spec: { containers: [{ name: 'firebird', image: 'old:image' }] } },
     volumeClaimTemplates: [
       { metadata: { name: 'firebird-data' }, spec: { resources: { requests: { storage: size } } } },

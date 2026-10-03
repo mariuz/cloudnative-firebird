@@ -25,7 +25,7 @@ field() { echo "$header" | sed -n "s/^[[:space:]]*$1:*[[:space:]]*\\([0-9{][0-9A
 pending() { t=$(awk -v p="$POD_NAME" '$1 == p { print $2 }' "$1" 2>/dev/null || true); [ -n "$t" ] && [ "$(cat "$2" 2>/dev/null || true)" != "$t" ] && echo "$t" || true; }
 wipe_replication_state() {
   find "$SOURCE_DIR" "$JOURNAL_DIR" "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-  rm -f "$STATE_FILE"
+  rm -f "$STATE_FILE" "$REPLICATION_DIR/sync-standby" "$REPLICATION_DIR/sync-seen"
 }
 # offline copy of a database nothing has attached: a consistent bootstrap seed for new replicas.
 # Its replication sequence is recorded next to it (the segment server keeps the segments after it).
@@ -65,6 +65,9 @@ if [ -n "$promote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
     ctl=$(find "$SOURCE_DIR" -maxdepth 1 -name '{*}' | head -n 1)
     seq=0
     if [ -n "$ctl" ]; then seq=$(od -An -tu8 -j16 -N8 "$ctl" | tr -d ' '); fi
+    # a synchronous standby has every change up to the last segment archived on the old primary
+    seen=$(cat "$REPLICATION_DIR/sync-seen" 2>/dev/null || true)
+    if [ -f "$REPLICATION_DIR/sync-standby" ] && [ -n "$seen" ] && [ "$seen" -gt "$seq" ]; then seq=$seen; fi
     echo "$seq" > "$REPLICATION_DIR/.promote-seq"
   fi
   seq=$(cat "$REPLICATION_DIR/.promote-seq")
@@ -115,7 +118,7 @@ if [ -n "$reseed_token" ] && [ "$(cat "$REPLICATION_DIR/.reseeded" 2>/dev/null |
       ;;
     *)
       echo "re-seed requested: discarding the database and replication state"
-      rm -f "$DATABASE_PATH" "$STATE_FILE"
+      rm -f "$DATABASE_PATH" "$STATE_FILE" "$REPLICATION_DIR/sync-standby" "$REPLICATION_DIR/sync-seen"
       find "$SOURCE_DIR" "$JOURNAL_DIR" "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
       ;;
   esac
@@ -123,8 +126,15 @@ else
   reseed_token=""
 fi
 
-# Replication enabled on an existing cluster: the databases were created without it.
 is_primary() { case "$primary" in ""|"$POD_NAME"|"$POD_NAME".*) return 0 ;; *) return 1 ;; esac; }
+
+# Synchronous replication: replication.conf includes sync.conf, where the primary's segment server
+# writes the sync_replica entry (SYNC). Only the primary replicates synchronously: a former primary
+# must not keep sending its changes to the standby.
+if ! is_primary || [ ! -f "$REPLICATION_DIR/sync.conf" ]; then : > "$REPLICATION_DIR/sync.conf"; fi
+chown firebird:firebird "$REPLICATION_DIR/sync.conf"
+
+# Replication enabled on an existing cluster: the databases were created without it.
 is_replica_db() { gstat -h "$1" | grep -q '^[[:space:]]*Attributes.*replica'; }
 en="$DATA_DIR/.enable-replication.fdb"
 # resume an interrupted conversion before anything looks at DATABASE_PATH
@@ -214,6 +224,19 @@ case "$primary" in
     exit 0
     ;;
 esac
+
+# Synchronous replication: a primary still replicating to this instance would send its changes on
+# top of a seed that also receives them from the journal. The operator detaches the standby
+# before re-seeding it; a volume lost otherwise waits here until it does (re-seed annotation).
+while :; do
+  syncto=$(perl -MIO::Socket::INET -e '
+    my $s = IO::Socket::INET->new(PeerHost => $ARGV[0], PeerPort => $ENV{SEGMENT_PORT} || 3051, Timeout => 10) or exit 0;
+    print $s "$ENV{ISC_PASSWORD} SYNCTO\n"; my $l = <$s> // ""; print $1 if $l =~ /^OK (\S+)/;' "$primary" 2>/dev/null || true)
+  case "$syncto" in
+    "$POD_NAME"|"$POD_NAME".*) echo "the primary still replicates to this instance synchronously; waiting for it to be detached (annotate the pod with reseed=true)"; sleep 10 ;;
+    *) break ;;
+  esac
+done
 
 # Replica: ready replicas first (a replica does not publish, so locking it is safe), then the
 # primary (its offline bootstrap seed, or a live copy only when explicitly allowed).

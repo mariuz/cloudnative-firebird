@@ -4,8 +4,7 @@
 #   1. stop writes on the old primary: full shutdown through its service manager (idempotent);
 #   2. read its final replication sequence S from the header (through its segment server when the
 #      server refuses header statistics in full shutdown, as Firebird 6 does);
-#   3. wait until segment S is archived on the old primary;
-#   4. wait until the target and every other ready replica has applied everything up to S
+#   3. wait until the target and every other ready replica has applied everything up to S
 #      (POSITION on their segment servers: control file at S or beyond, nothing pending).
 #
 # Exits 0 when the target can be promoted: the operator then moves the primary and restarts the
@@ -25,7 +24,6 @@ my $db      = $ENV{DATABASE_PATH} or die "DATABASE_PATH is required\n";
 my $token   = $ENV{ISC_PASSWORD} // '';
 my $port    = $ENV{SEGMENT_PORT} // 3051;
 my $timeout = $ENV{TIMEOUT_SECONDS} // 300;
-my $name_re = qr/^[A-Za-z0-9._-]+\.journal-(\d+)$/;
 $| = 1;
 
 # Header statistics of the old primary through its service manager; undef when the server refuses
@@ -83,15 +81,8 @@ if (defined $stats) {
 }
 print "final replication sequence of $old: $final\n";
 
-# 3. the last segment is archived when the journal is closed
-if ($final > 0) {
-  wait_until("segment $final to be archived on $old", sub {
-    my $list = request($old, 'LIST') or return 0;
-    return grep { $_ =~ $name_re && $1 >= $final } @$list;
-  });
-}
-
-# 4. replicas caught up
+# 3. replicas caught up (applied up to S also means archived; a primary just promoted and not
+# written to has no segment S, its journal starting after S)
 for my $host ($target, @others) {
   wait_until("$host to apply segment $final", sub {
     my $r = request($host, 'POSITION') or return 0;

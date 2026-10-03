@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, Mock } from 'vitest';
-import { KubeConfig, V1Job } from '@kubernetes/client-node';
+import { KubeConfig, V1Job, loadYaml } from '@kubernetes/client-node';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
 import {
   buildFailoverJob,
@@ -249,5 +251,103 @@ describe('primary isolation check', () => {
     const spec = (timeoutSeconds: number) => makeCluster(undefined, { enabled: true, isolationCheck: { timeoutSeconds } });
     expect(() => validateClusterSpec(spec(4))).toThrow(/isolationCheck.timeoutSeconds/);
     expect(() => validateClusterSpec(spec(5))).not.toThrow();
+  });
+});
+
+describe('synchronous replication and failover, switchover, re-seeding', () => {
+  const syncCluster = (status: FirebirdCluster['status'], annotations: Record<string, string> = {}): FirebirdCluster => ({
+    ...makeCluster(status),
+    metadata: { name: 'db', namespace: 'default', uid: 'c', annotations },
+    spec: {
+      instances: 3,
+      storage: { size: '1Gi' },
+      replication: { enabled: true, mode: 'sync', failover: { enabled: true, delaySeconds: 30, isolationCheck: { enabled: false } } },
+    },
+  });
+  const attached = { standby: 'db-1', primary: 'db-0', phase: 'Attached' as const, time: longAgo };
+
+  it('promotes the attached standby without an election, and re-seeds the other instances', async () => {
+    const s = setup();
+    await s.controller.reconcile(syncCluster({ primaryNotReadySince: longAgo, synchronous: attached }));
+    expect(s.created().some((j) => j.metadata?.name === 'db-failover')).toBe(false);
+    const promoting = s.fn('patchNamespacedCustomObjectStatus').mock.calls
+      .map((c) => c[0].body[0])
+      .find((op) => op.path === '/status/switchover')?.value;
+    expect(promoting).toMatchObject({ kind: 'failover', from: 'db-0', target: 'db-1', phase: 'Promoting', targetToken: 'u1' });
+    expect(Object.keys(promoting.reseed).sort()).toEqual(['db-0', 'db-2']);
+    expect(promoting.message).toContain('no transaction lost');
+  });
+
+  it('does not fail over while a sync-standby Job holds the primary in full shutdown', async () => {
+    const attaching = { standby: 'db-1', primary: 'db-0', phase: 'Attaching' as const, time: new Date(Date.now() - 60_000).toISOString() };
+    const s = setup({ job: {} });
+    await s.controller.reconcile(syncCluster({ primaryNotReadySince: longAgo, synchronous: attaching }));
+    expect(s.created().some((j) => j.metadata?.name === 'db-failover')).toBe(false);
+    expect(s.status().primaryNotReadySince).toBeUndefined();
+    // a Job that has held it for longer than the grace no longer prevents a failover
+    const stuck = setup({ job: {} });
+    await stuck.controller.reconcile(
+      syncCluster({ primaryNotReadySince: longAgo, synchronous: { ...attaching, time: new Date(Date.now() - 400_000).toISOString() } }),
+    );
+    expect(stuck.created().some((j) => j.metadata?.name === 'db-failover')).toBe(true);
+  });
+
+  it('elects as before when the standby is not ready', async () => {
+    const s = setup({ pods: [pod('db-0', 'u0', false), pod('db-1', 'u1', false), pod('db-2', 'u2')] });
+    await s.controller.reconcile(syncCluster({ primaryNotReadySince: longAgo, synchronous: attached }));
+    const job = s.created().find((j) => j.metadata?.name === 'db-failover')!;
+    expect(job.spec!.template.spec!.containers[0].env!.find((e) => e.name === 'CANDIDATES')?.value).toBe('db-2.db-headless');
+  });
+
+  it('detaches the standby before a planned switchover', async () => {
+    const s = setup({ pods: [pod('db-0', 'u0'), pod('db-1', 'u1'), pod('db-2', 'u2')] });
+    await s.controller.reconcile(syncCluster({ synchronous: attached }, { [TARGET_PRIMARY_ANNOTATION]: 'db-2' }));
+    expect(s.created().some((j) => j.metadata?.name === 'db-switchover')).toBe(false);
+    const job = s.created().find((j) => j.metadata?.name === 'db-sync-standby')!;
+    expect(job.metadata?.annotations).toMatchObject({ 'firebird.cloudnative-firebird.io/sync-action': 'detach' });
+  });
+
+  it('holds a re-seed of the standby until it is detached', async () => {
+    const annotated = { ...pod('db-1', 'u1'), metadata: { name: 'db-1', uid: 'u1', annotations: { 'firebird.cloudnative-firebird.io/reseed': 'true' } } };
+    const s = setup({ pods: [pod('db-0', 'u0'), annotated, pod('db-2', 'u2')] });
+    await s.controller.reconcile(syncCluster({ synchronous: attached }));
+    expect(s.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name)).not.toContain('db-1');
+    const job = s.created().find((j) => j.metadata?.name === 'db-sync-standby')!;
+    expect(job.metadata?.annotations).toMatchObject({ 'firebird.cloudnative-firebird.io/sync-action': 'detach' });
+    // once detached, the re-seed goes ahead
+    const detached = setup({ pods: [pod('db-0', 'u0'), annotated, pod('db-2', 'u2')] });
+    await detached.controller.reconcile(syncCluster({ synchronous: { ...attached, phase: 'Detached' } }));
+    expect(detached.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name)).toContain('db-1');
+  });
+});
+
+describe('status written by the operator', () => {
+  type Schema = { properties?: Record<string, Schema>; items?: Schema; additionalProperties?: unknown; 'x-kubernetes-preserve-unknown-fields'?: boolean };
+  const crd = loadYaml(readFileSync(join(__dirname, '..', '..', 'config', 'crds', 'firebirdcluster.yaml'), 'utf8')) as {
+    spec: { versions: Array<{ schema: { openAPIV3Schema: Schema } }> };
+  };
+  const statusSchema = crd.spec.versions[0].schema.openAPIV3Schema.properties!.status;
+  /** Paths in value the schema does not declare: the API server would prune them */
+  const undeclared = (value: unknown, schema: Schema, path: string): string[] => {
+    if (Array.isArray(value)) return schema.items ? value.flatMap((v, i) => undeclared(v, schema.items!, `${path}[${i}]`)) : [];
+    if (value === null || typeof value !== 'object') return [];
+    if (schema['x-kubernetes-preserve-unknown-fields'] || (schema.additionalProperties && !schema.properties)) return [];
+    return Object.entries(value).flatMap(([k, v]) =>
+      schema.properties?.[k] ? undeclared(v, schema.properties[k], `${path}.${k}`) : [`${path}.${k}`],
+    );
+  };
+
+  it('declares every status field in the CRD (undeclared ones are pruned)', async () => {
+    const s = setup({ pods: [pod('db-0', 'u0'), pod('db-1', 'u1'), pod('db-2', 'u2')] });
+    const cluster: FirebirdCluster = {
+      ...makeCluster({
+        synchronous: { standby: 'db-1', primary: 'db-0', phase: 'Attached', time: longAgo, unavailableSince: longAgo, retryAfter: longAgo },
+      }),
+      spec: { instances: 3, storage: { size: '1Gi' }, replication: { enabled: true, mode: 'sync', failover: { enabled: true } } },
+    };
+    await s.controller.reconcile(cluster);
+    const written = s.status();
+    expect(written.synchronous).toBeDefined();
+    expect(undeclared(written, statusSchema, 'status')).toEqual([]);
   });
 });

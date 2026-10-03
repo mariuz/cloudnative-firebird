@@ -436,6 +436,10 @@ export function buildStatefulSet(
       // with replication the operator restarts outdated pods itself, replicas first and the
       // primary last (utils/rolling-update.ts)
       updateStrategy: { type: operatorRollsPods(cluster) ? 'OnDelete' : 'RollingUpdate' },
+      // Pods are (re)created independently: with OrderedReady, a deleted pod is not recreated
+      // while a lower ordinal is not ready, e.g. a promoted replica behind the failed primary it
+      // replaces, which waits for a seed from it
+      podManagementPolicy: 'Parallel',
       selector: {
         matchLabels: labels,
       },

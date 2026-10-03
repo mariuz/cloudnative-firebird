@@ -234,14 +234,14 @@ describe('FirebirdClusterController – replication integration', () => {
       );
     });
 
-    it('rejects synchronous replication, which is not implemented yet', async () => {
+    it('rejects synchronous replication with a single instance', async () => {
       const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig } = makeMockKubeConfig({ patchNamespacedCustomObjectStatusImpl });
       const controller = new FirebirdClusterController(mockKubeConfig);
 
       await expect(
-        controller.reconcile(makeCluster({ replication: { enabled: true, mode: 'sync' } })),
-      ).rejects.toThrow(/'sync' is not supported yet/);
+        controller.reconcile(makeCluster({ instances: 1, replication: { enabled: true, mode: 'sync' } })),
+      ).rejects.toThrow(/'sync' needs at least 2 instances/);
     });
 
     it('updates status to Running after successful reconciliation with replication', async () => {
@@ -404,6 +404,7 @@ describe('FirebirdClusterController – replication integration', () => {
       const outdatedSts = {
         spec: {
           replicas: 1,
+          podManagementPolicy: 'Parallel',
           template: {
             spec: {
               containers: [{ image: 'firebirdsql/firebird:3.0' }],

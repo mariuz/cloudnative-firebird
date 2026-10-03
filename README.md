@@ -12,12 +12,12 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **StatefulSet-based** deployment for stable pod identity and storage
 - **Persistent storage** via PersistentVolumeClaims, with online volume expansion when `spec.storage.size` grows
 - **Declarative hibernation** (`spec.hibernated`) that scales to zero while keeping data
-- **Journal-based asynchronous replication** (Firebird 4, 5 and the 6.0 snapshot, experimental) with replicas seeded without locking the primary
+- **Journal-based asynchronous replication** (Firebird 4, 5 and the 6.0 snapshot, experimental) with replicas seeded without locking the primary, and an optional **synchronous standby** (`mode: sync`)
 - **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical and physical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
 - **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
 - **Declarative users** (`FirebirdUser`, after CloudNativePG's `DatabaseRole`) with Secret-backed passwords, role grants and a reclaim policy; users persist across pod restarts
 - **Declarative roles** (`FirebirdRole`): a database role and exactly the privileges it holds on tables, views, procedures, functions, packages, sequences and exceptions
-- **Automatic failover** (opt-in) to the most advanced replica; the old primary is re-seeded when it returns
+- **Automatic failover** (opt-in) to the synchronous standby (no transaction lost) or the most advanced replica; the old primary is re-seeded when it returns
 - **Planned switchover** with the `targetPrimary` annotation: no data loss, the other replicas continue without re-seeding
 - **Rolling updates with the primary last** (`primaryUpdateStrategy` / `primaryUpdateMethod`, as in CloudNativePG): replicas are restarted one at a time, then the primary is restarted or switched over
 - **Replica re-seeding** with a pod annotation (CloudNativePG `unrecoverable`)
@@ -131,7 +131,7 @@ kubectl port-forward svc/my-firebird-cluster 3050:3050
 Invalid specs are rejected when they are applied: the CRDs carry OpenAPI constraints and CEL
 validation rules (`x-kubernetes-validations`) for the same checks the operator runs on every
 reconcile, e.g. mutually exclusive bootstrap sources, cron schedules, physical backups to S3 without replication,
-restore paths outside the data directory, `sync` replication, shrinking `storage.size` and
+restore paths outside the data directory, `sync` replication with one instance, shrinking `storage.size` and
 immutable `clusterName` / `username` fields. No admission webhook is needed. The operator still
 validates each reconcile (for objects created before an upgrade) and reports `Degraded`.
 `hack/crd-validation/test.sh` checks the rules against an API server.
@@ -457,6 +457,69 @@ there), because it may have committed transactions that never reached a replica.
 A primary that reaches the API server or any replica is never fenced, so a partition that leaves
 the primary and its clients with one of those (but not with the operator's view of readiness)
 is not covered.
+
+### Synchronous Replication
+
+```yaml
+spec:
+  instances: 3
+  replication:
+    enabled: true
+    mode: sync
+    synchronous:
+      dataDurability: required      # default; or preferred
+      standbyUnavailableSeconds: 30 # preferred only
+```
+
+With `mode: sync` one replica, the **synchronous standby**, receives every change from the
+primary directly (Firebird's `sync_replica`): a commit completes only once the standby applied it,
+so the standby never misses a committed transaction. The other replicas stay asynchronous.
+`status.synchronous` shows the standby and its state (`Attaching`, `Attached`, `Detaching`,
+`Detached`, `Failed`), with `SyncStandby*` events.
+
+- **Attaching** (a sync-standby Job, as soon as a replica is ready and has caught up, lowest
+  ordinal first): the primary is put into full shutdown for a moment, the replica applies the
+  primary's last journal segment, stops applying the journal (it would otherwise apply every
+  change twice), and the primary's segment server writes the `sync_replica` entry to the file
+  `replication.conf` includes; Firebird reads it when the database is opened again. Writes pause
+  for these few seconds and clients are disconnected, as at the start of a switchover.
+- **Commits**: Firebird applies each transaction on the standby before the commit returns.
+  `replication.conf` sets `report_errors = true` and `disable_on_error = false`, so when the
+  standby cannot be reached the write fails on the primary (`Replication error`) and is not
+  committed; once the standby is back, writes succeed again on their own.
+- **dataDurability**: `required` keeps it that way while the standby is down (no write commits
+  without it, CloudNativePG's `required`). `preferred` detaches a standby that has not been ready
+  for `standbyUnavailableSeconds`; writes then continue asynchronously until a standby is attached
+  again.
+- **Detaching** (a sync-standby Job, again with a short write pause): before a planned switchover
+  (the switchover waits for it), a re-seed or fencing of the standby, when it is removed by scaling
+  down, when `mode` goes back to `async`, and in `preferred` mode as above. The standby's replica
+  control file is moved to the primary's last segment, so it continues from the journal without
+  being re-seeded; a standby that cannot be reached is re-seeded. A re-seed request for the
+  standby (`reseed` annotation) waits until it is detached.
+- **Failover**: an attached, ready standby is promoted without an election, and no committed
+  transaction is lost. The other replicas, which may lack the old primary's unshipped segments,
+  are re-seeded from it, like the old primary when it returns. Without a ready standby, the
+  election runs as for asynchronous replication.
+- A pod restart of the standby (e.g. a rolling update) blocks writes with `required` until it is
+  ready again. A standby whose volume is replaced outside the operator waits in its init container
+  until it is detached (annotate it `reseed=true`).
+- Firebird 5 and later read the standby's password from the server's environment
+  (`password_env`); Firebird 4 ignores that and connects with the server's `ISC_USER` /
+  `ISC_PASSWORD`, the same credentials. Nothing is written to the ConfigMap.
+
+`hack/repro/sync-replica.sh` shows the Firebird behaviour this relies on: strict synchronous
+commits, a replica applying the journal as well getting every change twice, and `sync_replica`
+read from an included file when the database is opened again.
+
+### Pod Management
+
+The StatefulSet creates and recreates instance pods in parallel (`podManagementPolicy:
+Parallel`). With the default `OrderedReady`, a deleted pod is not recreated while a lower ordinal
+is not ready: after a failover to a higher ordinal, the promoted replica waited for the failed
+primary, which waited to be re-seeded from it. The policy cannot be changed on an existing
+StatefulSet, so the operator re-creates StatefulSets made by earlier versions once, orphaning
+their pods: the new StatefulSet adopts them with the same template, and nothing restarts.
 
 ### Rolling Updates
 
