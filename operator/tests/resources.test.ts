@@ -253,7 +253,7 @@ describe('buildStatefulSet (replication)', () => {
     // the scripts are read at start: a new version rolls the pods
     const sts = buildStatefulSet(makeCluster());
     expect(sts.spec!.template.metadata!.annotations!['firebird.cloudnative-firebird.io/backup-files-hash']).toMatch(/^[0-9a-f]{16}$/);
-    expect(Object.keys(buildConfigMap(makeCluster())!.data!).sort()).toEqual(['backup-file.pl', 'fetch-segments.pl', 'pitr-plan.pl', 'pitr-restore.sh', 'segment-server.pl']);
+    expect(Object.keys(buildConfigMap(makeCluster())!.data!).sort()).toEqual(['backup-file.pl', 'fetch-segments.pl', 'pitr-plan.pl', 'pitr-restore.sh', 'segment-server.pl', 'sync-standby.pl']);
   });
 
   it('seeds replicas in an init container and ships segments with two sidecars', () => {
@@ -567,7 +567,7 @@ describe('podDisruptionBudgetNeedsUpdate', () => {
 describe('buildConfigMap & configMapNeedsUpdate', () => {
   it('only ships the backup file server scripts when neither config nor bootstrap initSql is provided', () => {
     const cluster = makeCluster();
-    expect(Object.keys(buildConfigMap(cluster)!.data!).sort()).toEqual(['backup-file.pl', 'fetch-segments.pl', 'pitr-plan.pl', 'pitr-restore.sh', 'segment-server.pl']);
+    expect(Object.keys(buildConfigMap(cluster)!.data!).sort()).toEqual(['backup-file.pl', 'fetch-segments.pl', 'pitr-plan.pl', 'pitr-restore.sh', 'segment-server.pl', 'sync-standby.pl']);
   });
 
   it('creates ConfigMap with custom firebird.conf settings', () => {
@@ -939,6 +939,7 @@ describe('buildConfigMap (replication)', () => {
       'segment-server.pl',
       'set-repl-seq.pl',
       'switchover.pl',
+      'sync-standby.pl',
     ]);
   });
 

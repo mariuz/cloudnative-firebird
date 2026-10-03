@@ -251,3 +251,56 @@ describe('primary isolation check', () => {
     expect(() => validateClusterSpec(spec(5))).not.toThrow();
   });
 });
+
+describe('synchronous replication and failover, switchover, re-seeding', () => {
+  const syncCluster = (status: FirebirdCluster['status'], annotations: Record<string, string> = {}): FirebirdCluster => ({
+    ...makeCluster(status),
+    metadata: { name: 'db', namespace: 'default', uid: 'c', annotations },
+    spec: {
+      instances: 3,
+      storage: { size: '1Gi' },
+      replication: { enabled: true, mode: 'sync', failover: { enabled: true, delaySeconds: 30, isolationCheck: { enabled: false } } },
+    },
+  });
+  const attached = { standby: 'db-1', primary: 'db-0', phase: 'Attached' as const, time: longAgo };
+
+  it('promotes the attached standby without an election, and re-seeds the other instances', async () => {
+    const s = setup();
+    await s.controller.reconcile(syncCluster({ primaryNotReadySince: longAgo, synchronous: attached }));
+    expect(s.created().some((j) => j.metadata?.name === 'db-failover')).toBe(false);
+    const promoting = s.fn('patchNamespacedCustomObjectStatus').mock.calls
+      .map((c) => c[0].body[0])
+      .find((op) => op.path === '/status/switchover')?.value;
+    expect(promoting).toMatchObject({ kind: 'failover', from: 'db-0', target: 'db-1', phase: 'Promoting', targetToken: 'u1' });
+    expect(Object.keys(promoting.reseed).sort()).toEqual(['db-0', 'db-2']);
+    expect(promoting.message).toContain('no transaction lost');
+  });
+
+  it('elects as before when the standby is not ready', async () => {
+    const s = setup({ pods: [pod('db-0', 'u0', false), pod('db-1', 'u1', false), pod('db-2', 'u2')] });
+    await s.controller.reconcile(syncCluster({ primaryNotReadySince: longAgo, synchronous: attached }));
+    const job = s.created().find((j) => j.metadata?.name === 'db-failover')!;
+    expect(job.spec!.template.spec!.containers[0].env!.find((e) => e.name === 'CANDIDATES')?.value).toBe('db-2.db-headless');
+  });
+
+  it('detaches the standby before a planned switchover', async () => {
+    const s = setup({ pods: [pod('db-0', 'u0'), pod('db-1', 'u1'), pod('db-2', 'u2')] });
+    await s.controller.reconcile(syncCluster({ synchronous: attached }, { [TARGET_PRIMARY_ANNOTATION]: 'db-2' }));
+    expect(s.created().some((j) => j.metadata?.name === 'db-switchover')).toBe(false);
+    const job = s.created().find((j) => j.metadata?.name === 'db-sync-standby')!;
+    expect(job.metadata?.annotations).toMatchObject({ 'firebird.cloudnative-firebird.io/sync-action': 'detach' });
+  });
+
+  it('holds a re-seed of the standby until it is detached', async () => {
+    const annotated = { ...pod('db-1', 'u1'), metadata: { name: 'db-1', uid: 'u1', annotations: { 'firebird.cloudnative-firebird.io/reseed': 'true' } } };
+    const s = setup({ pods: [pod('db-0', 'u0'), annotated, pod('db-2', 'u2')] });
+    await s.controller.reconcile(syncCluster({ synchronous: attached }));
+    expect(s.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name)).not.toContain('db-1');
+    const job = s.created().find((j) => j.metadata?.name === 'db-sync-standby')!;
+    expect(job.metadata?.annotations).toMatchObject({ 'firebird.cloudnative-firebird.io/sync-action': 'detach' });
+    // once detached, the re-seed goes ahead
+    const detached = setup({ pods: [pod('db-0', 'u0'), annotated, pod('db-2', 'u2')] });
+    await detached.controller.reconcile(syncCluster({ synchronous: { ...attached, phase: 'Detached' } }));
+    expect(detached.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name)).toContain('db-1');
+  });
+});

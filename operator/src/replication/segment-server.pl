@@ -12,7 +12,9 @@
 #                                 segments <= S: its first such segment, and 1 when that block begins
 #                                 the transaction (0: it began in a segment no longer archived)
 #   "<token> POSITION\n"       -> replica: "OK <sequence> <offset> <pending>", the replica control
-#                                 file position and the number of received segments beyond it;
+#                                 file position and the number of received segments beyond it (a
+#                                 synchronous standby: the last segment archived on the primary,
+#                                 which it has every change of);
 #                                 primary: "OK primary" (used by planned switchover)
 #   "<token> ARCHIVED\n"       -> "<sequence> <age seconds>" for each archived segment, then ".\n"
 #                                 (the operator compares it with the replicas' POSITION: lag)
@@ -35,6 +37,20 @@
 #                                 service manager then, and gstat reads local files only)
 #   "<token> ISOLATION\n"       -> "OK fenced <epoch>" when the isolation check fenced this
 #                                 primary (isolation-check.pl), "OK online" otherwise
+#   "<token> SYNC <host>|none\n" -> "OK": primary, synchronous replication: writes SYNC_FILE (included
+#                                 by replication.conf) with a sync_replica entry for the replica
+#                                 <host>, or empties it. Firebird reads it when the database is
+#                                 opened, so the sync-standby Job sends it while the database is in
+#                                 full shutdown (sync-standby.pl)
+#   "<token> SYNCTO\n"          -> "OK <host>" or "OK none": the replica the primary replicates to
+#                                 synchronously (from SYNC_FILE: what applies once the database is
+#                                 opened; the sync-standby Job changes it only in full shutdown)
+#   "<token> STANDBY on\n"      -> "OK": replica, becomes the synchronous standby: the segment
+#                                 puller stops applying journal segments (the primary sends every
+#                                 change directly), and only records the last archived one
+#   "<token> STANDBY off <S>\n" -> "OK": back to journal shipping after segment S (the primary's
+#                                 last segment, in full shutdown): the replica control file and the
+#                                 puller's position move to S
 #   "<token> REJOIN\n"          -> "OK": brings a database fenced by the isolation check back
 #                                 online, sent by the operator once it checked that this instance
 #                                 still holds the leader Lease ("OK" too when it is not fenced)
@@ -93,6 +109,11 @@ my $bootstrap_seed = "$base/bootstrap-seed.fdb";
 my $pause_flag = "$base/.pause-pull";
 my $pause_ack  = "$base/.pull-paused";
 my $self_fenced = "$base/self-fenced";
+# synchronous replication: the primary's sync_replica entry, and the standby's flag and last seen segment
+my $sync_file = "$base/sync.conf";
+my $standby_flag = "$base/sync-standby";
+my $standby_seen = "$base/sync-seen";
+my $state_file = $ENV{STATE_FILE} // "$base/.last-pulled";
 my $isolation_timeout = $ENV{ISOLATION_TIMEOUT_SECONDS} // 0;
 my $name_re   = qr/^[A-Za-z0-9._-]+\.journal-\d+$/;
 my $backup_re = qr/^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:nbk|fbk)$/;
@@ -230,6 +251,39 @@ sub read_control {
   return undef unless defined $data && length($data) >= 40 && substr($data, 0, 9) eq 'FBREPLCTL';
   my (undef, undef, $count, $seq, $offset) = unpack('a10 v V Q< V', $data);
   return { data => $data, sequence => $seq, offset => $offset, count => $count };
+}
+
+sub write_file {
+  my ($path, $content) = @_;
+  open(my $fh, '>', "$path.tmp") or return 0;
+  print $fh $content;
+  close $fh or return 0;
+  return rename("$path.tmp", $path);
+}
+
+# The replica control file (the only {GUID} file in the source directory)
+sub control_path {
+  opendir(my $dh, $source) or return undef;
+  my ($name) = grep { /^\{[0-9A-Fa-f-]+\}$/ } readdir($dh);
+  closedir($dh);
+  return defined $name ? "$source/$name" : undef;
+}
+
+# Standby back to journal shipping after segment $seq: control file at $seq (no transaction in
+# progress: the primary is in full shutdown), keeping the database's own sequence (db_sequence,
+# checked by the replica server), and the puller's position at segment $seq too
+sub standby_off {
+  my ($seq) = @_;
+  my $path = control_path() or return "no replica control file";
+  my $ctl = read_control($path) or return "cannot read $path";
+  my $dbseq = unpack('Q<', substr($ctl->{data}, 32, 8));
+  write_file($path, pack('a10 v V Q< V x4 Q<', 'FBREPLCTL', 1, 0, $seq, 0, $dbseq)) or return "cannot write $path: $!";
+  my $last = slurp($state_file);
+  if ($last =~ /^(.*\.journal-)(\d+)$/) {
+    write_file($state_file, sprintf("%s%0*d\n", $1, length($2), $seq)) or return "cannot write $state_file: $!";
+  }
+  unlink $standby_flag, $standby_seen;
+  return undef;
 }
 
 sub send_seed {
@@ -483,9 +537,46 @@ while (1) {
     } else {
       print $client "ERR cannot bring $database online\n";
     }
+  } elsif ($cmd eq 'SYNC' && defined $arg && $arg =~ /^(none|[A-Za-z0-9][A-Za-z0-9.-]*)$/) {
+    # the server's ISC_USER / ISC_PASSWORD are the credentials: Firebird 4 ignores the sub-section
+    # and uses them, Firebird 5 and later read password_env
+    my $user = $ENV{ISC_USER} || 'SYSDBA';
+    my $content = $arg eq 'none' ? '' :
+      "sync_replica = $arg:$database\n{\n  username = $user\n  password_env = ISC_PASSWORD\n}\n";
+    if (write_file($sync_file, $content)) {
+      print "synchronous replication " . ($arg eq 'none' ? "off" : "to $arg") . " (applied when the database is opened)\n";
+      print $client "OK\n";
+    } else {
+      print $client "ERR cannot write $sync_file: $!\n";
+    }
+  } elsif ($cmd eq 'SYNCTO') {
+    my ($host) = slurp($sync_file) =~ /^sync_replica\s*=\s*([^:\s]+):/m;
+    print $client "OK " . ($host // 'none') . "\n";
+  } elsif ($cmd eq 'STANDBY' && defined $arg && $arg eq 'on') {
+    if (is_primary()) {
+      print $client "ERR this instance is the primary\n";
+    } elsif (write_file($standby_flag, time . "\n")) {
+      print "synchronous standby: journal segments are no longer applied here\n";
+      print $client "OK\n";
+    } else {
+      print $client "ERR cannot write $standby_flag: $!\n";
+    }
+  } elsif ($cmd eq 'STANDBY' && defined $arg && $arg =~ /^off (\d+)$/) {
+    my $seq = $1;
+    my $error = -f $standby_flag ? standby_off($seq) : undef;
+    if (defined $error) {
+      print $client "ERR $error\n";
+    } else {
+      print "asynchronous replica again: journal shipping continues after segment $seq\n";
+      print $client "OK\n";
+    }
   } elsif ($cmd eq 'POSITION') {
     if (is_primary()) {
       print $client "OK primary\n";
+    } elsif (-f $standby_flag && slurp($standby_seen) =~ /^(\d+)$/) {
+      # every change reached this standby synchronously (the puller records the last archived
+      # segment only while the primary names it): as far as the archive goes
+      print $client "OK $1 0 0\n";
     } else {
       # the control file is the only {GUID} file in the source directory; reading it needs no
       # access to the (possibly shut down) database

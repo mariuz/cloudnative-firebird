@@ -4,10 +4,10 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.52.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.53.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
-> (failover, synchronous replication). The latest CloudNativePG changes
+> (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
 > (1.28 – 1.30.1) are reviewed in [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md).
 > Firebird-level problems found along the way are in [ISSUES.md](ISSUES.md), open work in
 > [TODO.md](TODO.md).
@@ -41,7 +41,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - Replicas behind it and the old primary (when it returns) are re-seeded. Asynchronous replication: unshipped transactions are lost. A fenced primary is never failed over.
 - [x] **Firebird 4.0+ Journal-Based Replication Management & PITR Archiving** *(v0.5.0, working since v0.9.0)*
   - Dynamic journal file sync, status tracking, and continuous archiving to S3.
-  - Quorum management for synchronous replication (`mode: sync`): not implemented, rejected by validation.
+  - Synchronous replication (`mode: sync`) with one synchronous standby since v0.53.0; quorum of several standbys not implemented.
 - [x] **Smart Read-Only Traffic Routing** *(v0.6.0)*
   - Pod readiness and replication lag-aware endpoint management for read replicas.
   - Role-labelled pods: the rw Service targets the primary (leader Lease holder), the `-replica` Service targets eligible replicas.
@@ -171,6 +171,11 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Synchronous Replication** *(v0.53.0)*
+  - `replication.mode: sync` attaches one replica as the synchronous standby (Firebird `sync_replica`, strict: `report_errors = true`, `disable_on_error = false`): a commit completes only once the standby applied it, and fails while the standby cannot be reached. `synchronous.dataDurability: required | preferred` (CloudNativePG); `preferred` detaches a standby unavailable for `standbyUnavailableSeconds`.
+  - A replica must not apply the same changes from the journal and synchronously (verified: it applies them twice), so a sync-standby Job attaches and detaches it with the primary briefly in full shutdown at the end of its last segment: the standby stops applying the journal, and the primary's segment server writes `sync_replica` to a file `replication.conf` includes, which Firebird reads when the database is opened again (verified on Firebird 4, 5 and 6). Detaching moves the standby's replica control file to the primary's last segment, so it continues from the journal without re-seeding (a running replica server picks the new position up).
+  - The standby is detached before a planned switchover, a re-seed or fencing of it, and scaling it away. A failover promotes an attached, ready standby without an election: no committed transaction is lost, and the other replicas are re-seeded from it.
+  - Safeguards: the standby's segment puller stops applying the journal only while the primary names it (`SYNCTO`), and an instance being seeded waits while the primary still replicates to it.
 - [x] **Primary Isolation Check** *(v0.52.0, CloudNativePG `isolationCheck`)*
   - With automatic failover, the primary's segment server runs `isolation-check.pl`: when the primary has reached neither the Kubernetes API server nor another instance's segment server for `failover.isolationCheck.timeoutSeconds` (default 20), it puts its database into full shutdown, so clients cut off with it cannot write while a replica is promoted. The failover delay is at least the timeout plus 10 seconds.
   - A self-fenced primary that still holds the Lease when the operator reaches it again is brought back online through the segment server (`ISOLATION`, `REJOIN`; `PrimaryRejoined` event) instead of being failed over.

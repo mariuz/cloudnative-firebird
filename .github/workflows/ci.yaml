@@ -794,6 +794,75 @@ jobs:
             | kubectl apply --dry-run=server -f -
           kubectl delete namespace pss-restricted --wait=false
 
+      - name: Verify synchronous replication
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
+          count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          sync_state() { kubectl get firebirdcluster sync -o jsonpath='{.status.synchronous.phase} {.status.synchronous.primary} {.status.synchronous.standby}'; }
+          wait_attached() {
+            timeout 600 bash -c "until [ \"\$(kubectl get firebirdcluster sync -o jsonpath='{.status.synchronous.phase} {.status.synchronous.primary}')\" = 'Attached $1' ]; do sleep 5; done" \
+              || { sync_state; echo; kubectl get firebirdcluster sync -o jsonpath='{.status.synchronous.message}'; echo; kubectl logs job/sync-sync-standby || true; exit 1; }
+          }
+          cat <<'EOF' | kubectl apply -f -
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: sync
+          spec:
+            instances: 2
+            storage:
+              size: 1Gi
+            bootstrap:
+              initSql: |
+                CREATE TABLE app (id INTEGER PRIMARY KEY, note VARCHAR(40));
+                COMMIT;
+            replication:
+              enabled: true
+              mode: sync
+              archiveTimeoutSeconds: 5
+              failover:
+                enabled: true
+                delaySeconds: 20
+          EOF
+          kubectl wait pod/sync-0 pod/sync-1 --for=condition=Ready --timeout=600s 2>/dev/null \
+            || { timeout 300 bash -c 'until kubectl get pod sync-1 >/dev/null 2>&1; do sleep 3; done'; kubectl wait pod/sync-0 pod/sync-1 --for=condition=Ready --timeout=600s; }
+          wait_attached sync-0
+          sync_state; echo
+          kubectl logs job/sync-sync-standby | tail -5 || true
+          # every commit is on the standby when it returns
+          for i in 1 2 3; do
+            sql sync-0 "insert into app values ($i, 'sync'); commit;" >/dev/null
+            [ "$(sql sync-1 "select count(*) from app where id = $i;" | awk '$1 ~ /^[0-9]+$/ { print $1 }')" = 1 ] \
+              || { echo "row $i is not on the standby right after its commit"; exit 1; }
+          done
+          echo "commits are applied on the standby synchronously"
+          # the standby does not apply the journal as well: nothing twice, after segments shipped
+          sleep 15
+          [ "$(count sync-1)" = 3 ] || { echo "the standby has $(count sync-1) rows, expected 3"; exit 1; }
+          # failover: the standby is promoted without an election and has every committed row
+          for i in $(seq 10 19); do sql sync-0 "insert into app values ($i, 'before failover'); commit;" >/dev/null; done
+          kubectl exec sync-0 -c firebird -- bash -c \
+            "fbsvcmgr localhost:service_mgr action_properties dbname $DB prp_shutdown_mode prp_sm_full prp_force_shutdown 0"
+          timeout 600 bash -c \
+            'until kubectl get firebirdcluster sync -o jsonpath="{.status.switchover.kind} {.status.switchover.phase}" | grep -q "failover Completed"; do
+               kubectl get firebirdcluster sync -o jsonpath="{.status.switchover.kind} {.status.switchover.phase}" | grep -q "failover Failed" && exit 1; sleep 5; done' \
+            || { kubectl get firebirdcluster sync -o jsonpath='{.status.switchover}'; echo; exit 1; }
+          kubectl get firebirdcluster sync -o jsonpath='{.status.switchover.message}'; echo
+          kubectl get firebirdcluster sync -o jsonpath='{.status.switchover.message}' | grep -q 'synchronous standby sync-1'
+          [ "$(kubectl get lease sync-lease -o jsonpath={.spec.holderIdentity})" = "sync-1" ]
+          [ "$(count sync-1)" = 13 ] || { echo "the new primary has $(count sync-1) rows, expected 13"; exit 1; }
+          echo "failed over to the synchronous standby without losing a transaction"
+          # the old primary returns re-seeded and becomes the standby of the new one
+          timeout 300 bash -c "until kubectl get pod sync-0 >/dev/null 2>&1; do sleep 3; done"
+          kubectl wait pod/sync-0 --for=condition=Ready --timeout=300s
+          wait_attached sync-1
+          sql sync-1 "insert into app values (100, 'new standby'); commit;" >/dev/null
+          [ "$(sql sync-0 'select count(*) from app where id = 100;' | awk '$1 ~ /^[0-9]+$/ { print $1 }')" = 1 ]
+          [ "$(count sync-0)" = 14 ] || { echo "the new standby has $(count sync-0) rows, expected 14"; exit 1; }
+          echo "sync-0 is the synchronous standby of sync-1"
+          kubectl delete firebirdcluster sync --wait=false
+
       - name: Verify Kubernetes events
         run: |
           kubectl get events --sort-by=.lastTimestamp \

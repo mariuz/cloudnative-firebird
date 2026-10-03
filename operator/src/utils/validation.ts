@@ -90,9 +90,18 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
         `Invalid replication mode: ${spec.replication.mode}. Must be 'sync' or 'async'.`,
       );
     }
-    if (spec.replication.mode === 'sync') {
+    if (spec.replication.mode === 'sync' && spec.instances < 2) {
+      throw new ValidationError("Replication mode 'sync' needs at least 2 instances (a primary and a standby).");
+    }
+    const sync = spec.replication.synchronous;
+    if (sync?.dataDurability !== undefined && !['required', 'preferred'].includes(sync.dataDurability)) {
       throw new ValidationError(
-        "Replication mode 'sync' is not supported yet; use 'async' (journal shipping).",
+        `Invalid replication synchronous.dataDurability: ${sync.dataDurability}. Must be required or preferred.`,
+      );
+    }
+    if (sync?.standbyUnavailableSeconds !== undefined && (!Number.isInteger(sync.standbyUnavailableSeconds) || sync.standbyUnavailableSeconds < 1)) {
+      throw new ValidationError(
+        `Invalid replication synchronous.standbyUnavailableSeconds: ${sync.standbyUnavailableSeconds}. Must be a positive integer.`,
       );
     }
     // Must live on the instance volume (shared with the replication sidecars) and is written

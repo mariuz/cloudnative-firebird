@@ -16,12 +16,13 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   cut off from both the API server and every replica; a primary that is partitioned from the other
   pods but still ready to the kubelet is not failed over at all, and one that still reaches the API
   server or a replica is never fenced.
-- [ ] **Synchronous replication** would make failover lossless; see below.
 - [ ] **Switchover downtime**: writes stop from the primary shutdown until the target pod is ready
   again (two pod restarts). Promoting online (replica mode none and publication on a running
   replica) would need the replication sequence set without restarting.
-- [ ] **Synchronous mode** (`sync_replica`): currently rejected by validation. Needs replica
-  credentials in a Secret-backed replication.conf.
+- [ ] **Synchronous replication follow-ups** (v0.53.0 attaches one standby): quorum of several
+  standbys (CloudNativePG's `number` / `method: any`); attaching and detaching without the short
+  write pause (Firebird reads `sync_replica` only when the database is opened); a standby restart
+  without blocking writes in `required` mode (detach first in rolling updates).
 - [ ] **Encrypt segment shipping**: the segment server authenticates with the SYSDBA password
   but traffic is plain TCP inside the cluster (restricted by the NetworkPolicy when enabled).
 - [ ] **Firebird internal formats**: seeding writes the replica control file
