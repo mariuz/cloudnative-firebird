@@ -849,7 +849,10 @@ jobs:
                kubectl get firebirdcluster sync -o jsonpath="{.status.switchover.kind} {.status.switchover.phase}" | grep -q "failover Failed" && exit 1; sleep 5; done' \
             || { kubectl get firebirdcluster sync -o jsonpath='{.status.switchover}'; echo; exit 1; }
           kubectl get firebirdcluster sync -o jsonpath='{.status.switchover.message}'; echo
-          kubectl get firebirdcluster sync -o jsonpath='{.status.switchover.message}' | grep -q 'synchronous standby sync-1'
+          # promoted without an election (the Promoting event of the failover says so)
+          kubectl get events --field-selector involvedObject.name=sync -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' \
+            | tee /dev/stderr | grep -q 'promoting the synchronous standby sync-1'
+          ! kubectl get events --field-selector involvedObject.name=sync -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}' | grep -q FailoverStarted
           [ "$(kubectl get lease sync-lease -o jsonpath={.spec.holderIdentity})" = "sync-1" ]
           [ "$(count sync-1)" = 13 ] || { echo "the new primary has $(count sync-1) rows, expected 13"; exit 1; }
           echo "failed over to the synchronous standby without losing a transaction"
