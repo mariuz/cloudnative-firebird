@@ -368,10 +368,12 @@ describe('FirebirdClusterController – basic reconciliation', () => {
   });
 
   describe('reconcile() status lifecycle', () => {
-    it('keeps the phase of an existing cluster while it reconciles', async () => {
+    it('keeps the phase of an existing cluster while it reconciles, and does not rewrite its status first', async () => {
       const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
+      const getNamespacedCustomObjectImpl = vi.fn().mockResolvedValue({});
       const { mockKubeConfig, mockCustomApi } = makeMockKubeConfig({
         patchNamespacedCustomObjectStatusImpl,
+        getNamespacedCustomObjectImpl,
       });
       const controller = new FirebirdClusterController(mockKubeConfig);
       const cluster = makeCluster();
@@ -379,13 +381,21 @@ describe('FirebirdClusterController – basic reconciliation', () => {
 
       await controller.reconcile(cluster);
 
-      const firstPatch = (
-        mockCustomApi.patchNamespacedCustomObjectStatus as Mock
-      ).mock.calls[0] as PatchStatusCall;
-      expect(firstPatch[0].body[0].value).toMatchObject({
-        phase: 'Running',
-        phaseReason: 'All resources reconciled successfully',
-      });
+      // only the final status write: a write from this copy at the start would drop what the
+      // previous reconcile stored meanwhile
+      const calls = (mockCustomApi.patchNamespacedCustomObjectStatus as Mock).mock.calls as PatchStatusCall[];
+      expect(calls).toHaveLength(1);
+      expect(calls.map((c) => c[0].body[0].value.phase)).not.toContain('Creating');
+    });
+
+    it('stops when an existing cluster was deleted since the reconcile was queued', async () => {
+      const patchNamespacedCustomObjectStatusImpl = vi.fn().mockResolvedValue({});
+      const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({ patchNamespacedCustomObjectStatusImpl });
+      const cluster = makeCluster();
+      cluster.status = { phase: 'Running' };
+      await new FirebirdClusterController(mockKubeConfig).reconcile(cluster);
+      expect(patchNamespacedCustomObjectStatusImpl).not.toHaveBeenCalled();
+      expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled();
     });
 
     it('sets status to Creating at the start of reconciliation', async () => {

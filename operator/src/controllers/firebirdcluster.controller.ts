@@ -260,11 +260,13 @@ export class FirebirdClusterController {
       }
 
       // Only a new cluster starts as Creating: rewriting the phase of a running cluster on every
-      // reconcile made it read Creating until the end of the reconcile (e.g. every resync)
-      const started: Partial<FirebirdClusterStatus> = cluster.status?.phase
-        ? { phase: cluster.status.phase, phaseReason: cluster.status.phaseReason }
-        : { phase: 'Creating', phaseReason: 'Reconciliation started' };
-      if (!(await this.updateStatus(cluster, started))) {
+      // reconcile made it read Creating until the end of the reconcile (e.g. every resync). An
+      // existing one is only checked: rewriting its status from this (possibly stale) copy dropped
+      // what the previous reconcile had just stored, e.g. the primary restart of a rolling update.
+      const exists = cluster.status?.phase
+        ? await this.clusterExists(cluster)
+        : await this.updateStatus(cluster, { phase: 'Creating', phaseReason: 'Reconciliation started' });
+      if (!exists) {
         // deleted since this reconcile was queued (e.g. a resync): recreate nothing
         log.info('Cluster no longer exists; nothing to reconcile');
         return;
