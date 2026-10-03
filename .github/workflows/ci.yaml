@@ -914,16 +914,21 @@ jobs:
           for j in repl-failover repl-switchover; do echo "--- job/$j"; kubectl logs "job/$j" || true; done
           echo "=== FirebirdCluster status ==="
           kubectl get firebirdcluster -o yaml || true
+          echo "=== Instance pods ==="
+          kubectl get pods -o wide || true
           echo "=== Replication init and sidecar logs ==="
-          for p in repl-0 repl-1 repl-2; do
-            for c in replication-init segment-server segment-puller; do
+          for p in repl-0 repl-1 repl-2 sync-0 sync-1; do
+            kubectl get pod $p >/dev/null 2>&1 || continue
+            kubectl get pod $p -o jsonpath='{range .status.initContainerStatuses[*]}{.name}: {.state}{"\n"}{end}{range .status.containerStatuses[*]}{.name}: ready={.ready} restarts={.restartCount} {.state}{"\n"}{end}' || true
+            for c in replication-init segment-server segment-puller firebird; do
               echo "--- $p/$c"; kubectl logs $p -c $c --tail=30 2>/dev/null || true
             done
             kubectl exec $p -c firebird -- tail -20 /opt/firebird/replication.log 2>/dev/null || true
           done
+          kubectl logs job/sync-sync-standby 2>/dev/null || true
           echo "=== Operator logs ==="
           kubectl logs -n cloudnative-firebird-system \
             -l app.kubernetes.io/name=cloudnative-firebird \
-            --tail=50 || true
+            --tail=200 || true
           echo "=== Operator pod events ==="
           kubectl get events -n cloudnative-firebird-system || true

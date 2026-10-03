@@ -22,7 +22,7 @@ function mockApi(overrides: Record<string, Mock> = {}) {
 describe('a cluster deleted during its reconcile', () => {
   // the StatefulSet existed when read, and was garbage-collected before the patch
   const gone = () => ({
-    readNamespacedStatefulSet: vi.fn().mockResolvedValue({ metadata: { name: 'test-cluster' }, spec: { replicas: 9 }, status: {} }),
+    readNamespacedStatefulSet: vi.fn().mockResolvedValue({ metadata: { name: 'test-cluster' }, spec: { replicas: 9, podManagementPolicy: 'Parallel' }, status: {} }),
     patchNamespacedStatefulSet: vi.fn().mockRejectedValue(notFoundError),
   });
 

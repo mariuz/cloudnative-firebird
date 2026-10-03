@@ -404,6 +404,7 @@ describe('FirebirdClusterController – replication integration', () => {
       const outdatedSts = {
         spec: {
           replicas: 1,
+          podManagementPolicy: 'Parallel',
           template: {
             spec: {
               containers: [{ image: 'firebirdsql/firebird:3.0' }],

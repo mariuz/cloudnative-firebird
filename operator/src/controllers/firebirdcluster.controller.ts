@@ -1317,6 +1317,28 @@ export class FirebirdClusterController {
       };
     }
 
+    // podManagementPolicy is immutable: a StatefulSet created before Parallel is replaced, its
+    // pods orphaned and adopted by the new one (same template: nothing restarts)
+    if ((existing.spec?.podManagementPolicy ?? 'OrderedReady') !== desired.spec?.podManagementPolicy) {
+      log.info('Re-creating the StatefulSet for parallel pod management; the pods keep running');
+      await this.appsApi.deleteNamespacedStatefulSet({ name, namespace, propagationPolicy: 'Orphan' });
+      let gone = false;
+      for (let i = 0; i < 20 && !gone; i++) {
+        try {
+          await this.appsApi.readNamespacedStatefulSet({ name, namespace });
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        } catch (err) {
+          if (!isNotFound(err)) throw err;
+          gone = true;
+        }
+      }
+      // still being deleted: the next reconcile creates it
+      if (!gone) return { readyInstances: existing.status?.readyReplicas ?? 0, superuserSecretHash, statefulSetExisted: true, statefulSet: existing };
+      if (desired.spec && existing.spec?.volumeClaimTemplates) desired.spec.volumeClaimTemplates = existing.spec.volumeClaimTemplates;
+      const created = await this.appsApi.createNamespacedStatefulSet({ namespace, body: desired });
+      return { readyInstances: existing.status?.readyReplicas ?? 0, superuserSecretHash, statefulSetExisted: true, statefulSet: created };
+    }
+
     let current = existing;
     if (statefulSetNeedsUpdate(existing, desired)) {
       log.info('Updating StatefulSet');

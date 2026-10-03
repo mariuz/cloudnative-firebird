@@ -512,6 +512,15 @@ so the standby never misses a committed transaction. The other replicas stay asy
 commits, a replica applying the journal as well getting every change twice, and `sync_replica`
 read from an included file when the database is opened again.
 
+### Pod Management
+
+The StatefulSet creates and recreates instance pods in parallel (`podManagementPolicy:
+Parallel`). With the default `OrderedReady`, a deleted pod is not recreated while a lower ordinal
+is not ready: after a failover to a higher ordinal, the promoted replica waited for the failed
+primary, which waited to be re-seeded from it. The policy cannot be changed on an existing
+StatefulSet, so the operator re-creates StatefulSets made by earlier versions once, orphaning
+their pods: the new StatefulSet adopts them with the same template, and nothing restarts.
+
 ### Rolling Updates
 
 Without replication the StatefulSet controller rolls the pods. With replication the StatefulSet

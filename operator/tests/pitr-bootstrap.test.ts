@@ -117,7 +117,7 @@ describe('point-in-time bootstrap', () => {
 
   it('leaves a cluster whose StatefulSet exists alone', async () => {
     const { kubeConfig, api } = mockApi({
-      readNamespacedStatefulSet: vi.fn().mockResolvedValue({ metadata: { name: 'test-cluster' }, spec: {}, status: {} }),
+      readNamespacedStatefulSet: vi.fn().mockResolvedValue({ metadata: { name: 'test-cluster' }, spec: { podManagementPolicy: 'Parallel' }, status: {} }),
     });
     await new FirebirdClusterController(kubeConfig).reconcile(pitrCluster());
     expect(api('createNamespacedJob')).not.toHaveBeenCalledWith(
