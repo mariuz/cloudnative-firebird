@@ -9,8 +9,8 @@
 #
 # attach:
 #   1. stop writes on the primary: full shutdown (idempotent);
-#   2. read its final replication sequence S, wait until segment S is archived and the standby has
-#      applied everything up to S (POSITION);
+#   2. read its final replication sequence S, wait until the standby has applied everything up to
+#      S (POSITION);
 #   3. SYNC <standby> on the primary (sync_replica in the file replication.conf includes), then
 #      STANDBY on (the standby stops applying journal segments);
 #   4. bring the primary back online: from its next attachment on, every commit is applied on the
@@ -40,7 +40,6 @@ my $token   = $ENV{ISC_PASSWORD} // '';
 my $port    = $ENV{SEGMENT_PORT} // 3051;
 my $timeout = $ENV{TIMEOUT_SECONDS} // 300;
 my $result  = $ENV{RESULT_FILE} // '/dev/termination-log';
-my $name_re = qr/^[A-Za-z0-9._-]+\.journal-(\d+)$/;
 die "ACTION must be attach or detach\n" unless $action eq 'attach' || $action eq 'detach';
 $| = 1;
 
@@ -61,8 +60,10 @@ sub ok { my ($host, $line) = @_; my $r = request($host, $line); return $r && ($r
 sub wait_until {
   my ($what, $check) = @_;
   my $deadline = time + $timeout;
+  my $next_report = time + 10;
   while (time < $deadline) {
     return 1 if $check->();
+    if (time >= $next_report) { print "waiting for $what\n"; $next_report = time + 10; }
     sleep 2;
   }
   die "timed out waiting for $what\n";
@@ -124,12 +125,9 @@ my $outcome = eval {
     return 'detached unreachable';
   }
 
-  if ($final > 0) {
-    wait_until("segment $final to be archived on $primary", sub {
-      my $list = request($primary, 'LIST') or return 0;
-      return grep { $_ =~ $name_re && $1 >= $final } @$list;
-    });
-  }
+  # Applied up to S also means archived: a segment with changes is applied only once archived. A
+  # primary just promoted and not written to has no segment S at all (its journal starts after
+  # S), so waiting for segment S to be archived would never end.
   wait_until("$standby to apply segment $final", sub {
     my $p = request($standby, 'POSITION') or return 0;
     my ($seq, $offset, $pending) = ($p->[0] // '') =~ /^OK (\d+) (\d+) (\d+)$/ or return 0;

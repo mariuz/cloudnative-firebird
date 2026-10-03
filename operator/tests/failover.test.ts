@@ -278,6 +278,20 @@ describe('synchronous replication and failover, switchover, re-seeding', () => {
     expect(promoting.message).toContain('no transaction lost');
   });
 
+  it('does not fail over while a sync-standby Job holds the primary in full shutdown', async () => {
+    const attaching = { standby: 'db-1', primary: 'db-0', phase: 'Attaching' as const, time: new Date(Date.now() - 60_000).toISOString() };
+    const s = setup({ job: {} });
+    await s.controller.reconcile(syncCluster({ primaryNotReadySince: longAgo, synchronous: attaching }));
+    expect(s.created().some((j) => j.metadata?.name === 'db-failover')).toBe(false);
+    expect(s.status().primaryNotReadySince).toBeUndefined();
+    // a Job that has held it for longer than the grace no longer prevents a failover
+    const stuck = setup({ job: {} });
+    await stuck.controller.reconcile(
+      syncCluster({ primaryNotReadySince: longAgo, synchronous: { ...attaching, time: new Date(Date.now() - 400_000).toISOString() } }),
+    );
+    expect(stuck.created().some((j) => j.metadata?.name === 'db-failover')).toBe(true);
+  });
+
   it('elects as before when the standby is not ready', async () => {
     const s = setup({ pods: [pod('db-0', 'u0', false), pod('db-1', 'u1', false), pod('db-2', 'u2')] });
     await s.controller.reconcile(syncCluster({ primaryNotReadySince: longAgo, synchronous: attached }));

@@ -186,9 +186,20 @@ describe('sync-standby.pl', () => {
     });
     expect(r.code).toBe(0);
     expect(r.result).toBe('attached');
-    expect(r.log).toEqual(['primary HEADER', 'primary LIST', 'standby POSITION', 'primary SYNC 127.0.0.2', 'standby STANDBY on']);
+    expect(r.log).toEqual(['primary HEADER', 'standby POSITION', 'primary SYNC 127.0.0.2', 'standby STANDBY on']);
     expect(r.calls[1]).toContain('prp_shutdown_mode prp_sm_full prp_force_shutdown 0');
     expect(r.calls[r.calls.length - 1]).toContain('prp_online_mode prp_sm_normal');
+  });
+
+  it('attaches to a primary just promoted and not written to (no segment at its sequence)', async () => {
+    if (!hasPerl) return;
+    // its journal starts after S: nothing archived; the standby, seeded at S, has applied S
+    const r = await run('attach', {
+      primary: { HEADER: 'OK 12', LIST: '.', SYNC: 'OK' },
+      standby: { POSITION: 'OK 12 0 0', 'STANDBY on': 'OK' },
+    });
+    expect(r.code).toBe(0);
+    expect(r.result).toBe('attached');
   });
 
   it('undoes a half-done attach and brings the primary back online', async () => {

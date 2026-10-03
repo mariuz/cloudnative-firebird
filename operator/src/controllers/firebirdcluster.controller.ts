@@ -654,8 +654,12 @@ export class FirebirdClusterController {
       const restart = current.status?.rollingUpdate?.primaryRestart;
       const graceMs = Math.max(PRIMARY_RESTART_GRACE_SECONDS, effectiveFailoverDelaySeconds(cluster)) * 1000;
       const plannedRestart = restart?.pod === primaryPod && Date.now() - Date.parse(restart.time) < graceMs;
-      if (primaryReady || fenced.includes(primaryPod) || plannedRestart) {
-        // a fenced primary is never failed over, a primary restarted by a rolling update not yet
+      // a sync-standby Job keeps the primary in full shutdown while it attaches or detaches
+      const syncJob =
+        (sync?.phase === 'Attaching' || sync?.phase === 'Detaching') && Date.now() - Date.parse(sync.time) < graceMs;
+      if (primaryReady || fenced.includes(primaryPod) || plannedRestart || syncJob) {
+        // a fenced primary is never failed over, a primary restarted by a rolling update or shut
+        // down by a sync-standby Job not yet
         result.primaryNotReadySince = undefined;
       } else {
         const since = current.status?.primaryNotReadySince ?? now;
