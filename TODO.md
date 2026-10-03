@@ -23,6 +23,12 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   standbys (CloudNativePG's `number` / `method: any`); attaching and detaching without the short
   write pause (Firebird reads `sync_replica` only when the database is opened); a standby restart
   without blocking writes in `required` mode (detach first in rolling updates).
+- [ ] **Promotion sequence vs. the journal archive**: a promoted replica's journal continues after
+  the last segment it applied (a synchronous standby: the last one it saw archived, polled every
+  5 seconds), which can be below segments the old primary already uploaded to `journalArchiveS3`.
+  With Firebird 4 and 5 segment names (no GUID) the new primary's first segments then collide with
+  uploaded ones of the old lineage. Promote after the highest sequence any replica or the archive
+  knows instead.
 - [ ] **Encrypt segment shipping**: the segment server authenticates with the SYSDBA password
   but traffic is plain TCP inside the cluster (restricted by the NetworkPolicy when enabled).
 - [ ] **Firebird internal formats**: seeding writes the replica control file
