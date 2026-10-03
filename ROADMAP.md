@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.51.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.52.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Primary Isolation Check** *(v0.52.0, CloudNativePG `isolationCheck`)*
+  - With automatic failover, the primary's segment server runs `isolation-check.pl`: when the primary has reached neither the Kubernetes API server nor another instance's segment server for `failover.isolationCheck.timeoutSeconds` (default 20), it puts its database into full shutdown, so clients cut off with it cannot write while a replica is promoted. The failover delay is at least the timeout plus 10 seconds.
+  - A self-fenced primary that still holds the Lease when the operator reaches it again is brought back online through the segment server (`ISOLATION`, `REJOIN`; `PrimaryRejoined` event) instead of being failed over.
+  - Verified on Firebird 4.0.7, 5.0.4 and the 6.0 snapshot in a container without network (fenced after the timeout, writes refused, back online on `REJOIN`, fenced again while still isolated), and on an internal network where only a peer answered on the headless name (not fenced until the peer stopped).
 - [x] **Live Seeds by Default** *(v0.51.0)*
   - `replication.allowLiveSeedFromPrimary` defaults to true: when no replica is ready and the offline bootstrap seed is stale, a new replica is seeded from a locked copy of the live primary instead of waiting for the primary's next clean restart, so seeding no longer depends on restarts. Ready replicas and the offline seed still come first; `false` keeps the primary from ever being locked. Safe since the commit/TIP window is confirmed and handled (v0.49.0) and live seeds plan with `PLAN` (v0.50.0); verified with the setting unset (window transactions replayed, replica identical) and opted out (seed refused).
 - [x] **Stricter Live Seed Planning** *(v0.50.0)*

@@ -33,6 +33,11 @@
 #                                 page on disk (planned switchover, once the old primary is in full
 #                                 shutdown: Firebird 6 refuses header statistics through the
 #                                 service manager then, and gstat reads local files only)
+#   "<token> ISOLATION\n"       -> "OK fenced <epoch>" when the isolation check fenced this
+#                                 primary (isolation-check.pl), "OK online" otherwise
+#   "<token> REJOIN\n"          -> "OK": brings a database fenced by the isolation check back
+#                                 online, sent by the operator once it checked that this instance
+#                                 still holds the leader Lease ("OK" too when it is not fenced)
 #
 # FILE, STORE, REMOVE and FILES only handle plain "*.nbk" and "*.fbk" names (no directories), so
 # they cannot touch the database, the journal or the replication state. FILE and STORE run in a child process, so a
@@ -87,6 +92,8 @@ my $seed_file = "$base/seed.copy";
 my $bootstrap_seed = "$base/bootstrap-seed.fdb";
 my $pause_flag = "$base/.pause-pull";
 my $pause_ack  = "$base/.pull-paused";
+my $self_fenced = "$base/self-fenced";
+my $isolation_timeout = $ENV{ISOLATION_TIMEOUT_SECONDS} // 0;
 my $name_re   = qr/^[A-Za-z0-9._-]+\.journal-\d+$/;
 my $backup_re = qr/^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:nbk|fbk)$/;
 (my $data_dir = $database) =~ s{/[^/]*$}{};
@@ -398,10 +405,28 @@ sub store_file {
   }
 }
 
+# The isolation check (automatic failover only) runs beside the server, restarted if it exits
+my $monitor;
+sub start_monitor {
+  return if $files_only || $isolation_timeout !~ /^\d+$/ || $isolation_timeout == 0;
+  $ENV{SELF_FENCED_FILE} = $self_fenced;
+  my $pid = fork;
+  if (!defined $pid) { print "cannot start the isolation check: $!\n"; return; }
+  if ($pid == 0) {
+    close $server;
+    exec('perl', "$ENV{SCRIPT_DIR}/isolation-check.pl") or exit 1;
+  }
+  $monitor = $pid;
+}
+start_monitor();
+
 my $last_prune = 0;
 while (1) {
   if (!$files_only && time - $last_prune > 60) { prune(); $last_prune = time; }
-  1 while waitpid(-1, 1) > 0;   # reap finished transfers (1 = WNOHANG)
+  # reap finished transfers (1 = WNOHANG), and restart the isolation check if it ended
+  while ((my $done = waitpid(-1, 1)) > 0) {
+    if (defined $monitor && $done == $monitor) { $monitor = undef; sleep 1; start_monitor(); }
+  }
   $server->timeout(30);
   my $client = $server->accept or next;
   $client->timeout(600);
@@ -445,6 +470,19 @@ while (1) {
   } elsif ($cmd eq 'HEADER') {
     my $seq = header_sequence($database);
     print $client (defined $seq ? "OK $seq\n" : "ERR cannot read the header of $database\n");
+  } elsif ($cmd eq 'ISOLATION') {
+    print $client (-f $self_fenced ? "OK fenced " . (slurp($self_fenced) || 0) . "\n" : "OK online\n");
+  } elsif ($cmd eq 'REJOIN') {
+    if (!-f $self_fenced) {
+      print $client "OK\n";
+    } elsif (system('fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database,
+                    'prp_online_mode', 'prp_sm_normal') == 0) {
+      unlink $self_fenced;
+      print "isolation fence lifted by the operator: database online\n";
+      print $client "OK\n";
+    } else {
+      print $client "ERR cannot bring $database online\n";
+    }
   } elsif ($cmd eq 'POSITION') {
     if (is_primary()) {
       print $client "OK primary\n";

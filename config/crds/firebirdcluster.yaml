@@ -360,6 +360,21 @@ spec:
                           description: Seconds the primary must be unavailable before a failover (default 30)
                           type: integer
                           minimum: 1
+                        isolationCheck:
+                          description: >-
+                            The primary puts its database into full shutdown when it has reached neither
+                            the Kubernetes API server nor any other instance for timeoutSeconds, so that
+                            clients cut off with it cannot write while a replica is promoted. The operator
+                            brings it back online if it is still the primary. Enabled by default.
+                          type: object
+                          properties:
+                            enabled:
+                              type: boolean
+                            timeoutSeconds:
+                              description: Seconds the primary may be isolated before it fences itself (default 20)
+                              type: integer
+                              minimum: 5
+                              maximum: 3600
                     allowLiveSeedFromPrimary:
                       description: >
                         Allow seeding a replica with a locked copy of the live primary when no ready

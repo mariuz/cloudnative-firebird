@@ -12,10 +12,10 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   replicas created with Firebird's documented procedure (`nbackup -L`, `-SEQ -F`) lose the
   transactions committed at the moment of the lock (`hack/repro/replica-seed-race.sh`).
 - [ ] **Failover safety**: the Lease is moved by the operator, not held and renewed by the
-  instances (CloudNativePG 1.30's promotion mutex). A primary that is alive but unready (e.g.
-  overloaded) is restarted and re-seeded after a failover; one that is partitioned from the other
-  pods but still ready to the kubelet is not failed over at all. Instance-side self-fencing
-  (shut the database down when the Lease is lost) would close both gaps.
+  instances (CloudNativePG 1.30's promotion mutex). The isolation check (v0.52.0) fences a primary
+  cut off from both the API server and every replica; a primary that is partitioned from the other
+  pods but still ready to the kubelet is not failed over at all, and one that still reaches the API
+  server or a replica is never fenced.
 - [ ] **Synchronous replication** would make failover lossless; see below.
 - [ ] **Switchover downtime**: writes stop from the primary shutdown until the target pod is ready
   again (two pod restarts). Promoting online (replica mode none and publication on a running

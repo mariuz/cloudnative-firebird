@@ -116,6 +116,15 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
         throw new ValidationError(`Invalid replication ${field}: ${value}. Must be a positive integer.`);
       }
     }
+    const isolationTimeout = spec.replication.failover?.isolationCheck?.timeoutSeconds;
+    if (
+      isolationTimeout !== undefined &&
+      (!Number.isInteger(isolationTimeout) || isolationTimeout < 5 || isolationTimeout > 3600)
+    ) {
+      throw new ValidationError(
+        `Invalid replication failover.isolationCheck.timeoutSeconds: ${isolationTimeout}. Must be an integer from 5 to 3600.`,
+      );
+    }
     const routing = spec.replication.readOnlyRouting;
     if (
       routing?.maxLagSeconds !== undefined &&
