@@ -1,12 +1,17 @@
-# expect: 'sync' needs at least 2 instances
+# expect: valid
 apiVersion: firebird.cloudnative-firebird.io/v1
 kind: FirebirdCluster
 metadata:
   name: c1
 spec:
-  instances: 1
+  instances: 3
   storage:
     size: 1Gi
   replication:
     enabled: true
     mode: sync
+    synchronous:
+      dataDurability: preferred
+      standbyUnavailableSeconds: 20
+    failover:
+      enabled: true

@@ -346,6 +346,6 @@ describe('switchover.pl with Firebird 6', () => {
     expect(readFileSync(join(dir, 'calls'), 'utf8')).not.toContain('action_properties');
     expect(out.text).toContain('final replication sequence of 127.0.0.1: 53');
     expect(out.text).toContain('switchover ready: promote 127.0.0.1 after segment 53');
-    expect(requests).toEqual(['HEADER', 'LIST', 'POSITION']);
+    expect(requests).toEqual(['HEADER', 'POSITION']);
   });
 });

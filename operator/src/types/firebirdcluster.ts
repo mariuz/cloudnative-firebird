@@ -179,10 +179,13 @@ export interface ReplicationConfiguration {
   /** Whether replication is enabled */
   enabled: boolean;
   /**
-   * Replication mode. Only 'async' (journal shipping) is supported; 'sync' is rejected
-   * by validation until synchronous replication is implemented. Defaults to 'async'.
+   * Replication mode (defaults to 'async'): 'async' ships journal segments to every replica;
+   * 'sync' also makes one replica the synchronous standby, which applies every change before the
+   * primary's commit completes (see synchronous).
    */
   mode?: 'sync' | 'async';
+  /** Synchronous replication settings (mode sync) */
+  synchronous?: SynchronousReplicationConfiguration;
   /**
    * Base directory for replication files on each instance's volume; journal, archive and
    * source directories are created below it (defaults to "/var/lib/firebird/data/replication")
@@ -522,6 +525,8 @@ export interface FirebirdClusterStatus {
   primaryNotReadySince?: string;
   /** Planned switchover or failover in progress, or the last one */
   switchover?: SwitchoverStatus;
+  /** Synchronous replication (replication.mode sync): the standby and its state */
+  synchronous?: SynchronousStatus;
   /** Replicas being re-seeded (reseed annotation) */
   reseedingInstances?: string[];
   /** Replicas whose volume is being re-created (reseed=volume annotation) */
@@ -541,6 +546,36 @@ export interface RollingUpdateStatus {
   message: string;
   /** The primary pod restarted by the update (automatic failover waits for it to return) */
   primaryRestart?: { pod: string; uid: string; time: string };
+}
+
+/** Synchronous replication settings */
+export interface SynchronousReplicationConfiguration {
+  /**
+   * 'required' (default): while the standby is unavailable, the primary's writes fail rather than
+   * commit without it (CloudNativePG's dataDurability: required). 'preferred': the operator
+   * detaches a standby that has not been ready for standbyUnavailableSeconds, and writes continue
+   * asynchronously until a standby is attached again.
+   */
+  dataDurability?: 'required' | 'preferred';
+  /** dataDurability preferred: how long the standby may be unavailable before it is detached (default 30) */
+  standbyUnavailableSeconds?: number;
+}
+
+/** State of synchronous replication (mode sync) */
+export interface SynchronousStatus {
+  /** The synchronous standby (instance name) */
+  standby: string;
+  /** The primary it is attached to */
+  primary: string;
+  /** Attaching / Detaching: a sync-standby Job is running; Attached; Detached; Failed (the last Job) */
+  phase: 'Attaching' | 'Attached' | 'Detaching' | 'Detached' | 'Failed';
+  message?: string;
+  /** When the phase was entered */
+  time: string;
+  /** Since when the attached standby has not been ready */
+  unavailableSince?: string;
+  /** A detach failed: not retried before this time */
+  retryAfter?: string;
 }
 
 /** Automatic failover settings */

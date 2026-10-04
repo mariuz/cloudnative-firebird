@@ -63,7 +63,7 @@ export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.from
  * ConfigMap. Not part of any pod template hash: changing them restarts no instance.
  */
 export const JOB_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
-  ['fetch-segments.pl', 'pitr-plan.pl', 'pitr-restore.sh'].map((name) => [
+  ['fetch-segments.pl', 'pitr-plan.pl', 'pitr-restore.sh', 'sync-standby.pl'].map((name) => [
     name,
     readFileSync(join(SCRIPT_DIR, name), 'utf8'),
   ]),
@@ -118,6 +118,11 @@ export function buildReplicationConf(cluster: FirebirdCluster, databasePath: str
     `    journal_archive_timeout = ${archiveTimeout}`,
     `    journal_source_directory = ${dirs.source}`,
     '    apply_idle_timeout = 5',
+    // synchronous replication (replication.mode sync): the primary's sync_replica entry, written by
+    // its segment server and read when the database is opened; strict, so a commit fails rather
+    // than leave the standby behind
+    ...(cluster.spec.replication?.mode === 'sync' ? ['    report_errors = true', '    disable_on_error = false'] : []),
+    `    include ${dirs.base}/sync.conf`,
     '}',
     '',
   ].join('\n');

@@ -76,6 +76,10 @@ spec:
                     !has(self.bootstrap) || !has(self.bootstrap.recovery) || !has(self.bootstrap.recovery.pointInTime) ||
                     self.instances <= 1 || (has(self.replication) && has(self.replication.enabled) && self.replication.enabled)
                   message: bootstrap.recovery.pointInTime with more than one instance needs replication
+                - rule: >-
+                    !has(self.replication) || !self.replication.enabled || !has(self.replication.mode) ||
+                    self.replication.mode != 'sync' || self.instances >= 2
+                  message: replication mode 'sync' needs at least 2 instances
               required:
                 - instances
                 - storage
@@ -304,21 +308,36 @@ spec:
                   type: object
                   required:
                     - enabled
-                  x-kubernetes-validations:
-                    - rule: "!self.enabled || !has(self.mode) || self.mode == 'async'"
-                      message: replication mode 'sync' is not supported yet; use 'async' (journal shipping)
                   properties:
                     enabled:
                       description: Whether replication is enabled
                       type: boolean
                     mode:
                       description: >
-                        Replication mode. Only 'async' (journal shipping) is supported; 'sync' is
-                        rejected until synchronous replication is implemented. Defaults to 'async'.
+                        Replication mode (defaults to 'async'): 'async' ships journal segments to every
+                        replica; 'sync' also makes one replica the synchronous standby, which applies
+                        every change before the primary's commit completes. Needs 2 instances or more.
                       type: string
                       enum:
                         - sync
                         - async
+                    synchronous:
+                      description: Synchronous replication settings (mode sync)
+                      type: object
+                      properties:
+                        dataDurability:
+                          description: >
+                            required (default): while the standby is unavailable, the primary's writes
+                            fail rather than commit without it. preferred: a standby not ready for
+                            standbyUnavailableSeconds is detached and writes continue asynchronously.
+                          type: string
+                          enum:
+                            - required
+                            - preferred
+                        standbyUnavailableSeconds:
+                          description: dataDurability preferred, seconds before an unavailable standby is detached (default 30)
+                          type: integer
+                          minimum: 1
                     journalDirectory:
                       description: >
                         Base directory for replication files on each instance's volume; journal,
@@ -813,6 +832,30 @@ spec:
                       type: object
                       additionalProperties:
                         type: string
+                synchronous:
+                  description: Synchronous replication (replication.mode sync), the standby and its state
+                  type: object
+                  properties:
+                    standby:
+                      type: string
+                    primary:
+                      type: string
+                    phase:
+                      type: string
+                      enum:
+                        - Attaching
+                        - Attached
+                        - Detaching
+                        - Detached
+                        - Failed
+                    message:
+                      type: string
+                    time:
+                      type: string
+                    unavailableSince:
+                      type: string
+                    retryAfter:
+                      type: string
                 replicationStatus:
                   description: Detailed replication status details
                   type: object
