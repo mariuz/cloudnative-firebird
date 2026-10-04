@@ -138,6 +138,18 @@ describe('cluster events', () => {
     });
   });
 
+  it('warns once that the TLS certificate settings are ignored', async () => {
+    const s = clusterSetup([pod('db-0'), pod('db-1'), pod('db-2')]);
+    const cluster = makeCluster({ tls: { enabled: true, issuerRef: { name: 'letsencrypt' } } });
+    await s.controller.reconcile(cluster);
+    await s.controller.reconcile(cluster);
+    expect(s.events().filter((e) => e.reason === 'TLSCertificateIgnored')).toEqual([
+      expect.objectContaining({ type: 'Warning', message: expect.stringContaining('tls.secretName and tls.issuerRef are ignored') }),
+    ]);
+    // nothing for cert-manager
+    expect(s.fn('createNamespacedCustomObject').mock.calls.filter((c) => c[0].plural === 'certificates')).toEqual([]);
+  });
+
   it('records a refused switchover as a warning', async () => {
     const s = clusterSetup([pod('db-0'), pod('db-1', { ready: false }), pod('db-2')]);
     await s.controller.reconcile(makeCluster({}, { annotations: { [TARGET_PRIMARY_ANNOTATION]: 'db-1' } }));

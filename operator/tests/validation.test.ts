@@ -235,6 +235,15 @@ describe('validateClusterSpec', () => {
     expect(() => validateClusterSpec(cluster)).toThrow(/Invalid exporter port/);
   });
 
+  it('rejects settings that weaken the wire encryption tls.enabled requires', () => {
+    const tls = (settings: Record<string, string>) => makeCluster({ tls: { enabled: true }, config: { settings } });
+    expect(() => validateClusterSpec(tls({ WireCrypt: 'Enabled' }))).toThrow(/WireCrypt = Required/);
+    expect(() => validateClusterSpec(tls({ WireCryptPlugin: 'ChaCha64, Arc4' }))).toThrow(/ChaCha64 and ChaCha/);
+    expect(() => validateClusterSpec(tls({ WireCrypt: 'required', WireCryptPlugin: 'ChaCha' }))).not.toThrow();
+    // without tls the settings are the user's
+    expect(() => validateClusterSpec(makeCluster({ config: { settings: { WireCrypt: 'Disabled' } } }))).not.toThrow();
+  });
+
   it('throws ValidationError for empty TLS issuerRef name', () => {
     const cluster = makeCluster({
       tls: { enabled: true, issuerRef: { name: ' ' } },

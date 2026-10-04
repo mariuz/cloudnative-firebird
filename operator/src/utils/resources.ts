@@ -133,13 +133,20 @@ export function databaseName(cluster: FirebirdCluster): string {
   return cluster.spec.databaseName ?? DEFAULT_DATABASE_NAME;
 }
 
+/** Wire encryption plugins allowed with tls.enabled: ChaCha only, not the RC4-based Arc4 */
+export const STRICT_WIRE_CRYPT_PLUGINS = 'ChaCha64, ChaCha';
+
 /**
- * Returns the effective firebird.conf settings, including WireCrypt=Required when TLS is enabled.
+ * Returns the effective firebird.conf settings. Firebird 4 and later already require wire
+ * encryption on the server (WireCrypt = Required, with Srp256 authentication, whose session key
+ * the encryption uses); tls.enabled makes it explicit and leaves out the Arc4 plugin, so a client
+ * that offers only Arc4 (e.g. Firebird 3) is refused.
  */
 export function firebirdConfSettings(cluster: FirebirdCluster): Record<string, string> {
   const settings = { ...(cluster.spec.config?.settings ?? {}) };
-  if (cluster.spec.tls?.enabled && !settings['WireCrypt']) {
-    settings['WireCrypt'] = 'Required';
+  if (cluster.spec.tls?.enabled) {
+    settings['WireCrypt'] ??= 'Required';
+    settings['WireCryptPlugin'] ??= STRICT_WIRE_CRYPT_PLUGINS;
   }
   return settings;
 }
@@ -336,15 +343,6 @@ export function buildStatefulSet(
             ]
           : []),
         ...(replication?.mainMounts ?? []),
-        ...(spec.tls?.enabled
-          ? [
-              {
-                name: 'tls-cert',
-                mountPath: '/firebird/etc/tls',
-                readOnly: true,
-              },
-            ]
-          : []),
       ],
       livenessProbe: {
         tcpSocket: { port: 3050 },
@@ -393,16 +391,6 @@ export function buildStatefulSet(
             name: 'cluster-config',
             configMap: {
               name: `${name}-config`,
-            },
-          },
-        ]
-      : []),
-    ...(spec.tls?.enabled
-      ? [
-          {
-            name: 'tls-cert',
-            secret: {
-              secretName: spec.tls.secretName ?? `${name}-tls`,
             },
           },
         ]
@@ -842,49 +830,6 @@ export function buildPodMonitor(cluster: FirebirdCluster): Record<string, unknow
         matchLabels: labels,
       },
       podMetricsEndpoints,
-    },
-  };
-}
-
-/**
- * Builds the cert-manager Certificate resource for TLS encryption.
- */
-export function buildCertificate(cluster: FirebirdCluster): Record<string, unknown> {
-  const { name, namespace = 'default' } = cluster.metadata;
-  const labels = clusterLabels(name);
-  const tls = cluster.spec.tls;
-
-  return {
-    apiVersion: 'cert-manager.io/v1',
-    kind: 'Certificate',
-    metadata: {
-      name: `${name}-cert`,
-      namespace,
-      labels,
-      ownerReferences: [
-        {
-          apiVersion: `${API_GROUP}/v1`,
-          kind: RESOURCE_KIND,
-          name: cluster.metadata.name,
-          uid: cluster.metadata.uid ?? '',
-          controller: true,
-          blockOwnerDeletion: true,
-        },
-      ],
-    },
-    spec: {
-      secretName: tls?.secretName ?? `${name}-tls`,
-      dnsNames: [
-        name,
-        `${name}.${namespace}`,
-        `${name}.${namespace}.svc.cluster.local`,
-        `*.${name}-headless.${namespace}.svc.cluster.local`,
-      ],
-      issuerRef: tls?.issuerRef ?? {
-        name: 'selfsigned-issuer',
-        kind: 'Issuer',
-        group: 'cert-manager.io',
-      },
     },
   };
 }

@@ -226,6 +226,32 @@ spec:
 
 Changing them (and upgrading from a version without these defaults) rolls the instances.
 
+### Encryption in Transit
+
+Firebird has no TLS listener. Client connections are encrypted by Firebird's own wire protocol
+(WireCrypt), with a session key from the Srp authentication. Firebird 4 and later already require
+it on the server by default (`WireCrypt = Required`, `AuthServer = Srp256`), so a client that does
+not encrypt is refused. With operator-generated pods on Firebird 4.0.7, 5.0.4 and the 6.0
+snapshot, an unencrypted client gets "Incompatible wire encryption levels" and others negotiate
+ChaCha64.
+
+```yaml
+spec:
+  tls:
+    enabled: true   # WireCrypt = Required and WireCryptPlugin = ChaCha64, ChaCha
+```
+
+`tls.enabled` makes it strict: only the ChaCha64 and ChaCha plugins are offered, not the RC4-based
+Arc4, so a client that can only use Arc4 (e.g. Firebird 3) is refused. `config.settings` that would
+weaken it (another `WireCrypt`, or `Arc4` in `WireCryptPlugin`) are rejected. `tls.secretName` and
+`tls.issuerRef` are deprecated and ignored: earlier versions mounted a certificate (and created a
+cert-manager Certificate) that Firebird never read; a `TLSCertificateIgnored` event says so.
+
+Not encrypted: journal segment shipping and seed copies between instances, and backup files
+copied through the segment server, travel as plain TCP inside the cluster (authenticated with the
+SYSDBA password); `networkPolicy.enabled` restricts them to the cluster's own pods and Jobs. See
+TODO.md.
+
 ### Status Fields
 
 | Field | Description |
@@ -911,7 +937,7 @@ The operator records Kubernetes events on its resources (CloudNativePG 1.29 / 1.
 
 | Resource | Reasons |
 |---|---|
-| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`; `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReconcileFailed` (warning) |
+| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReconcileFailed` (warning) |
 | `FirebirdBackup` | `BackupStarted`, `BackupCompleted`, `BackupFailed` (warning) |
 | `FirebirdRestore` | `RestoreStarted`, `RestoreCompleted`, `RestoreFailed` (warning) |
 | `FirebirdUser` | `UserApplied`, `UserFailed` (warning), `UserDropped` |
@@ -984,7 +1010,7 @@ The operator uses `~/.kube/config` when `KUBERNETES_SERVICE_HOST` is not set (lo
 
 ## Roadmap
 
-For planned features inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg)—including automated failover, `nbackup` physical backups, PITR, `gfix` sweeping, cert-manager TLS, and dedicated backup CRDs—see [ROADMAP.md](ROADMAP.md).
+For planned features inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg)—including automated failover, `nbackup` physical backups, PITR, `gfix` sweeping, and dedicated backup CRDs—see [ROADMAP.md](ROADMAP.md).
 
 ## License
 

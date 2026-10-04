@@ -29,8 +29,11 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   With Firebird 4 and 5 segment names (no GUID) the new primary's first segments then collide with
   uploaded ones of the old lineage. Promote after the highest sequence any replica or the archive
   knows instead.
-- [ ] **Encrypt segment shipping**: the segment server authenticates with the SYSDBA password
-  but traffic is plain TCP inside the cluster (restricted by the NetworkPolicy when enabled).
+- [ ] **Encrypt segment shipping**: client connections are encrypted (WireCrypt, v0.54.0), but the
+  segment server (journal segments, seed copies, backup files) authenticates with the SYSDBA
+  password over plain TCP inside the cluster (restricted by the NetworkPolicy when enabled). The
+  image's Perl has no TLS module; options are carrying the bytes over a Firebird connection, or a
+  sidecar image with TLS.
 - [ ] **Firebird internal formats**: seeding writes the replica control file
   (`ControlFile::DataV1` in `src/remote/server/ReplServer.cpp`) and switchover writes the
   `HDR_repl_seq` header clump (`src/jrd/ods.h`). Verified for Firebird 4.0.7 (ODS 13.0), 5.0.4
@@ -54,8 +57,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 ## Other roadmap items
 
-- [ ] TLS: Firebird has no native TLS listener; decide between WireCrypt only, a TLS proxy
-  sidecar, or dropping the `tls` mount.
 - [ ] **In-place configuration reloads**: every template change restarts the instances, even
   settings Firebird could apply without a restart. CloudNativePG reloads PostgreSQL in place when
   possible.
