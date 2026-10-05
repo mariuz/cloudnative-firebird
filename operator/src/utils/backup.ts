@@ -4,6 +4,7 @@ import {
   V1EnvVar,
   V1Job,
   V1OwnerReference,
+  V1Pod,
   V1PodSpec,
   V1Volume,
   V1VolumeMount,
@@ -918,6 +919,34 @@ export function jobOutcome(job: V1Job): 'Running' | 'Completed' | 'Failed' {
   return 'Running';
 }
 
+function journalArchiveLabels(cluster: FirebirdCluster): Record<string, string> {
+  return { ...clusterLabels(cluster.metadata.name), 'app.kubernetes.io/component': 'journal-archive' };
+}
+
+/** Label selector of the journal archive Job pods */
+export function journalArchivePodSelector(cluster: FirebirdCluster): string {
+  return Object.entries(journalArchiveLabels(cluster))
+    .map(([k, v]) => `${k}=${v}`)
+    .join(',');
+}
+
+/**
+ * The highest journal segment sequence the journal archive Jobs listed for upload (their
+ * fetch-segments init container's termination message "listed=<S>"), at least `stored`. Anything
+ * in the object store was listed first, so a promoted replica's journal continues after it: with
+ * Firebird 4 and 5 segment names (no GUID) a lower sequence would reuse the names of segments of
+ * the old primary already uploaded, which the archive Job then skips as uploaded.
+ */
+export function journalArchiveListedSequence(pods: V1Pod[], stored?: number): number | undefined {
+  let max = stored;
+  for (const pod of pods) {
+    const terminated = pod.status?.initContainerStatuses?.find((c) => c.name === 'fetch-segments')?.state?.terminated;
+    const listed = terminated?.exitCode === 0 ? /^listed=(\d+)\s*$/.exec(terminated.message ?? '') : null;
+    if (listed && (max === undefined || Number(listed[1]) > max)) max = Number(listed[1]);
+  }
+  return max;
+}
+
 /**
  * Builds the CronJob that ships the primary's archived journal segments to S3 for PITR.
  * Segments are fetched from the primary's segment server (the archive lives on its volume);
@@ -928,7 +957,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
   const s3 = cluster.spec.replication?.journalArchiveS3;
   if (!replicationEnabled(cluster) || !s3) return null;
 
-  const labels = { ...clusterLabels(name), 'app.kubernetes.io/component': 'journal-archive' };
+  const labels = journalArchiveLabels(cluster);
   const journals = s3Uri(s3, 'journals/');
   const upload: V1Container = {
     name: 'upload',
@@ -983,6 +1012,8 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
           { name: 'OUT_DIR', value: `${WORK_DIR}/segments` },
           { name: 'SKIP_FILE', value: `${WORK_DIR}/uploaded` },
           { name: 'LISTED_FILE', value: `${WORK_DIR}/listed-max` },
+          // the highest segment it may upload, read by the operator (journalArchiveListedSequence)
+          { name: 'RESULT_FILE', value: '/dev/termination-log' },
         ],
         volumeMounts: [workMount, { name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }],
       },

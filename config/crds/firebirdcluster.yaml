@@ -801,6 +801,12 @@ spec:
                 primaryNotReadySince:
                   description: Since when the primary pod has not been ready (automatic failover)
                   type: string
+                journalArchiveSequence:
+                  description: >-
+                    Highest journal segment sequence the journal archive Job listed for upload
+                    (journalArchiveS3); a promoted replica's journal continues after it
+                  type: integer
+                  format: int64
                 switchover:
                   description: Planned switchover or automatic failover in progress, or the last one
                   type: object

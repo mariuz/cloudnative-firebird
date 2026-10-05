@@ -21,6 +21,8 @@ import {
   buildJournalArchiveCronJob,
   buildRecoveryBootstrapJob,
   instanceDataClaimName,
+  journalArchiveListedSequence,
+  journalArchivePodSelector,
   jobOutcome,
   recoveryBootstrapJobName,
 } from '../utils/backup';
@@ -145,6 +147,8 @@ interface SwitchoverResult {
   wantsSwitchover?: boolean;
   /** The stored synchronous replication state */
   synchronous?: SynchronousStatus;
+  /** The stored status.journalArchiveSequence */
+  journalArchiveSequence?: number;
 }
 
 /** Whether a switchover or failover is between its start and its completion */
@@ -351,6 +355,7 @@ export class FirebirdClusterController {
       }
 
       await this.reconcileJournalArchiveCronJob(cluster, primaryPod, log);
+      const journalArchiveSequence = await this.journalArchiveSequence(cluster, switchover.journalArchiveSequence);
       await this.reconcileLease(cluster, log);
       await this.warnUnusedCertificate(cluster, log);
       await this.reconcilePodDisruptionBudget(cluster, log);
@@ -429,6 +434,7 @@ export class FirebirdClusterController {
         ...(switchover.status ? { switchover: switchover.status } : {}),
         primaryNotReadySince: switchover.primaryNotReadySince,
         synchronous,
+        journalArchiveSequence,
         ...(volumes ? { volumes } : {}),
         conditions: [
           this.makeCondition(
@@ -588,6 +594,7 @@ export class FirebirdClusterController {
     const result: SwitchoverResult = { primaryPod, promote: {}, demote: {}, restart: [], reseed: {} };
     result.status = cluster.status?.switchover;
     result.rollingUpdate = cluster.status?.rollingUpdate;
+    result.journalArchiveSequence = cluster.status?.journalArchiveSequence;
     if (!replicationEnabled(cluster) || cluster.spec.hibernated) return result;
 
     // the switchover state machine acts on the latest stored state, never on a stale watch copy
@@ -606,6 +613,7 @@ export class FirebirdClusterController {
     }
     const state = current.status?.switchover;
     result.rollingUpdate = current.status?.rollingUpdate;
+    result.journalArchiveSequence = current.status?.journalArchiveSequence ?? cluster.status?.journalArchiveSequence;
     const desired = current.metadata.annotations?.[TARGET_PRIMARY_ANNOTATION]?.trim();
     const inFlight = state && (state.phase === 'Electing' || state.phase === 'Stopping' || state.phase === 'Promoting');
     const failover = cluster.spec.replication?.failover;
@@ -948,7 +956,9 @@ export class FirebirdClusterController {
       await persist({ ...phase, phase: 'Completed', message: `${phase.target} is the primary`, completionTime: now });
       return result;
     }
-    result.promote = { [phase.target]: phase.targetToken ?? '' };
+    // the promoted replica's journal continues after every segment the journal archive may hold
+    const archived = await this.journalArchiveSequence(cluster, result.journalArchiveSequence);
+    result.promote = { [phase.target]: `${phase.targetToken ?? ''}${archived !== undefined ? ` ${archived}` : ''}` };
     // after a failover the old primary diverged (its unshipped transactions): it is re-seeded
     result.demote = isFailover ? {} : { [phase.from]: phase.fromToken ?? '' };
     // pods still running with the UID they had when the primary moved (not yet restarted)
@@ -1657,6 +1667,18 @@ export class FirebirdClusterController {
   }
 
   /** Reconcile CronJob for replication journal continuous archiving to S3 */
+  /** status.journalArchiveSequence: see journalArchiveListedSequence (utils/backup.ts) */
+  private async journalArchiveSequence(cluster: FirebirdCluster, stored?: number): Promise<number | undefined> {
+    if (!replicationEnabled(cluster) || !cluster.spec.replication?.journalArchiveS3) return stored;
+    const pods = (
+      await this.coreApi.listNamespacedPod({
+        namespace: cluster.metadata.namespace ?? 'default',
+        labelSelector: journalArchivePodSelector(cluster),
+      })
+    ).items;
+    return journalArchiveListedSequence(pods, stored);
+  }
+
   private async reconcileJournalArchiveCronJob(
     cluster: FirebirdCluster,
     primaryPod: string,
