@@ -167,7 +167,9 @@ export function s3RetentionScript(s3: S3BackupConfiguration, series: string, sec
   const dir = `s3://${s3.bucket}/${s3KeyPrefix(s3)}`;
   return retentionScript({
     list: `${awsCommand(s3)} s3 ls ${shellQuote(dir)} | awk '{ print $4 }'`,
-    remove: `${awsCommand(s3)} s3 rm ${shellQuote(dir)}"$k"`,
+    // with an nbackup taken on a replica, its control file (missing ones are fine)
+    remove: `${awsCommand(s3)} s3 rm ${shellQuote(dir)}"$k"` +
+      (history ? `; ${awsCommand(s3)} s3 rm ${shellQuote(dir)}"$k.ctl" >/dev/null 2>&1 || true` : ''),
     tmp: WORK_DIR,
     series,
     seconds,
@@ -275,6 +277,11 @@ export function buildBackupPodSpec(
     retention?: { series: string; policy?: string };
     /** Restore the backup into a scratch database and validate it (logical backups) */
     verify?: boolean;
+    /**
+     * The host is a replica (target prefer-standby): an nbackup is taken through its segment server
+     * (NBACKUP), which also writes the replica's position (<file>.ctl) for point-in-time recovery
+     */
+    replica?: boolean;
   },
 ): V1PodSpec {
   const verify = Boolean(options.verify) && options.type !== 'physical';
@@ -330,9 +337,17 @@ export function buildBackupPodSpec(
             image,
             command: ['/bin/sh', '-c'],
             args: [
-              `set -eu; f="${options.fileName}"; trap '${BACKUP_FILE} remove "$f" || true' EXIT; ` +
-                `fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_nbak dbname "$DATABASE_PATH" nbk_file "${FIREBIRD_DATA_DIR}/$f" nbk_level ${options.level ?? 0}; ` +
-                `${BACKUP_FILE} get "$f" "${WORK_DIR}/$f"; echo "$f" > ${WORK_DIR}/.name` +
+              (options.replica
+                ? `set -eu; f="${options.fileName}"; trap '${BACKUP_FILE} remove "$f" "$f.ctl" || true' EXIT; ` +
+                  `out=$(${BACKUP_FILE} nbackup ${options.level ?? 0} "$f"); echo "$out"; ` +
+                  `${BACKUP_FILE} get "$f" "${WORK_DIR}/$f"; ` +
+                  // the replica's position at the copy (none when it was the primary or the
+                  // synchronous standby by then)
+                  `case "$out" in *"replica position"*) ${BACKUP_FILE} get "$f.ctl" "${WORK_DIR}/$f.ctl" ;; esac; ` +
+                  `echo "$f" > ${WORK_DIR}/.name`
+                : `set -eu; f="${options.fileName}"; trap '${BACKUP_FILE} remove "$f" || true' EXIT; ` +
+                  `fbsvcmgr "$FIREBIRD_HOST:service_mgr" action_nbak dbname "$DATABASE_PATH" nbk_file "${FIREBIRD_DATA_DIR}/$f" nbk_level ${options.level ?? 0}; ` +
+                  `${BACKUP_FILE} get "$f" "${WORK_DIR}/$f"; echo "$f" > ${WORK_DIR}/.name`) +
                 // the chains, for retention in the upload container (no Firebird client there)
                 (options.retention?.policy ? `; ${nbackupHistoryScript(`${WORK_DIR}/history`)}` : ''),
             ],
@@ -372,6 +387,10 @@ export function buildBackupPodSpec(
         command: ['/bin/sh', '-c'],
         args: [
           `set -eu; f=$(cat ${WORK_DIR}/.name); ` +
+            // a replica's position first: an uploaded nbackup taken on a replica has its .ctl
+            (physical
+              ? `if [ -f "${WORK_DIR}/$f.ctl" ]; then ${awsCommand(s3)} s3 cp "${WORK_DIR}/$f.ctl" "s3://${s3.bucket}/${s3KeyPrefix(s3)}$f.ctl"; fi; `
+              : '') +
             `${awsCommand(s3)} s3 cp "${WORK_DIR}/$f" "s3://${s3.bucket}/${s3KeyPrefix(s3)}$f"` +
             (options.retention?.policy
               ? `; ${s3RetentionScript(
@@ -465,7 +484,7 @@ function cronJob(
 /**
  * Builds the CronJob for the cluster's `spec.backup` schedule.
  */
-export function buildBackupCronJob(cluster: FirebirdCluster, primaryPod?: string): V1CronJob {
+export function buildBackupCronJob(cluster: FirebirdCluster, primaryPod?: string, replica = false): V1CronJob {
   const { name, namespace = 'default' } = cluster.metadata;
   const backup = cluster.spec.backup;
   const type = backup?.type ?? 'logical';
@@ -487,6 +506,7 @@ export function buildBackupCronJob(cluster: FirebirdCluster, primaryPod?: string
       s3: backup?.s3,
       retention: { series: name, policy: backup?.retentionPolicy },
       verify: backup?.verify,
+      replica,
     }),
   );
 }
@@ -498,6 +518,7 @@ export function buildScheduledBackupCronJob(
   scheduledBackup: FirebirdScheduledBackup,
   cluster: FirebirdCluster,
   primaryPod?: string,
+  replica = false,
 ): V1CronJob {
   const { name: sbName, namespace = 'default', uid } = scheduledBackup.metadata;
   const spec = scheduledBackup.spec;
@@ -520,6 +541,7 @@ export function buildScheduledBackupCronJob(
       s3: spec.s3,
       retention: { series: sbName, policy: spec.retentionPolicy },
       verify: spec.verify,
+      replica,
     }),
     (spec.suspend ?? false) || Boolean(cluster.spec.hibernated),
   );
@@ -528,7 +550,7 @@ export function buildScheduledBackupCronJob(
 /**
  * Builds the Job for an on-demand FirebirdBackup.
  */
-export function buildBackupJob(backup: FirebirdBackup, cluster: FirebirdCluster, primaryPod?: string): V1Job {
+export function buildBackupJob(backup: FirebirdBackup, cluster: FirebirdCluster, primaryPod?: string, replica = false): V1Job {
   const { name: backupName, namespace = 'default', uid } = backup.metadata;
   const clusterName = backup.spec.clusterName;
   const labels = { ...clusterLabels(clusterName), 'app.kubernetes.io/component': 'on-demand-backup' };
@@ -552,6 +574,7 @@ export function buildBackupJob(backup: FirebirdBackup, cluster: FirebirdCluster,
           fileName: onDemandBackupFileName(backup),
           s3: backup.spec.s3,
           verify: backup.spec.verify,
+          replica,
         }),
       },
     },
@@ -771,7 +794,10 @@ function replayPodSpec(
           command: ['/bin/sh', '-c'],
           args: [
             `set -eu; mkdir -p ${WORK_DIR}/chain; ` +
-              chain.keys.map((k, i) => `${awsCommand(chain.s3)} s3 cp ${shellQuote(s3Uri(chain.s3, k))} ${WORK_DIR}/chain/${i}.nbk`).join('; '),
+              chain.keys.map((k, i) => `${awsCommand(chain.s3)} s3 cp ${shellQuote(s3Uri(chain.s3, k))} ${WORK_DIR}/chain/${i}.nbk`).join('; ') +
+              // taken on a replica: its position at the copy, next to the last file of the chain
+              `; if ${awsCommand(chain.s3)} s3 ls ${shellQuote(s3Uri(chain.s3, `${chain.keys[chain.keys.length - 1]}.ctl`))} >/dev/null 2>&1; then ` +
+              `${awsCommand(chain.s3)} s3 cp ${shellQuote(s3Uri(chain.s3, `${chain.keys[chain.keys.length - 1]}.ctl`))} ${WORK_DIR}/chain/position.ctl; fi`,
           ],
           env: s3ClientEnv(chain.s3),
           volumeMounts: [workMount],

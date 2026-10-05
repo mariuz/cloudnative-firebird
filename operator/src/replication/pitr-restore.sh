@@ -91,10 +91,20 @@ while [ "$i" -lt "$CHAIN_COUNT" ]; do chain="$chain $W/chain/$i.nbk"; i=$((i + 1
 rm -f $chain
 header=$("$FB/gstat" -h "$DB")
 field() { echo "$header" | sed -n "s/^[[:space:]]*$1:*[[:space:]]*\\([0-9{][0-9A-F{}-]*\\).*/\\1/p"; }
-if echo "$header" | grep -q '^[[:space:]]*Attributes.*replica'; then
-  fail "the backup was taken on a replica; point-in-time recovery needs a backup taken on the primary"
-fi
 S=$(field "Replication sequence"); S=${S:-0}
+# a backup taken on a replica: its replica control file, kept with the backup (segment server
+# NBACKUP), gives the primary's segment it had applied (and the transactions it had in progress)
+adopt=""
+if echo "$header" | grep -q '^[[:space:]]*Attributes.*replica'; then
+  [ -f "$W/chain/position.ctl" ] ||
+    fail "the backup was taken on a replica without its position (a backup from an older operator version, or of the synchronous standby); point-in-time recovery needs a backup taken on the primary or on an asynchronous replica"
+  # shellcheck disable=SC2046 # three numbers
+  set -- $(perl "$SCRIPT_DIR/pitr-plan.pl" --describe "$W/chain/position.ctl")
+  [ "$#" -eq 3 ] && [ "$2" = 0 ] || fail "unusable replica position in the backup"
+  S=$1
+  adopt=$3
+  echo "backup taken on a replica after segment $S"
+fi
 oat=$(field "Oldest active")
 next=$(field "Next transaction")
 guid=$(field "Database GUID")
@@ -158,6 +168,7 @@ fi
 echo "recovery target: segment $L, archived at $(time_of "$L")"
 
 # 3. download and plan: the open transactions may need segments before S
+if [ -z "$adopt" ]; then
 "$FB/isql" -q -user SYSDBA "$DB" > "$W/candidates" <<SQL
 SET TERM ^;
 EXECUTE BLOCK RETURNS (t BIGINT) AS BEGIN t = $oat; WHILE (t < $next) DO BEGIN
@@ -165,6 +176,7 @@ EXECUTE BLOCK RETURNS (t BIGINT) AS BEGIN t = $oat; WHILE (t < $next) DO BEGIN
 SET TERM ;^
 SQL
 awk '$1 ~ /^[0-9]+$/ { print $1 }' "$W/candidates" > "$W/candidates.ids"
+fi
 # the switches the replay goes through ("<P> <U>", P at or after the backup), and where the first
 # part ends: the first such P, or L
 awk -v s="$S" -v l="$L" '$1 >= s && $2 < l' "$W/switches" > "$W/phases"
@@ -174,12 +186,19 @@ first=$S
 want() { # <from> <to>: segment names in the archive
   awk -v a="$1" -v b="$2" '$1 >= a && $1 <= b { print $2 }' "$W/segments.idx"
 }
+if [ -n "$adopt" ]; then
+  # the replica's control file: its position and the transactions it had in progress, which
+  # start in segment $adopt or later
+  first=$adopt
+  [ "$first" -ge 1 ] || first=1
+  cp "$W/chain/position.ctl" "$SRC/$guid"
+fi
 if [ "$L1" -ge "$first" ]; then
   # shellcheck disable=SC2046 # segment names have no spaces
   download $(want "$first" "$L1")
   for f in "$W/segments"/*.journal-*; do [ -f "$f" ] && mv "$f" "$SRC/"; done
 fi
-while :; do
+while [ -z "$adopt" ]; do
   rc=0
   out=$(perl "$SCRIPT_DIR/pitr-plan.pl" "$SRC" "$S" "$oat" "$next" "$W/candidates.ids" "$L1" "$SRC/$guid") || rc=$?
   echo "$out"
@@ -192,7 +211,7 @@ while :; do
   download $(want "$from" "$need")
   for f in "$W/segments"/*.journal-*; do [ -f "$f" ] && mv "$f" "$SRC/"; done
 done
-[ "$rc" -eq 0 ] || fail "cannot plan the replay"
+[ -n "$adopt" ] || [ "$rc" -eq 0 ] || fail "cannot plan the replay"
 # the later parts' segments, each after its switch: "<P> <U> <end>"
 awk -v l="$L" '{ p[NR] = $1; u[NR] = $2 } END { for (i = 1; i <= NR; i++) print p[i], u[i], (i < NR ? p[i + 1] : l) }' \
   "$W/phases" > "$W/parts"

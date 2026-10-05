@@ -164,7 +164,8 @@ export class FirebirdBackupController {
           await this.updateBackupStatus(backup, { phase: 'Pending', error: 'cluster is hibernated' });
           return;
         }
-        const desired = buildBackupJob(backup, cluster, await this.backupInstance(cluster, backup.spec));
+        const instance = await this.backupInstance(cluster, backup.spec);
+        const desired = buildBackupJob(backup, cluster, instance, instance !== (await this.primaryPod(cluster)));
         log.info({ jobName }, 'Creating backup Job');
         job = await this.batchApi.createNamespacedJob({ namespace, body: desired });
         await this.event(backup, 'FirebirdBackup', 'Normal', EventReason.BackupStarted, `${backup.spec.type ?? 'logical'} backup of cluster ${backup.spec.clusterName} started (Job ${jobName})`);
@@ -228,7 +229,8 @@ export class FirebirdBackupController {
 
     validateScheduledBackupSpec(scheduledBackup);
     const cluster = await this.getCluster(namespace, scheduledBackup.spec.clusterName);
-    const desired = buildScheduledBackupCronJob(scheduledBackup, cluster, await this.backupInstance(cluster, scheduledBackup.spec));
+    const instance = await this.backupInstance(cluster, scheduledBackup.spec);
+    const desired = buildScheduledBackupCronJob(scheduledBackup, cluster, instance, instance !== (await this.primaryPod(cluster)));
     const cronName = desired.metadata!.name!;
 
     let current: V1CronJob;

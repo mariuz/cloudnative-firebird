@@ -7,6 +7,9 @@
 #   backup-file.pl put <local file> <name>     copy <local file> to the server file <name>
 #   backup-file.pl remove <name>...            delete server files (missing files are fine)
 #   backup-file.pl list                        print the server's backup file names
+#   backup-file.pl nbackup <level> <name>      nbackup of the instance into the server file <name>;
+#                                              on a replica also <name>.ctl, its position
+#                                              (prints "replica position <S>")
 #
 # Exits non-zero on any error so the Job retries.
 use strict;
@@ -61,6 +64,13 @@ if ($mode eq 'get' && @args == 2) {
   close $s;
   die "server: " . ($reply eq '' ? "no reply\n" : $reply) unless $reply =~ /^OK/;
   print "copied $file ($size bytes) to $name on $host\n";
+} elsif ($mode eq 'nbackup' && @args == 2) {
+  my ($level, $name) = @args;
+  my $s = request("NBACKUP $level $name");
+  my $reply = <$s> // '';
+  close $s;
+  die "server: " . ($reply eq '' ? "no reply\n" : $reply) unless $reply =~ /^OK(?: replica (\d+))?/;
+  print defined $1 ? "nbackup $name written on $host at replica position $1\nreplica position $1\n" : "nbackup $name written on $host\n";
 } elsif ($mode eq 'list' && !@args) {
   my $s = request('FILES');
   my $done = 0;
@@ -81,5 +91,5 @@ if ($mode eq 'get' && @args == 2) {
     print "removed $name on $host\n";
   }
 } else {
-  die "usage: backup-file.pl get <name> <file> | put <file> <name> | remove <name>... | list\n";
+  die "usage: backup-file.pl get <name> <file> | put <file> <name> | remove <name>... | list | nbackup <level> <name>\n";
 }

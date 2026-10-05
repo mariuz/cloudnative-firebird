@@ -241,6 +241,36 @@ describe('replication scripts shipped to instance pods', () => {
   });
 });
 
+describe('pitr-plan.pl --describe', () => {
+  it('reads a replica\'s position and the first segment its transactions in progress need', () => {
+    if (!hasPerl) return;
+    const ctlDir = mkdtempSync(join(tmpdir(), 'fb-ctl-'));
+    const control = join(ctlDir, 'position.ctl');
+    const b = Buffer.alloc(40 + 32);
+    b.write('FBREPLCTL', 0, 'latin1');
+    b.writeUInt16LE(1, 10);
+    b.writeUInt32LE(2, 12);
+    b.writeBigUInt64LE(21n, 16);
+    b.writeBigUInt64LE(5n, 32);
+    b.writeBigUInt64LE(700n, 40);
+    b.writeBigUInt64LE(19n, 48);
+    b.writeBigUInt64LE(701n, 56);
+    b.writeBigUInt64LE(17n, 64);
+    writeFileSync(control, b);
+    const script = join(dir, 'pitr-plan.pl');
+    writeFileSync(script, JOB_SCRIPTS['pitr-plan.pl']);
+    expect(spawnSync('perl', [script, '--describe', control], { encoding: 'utf8' }).stdout).toBe('21 0 17\n');
+    writeFileSync(control, b.subarray(0, 40));
+    // no transaction in progress: the position itself (a truncated list is refused)
+    b.writeUInt32LE(0, 12);
+    writeFileSync(control, b.subarray(0, 40));
+    expect(spawnSync('perl', [script, '--describe', control], { encoding: 'utf8' }).stdout).toBe('21 0 21\n');
+    b.writeUInt32LE(3, 12);
+    writeFileSync(control, b);
+    expect(spawnSync('perl', [script, '--describe', control]).status).not.toBe(0);
+  });
+});
+
 describe('pitr-plan.pl --reposition', () => {
   it('continues after the given segment with no active transaction, keeping db_sequence', () => {
     if (!hasPerl) return;
