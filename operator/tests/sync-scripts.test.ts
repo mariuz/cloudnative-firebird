@@ -74,6 +74,14 @@ describe('segment server: synchronous replication commands', () => {
     return { ws, base, ask };
   }
 
+  it('reports the lineage switches recorded at promotion (LINEAGE)', async () => {
+    if (!hasPerl) return;
+    const { base, ask } = await start('db-1', 'db-1');
+    expect(await ask('LINEAGE')).toEqual(['.']);
+    writeFileSync(join(base, 'lineage'), '21 41\n60 75\nbad line\n');
+    expect(await ask('LINEAGE')).toEqual(['mydb.fdb.lineage-21-41', 'mydb.fdb.lineage-60-75', '.']);
+  });
+
   it('writes the sync_replica entry on the primary and reports it', async () => {
     if (!hasPerl) return;
     const { base, ask } = await start('db-0', 'db-0');

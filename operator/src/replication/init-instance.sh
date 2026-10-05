@@ -76,6 +76,9 @@ if [ -n "$promote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
       ''|*[!0-9]*) ;;
       *) if [ "$archived" -gt "$seq" ]; then
            echo "the journal archive holds segments up to $archived (this replica applied up to $seq)"
+           # recorded for point-in-time recovery: segments $seq+1..$archived of the archive are
+           # the lost primary's, not in this lineage (segment server LINEAGE, pitr-restore.sh)
+           echo "$seq $archived" > "$REPLICATION_DIR/.promote-lineage"
            seq=$archived
          fi ;;
     esac
@@ -91,8 +94,13 @@ if [ -n "$promote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
   write_seed "$sw"
   chown -R firebird:firebird "$DATA_DIR"
   mv "$sw" "$DATABASE_PATH"
+  if [ -f "$REPLICATION_DIR/.promote-lineage" ]; then
+    switch=$(cat "$REPLICATION_DIR/.promote-lineage")
+    grep -qxF "$switch" "$REPLICATION_DIR/lineage" 2>/dev/null || echo "$switch" >> "$REPLICATION_DIR/lineage"
+    chown firebird:firebird "$REPLICATION_DIR/lineage"
+  fi
   echo "$promote_token" > "$REPLICATION_DIR/.promoted"
-  rm -f "$REPLICATION_DIR/.promote-seq"
+  rm -f "$REPLICATION_DIR/.promote-seq" "$REPLICATION_DIR/.promote-lineage"
   echo "promoted to primary"
 fi
 demote_token=$(pending "${DEMOTE_FILE:-/dev/null}" "$REPLICATION_DIR/.demoted")

@@ -17,6 +17,11 @@
 #    backup from their first segment.
 # 4. Makes the scratch database a read-only replica, starts a private Firebird server whose
 #    replication.conf points the replica at the segments, and waits until it applied segment L.
+#    Across a failover (lineage marker "<database>.lineage-<P>-<U>" in the archive: the replica
+#    promoted at segment P continued after the archive's segment U) the lost primary's segments
+#    P+1..U are skipped: the replay stops at P, the server is stopped (transactions still open
+#    are rolled back: they never committed in the new lineage), the replica control file is moved
+#    after U, and the replay continues with the new lineage's segments.
 # 5. Stops the server (transactions still open at L are rolled back), makes the database a
 #    normal one, takes a level-0 nbackup of it and restores that into TARGET_PATH on the primary.
 #
@@ -111,6 +116,28 @@ awk '{
   }
 } END { for (s in seg) print s, seg[s], ((s in mark) ? mark[s] : up[s]) }' "$W/journals.list" | sort -n > "$W/segments.idx"
 [ -s "$W/segments.idx" ] || fail "the journal archive is empty"
+# lineage switches "<P> <U>" (failovers), by U; a target past U skips the lost primary's
+# segments P+1..U, which are not in the history of the segments after U
+awk '{ n = $4; if (n ~ /\.lineage-[0-9]+-[0-9]+$/) { sub(/.*\.lineage-/, "", n); split(n, a, "-"); print a[1] + 0, a[2] + 0 } }' \
+  "$W/journals.list" | sort -n -k2 -u > "$W/lineage"
+: > "$W/switches"
+while read -r p u; do
+  if [ -n "${TARGET_SEGMENT:-}" ]; then
+    crossed=$([ "$TARGET_SEGMENT" -gt "$u" ] && echo yes || true)
+  elif [ -n "${TARGET_TIME:-}" ]; then
+    crossed=$(awk -v u="$u" -v t="$TARGET_TIME" '$1 > u && $3 <= t { print "yes"; exit }' "$W/segments.idx")
+  else
+    crossed=$(awk -v u="$u" '$1 > u { print "yes"; exit }' "$W/segments.idx")
+  fi
+  [ "$crossed" = yes ] || continue
+  if [ "$S" -gt "$p" ] && [ "$S" -le "$u" ]; then
+    fail "the backup (segment $S) has changes of the primary lost in the failover after segment $p: the recovery target is after that failover; use a backup taken before segment $p or after the failover"
+  fi
+  echo "$p $u" >> "$W/switches"
+  awk -v p="$p" -v u="$u" '!($1 > p && $1 <= u)' "$W/segments.idx" > "$W/segments.tmp"
+  mv "$W/segments.tmp" "$W/segments.idx"
+  echo "failover after segment $p: the lost primary's segments $((p + 1)) to $u are skipped"
+done < "$W/lineage"
 time_of() { awk -v s="$1" '$1 == s { print $3 }' "$W/segments.idx"; }
 name_of() { awk -v s="$1" '$1 == s { print $2 }' "$W/segments.idx"; }
 
@@ -138,19 +165,23 @@ EXECUTE BLOCK RETURNS (t BIGINT) AS BEGIN t = $oat; WHILE (t < $next) DO BEGIN
 SET TERM ;^
 SQL
 awk '$1 ~ /^[0-9]+$/ { print $1 }' "$W/candidates" > "$W/candidates.ids"
+# the switches the replay goes through ("<P> <U>", P at or after the backup), and where the first
+# part ends: the first such P, or L
+awk -v s="$S" -v l="$L" '$1 >= s && $2 < l' "$W/switches" > "$W/phases"
+L1=$(awk 'NR == 1 { print $1 }' "$W/phases"); L1=${L1:-$L}
 first=$S
 [ "$first" -ge 1 ] || first=1
 want() { # <from> <to>: segment names in the archive
   awk -v a="$1" -v b="$2" '$1 >= a && $1 <= b { print $2 }' "$W/segments.idx"
 }
-if [ "$L" -ge "$first" ]; then
+if [ "$L1" -ge "$first" ]; then
   # shellcheck disable=SC2046 # segment names have no spaces
-  download $(want "$first" "$L")
+  download $(want "$first" "$L1")
   for f in "$W/segments"/*.journal-*; do [ -f "$f" ] && mv "$f" "$SRC/"; done
 fi
 while :; do
   rc=0
-  out=$(perl "$SCRIPT_DIR/pitr-plan.pl" "$SRC" "$S" "$oat" "$next" "$W/candidates.ids" "$L" "$SRC/$guid") || rc=$?
+  out=$(perl "$SCRIPT_DIR/pitr-plan.pl" "$SRC" "$S" "$oat" "$next" "$W/candidates.ids" "$L1" "$SRC/$guid") || rc=$?
   echo "$out"
   [ "$rc" -eq 3 ] || break
   need=$(echo "$out" | sed -n 's/^need //p')
@@ -162,6 +193,15 @@ while :; do
   for f in "$W/segments"/*.journal-*; do [ -f "$f" ] && mv "$f" "$SRC/"; done
 done
 [ "$rc" -eq 0 ] || fail "cannot plan the replay"
+# the later parts' segments, each after its switch: "<P> <U> <end>"
+awk -v l="$L" '{ p[NR] = $1; u[NR] = $2 } END { for (i = 1; i <= NR; i++) print p[i], u[i], (i < NR ? p[i + 1] : l) }' \
+  "$W/phases" > "$W/parts"
+while read -r p u end; do
+  mkdir -p "$W/later/$u"
+  # shellcheck disable=SC2046
+  download $(want "$((u + 1))" "$end")
+  for f in "$W/segments"/*.journal-*; do [ -f "$f" ] && mv "$f" "$W/later/$u/"; done
+done < "$W/parts"
 # every download is done: the S3 client container can stop
 touch "$W/finished"
 kill "$heartbeat" 2>/dev/null || true
@@ -169,15 +209,15 @@ kill "$heartbeat" 2>/dev/null || true
 # 4. replay as a replica of the archived journal
 echo "ALTER DATABASE DISABLE PUBLICATION; COMMIT;" | "$FB/isql" -q -user SYSDBA "$DB"
 "$FB/gfix" -user SYSDBA -replica read_only "$DB"
-if [ "$L" -gt "$S" ]; then
-  printf '%s\n' 'database' '{' '}' "database = $DB" '{' "    journal_source_directory = $SRC" \
-    '    apply_idle_timeout = 1' '    verbose_logging = true' '}' > "$W/fb/replication.conf"
+printf '%s\n' 'database' '{' '}' "database = $DB" '{' "    journal_source_directory = $SRC" \
+  '    apply_idle_timeout = 1' '    verbose_logging = true' '}' > "$W/fb/replication.conf"
+replay() { # <last segment>: replays the segments in $SRC up to it, then stops the server
   "$FB/firebird" &
   server=$!
   while :; do
     seq=$(od -An -tu8 -j16 -N8 "$SRC/$guid" | tr -d ' ')
     offset=$(od -An -tu4 -j24 -N4 "$SRC/$guid" | tr -d ' ')
-    if [ "${seq:-0}" -ge "$L" ] && [ "${offset:-1}" = 0 ]; then break; fi
+    if [ "${seq:-0}" -ge "$1" ] && [ "${offset:-1}" = 0 ]; then break; fi
     if grep -q 'ERROR' "$W/fb/replication.log" 2>/dev/null; then
       tail -n 20 "$W/fb/replication.log" >&2
       fail "replaying the journal failed"
@@ -188,7 +228,16 @@ if [ "$L" -gt "$S" ]; then
   grep -E 'is (replayed|replicated)' "$W/fb/replication.log" || true
   kill "$server"
   wait "$server" || true
-fi
+}
+if [ "$L1" -gt "$S" ]; then replay "$L1"; fi
+while read -r p u end; do
+  echo "lineage switch: the replay continues after segment $u"
+  rm -f "$SRC"/*.journal-*
+  perl "$SCRIPT_DIR/pitr-plan.pl" --reposition "$u" "$SRC/$guid"
+  for f in "$W/later/$u"/*.journal-*; do [ -f "$f" ] && mv "$f" "$SRC/"; done
+  : > "$W/fb/replication.log"
+  replay "$end"
+done < "$W/parts"
 "$FB/gfix" -user SYSDBA -replica none "$DB"
 echo "recovered to the end of segment $L (archived at $(time_of "$L"))"
 
