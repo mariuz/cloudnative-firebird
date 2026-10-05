@@ -139,8 +139,8 @@ describe('sync-standby.pl', () => {
   async function run(action: string, answers: { primary: Record<string, string>; standby: Record<string, string | null> }) {
     const ws = workspace();
     const log: string[] = [];
-    const make = (who: 'primary' | 'standby', host: string) =>
-      new Promise<Server>((resolve) => {
+    const make = (who: 'primary' | 'standby', host: string, port: number) =>
+      new Promise<Server>((resolve, reject) => {
         const server = createServer((sock) =>
           sock.once('data', (buf) => {
             const line = buf.toString().trim().split(' ').slice(1).join(' ');
@@ -152,10 +152,27 @@ describe('sync-standby.pl', () => {
             else sock.end(`${reply}\n`);
           }),
         );
+        server.once('error', reject);
         server.listen(port, host, () => resolve(server));
       });
-    const port = 45000 + Math.floor(Math.random() * 2000);
-    const servers = [await make('primary', '127.0.0.1'), ...(answers.standby.__down === undefined ? [await make('standby', '127.0.0.2')] : [])];
+    // both on the same port (the script has one SEGMENT_PORT): the primary's is chosen by the
+    // system, and taken again if it is in use on 127.0.0.2
+    let servers: Server[] = [];
+    let port = 0;
+    for (let attempt = 0; servers.length === 0; attempt++) {
+      const primary = await make('primary', '127.0.0.1', 0);
+      port = (primary.address() as { port: number }).port;
+      if (answers.standby.__down !== undefined) {
+        servers = [primary];
+        break;
+      }
+      try {
+        servers = [primary, await make('standby', '127.0.0.2', port)];
+      } catch (err) {
+        primary.close();
+        if (attempt >= 10) throw err;
+      }
+    }
     const child = spawn('perl', [join(ws.dir, 'sync-standby.pl')], {
       env: {
         PATH: `${join(ws.dir, 'bin')}:${process.env.PATH}`,
@@ -236,7 +253,7 @@ describe('sync-standby.pl', () => {
     expect(r.log).not.toContain('primary SYNC 127.0.0.2');
     expect(r.log).toContain('primary SYNC none');
     expect(r.calls[r.calls.length - 1]).toContain('prp_online_mode');
-  });
+  }, 20_000); // waits TIMEOUT_SECONDS (4) for the standby
 
   it('detaches: standby repositioned first, then synchronous replication off', async () => {
     if (!hasPerl) return;
