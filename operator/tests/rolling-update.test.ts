@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, Mock } from 'vitest';
 import { KubeConfig, V1Pod, V1StatefulSet } from '@kubernetes/client-node';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
-import { REVISION_LABEL, planRollingUpdate } from '../src/utils/rolling-update';
+import { REVISION_LABEL, planRollingUpdate, rollingUpdateTarget } from '../src/utils/rolling-update';
 import { buildStatefulSet, statefulSetNeedsUpdate } from '../src/utils/resources';
 import { TARGET_PRIMARY_ANNOTATION } from '../src/utils/switchover';
+import { REPLICATION_LAG_ANNOTATION } from '../src/utils/routing';
 import { validateClusterSpec } from '../src/utils/validation';
 import { FirebirdCluster } from '../src/types';
 
@@ -44,6 +45,28 @@ describe('rolling update planning', () => {
     const p = plan([pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-old')]);
     expect(p).toMatchObject({ restart: 'db-2', outdated: ['db-0', 'db-1', 'db-2'], revision: 'db-new' });
     expect(plan([pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-new')])?.restart).toBe('db-1');
+  });
+
+  it('restarts the synchronous standby last, and not while it is held', () => {
+    const pods = [pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-old')];
+    expect(plan(pods, { syncStandby: { pod: 'db-2', hold: false } })?.restart).toBe('db-1');
+    expect(plan(pods, { syncStandby: { pod: 'db-2', hold: true } })?.restart).toBe('db-1');
+    const last = [pod('db-0', 'db-old'), pod('db-1', 'db-new'), pod('db-2', 'db-old')];
+    expect(plan(last, { syncStandby: { pod: 'db-2', hold: false } })?.restart).toBe('db-2');
+    const held = plan(last, { syncStandby: { pod: 'db-2', hold: true } });
+    expect(held?.restart).toBeUndefined();
+    expect(held?.message).toContain('synchronous standby db-2');
+  });
+
+  it('names the replica restarted last (the only outdated one)', () => {
+    const c = makeCluster();
+    const pods = [pod('db-0', 'db-old'), pod('db-1', 'db-new'), pod('db-2', 'db-old')];
+    expect(rollingUpdateTarget(c, sts(), pods, 'db-0', [])).toBe('db-2');
+    expect(rollingUpdateTarget(c, sts(), pods, 'db-0', ['db-2'])).toBeUndefined();
+    expect(rollingUpdateTarget(c, sts(), [...pods.slice(0, 1), pod('db-1', 'db-old'), pods[2]], 'db-0', [])).toBeUndefined();
+    expect(rollingUpdateTarget(c, sts('db-new', 1), pods, 'db-0', [])).toBeUndefined();
+    expect(rollingUpdateTarget(c, undefined, pods, 'db-0', [])).toBeUndefined();
+    expect(rollingUpdateTarget(makeCluster({ replication: { enabled: false } }), sts(), pods, 'db-0', [])).toBeUndefined();
   });
 
   it('restarts the primary first when replication was just enabled (it seeds the replicas)', () => {
@@ -261,6 +284,37 @@ describe('rolling update reconciliation', () => {
     expect(stale.status().rollingUpdate?.primaryRestart).toMatchObject({ pod: 'db-0' });
     expect(stale.status().primaryNotReadySince).toBeUndefined();
     expect(stale.fn('createNamespacedJob')).not.toHaveBeenCalled();
+  });
+
+  it('hands the synchronous standby over before restarting it, then restarts it', async () => {
+    const lagged = (p: V1Pod) => ({ ...p, metadata: { ...p.metadata, annotations: { [REPLICATION_LAG_ANNOTATION]: '0' } } });
+    const pods = [pod('db-0', 'db-new'), lagged(pod('db-1', 'db-old')), lagged(pod('db-2', 'db-new'))];
+    const sync = (phase: string, standby = 'db-1') => ({
+      ...makeCluster({ replication: { enabled: true, mode: 'sync' } }),
+      status: { synchronous: { standby, primary: 'db-0', phase, time: new Date().toISOString() } },
+    }) as FirebirdCluster;
+    const s = setup(pods);
+    s.fn('getNamespacedCustomObject').mockResolvedValue(sync('Attached'));
+    await s.controller.reconcile(sync('Attached'));
+    expect(s.fn('deleteNamespacedPod')).not.toHaveBeenCalled();
+    const job = s.fn('createNamespacedJob').mock.calls.map((c) => c[0].body).find((b) => b.metadata.name === 'db-sync-standby');
+    expect(job.spec.template.spec.containers[0].env).toContainEqual({ name: 'ACTION', value: 'detach' });
+    expect(s.status().rollingUpdate?.message).toContain('synchronous standby db-1');
+
+    // detached: db-2 is attached, and nothing restarted while the Job runs
+    const d = setup(pods);
+    d.fn('getNamespacedCustomObject').mockResolvedValue(sync('Detached'));
+    await d.controller.reconcile(sync('Detached'));
+    const attach = d.fn('createNamespacedJob').mock.calls.map((c) => c[0].body).find((b) => b.metadata.name === 'db-sync-standby');
+    expect(attach.spec.template.spec.containers[0].env).toContainEqual({ name: 'STANDBY', value: 'db-2.db-headless' });
+    expect(d.fn('deleteNamespacedPod')).not.toHaveBeenCalled();
+    expect(d.status().rollingUpdate?.message).toContain('being attached');
+
+    // db-2 attached: the rolling update restarts db-1
+    const a = setup(pods);
+    a.fn('getNamespacedCustomObject').mockResolvedValue(sync('Attached', 'db-2'));
+    await a.controller.reconcile(sync('Attached', 'db-2'));
+    expect(a.fn('deleteNamespacedPod')).toHaveBeenCalledWith({ name: 'db-1', namespace: 'default' });
   });
 
   it('requests a switchover through the targetPrimary annotation', async () => {

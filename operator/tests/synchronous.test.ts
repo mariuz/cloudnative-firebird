@@ -151,6 +151,37 @@ describe('planSynchronous: attached', () => {
   });
 });
 
+describe('planSynchronous: rolling updates', () => {
+  it('hands the standby over to another replica before the rolling update restarts it', () => {
+    const step = plan({ status: attached, rollingTarget: 'db-1' });
+    expect(step).toMatchObject({ kind: 'start', action: 'detach', standby: 'db-1' });
+    expect(step.kind === 'start' && step.status.message).toContain('restarted by the rolling update');
+    // then attaches the other replica, never the one about to be restarted
+    const detached: SynchronousStatus = { ...attached, phase: 'Detached', time: ago(1) };
+    expect(plan({ status: detached, rollingTarget: 'db-1' })).toMatchObject({ kind: 'start', action: 'attach', standby: 'db-2' });
+    expect(plan({ rollingTarget: 'db-1' })).toMatchObject({ kind: 'start', action: 'attach', standby: 'db-2' });
+    // a standby that is not restarted next stays
+    expect(plan({ status: attached, rollingTarget: 'db-2' })).toEqual({ kind: 'none', status: attached });
+  });
+
+  it('with dataDurability required and no other replica, restarts the standby attached', () => {
+    const pods = [pod('db-0'), pod('db-1')];
+    expect(plan({ cluster: makeCluster({}, 2), pods, status: attached, rollingTarget: 'db-1' })).toEqual({ kind: 'none', status: attached });
+    // another replica that has not caught up cannot take over
+    const lagging = [pod('db-0'), pod('db-1'), pod('db-2', true, '300')];
+    expect(plan({ pods: lagging, status: attached, rollingTarget: 'db-1' })).toEqual({ kind: 'none', status: attached });
+  });
+
+  it('with dataDurability preferred, detaches the standby before its restart', () => {
+    const cluster = makeCluster({ synchronous: { dataDurability: 'preferred' } }, 2);
+    const pods = [pod('db-0'), pod('db-1')];
+    expect(plan({ cluster, pods, status: attached, rollingTarget: 'db-1' })).toMatchObject({ kind: 'start', action: 'detach' });
+    // and attaches nothing until it was restarted
+    expect(plan({ cluster, pods, status: { ...attached, phase: 'Detached' }, rollingTarget: 'db-1' }).kind).toBe('none');
+    expect(plan({ cluster, pods, status: { ...attached, phase: 'Detached' } })).toMatchObject({ kind: 'start', action: 'attach', standby: 'db-1' });
+  });
+});
+
 describe('buildSyncStandbyJob', () => {
   it('runs sync-standby.pl against the primary and the standby', () => {
     const job = buildSyncStandbyJob(makeCluster(), 'attach', 'db-0', 'db-1');
