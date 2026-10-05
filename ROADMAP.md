@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.53.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.54.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -102,9 +102,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 ### 5. Security & Isolation (Inspired by CloudNative-PG Security)
 
 - [x] **TLS Encryption (`WireCrypt` / TLS)** *(v0.4.0)*
-  - Encrypted client-to-database connections using Firebird 4.0+ TLS capabilities.
-- [x] **cert-manager Integration** *(v0.4.0)*
-  - Automated TLS certificate generation, injection, and zero-downtime rotation.
+  - Encrypted client-to-database connections. Corrected in v0.54.0: Firebird has no TLS listener; connections are encrypted by WireCrypt (required by default since Firebird 4), and `tls.enabled` restricts it to the ChaCha plugins.
+- [x] ~~**cert-manager Integration**~~ *(v0.4.0, withdrawn in v0.54.0)*
+  - The certificate was generated and mounted but never used by Firebird; `tls.secretName` / `tls.issuerRef` are now ignored (`TLSCertificateIgnored` event).
 - [x] **Automated NetworkPolicies** *(v0.3.0)*
   - Auto-generated Kubernetes NetworkPolicy resources restricting port 3050 access to approved client labels/namespaces.
 - [x] **SYSDBA & User Password Rotation** *(v0.5.0)*
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Encryption in Transit Decided** *(v0.54.0)*
+  - Firebird has no TLS listener; client connections are encrypted by WireCrypt, which Firebird 4 and later already require on the server by default (verified with operator-generated pods on 4.0.7, 5.0.4 and the 6.0 snapshot: an unencrypted client is refused, others negotiate ChaCha64).
+  - `tls.enabled` now means strict wire encryption: `WireCrypt = Required` and `WireCryptPlugin = ChaCha64, ChaCha` (no RC4-based Arc4; an Arc4-only client is refused), and validation rejects `config.settings` that weaken it.
+  - `tls.secretName` / `tls.issuerRef` are deprecated and ignored: the certificate was mounted but never read, and no cert-manager Certificate is created any more (`TLSCertificateIgnored` event). Segment shipping stays plain TCP inside the cluster (TODO.md).
 - [x] **Synchronous Replication** *(v0.53.0)*
   - `replication.mode: sync` attaches one replica as the synchronous standby (Firebird `sync_replica`, strict: `report_errors = true`, `disable_on_error = false`): a commit completes only once the standby applied it, and fails while the standby cannot be reached. `synchronous.dataDurability: required | preferred` (CloudNativePG); `preferred` detaches a standby unavailable for `standbyUnavailableSeconds`.
   - A replica must not apply the same changes from the journal and synchronously (verified: it applies them twice), so a sync-standby Job attaches and detaches it with the primary briefly in full shutdown at the end of its last segment: the standby stops applying the journal, and the primary's segment server writes `sync_replica` to a file `replication.conf` includes, which Firebird reads when the database is opened again (verified on Firebird 4, 5 and 6). Detaching moves the standby's replica control file to the primary's last segment, so it continues from the journal without re-seeding (a running replica server picks the new position up).
@@ -297,5 +301,5 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Declarative Roles** | `DatabaseRole` / `managed.roles` | `FirebirdUser` | **v0.12.0 (Done)** |
 | **Fencing** | Instance Fencing | `fencedInstances` annotation, database full shutdown | **v0.11.0 (Done)** |
 | **Auto-Sweeping / Maintenance** | VACUUM Scheduling | `gfix -sweep` CronJob | **v0.3.0 (Done)** |
-| **Security & TLS** | cert-manager | WireCrypt & cert-manager | **v0.4.0 (Done)** |
+| **Security & TLS** | cert-manager | WireCrypt (required by default; strict with `tls.enabled`) | **v0.4.0, corrected v0.54.0** |
 | **Metrics Exporter** | Built-in Exporter | Exporter Sidecar & PodMonitor | **v0.4.0 (Done)** |

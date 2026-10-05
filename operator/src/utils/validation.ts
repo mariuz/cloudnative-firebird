@@ -257,9 +257,19 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     }
   }
 
+  if (spec.tls?.issuerRef && (!spec.tls.issuerRef.name || spec.tls.issuerRef.name.trim() === '')) {
+    throw new ValidationError('TLS issuerRef name cannot be empty');
+  }
   if (spec.tls?.enabled) {
-    if (spec.tls.issuerRef && (!spec.tls.issuerRef.name || spec.tls.issuerRef.name.trim() === '')) {
-      throw new ValidationError('TLS issuerRef name cannot be empty');
+    // tls.enabled is strict wire encryption: settings that weaken it contradict it
+    const settings = spec.config?.settings ?? {};
+    const wireCrypt = settings['WireCrypt'];
+    if (wireCrypt !== undefined && wireCrypt.trim().toLowerCase() !== 'required') {
+      throw new ValidationError(`tls.enabled requires WireCrypt = Required, but config.settings sets WireCrypt = ${wireCrypt}`);
+    }
+    const plugins = settings['WireCryptPlugin'];
+    if (plugins !== undefined && plugins.split(',').some((p) => !['chacha', 'chacha64'].includes(p.trim().toLowerCase()))) {
+      throw new ValidationError(`tls.enabled allows only the ChaCha64 and ChaCha wire encryption plugins, but config.settings sets WireCryptPlugin = ${plugins}`);
     }
   }
 

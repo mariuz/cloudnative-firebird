@@ -57,7 +57,6 @@ import {
 import { logger } from '../utils/logger';
 import {
   buildAutoSweepCronJob,
-  buildCertificate,
   buildConfigMap,
   buildDiagnosticsCronJob,
   buildGrafanaDashboardConfigMap,
@@ -213,6 +212,8 @@ export class FirebirdClusterController {
   private readonly networkingApi: NetworkingV1Api;
   private readonly policyApi: PolicyV1Api;
   private readonly events: EventRecorder;
+  /** Clusters already warned about tls.secretName / tls.issuerRef */
+  private readonly certificateWarned = new Set<string>();
 
   constructor(
     kubeConfig: KubeConfig,
@@ -347,7 +348,7 @@ export class FirebirdClusterController {
 
       await this.reconcileJournalArchiveCronJob(cluster, primaryPod, log);
       await this.reconcileLease(cluster, log);
-      await this.reconcileCertificate(cluster, log);
+      await this.warnUnusedCertificate(cluster, log);
       await this.reconcilePodDisruptionBudget(cluster, log);
       await this.reconcileNetworkPolicy(cluster, log);
       await this.reconcileBackupCronJob(cluster, primaryPod, log);
@@ -2143,35 +2144,20 @@ export class FirebirdClusterController {
     }
   }
 
-  /** Reconcile cert-manager Certificate resource if TLS issuerRef is configured */
-  private async reconcileCertificate(
-    cluster: FirebirdCluster,
-    log: Logger,
-  ): Promise<void> {
-    if (!cluster.spec.tls?.enabled || !cluster.spec.tls.issuerRef) return;
-    const { name, namespace = 'default' } = cluster.metadata;
-    const certName = `${name}-cert`;
-    const desired = buildCertificate(cluster);
-
-    try {
-      await this.customApi.getNamespacedCustomObject({
-        group: 'cert-manager.io',
-        version: 'v1',
-        namespace,
-        plural: 'certificates',
-        name: certName,
-      });
-      log.debug('cert-manager Certificate already exists, skipping');
-    } catch {
-      log.info('Creating cert-manager Certificate');
-      await this.customApi.createNamespacedCustomObject({
-        group: 'cert-manager.io',
-        version: 'v1',
-        namespace,
-        plural: 'certificates',
-        body: desired,
-      });
-    }
+  /**
+   * tls.secretName and tls.issuerRef are no longer used: Firebird has no TLS listener, so the
+   * certificate was mounted but never read (tls.enabled is wire encryption). Warned once per cluster.
+   */
+  private async warnUnusedCertificate(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    const tls = cluster.spec.tls;
+    const uid = cluster.metadata.uid ?? cluster.metadata.name;
+    if (!tls?.enabled || (!tls.secretName && !tls.issuerRef) || this.certificateWarned.has(uid)) return;
+    this.certificateWarned.add(uid);
+    const message =
+      'tls.secretName and tls.issuerRef are ignored: Firebird has no TLS listener; tls.enabled ' +
+      'enforces wire encryption (WireCrypt = Required, ChaCha only) and needs no certificate';
+    log.warn(message);
+    await this.event(cluster, 'Warning', EventReason.TLSCertificateIgnored, message);
   }
 
   /** Reconcile the online database diagnostics CronJob (gfix -v -full) */

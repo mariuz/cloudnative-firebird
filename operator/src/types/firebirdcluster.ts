@@ -156,14 +156,19 @@ export interface DiagnosticsConfiguration {
 }
 
 /**
- * TLS / WireCrypt security configuration.
+ * Encryption of client connections. Firebird has no TLS listener: connections are encrypted by
+ * Firebird's wire protocol (WireCrypt, keyed by the Srp authentication), which Firebird 4 and
+ * later already require by default.
  */
 export interface TLSConfiguration {
-  /** Whether TLS encryption is required/enabled for database connections */
+  /**
+   * Strict wire encryption: WireCrypt = Required and only the ChaCha64 / ChaCha plugins (not the
+   * RC4-based Arc4), so a client that cannot use ChaCha (e.g. Firebird 3) is refused
+   */
   enabled: boolean;
-  /** Name of Secret containing server TLS certificate and key (tls.crt, tls.key) */
+  /** Deprecated and ignored (no certificate is used); a TLSCertificateIgnored event says so */
   secretName?: string;
-  /** cert-manager Issuer/ClusterIssuer reference for automated TLS certificate issuance */
+  /** Deprecated and ignored (no certificate is used); a TLSCertificateIgnored event says so */
   issuerRef?: {
     name: string;
     kind?: string;

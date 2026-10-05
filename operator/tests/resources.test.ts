@@ -17,7 +17,6 @@ import {
   cloneTargets,
   networkPolicyNeedsUpdate,
   networkPolicyWireFormat,
-  buildCertificate,
   buildLease,
   buildDiagnosticsCronJob,
   buildGrafanaDashboardConfigMap,
@@ -760,38 +759,23 @@ describe('Monitoring Exporter Sidecar & PodMonitor', () => {
   });
 });
 
-describe('TLS & cert-manager integration', () => {
-  it('mounts tls-cert volume into container when TLS is enabled', () => {
-    const cluster = makeCluster({
-      tls: { enabled: true, secretName: 'my-custom-tls' },
-    });
-    const sts = buildStatefulSet(cluster);
-    const container = sts.spec?.template?.spec?.containers?.[0];
-    const mount = container?.volumeMounts?.find((vm) => vm.mountPath === '/firebird/etc/tls');
-    expect(mount).toBeDefined();
-
-    const volumes = sts.spec?.template?.spec?.volumes;
-    const tlsVol = volumes?.find((v) => v.name === 'tls-cert');
-    expect(tlsVol?.secret?.secretName).toBe('my-custom-tls');
-  });
-
-  it('injects WireCrypt = Required into ConfigMap when TLS is enabled', () => {
-    const cluster = makeCluster({ tls: { enabled: true } });
-    const cm = buildConfigMap(cluster);
+describe('wire encryption (tls)', () => {
+  it('requires wire encryption with the ChaCha plugins only when tls is enabled', () => {
+    const env = buildStatefulSet(makeCluster({ tls: { enabled: true } })).spec?.template?.spec?.containers?.[0].env;
+    expect(env).toContainEqual({ name: 'FIREBIRD_CONF_WireCrypt', value: 'Required' });
+    expect(env).toContainEqual({ name: 'FIREBIRD_CONF_WireCryptPlugin', value: 'ChaCha64, ChaCha' });
+    const cm = buildConfigMap(makeCluster({ tls: { enabled: true } }));
     expect(cm?.data?.['firebird.conf']).toContain('WireCrypt = Required');
+    expect(cm?.data?.['firebird.conf']).toContain('WireCryptPlugin = ChaCha64, ChaCha');
+    // Firebird's own defaults otherwise (already WireCrypt = Required on the server)
+    const plain = buildStatefulSet(makeCluster()).spec?.template?.spec?.containers?.[0].env ?? [];
+    expect(plain.map((e) => e.name)).not.toContain('FIREBIRD_CONF_WireCryptPlugin');
   });
 
-  it('builds cert-manager Certificate resource', () => {
-    const cluster = makeCluster({
-      tls: {
-        enabled: true,
-        issuerRef: { name: 'letsencrypt-prod', kind: 'ClusterIssuer' },
-      },
-    });
-    const cert = buildCertificate(cluster) as { apiVersion: string; metadata: { name: string }; spec: { issuerRef: { name: string } } };
-    expect(cert.apiVersion).toBe('cert-manager.io/v1');
-    expect(cert.metadata.name).toBe('test-cluster-cert');
-    expect(cert.spec.issuerRef.name).toBe('letsencrypt-prod');
+  it('mounts no certificate: Firebird has no TLS listener', () => {
+    const sts = buildStatefulSet(makeCluster({ tls: { enabled: true, secretName: 'my-custom-tls' } }));
+    expect(sts.spec?.template?.spec?.volumes?.map((v) => v.name)).not.toContain('tls-cert');
+    expect(sts.spec?.template?.spec?.containers?.[0].volumeMounts?.map((m) => m.mountPath)).not.toContain('/firebird/etc/tls');
   });
 });
 
