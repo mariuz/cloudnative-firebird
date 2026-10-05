@@ -528,6 +528,11 @@ export interface FirebirdClusterStatus {
   fencedInstances?: string[];
   /** Since when the primary pod has not been ready (automatic failover) */
   primaryNotReadySince?: string;
+  /**
+   * Highest journal segment sequence the journal archive Job listed for upload
+   * (journalArchiveS3): a promoted replica's journal continues after it
+   */
+  journalArchiveSequence?: number;
   /** Planned switchover or failover in progress, or the last one */
   switchover?: SwitchoverStatus;
   /** Synchronous replication (replication.mode sync): the standby and its state */

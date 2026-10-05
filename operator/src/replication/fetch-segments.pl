@@ -9,6 +9,9 @@
 # time the primary archived it (ARCHIVED): point-in-time recovery picks the segments archived up to
 # its target time from these names.
 #
+# With RESULT_FILE set, "listed=<S>" (that highest sequence) is written to it as well: anything
+# this Job uploads is at most S, and the operator promotes replicas after it.
+#
 # With REPORT=true it only tells the primary's segment server that (UPLOADED <S>), after the upload.
 use strict;
 use warnings;
@@ -67,6 +70,10 @@ if ($listed_file ne '') {
   open(my $fh, '>', $listed_file) or die "write $listed_file: $!\n";
   print $fh (defined $max ? "$max\n" : '');
   close $fh;
+}
+if (defined $ENV{RESULT_FILE} && $ENV{RESULT_FILE} ne '') {
+  my ($max) = sort { $b <=> $a } map { /journal-(\d+)$/ ? $1 + 0 : () } @names;
+  if (defined $max && open(my $rf, '>', $ENV{RESULT_FILE})) { print $rf "listed=$max"; close $rf; }
 }
 
 # archive time of each segment, from its age on the primary (ARCHIVED)

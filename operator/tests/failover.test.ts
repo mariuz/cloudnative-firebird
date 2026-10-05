@@ -28,13 +28,15 @@ const pod = (name: string, uid: string, ready = true) => ({
 
 const longAgo = new Date(Date.now() - 120_000).toISOString();
 
-function setup(opts: { pods?: object[]; job?: V1Job; jobPods?: object[]; segment?: Mock } = {}) {
+function setup(opts: { pods?: object[]; job?: V1Job; jobPods?: object[]; archivePods?: object[]; segment?: Mock } = {}) {
   const notFound = Object.assign(new Error('Not Found'), { code: 404 });
   const api: Record<string, Mock> = {
     listNamespacedPod: vi.fn().mockImplementation(({ labelSelector }: { labelSelector: string }) =>
       Promise.resolve({
         items: labelSelector.startsWith('job-name=')
           ? (opts.jobPods ?? [])
+          : labelSelector.includes('journal-archive')
+            ? (opts.archivePods ?? [])
           : (opts.pods ?? [pod('db-0', 'u0', false), pod('db-1', 'u1'), pod('db-2', 'u2')]),
       }),
     ),
@@ -74,6 +76,25 @@ const electionPod = (message: string) => ({
 });
 
 describe('automatic failover', () => {
+  it("promotes after every segment the journal archive may hold", async () => {
+    const electing: SwitchoverStatus = { kind: 'failover', target: '', from: 'db-0', phase: 'Electing' };
+    const archivePod = (message: string, exitCode = 0) => ({
+      metadata: { name: `db-journal-archive-${message}` },
+      status: { initContainerStatuses: [{ name: 'fetch-segments', state: { terminated: { exitCode, message } } }] },
+    });
+    const s = setup({
+      job: done('Complete'),
+      jobPods: [electionPod('target=db-2.db-headless sequence=41 positions=db-1.db-headless:40,db-2.db-headless:41')],
+      archivePods: [archivePod('listed=57'), archivePod('listed=99', 1), archivePod('listed=55')],
+    });
+    const cluster = makeCluster({ switchover: electing, journalArchiveSequence: 50 });
+    cluster.spec.replication!.journalArchiveS3 = { bucket: 'b' };
+    await s.controller.reconcile(cluster);
+    expect(s.cmData().promote).toBe('db-2 u2 57\n');
+    expect(s.status().journalArchiveSequence).toBe(57);
+  });
+
+
   it('records when the primary became unavailable and waits for the delay', async () => {
     const s = setup();
     await s.controller.reconcile(makeCluster());

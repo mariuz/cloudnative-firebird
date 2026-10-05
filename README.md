@@ -754,6 +754,14 @@ With replication enabled, only the primary bootstraps; replicas are then seeded 
 With `replication.journalArchiveS3`, a CronJob copies archived journal segments from the
 primary's segment server to `<prefix>/journals/`, each with an empty marker object
 `<segment>.archived-<YYYYMMDDTHHMMSSZ>` recording when the primary archived it.
+The highest segment the Job listed for upload is kept in `status.journalArchiveSequence`. A
+replica promoted by a failover continues its journal after it, even when it applied fewer
+segments of the lost primary: otherwise its first segments would take the names of segments the
+old primary had already uploaded (Firebird 4 and 5 segment names carry no GUID), and the Job
+would skip them as uploaded. Point-in-time recovery across a failover is not supported yet:
+the archive still holds the lost primary's segments after the promoted replica's position, and
+a restore from a backup taken before the failover, with a target after it, would replay them.
+Take a new backup after a failover.
 
 **Point-in-time recovery.** A physical restore with `pointInTime` replays the archived journal on
 top of an `nbackup` chain (taken on the primary), up to a target:

@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.55.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.56.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Promotion After the Journal Archive** *(v0.56.0)*
+  - A failover could promote a replica that had applied fewer segments than the lost primary had already uploaded to `journalArchiveS3`. Its journal then reused those segment names (Firebird 4 and 5 names carry no GUID), and the archive Job skipped its segments as uploaded (reproduced on Firebird 4: 0 of 10 new segments uploaded).
+  - The archive Job's fetch step reports the highest segment it listed (termination message), the operator keeps the maximum in `status.journalArchiveSequence` and passes it with the promote directive, and the promoted replica's journal continues after it (verified on Firebird 4 and 5 with operator-generated pods: elected at segment 20, promoted after the archive's 60, its segments 61–70 uploaded).
 - [x] **Synchronous Standby in Rolling Updates** *(v0.55.0)*
   - The rolling update restarts the synchronous standby last of the replicas, and not while it is being attached or detached.
   - Before restarting it, the operator hands it over to another updated, caught-up replica (detach, then attach the other one), so writes pause twice for a few seconds instead of waiting through the restart. With `dataDurability: preferred` the standby is detached even without another replica; with `required` and no other replica it is restarted attached (writes wait, as before).

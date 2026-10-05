@@ -202,7 +202,7 @@ describe('replication scripts shipped to instance pods', () => {
     const segDir = join(out, 'segments');
     await new Promise<void>((resolve, reject) => {
       const child = spawn('perl', [script], {
-        env: { ...process.env, FIREBIRD_HOST: '127.0.0.1', SEGMENT_PORT: String(port), ISC_PASSWORD: 'tok', OUT_DIR: segDir, SKIP_FILE: skip },
+        env: { ...process.env, FIREBIRD_HOST: '127.0.0.1', SEGMENT_PORT: String(port), ISC_PASSWORD: 'tok', OUT_DIR: segDir, SKIP_FILE: skip, RESULT_FILE: join(out, 'result') },
       });
       child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`exit ${code}`))));
     });
@@ -217,6 +217,8 @@ describe('replication scripts shipped to instance pods', () => {
     const files = readdirSync(segDir).sort();
     expect(files.filter((f) => !f.includes('.archived-'))).toEqual(['mydb.fdb.journal-0000000002', 'mydb.fdb.journal-0000000003']);
     expect(readFileSync(join(segDir, 'mydb.fdb.journal-0000000003'), 'utf8')).toBe('three');
+    // the highest sequence it may upload, for the operator
+    expect(readFileSync(join(out, 'result'), 'utf8')).toBe('listed=3');
     // archive time markers (empty), for point-in-time recovery: now minus the age on the primary
     const markers = files.filter((f) => f.includes('.archived-'));
     expect(markers).toHaveLength(2);

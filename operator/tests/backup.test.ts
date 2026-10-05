@@ -6,6 +6,8 @@ import {
   buildBackupJob,
   buildBootstrapInitContainers,
   buildJournalArchiveCronJob,
+  journalArchiveListedSequence,
+  journalArchivePodSelector,
   buildRestoreJob,
   buildScheduledBackupCronJob,
   compactUtc,
@@ -411,6 +413,7 @@ describe('journal archive CronJob', () => {
     expect(env(fetch, 'FIREBIRD_HOST')?.value).toBe('db-1.db-headless');
     expect(env(fetch, 'SKIP_FILE')?.value).toBe('/work/uploaded');
     expect(env(fetch, 'LISTED_FILE')?.value).toBe('/work/listed-max');
+    expect(env(fetch, 'RESULT_FILE')?.value).toBe('/dev/termination-log');
     const upload = pod.initContainers![2];
     expect(upload.args?.[0]).toContain(`s3 sync /work/segments/ 's3://bkt/fb/journals/'`);
     expect(upload.args?.[0]).not.toContain('--delete');
@@ -423,6 +426,21 @@ describe('journal archive CronJob', () => {
     expect(env(report, 'FIREBIRD_HOST')?.value).toBe('db-1.db-headless');
     expect(pod.volumes?.map((v) => v.name)).toEqual(['work', 'cluster-config']);
     expect(allMounts([...pod.initContainers!, ...pod.containers])).not.toContain('firebird-data');
+  });
+});
+
+describe('journalArchiveListedSequence', () => {
+  const archivePod = (message?: string, exitCode = 0, name = 'fetch-segments') => ({
+    status: { initContainerStatuses: [{ name, image: '', imageID: '', ready: false, restartCount: 0, state: { terminated: { exitCode, message } } }] },
+  });
+  it('is the highest sequence a successful fetch listed, at least the stored one', () => {
+    expect(journalArchiveListedSequence([])).toBeUndefined();
+    expect(journalArchiveListedSequence([], 4)).toBe(4);
+    expect(journalArchiveListedSequence([archivePod('listed=7'), archivePod('listed=12'), archivePod()], 4)).toBe(12);
+    expect(journalArchiveListedSequence([archivePod('listed=7')], 9)).toBe(9);
+    // failed, another container, or no segment listed
+    expect(journalArchiveListedSequence([archivePod('listed=30', 1), archivePod('listed=30', 0, 'upload'), archivePod('')])).toBeUndefined();
+    expect(journalArchivePodSelector(makeCluster())).toContain('app.kubernetes.io/component=journal-archive');
   });
 });
 
