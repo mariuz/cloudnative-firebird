@@ -32,6 +32,29 @@ use constant { BLOCK_BEGIN_TRANS => 1, EXIT_NEED => 3 };
 # die exits with errno, which could be 3: always 1
 $SIG{__DIE__} = sub { print STDERR $_[0]; exit 1; };
 
+#   pitr-plan.pl --reposition <U> <control file>
+# Across a failover (lineage switch): the replay stopped at the end of the promoted replica's
+# segment P; the next lineage continues after the archive's segment U. Rewrites the control file
+# to continue after U with no active transaction (those still open at P were never committed in
+# the new lineage; stopping the server rolled them back), keeping db_sequence.
+if (@ARGV && $ARGV[0] eq '--reposition') {
+  my (undef, $seq, $control) = @ARGV;
+  die "usage: pitr-plan.pl --reposition <U> <control file>\n" unless defined $control && $seq =~ /^\d+$/;
+  open(my $in, '<:raw', $control) or die "read $control: $!\n";
+  local $/;
+  my $data = <$in>;
+  close $in;
+  die "$control is not a replica control file\n" unless length($data) >= 40 && substr($data, 0, 9) eq 'FBREPLCTL';
+  my ($magic, $version) = unpack('a10 v', $data);
+  my $dbseq = unpack('Q<', substr($data, 32, 8));
+  open(my $out, '>:raw', "$control.tmp") or die "write $control.tmp: $!\n";
+  print $out pack('a10 v V Q< V V Q<', $magic, $version, 0, $seq, 0, 0, $dbseq);
+  close $out;
+  rename("$control.tmp", $control) or die "rename $control: $!\n";
+  print "the replay continues after segment $seq\n";
+  exit 0;
+}
+
 my ($dir, $base, $oat, $next, $cand_file, $last, $control) = @ARGV;
 die "usage: pitr-plan.pl <dir> <S> <OAT> <next> <candidates> <L> <control>\n" unless defined $control;
 for ($base, $oat, $next, $last) { die "not a number: $_\n" unless /^\d+$/; }

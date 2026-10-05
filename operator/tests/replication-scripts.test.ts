@@ -189,6 +189,7 @@ describe('replication scripts shipped to instance pods', () => {
         const [, cmd, name] = line.split(' ');
         if (cmd === 'LIST') sock.end(Object.keys(segments).join('\n') + '\nnot-a-segment\n.\n');
         else if (cmd === 'ARCHIVED') sock.end('1 7200\n2 3600\n3 60\n.\n');
+        else if (cmd === 'LINEAGE') sock.end('mydb.fdb.lineage-1-2\nmydb.fdb.lineage-0-1\nbad/name\n.\n');
         else sock.end(`OK ${segments[name].length}\n${segments[name]}`);
       });
     });
@@ -198,7 +199,7 @@ describe('replication scripts shipped to instance pods', () => {
     writeFileSync(script, JOB_SCRIPTS['fetch-segments.pl']);
     const out = mkdtempSync(join(tmpdir(), 'fb-segments-'));
     const skip = join(out, 'uploaded');
-    writeFileSync(skip, 'mydb.fdb.journal-0000000001\n');
+    writeFileSync(skip, 'mydb.fdb.journal-0000000001\nmydb.fdb.lineage-0-1\n');
     const segDir = join(out, 'segments');
     await new Promise<void>((resolve, reject) => {
       const child = spawn('perl', [script], {
@@ -210,12 +211,19 @@ describe('replication scripts shipped to instance pods', () => {
 
     expect(requests).toEqual([
       'tok LIST',
+      'tok LINEAGE',
       'tok ARCHIVED',
       'tok GET mydb.fdb.journal-0000000002',
       'tok GET mydb.fdb.journal-0000000003',
     ]);
     const files = readdirSync(segDir).sort();
-    expect(files.filter((f) => !f.includes('.archived-'))).toEqual(['mydb.fdb.journal-0000000002', 'mydb.fdb.journal-0000000003']);
+    expect(files.filter((f) => !f.includes('.archived-'))).toEqual([
+      'mydb.fdb.journal-0000000002',
+      'mydb.fdb.journal-0000000003',
+      // a lineage marker not uploaded yet: an empty object for point-in-time recovery
+      'mydb.fdb.lineage-1-2',
+    ]);
+    expect(readFileSync(join(segDir, 'mydb.fdb.lineage-1-2'), 'utf8')).toBe('');
     expect(readFileSync(join(segDir, 'mydb.fdb.journal-0000000003'), 'utf8')).toBe('three');
     // the highest sequence it may upload, for the operator
     expect(readFileSync(join(out, 'result'), 'utf8')).toBe('listed=3');
@@ -230,6 +238,35 @@ describe('replication scripts shipped to instance pods', () => {
     expect(Math.abs(at('3') - (Date.now() - 60_000))).toBeLessThan(10_000);
     expect(Math.abs(at('2') - (Date.now() - 3_600_000))).toBeLessThan(10_000);
     expect(readFileSync(join(segDir, markers[0]), 'utf8')).toBe('');
+  });
+});
+
+describe('pitr-plan.pl --reposition', () => {
+  it('continues after the given segment with no active transaction, keeping db_sequence', () => {
+    if (!hasPerl) return;
+    const ctlDir = mkdtempSync(join(tmpdir(), 'fb-ctl-'));
+    const control = join(ctlDir, '{GUID}');
+    const b = Buffer.alloc(40 + 32);
+    b.write('FBREPLCTL', 0, 'latin1');
+    b.writeUInt16LE(1, 10);
+    b.writeUInt32LE(2, 12); // two active transactions
+    b.writeBigUInt64LE(21n, 16);
+    b.writeUInt32LE(300, 24);
+    b.writeBigUInt64LE(5n, 32);
+    writeFileSync(control, b);
+    const script = join(dir, 'pitr-plan.pl');
+    writeFileSync(script, JOB_SCRIPTS['pitr-plan.pl']);
+    const r = spawnSync('perl', [script, '--reposition', '41', control], { encoding: 'utf8' });
+    expect(r.status).toBe(0);
+    const ctl = readFileSync(control);
+    expect(ctl.length).toBe(40);
+    expect(ctl.subarray(0, 9).toString('latin1')).toBe('FBREPLCTL');
+    expect(ctl.readUInt16LE(10)).toBe(1);
+    expect(ctl.readUInt32LE(12)).toBe(0);
+    expect(Number(ctl.readBigUInt64LE(16))).toBe(41);
+    expect(ctl.readUInt32LE(24)).toBe(0);
+    expect(Number(ctl.readBigUInt64LE(32))).toBe(5);
+    expect(spawnSync('perl', [script, '--reposition', 'x', control]).status).not.toBe(0);
   });
 });
 

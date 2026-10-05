@@ -9,6 +9,8 @@
 # time the primary archived it (ARCHIVED): point-in-time recovery picks the segments archived up to
 # its target time from these names.
 #
+# Lineage markers of the primary (LINEAGE) are written as empty files too.
+#
 # With RESULT_FILE set, "listed=<S>" (that highest sequence) is written to it as well: anything
 # this Job uploads is at most S, and the operator promotes replicas after it.
 #
@@ -75,6 +77,22 @@ if (defined $ENV{RESULT_FILE} && $ENV{RESULT_FILE} ne '') {
   my ($max) = sort { $b <=> $a } map { /journal-(\d+)$/ ? $1 + 0 : () } @names;
   if (defined $max && open(my $rf, '>', $ENV{RESULT_FILE})) { print $rf "listed=$max"; close $rf; }
 }
+
+# lineage markers (LINEAGE): empty objects "<database>.lineage-<P>-<U>", one per failover that
+# promoted the primary from segment P after the archive's segment U; point-in-time recovery skips
+# segments P+1..U past it. A segment server without LINEAGE answers ERR: none.
+my $lineage = 0;
+my $lsock = request('LINEAGE');
+while (my $l = <$lsock>) {
+  $l =~ s/\r?\n$//;
+  last if $l eq '.' || $l =~ /^ERR/;
+  next unless $l =~ /^[A-Za-z0-9._-]+\.lineage-\d+-\d+$/ && !$done{$l};
+  open(my $mark, '>', "$out/$l") or die "write $l: $!\n";
+  close $mark;
+  $lineage++;
+}
+close $lsock;
+print "$lineage new lineage marker(s)\n" if $lineage;
 
 # archive time of each segment, from its age on the primary (ARCHIVED)
 my %archived;

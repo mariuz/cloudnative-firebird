@@ -758,10 +758,13 @@ The highest segment the Job listed for upload is kept in `status.journalArchiveS
 replica promoted by a failover continues its journal after it, even when it applied fewer
 segments of the lost primary: otherwise its first segments would take the names of segments the
 old primary had already uploaded (Firebird 4 and 5 segment names carry no GUID), and the Job
-would skip them as uploaded. Point-in-time recovery across a failover is not supported yet:
-the archive still holds the lost primary's segments after the promoted replica's position, and
-a restore from a backup taken before the failover, with a target after it, would replay them.
-Take a new backup after a failover.
+would skip them as uploaded. The promoted instance records the switch, and the Job uploads it
+as an empty marker object `<database>.lineage-<P>-<U>`: segments P+1..U are the lost primary's,
+not in the history of the segments after U. Point-in-time recovery to a target after the
+failover skips them: it replays up to P, restarts the replay after U (transactions still open at
+P are rolled back, as on the promoted replica) and continues with the new primary's segments. A
+target before the failover replays the lost primary's segments as they were. A backup taken on
+the lost primary after segment P cannot reach a target after the failover (refused).
 
 **Point-in-time recovery.** A physical restore with `pointInTime` replays the archived journal on
 top of an `nbackup` chain (taken on the primary), up to a target:

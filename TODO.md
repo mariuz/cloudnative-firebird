@@ -38,11 +38,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 ## Backups and restore
 
-- [ ] **Point-in-time recovery across a failover**: a replica promoted at segment P continues its
-  journal after the archive's highest segment U (v0.56.0), so the archive holds the lost primary's
-  segments P+1..U, which are not in the new primary's history. A restore from an earlier backup
-  with a target after the failover would replay them; record the lineage switch (P, U) in the
-  archive and skip, or refuse, that range in `pitr-plan.pl`.
 - [ ] **Recovery points within a segment**: point-in-time recovery applies whole journal
   segments (the journal has no timestamps); a target time lands on the end of the last segment
   archived before it. A shorter `archiveTimeoutSeconds` narrows the gap.

@@ -17,6 +17,9 @@
 #                                 which it has every change of);
 #                                 primary: "OK primary" (used by planned switchover)
 #   "<token> ARCHIVED\n"       -> "<sequence> <age seconds>" for each archived segment, then ".\n"
+#   "<token> LINEAGE\n"        -> "<database>.lineage-<P>-<U>" for each failover that promoted this
+#                                instance from segment P after the journal archive's segment U
+#                                (segments P+1..U are not in its history), then ".\n"
 #                                 (the operator compares it with the replicas' POSITION: lag)
 #   "<token> RETAIN <S>|none\n" -> "OK": keep archived segments after S (the lowest segment the
 #                                 replicas applied, sent by the operator) past the retention age,
@@ -591,6 +594,13 @@ while (1) {
         print $client "OK $ctl->{sequence} $ctl->{offset} $pending\n";
       }
     }
+  } elsif ($cmd eq 'LINEAGE') {
+    (my $db_name = $database) =~ s{.*/}{};
+    if (open(my $fh, '<', "$base/lineage")) {
+      while (my $l = <$fh>) { print $client "$db_name.lineage-$1-$2\n" if $l =~ /^(\d+) (\d+)\s*$/; }
+      close $fh;
+    }
+    print $client ".\n";
   } elsif ($cmd eq 'ARCHIVED') {
     # ages are computed here, so the operator's clock does not matter
     my $now = time;
