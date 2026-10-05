@@ -864,6 +864,33 @@ jobs:
           [ "$(sql sync-0 'select count(*) from app where id = 100;' | awk '$1 ~ /^[0-9]+$/ { print $1 }')" = 1 ]
           [ "$(count sync-0)" = 14 ] || { echo "the new standby has $(count sync-0) rows, expected 14"; exit 1; }
           echo "sync-0 is the synchronous standby of sync-1"
+          # rolling update with dataDurability preferred: the standby is detached before its
+          # restart (writes continue meanwhile), then attached again; the primary goes last
+          kubectl patch firebirdcluster sync --type merge \
+            -p '{"spec":{"env":[{"name":"ROLLING_UPDATE_TEST","value":"1"}],"replication":{"synchronous":{"dataDurability":"preferred"}}}}'
+          timeout 120 bash -c 'until kubectl get statefulset sync -o jsonpath={.spec.template.spec.containers[0].env} | grep -q ROLLING_UPDATE_TEST &&
+            [ "$(kubectl get statefulset sync -o jsonpath={.status.observedGeneration})" = "$(kubectl get statefulset sync -o jsonpath={.metadata.generation})" ]; do sleep 3; done'
+          rev=$(kubectl get statefulset sync -o jsonpath={.status.updateRevision})
+          SEL=firebird.cloudnative-firebird.io/cluster=sync,app.kubernetes.io/component=database
+          updated() {
+            kubectl get pods -l "$SEL" \
+              -o jsonpath='{range .items[*]}{.metadata.labels.controller-revision-hash} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+              | grep -c "^$rev True$"
+          }
+          for n in $(seq 1 120); do [ "$(updated)" = 2 ] && [ -z "$(kubectl get firebirdcluster sync -o jsonpath={.status.rollingUpdate})" ] && break; sleep 5; done
+          [ "$(updated)" = 2 ] || {
+            kubectl get firebirdcluster sync -o jsonpath='{.status.rollingUpdate} {.status.synchronous}'; echo
+            kubectl get pods -l "$SEL" -L controller-revision-hash; exit 1
+          }
+          kubectl get events --field-selector involvedObject.name=sync -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' \
+            | grep -q 'detaching sync-0: sync-0 is restarted by the rolling update' \
+            || { echo "the standby was not detached before its restart"; exit 1; }
+          wait_attached sync-1
+          [ "$(kubectl get lease sync-lease -o jsonpath={.spec.holderIdentity})" = "sync-1" ]
+          sql sync-1 "insert into app values (101, 'after update'); commit;" >/dev/null
+          [ "$(sql sync-0 'select count(*) from app where id = 101;' | awk '$1 ~ /^[0-9]+$/ { print $1 }')" = 1 ]
+          [ "$(count sync-0)" = 15 ] || { echo "the standby has $(count sync-0) rows, expected 15"; exit 1; }
+          echo "rolling update detached the synchronous standby before its restart and attached it again"
           kubectl delete firebirdcluster sync --wait=false
 
       - name: Verify Kubernetes events

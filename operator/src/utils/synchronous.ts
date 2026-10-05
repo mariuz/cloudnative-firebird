@@ -106,6 +106,12 @@ export interface SyncPlanInput {
   fenced: string[];
   /** Instances with a re-seed request */
   reseeding: string[];
+  /**
+   * The replica the rolling update restarts next and last (the only outdated replica left): it is
+   * not attached, and an attached standby is handed over to another replica (or, with
+   * dataDurability preferred, detached) before its restart
+   */
+  rollingTarget?: string;
   now: number;
 }
 
@@ -134,6 +140,9 @@ export function detachReason(input: SyncPlanInput, standby: string, unavailableS
   if (input.fenced.includes(standby)) return `${standby} is fenced`;
   if (input.reseeding.includes(standby)) return `${standby} is being re-seeded`;
   if (input.busy) return input.busy;
+  if (standby === input.rollingTarget && handoverForUpdate(input)) {
+    return `${standby} is restarted by the rolling update`;
+  }
   if (cluster.spec.replication?.synchronous?.dataDurability === 'preferred' && unavailableSince) {
     const limit = (cluster.spec.replication.synchronous.standbyUnavailableSeconds ?? DEFAULT_STANDBY_UNAVAILABLE_SECONDS) * 1000;
     const down = now - Date.parse(unavailableSince);
@@ -142,7 +151,22 @@ export function detachReason(input: SyncPlanInput, standby: string, unavailableS
   return undefined;
 }
 
-/** The replica to attach: ready, not fenced or re-seeding, caught up; the lowest ordinal first */
+/**
+ * Whether the standby the rolling update restarts next is detached first: with dataDurability
+ * preferred always (writes continue asynchronously during its restart instead of waiting for it),
+ * with required only when another replica can take over as the standby (otherwise it is restarted
+ * attached, and writes wait until it is ready again)
+ */
+export function handoverForUpdate(input: SyncPlanInput): boolean {
+  if (!input.rollingTarget) return false;
+  if (input.cluster.spec.replication?.synchronous?.dataDurability === 'preferred') return true;
+  return chooseStandby(input) !== undefined;
+}
+
+/**
+ * The replica to attach: ready, not fenced or re-seeding, caught up, not about to be restarted by
+ * the rolling update; the lowest ordinal first
+ */
 export function chooseStandby(input: SyncPlanInput): string | undefined {
   const { cluster, pods, primaryPod } = input;
   const name = cluster.metadata.name;
@@ -157,6 +181,7 @@ export function chooseStandby(input: SyncPlanInput): string | undefined {
         !p.metadata?.deletionTimestamp &&
         !input.fenced.includes(pod) &&
         !input.reseeding.includes(pod) &&
+        pod !== input.rollingTarget &&
         Number.isFinite(lag) &&
         lag <= SYNC_ATTACH_MAX_LAG_SECONDS
       );

@@ -21,8 +21,9 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   replica) would need the replication sequence set without restarting.
 - [ ] **Synchronous replication follow-ups** (v0.53.0 attaches one standby): quorum of several
   standbys (CloudNativePG's `number` / `method: any`); attaching and detaching without the short
-  write pause (Firebird reads `sync_replica` only when the database is opened); a standby restart
-  without blocking writes in `required` mode (detach first in rolling updates).
+  write pause (Firebird reads `sync_replica` only when the database is opened); a restart of the
+  only replica without blocking writes in `required` mode (v0.55.0 hands the standby over to
+  another replica before a rolling update restarts it).
 - [ ] **Promotion sequence vs. the journal archive**: a promoted replica's journal continues after
   the last segment it applied (a synchronous standby: the last one it saw archived, polled every
   5 seconds), which can be below segments the old primary already uploaded to `journalArchiveS3`.

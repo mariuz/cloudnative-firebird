@@ -36,8 +36,8 @@ import { firebirdUsername } from '../utils/users';
 import { recordClusterMetrics, recordReconcile } from '../utils/metrics';
 import { RESEED_VOLUME, dataClaimName, planVolumeRecreation } from '../utils/volume-recreation';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
-import { PRIMARY_RESTART_GRACE_SECONDS, operatorRollsPods, planRollingUpdate } from '../utils/rolling-update';
-import { buildSyncStandbyJob, planSynchronous, syncStandbyJobName, synchronousMode } from '../utils/synchronous';
+import { PRIMARY_RESTART_GRACE_SECONDS, operatorRollsPods, planRollingUpdate, rollingUpdateTarget } from '../utils/rolling-update';
+import { SyncPlanInput, buildSyncStandbyJob, handoverForUpdate, planSynchronous, syncStandbyJobName, synchronousMode } from '../utils/synchronous';
 import { chooseBackupInstance } from '../utils/backup-target';
 import {
   effectiveFailoverDelaySeconds,
@@ -323,12 +323,13 @@ export class FirebirdClusterController {
         ? await this.reconcileVolumeExpansion(cluster, log)
         : undefined;
       const fencing = await this.reconcileFencing(cluster, log);
-      const synchronous = await this.reconcileSynchronous(
+      const { status: synchronous, rollingHold } = await this.reconcileSynchronous(
         cluster,
         primaryPod,
         switchover,
         [...Object.keys(reseed.requests), ...reseed.held, ...recreatingVolumes.map((r) => r.pod), ...volumeRecreation.held],
         fencing.fenced,
+        statefulSetExisted ? statefulSet : undefined,
         log,
       );
       const busy = switchoverInFlight(switchover.status)
@@ -337,9 +338,12 @@ export class FirebirdClusterController {
           ? `volume of ${recreatingVolumes.map((r) => r.pod).join(', ')} being re-created`
         : Object.keys(reseed.requests).length > 0 || reseed.restart.length > 0 || switchover.restart.length > 0
           ? 'instances are being re-seeded or restarted'
+        // the sync-standby Job shuts the primary down and needs both instances
+        : synchronous?.phase === 'Attaching' || synchronous?.phase === 'Detaching'
+          ? `the synchronous standby ${synchronous.standby} is being ${synchronous.phase === 'Attaching' ? 'attached' : 'detached'}`
           : undefined;
       const rollingUpdate = statefulSetExisted
-        ? await this.reconcileRollingUpdate(cluster, statefulSet, primaryPod, fencing.fenced, busy, switchover, log)
+        ? await this.reconcileRollingUpdate(cluster, statefulSet, primaryPod, fencing.fenced, busy, switchover, rollingHold, log)
         : undefined;
 
       if (cluster.spec.replication?.enabled) {
@@ -1473,6 +1477,7 @@ export class FirebirdClusterController {
     fenced: string[],
     busy: string | undefined,
     switchover: SwitchoverResult,
+    syncStandby: { pod: string; hold: boolean } | undefined,
     log: Logger,
   ): Promise<RollingUpdateStatus | undefined> {
     const lastSwitchover = switchover.status;
@@ -1485,7 +1490,7 @@ export class FirebirdClusterController {
       (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items,
       name,
     );
-    const plan = planRollingUpdate({ cluster, statefulSet, pods, primaryPod, fenced, busy, lastSwitchover });
+    const plan = planRollingUpdate({ cluster, statefulSet, pods, primaryPod, fenced, busy, lastSwitchover, syncStandby });
     // the StatefulSet controller has not observed the latest template yet: keep the last status
     if (!plan) return stored;
     const primary = pods.find((p) => p.metadata?.name === primaryPod);
@@ -2018,7 +2023,8 @@ export class FirebirdClusterController {
   /**
    * Synchronous replication (utils/synchronous.ts): attaches a synchronous standby to the primary
    * and detaches it when needed, one sync-standby Job at a time. Each phase is stored before it is
-   * acted upon. Returns the state to keep in status.synchronous.
+   * acted upon. Returns the state to keep in status.synchronous, and the standby of the primary for
+   * the rolling update (hold: not to be restarted now, see utils/rolling-update.ts).
    */
   private async reconcileSynchronous(
     cluster: FirebirdCluster,
@@ -2026,14 +2032,15 @@ export class FirebirdClusterController {
     switchover: SwitchoverResult,
     reseeding: string[],
     fenced: string[],
+    statefulSet: V1StatefulSet | undefined,
     log: Logger,
-  ): Promise<SynchronousStatus | undefined> {
+  ): Promise<{ status?: SynchronousStatus; rollingHold?: { pod: string; hold: boolean } }> {
     const { name, namespace = 'default' } = cluster.metadata;
     const stored = switchover.synchronous;
-    if (!replicationEnabled(cluster)) return undefined;
+    if (!replicationEnabled(cluster)) return {};
     // the primary keeps its sync_replica entry while hibernated: so does the status
-    if (cluster.spec.hibernated) return stored ?? cluster.status?.synchronous;
-    if (!stored && !synchronousMode(cluster)) return undefined;
+    if (cluster.spec.hibernated) return { status: stored ?? cluster.status?.synchronous };
+    if (!stored && !synchronousMode(cluster)) return {};
     const jobName = syncStandbyJobName(cluster);
     let job: V1Job | undefined;
     try {
@@ -2058,7 +2065,7 @@ export class FirebirdClusterController {
       : switchover.wantsSwitchover
         ? 'a switchover is requested'
         : undefined;
-    const step = planSynchronous({
+    const input: SyncPlanInput = {
       cluster,
       primaryPod,
       pods,
@@ -2068,8 +2075,19 @@ export class FirebirdClusterController {
       busy,
       fenced: [...new Set([...fenced, ...desiredFencedInstances(cluster)])],
       reseeding,
+      rollingTarget: rollingUpdateTarget(cluster, statefulSet, pods, primaryPod, fenced),
       now: Date.now(),
-    });
+    };
+    const step = planSynchronous(input);
+    // the standby of the primary is restarted by the rolling update once neither being attached or
+    // detached nor to be handed over first
+    const rolling = (status: SynchronousStatus | undefined) =>
+      status?.primary === primaryPod && ['Attached', 'Attaching', 'Detaching'].includes(status.phase)
+        ? {
+            pod: status.standby,
+            hold: status.phase !== 'Attached' || (status.standby === input.rollingTarget && handoverForUpdate(input)),
+          }
+        : undefined;
     const persist = async (status: SynchronousStatus | undefined) => {
       if (JSON.stringify(status) === JSON.stringify(stored)) return;
       await this.customApi.patchNamespacedCustomObjectStatus({
@@ -2087,13 +2105,13 @@ export class FirebirdClusterController {
 
     if (step.kind === 'none') {
       await persist(step.status);
-      return step.status;
+      return { status: step.status, rollingHold: rolling(step.status) };
     }
     if (step.kind === 'start') {
       if (job) {
         // a previous Job not yet deleted
         await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' }).catch(() => undefined);
-        return stored;
+        return { status: stored, rollingHold: rolling(stored) };
       }
       log.info({ action: step.action, standby: step.standby, primary: primaryPod }, `Synchronous standby: ${step.status.message}`);
       await persist(step.status);
@@ -2103,7 +2121,7 @@ export class FirebirdClusterController {
       } catch (err) {
         if ((err as { code?: number })?.code !== 409) throw err;
       }
-      return step.status;
+      return { status: step.status, rollingHold: rolling(step.status) };
     }
     // finished
     log.info({ standby: step.status.standby, phase: step.status.phase }, `Synchronous standby: ${step.status.message}`);
@@ -2120,7 +2138,7 @@ export class FirebirdClusterController {
           if (!isNotFound(err)) throw err;
         });
     }
-    return step.status;
+    return { status: step.status, rollingHold: rolling(step.status) };
   }
 
   /** Reconcile the primary leader lease object for HA election */

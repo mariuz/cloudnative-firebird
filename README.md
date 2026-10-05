@@ -527,9 +527,16 @@ so the standby never misses a committed transaction. The other replicas stay asy
   transaction is lost. The other replicas, which may lack the old primary's unshipped segments,
   are re-seeded from it, like the old primary when it returns. Without a ready standby, the
   election runs as for asynchronous replication.
-- A pod restart of the standby (e.g. a rolling update) blocks writes with `required` until it is
-  ready again. A standby whose volume is replaced outside the operator waits in its init container
-  until it is detached (annotate it `reseed=true`).
+- **Rolling updates** restart nothing while a sync-standby Job runs, and the standby last of the
+  replicas, only once it is detached:
+  with another updated replica ready and caught up, the standby is handed over to it first
+  (detach, then attach the other one; two short write pauses instead of writes waiting through
+  the restart); with `preferred` it is detached even without one (writes continue asynchronously
+  until it is attached again after its restart). With `required` and no other replica, it is
+  restarted attached and writes wait until it is ready again.
+- Any other pod restart of the standby blocks writes with `required` until it is ready again. A
+  standby whose volume is replaced outside the operator waits in its init container until it is
+  detached (annotate it `reseed=true`).
 - Firebird 5 and later read the standby's password from the server's environment
   (`password_env`); Firebird 4 ignores that and connects with the server's `ISC_USER` /
   `ISC_PASSWORD`, the same credentials. Nothing is written to the ConfigMap.
