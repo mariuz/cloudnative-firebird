@@ -1099,7 +1099,7 @@ export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Contai
     'if [ -n "${PRIMARY_FILE:-}" ]; then p=$(cat "$PRIMARY_FILE" 2>/dev/null || true); ' +
     'case "$p" in ""|"$POD_NAME"|"$POD_NAME".*) ;; *) echo "replica: seeded by replication, skipping bootstrap"; exit 0 ;; esac; fi; ';
   const finish =
-    'chown firebird:firebird "$TARGET_PATH.tmp"; mv "$TARGET_PATH.tmp" "$TARGET_PATH"; ';
+    '[ "$(id -u)" -ne 0 ] || chown firebird:firebird "$TARGET_PATH.tmp"; mv "$TARGET_PATH.tmp" "$TARGET_PATH"; ';
 
   if (!bootstrap.recovery) {
     const clone = bootstrap.clone!;

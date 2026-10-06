@@ -71,6 +71,46 @@ describe('instance pod security', () => {
   });
 });
 
+describe('instance pods as the firebird user (runAsFirebirdUser)', () => {
+  const pod = buildStatefulSet(cluster({ runAsFirebirdUser: true })).spec!.template.spec!;
+
+  it('meets the restricted Pod Security Standard', () => {
+    expect(pod.securityContext).toEqual({
+      runAsNonRoot: true,
+      runAsUser: FIREBIRD_UID,
+      runAsGroup: FIREBIRD_UID,
+      fsGroup: FIREBIRD_UID,
+      seccompProfile: { type: 'RuntimeDefault' },
+    });
+    for (const c of allContainers(pod)) {
+      expect(c.securityContext, c.name).toEqual({ allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } });
+    }
+    // restricted allows these volume types only (no hostPath)
+    for (const v of pod.volumes ?? []) {
+      expect(Boolean(v.emptyDir || v.configMap || v.secret || v.persistentVolumeClaim || v.projected), v.name).toBe(true);
+    }
+  });
+
+  it('runs the image entrypoint on a writable copy of /opt/firebird', () => {
+    expect(pod.initContainers![0].name).toBe('firebird-home');
+    expect(pod.initContainers![0].args![0]).toContain('cp -a /opt/firebird/. /firebird-home/');
+    expect(pod.volumes).toContainEqual({ name: 'firebird-home', emptyDir: {} });
+    const firebird = pod.containers.find((c) => c.name === 'firebird')!;
+    expect(firebird.volumeMounts).toContainEqual({ name: 'firebird-home', mountPath: '/opt/firebird' });
+    // the init scripts chown only as root
+    const security = pod.initContainers!.find((c) => c.name === 'security-db-init')!;
+    expect(security.args![0]).toContain('[ "$(id -u)" -ne 0 ] || chown -R firebird:firebird "$d"');
+    // off by default
+    const root = buildStatefulSet(cluster()).spec!.template.spec!;
+    expect(root.initContainers!.map((c) => c.name)).not.toContain('firebird-home');
+    expect(root.volumes!.map((v) => v.name)).not.toContain('firebird-home');
+  });
+
+  it('rolls the instances when it is turned on', () => {
+    expect(statefulSetNeedsUpdate(buildStatefulSet(cluster()), buildStatefulSet(cluster({ runAsFirebirdUser: true })))).toBe(true);
+  });
+});
+
 describe('Job pod security (restricted Pod Security Standard)', () => {
   const backup: FirebirdBackup = {
     apiVersion: 'firebird.cloudnative-firebird.io/v1',

@@ -14,8 +14,10 @@
 #
 # Seeds avoid locking the primary: see ISSUES.md, issue 2.
 set -eu
+# files for the server: chown as root; as the firebird user (runAsFirebirdUser) they are its own
+own() { [ "$(id -u)" -ne 0 ] || chown "$@"; }
 mkdir -p "$JOURNAL_DIR" "$ARCHIVE_DIR" "$SOURCE_DIR"
-chown firebird:firebird "$JOURNAL_DIR" "$ARCHIVE_DIR" "$SOURCE_DIR"
+own firebird:firebird "$JOURNAL_DIR" "$ARCHIVE_DIR" "$SOURCE_DIR"
 primary=$(cat "$PRIMARY_FILE" 2>/dev/null || true)
 
 # gstat omits "Replication sequence" while it is 0 (e.g. a database created offline)
@@ -92,12 +94,12 @@ if [ -n "$promote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
   isql -q -i "$SCRIPT_DIR/enable-publication.sql" "$sw"
   wipe_replication_state
   write_seed "$sw"
-  chown -R firebird:firebird "$DATA_DIR"
+  own -R firebird:firebird "$DATA_DIR"
   mv "$sw" "$DATABASE_PATH"
   if [ -f "$REPLICATION_DIR/.promote-lineage" ]; then
     switch=$(cat "$REPLICATION_DIR/.promote-lineage")
     grep -qxF "$switch" "$REPLICATION_DIR/lineage" 2>/dev/null || echo "$switch" >> "$REPLICATION_DIR/lineage"
-    chown firebird:firebird "$REPLICATION_DIR/lineage"
+    own firebird:firebird "$REPLICATION_DIR/lineage"
   fi
   echo "$promote_token" > "$REPLICATION_DIR/.promoted"
   rm -f "$REPLICATION_DIR/.promote-seq" "$REPLICATION_DIR/.promote-lineage"
@@ -118,7 +120,7 @@ if [ -n "$demote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
   guid=$(gstat -h "$sw" | sed -n 's/^[[:space:]]*Database GUID:[[:space:]]*\({[0-9A-F-]*}\).*/\1/p')
   perl "$SCRIPT_DIR/replica-control.pl" none "$seq" "$seq" "$SOURCE_DIR/.control.tmp"
   mv "$SOURCE_DIR/.control.tmp" "$SOURCE_DIR/$guid"
-  chown -R firebird:firebird "$DATA_DIR"
+  own -R firebird:firebird "$DATA_DIR"
   mv "$sw" "$DATABASE_PATH"
   echo "$demote_token" > "$REPLICATION_DIR/.demoted"
   echo "demoted to replica after segment $seq"
@@ -151,7 +153,7 @@ is_primary() { case "$primary" in ""|"$POD_NAME"|"$POD_NAME".*) return 0 ;; *) r
 # writes the sync_replica entry (SYNC). Only the primary replicates synchronously: a former primary
 # must not keep sending its changes to the standby.
 if ! is_primary || [ ! -f "$REPLICATION_DIR/sync.conf" ]; then : > "$REPLICATION_DIR/sync.conf"; fi
-chown firebird:firebird "$REPLICATION_DIR/sync.conf"
+own firebird:firebird "$REPLICATION_DIR/sync.conf"
 
 # Replication enabled on an existing cluster: the databases were created without it.
 is_replica_db() { gstat -h "$1" | grep -q '^[[:space:]]*Attributes.*replica'; }
@@ -171,7 +173,7 @@ if [ -f "$DATABASE_PATH" ] && is_primary && [ ! -f "$REPLICATION_DIR/bootstrap-s
     echo "replication enabled on an existing database: enabling publication and writing the offline bootstrap seed"
     isql -q -i "$SCRIPT_DIR/enable-publication.sql" "$en"
     write_seed "$en"
-    chown -R firebird:firebird "$DATA_DIR"
+    own -R firebird:firebird "$DATA_DIR"
     mv "$en" "$DATABASE_PATH"
     echo "existing primary database now publishes; offline bootstrap seed written"
     exit 0
@@ -207,7 +209,7 @@ if [ -f "$DATABASE_PATH" ] && is_primary && ! is_replica_db "$DATABASE_PATH"; th
     echo "offline bootstrap seed not refreshed: journal segment $current is still in use (unclean stop); refreshed at the next clean restart"
   elif [ "$usable" = no ]; then
     write_seed "$DATABASE_PATH"
-    chown firebird:firebird "$REPLICATION_DIR/bootstrap-seed.fdb" "$REPLICATION_DIR/bootstrap-seed.seq"
+    own firebird:firebird "$REPLICATION_DIR/bootstrap-seed.fdb" "$REPLICATION_DIR/bootstrap-seed.seq"
     echo "offline bootstrap seed refreshed at replication sequence $current"
   fi
 fi
@@ -237,7 +239,7 @@ case "$primary" in
       isql -q -i "$SCRIPT_DIR/init.sql" "$work"
     fi
     write_seed "$work"
-    chown -R firebird:firebird "$DATA_DIR"
+    own -R firebird:firebird "$DATA_DIR"
     mv "$work" "$DATABASE_PATH"
     echo "$origin primary database and offline bootstrap seed"
     exit 0
@@ -315,7 +317,7 @@ esac
 # the control file is named after the database GUID (the primary's, inherited by every copy)
 guid=$(gstat -h "$work" | sed -n 's/^[[:space:]]*Database GUID:[[:space:]]*\({[0-9A-F-]*}\).*/\1/p')
 mv "$SOURCE_DIR/.control.tmp" "$SOURCE_DIR/$guid"
-chown -R firebird:firebird "$DATA_DIR"
+own -R firebird:firebird "$DATA_DIR"
 rm -f "$work.ctl" "$work.kind"
 mv "$work" "$DATABASE_PATH"
 if [ -n "$reseed_token" ]; then echo "$reseed_token" > "$REPLICATION_DIR/.reseeded"; fi
