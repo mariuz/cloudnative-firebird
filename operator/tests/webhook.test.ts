@@ -103,6 +103,24 @@ describe('webhook certificate Secret and caBundle', () => {
     expect(s.api.replaceNamespacedSecret.mock.calls[0][0].body.metadata.resourceVersion).toBe('7');
   });
 
+  it('uses the certificates another operator pod wrote at the same time', async () => {
+    const theirs = createWebhookCertificates(names);
+    const s = setup();
+    s.api.readNamespacedSecret
+      .mockRejectedValueOnce(Object.assign(new Error('Not Found'), { code: 404 }))
+      .mockResolvedValueOnce(asSecret(theirs));
+    s.api.createNamespacedSecret.mockRejectedValueOnce(Object.assign(new Error('AlreadyExists'), { code: 409 }));
+    const certs = await s.server.ensureCertificates();
+    expect(certs.tlsCert).toBe(theirs.tlsCert);
+    expect(s.api.createNamespacedSecret).toHaveBeenCalledTimes(1);
+    expect(s.api.replaceNamespacedSecret).not.toHaveBeenCalled();
+    // other errors are not retried
+    const failing = setup();
+    failing.api.createNamespacedSecret.mockRejectedValue(Object.assign(new Error('Forbidden'), { code: 403 }));
+    await expect(failing.server.ensureCertificates()).rejects.toThrow('Forbidden');
+    expect(failing.api.createNamespacedSecret).toHaveBeenCalledTimes(1);
+  });
+
   it('replaces certificates for other names, and works without the webhook configuration', async () => {
     const s = setup(asSecret(createWebhookCertificates(['old.svc'])), null);
     await s.server.ensureCertificates();
