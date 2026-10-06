@@ -183,7 +183,7 @@ export function buildPromoteJob(cluster: FirebirdCluster, target: string, archiv
                 'sh',
                 '-c',
                 `reply=$(perl ${OPERATOR_CONFIG_DIR}/segment-request.pl "$TARGET" ${request}); echo "$reply"; ` +
-                  'printf "%s" "$reply" > /dev/termination-log 2>/dev/null; [ -n "$reply" ]',
+                  '{ printf "%s" "$reply" > /dev/termination-log; } 2>/dev/null; [ -n "$reply" ]',
               ],
               env: [
                 ...superuserClientEnv(cluster),
