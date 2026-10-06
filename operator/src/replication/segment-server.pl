@@ -70,7 +70,17 @@
 # they cannot touch the database, the journal or the replication state. FILE and STORE run in a child process, so a
 # large transfer does not hold up replicas and the operator.
 #
-# The token is the SYSDBA password (ISC_PASSWORD).
+# Requests are signed with the SYSDBA password (ISC_PASSWORD), which never crosses the network:
+#
+#   "SIG1 <epoch> <nonce> <mac> <command>\n", mac = hex HMAC-SHA256("<epoch> <nonce> <command>")
+#
+# keyed with the password (segment-auth.pl, included in this script). The server accepts it within AUTH_WINDOW_SECONDS of
+# its own clock and only once per nonce (replays are refused), and answers a bad or replayed
+# signature with "ERR unauthorized (<reason>)". "PING" answers "OK": clients send it signed once
+# per server to tell this server from one of an earlier version, which answers a signed request
+# with "ERR unauthorized" and gets the legacy form "<password> <command>" instead (rolling update).
+# The legacy form is still accepted from clients of earlier versions. Replies and transferred
+# bytes are neither encrypted nor signed.
 #
 # The live database is only ever accessed through the local server (isql localhost:): opening
 # the file with an independent embedded engine and lock table (gstat or nbackup from this
@@ -89,6 +99,7 @@
 use strict;
 use warnings;
 use IO::Socket::INET;
+#@include segment-auth.pl
 
 # FILES_ONLY: only the backup file commands (FILE, STORE, REMOVE, FILES), for instances without
 # replication (physical backups to and restores from S3, retention of server-side backups)
@@ -102,6 +113,9 @@ my $primary_file = required('PRIMARY_FILE');
 my $self      = $ENV{POD_NAME} // '';
 my $token     = $ENV{ISC_PASSWORD} // '';
 my $port      = $ENV{SEGMENT_PORT} // 3051;
+# how far a signed request's time may be from this server's clock (seconds), and the nonces seen
+my $auth_window = $ENV{AUTH_WINDOW_SECONDS} // 300;
+my %nonces;
 my $retention = $ENV{SEGMENT_RETENTION_SECONDS} // 86400;
 my $max_retention = $ENV{SEGMENT_MAX_RETENTION_SECONDS} // 7 * 86400;
 $max_retention = $retention if $max_retention < $retention;
@@ -136,6 +150,35 @@ my $backup_re = qr/^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:nbk|fbk|nbk\.ctl)$/;
 (my $data_dir = $database) =~ s{/[^/]*$}{};
 $data_dir = '.' if $data_dir eq '';
 $| = 1;
+
+sub same_string {
+  my ($a, $b) = @_;
+  return 0 unless length($a) == length($b);
+  my $diff = 0;
+  $diff |= ord(substr($a, $_, 1)) ^ ord(substr($b, $_, 1)) for 0 .. length($a) - 1;
+  return $diff == 0;
+}
+
+# The command and argument of a request line, or (undef, undef, reason) when it is not authorized
+# (reason '' for a legacy request with a wrong password)
+sub authorize {
+  my ($line) = @_;
+  if ($line =~ /^SIG1 (\d+) ([0-9a-f]{16,64}) ([0-9a-f]{64}) (.+)$/) {
+    my ($at, $nonce, $mac, $request) = ($1, $2, $3, $4);
+    return (undef, undef, 'signature') unless same_string(hmac_sha256_hex("$at $nonce $request", $token), $mac);
+    return (undef, undef, 'clock') if abs(time - $at) > $auth_window;
+    return (undef, undef, 'replay') if exists $nonces{$nonce};
+    $nonces{$nonce} = $at;
+    if (keys(%nonces) > 1000) {
+      for (keys %nonces) { delete $nonces{$_} if time - $nonces{$_} > $auth_window; }
+    }
+    my ($cmd, $arg) = split / /, $request, 2;
+    return ($cmd, $arg, undef);
+  }
+  my ($given, $cmd, $arg) = split / /, $line, 3;
+  return (undef, undef, '') if !defined $cmd || $given ne $token;
+  return ($cmd, $arg, undef);
+}
 
 my $server = IO::Socket::INET->new(LocalPort => $port, Listen => 16, ReuseAddr => 1, Proto => 'tcp')
   or die "listen on $port: $!\n";
@@ -599,9 +642,11 @@ while (1) {
   my $line = <$client>;
   if (!defined $line) { close $client; next; }
   $line =~ s/\r?\n$//;
-  my ($given, $cmd, $arg) = split / /, $line, 3;
-  if (!defined $cmd || $given ne $token) {
-    print $client "ERR unauthorized\n";
+  my ($cmd, $arg, $denied) = authorize($line);
+  if (defined $denied) {
+    print $client $denied eq '' ? "ERR unauthorized\n" : "ERR unauthorized ($denied)\n";
+  } elsif ($cmd eq 'PING') {
+    print $client "OK\n";
   } elsif ($files_only && $cmd !~ /^(?:FILE|STORE|REMOVE|FILES)$/) {
     print $client "ERR not available without replication\n";
   } elsif ($cmd eq 'LIST') {

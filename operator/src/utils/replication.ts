@@ -39,6 +39,13 @@ export const RESEED_ANNOTATION = 'firebird.cloudnative-firebird.io/reseed';
 
 const SCRIPT_DIR = join(__dirname, '..', 'replication');
 
+/** Reads a script, replacing each "#@include <file>" line with that file (shared Perl code) */
+function readScript(name: string): string {
+  return readFileSync(join(SCRIPT_DIR, name), 'utf8').replace(/^#@include (\S+)\n/gm, (_line, file: string) =>
+    readFileSync(join(SCRIPT_DIR, file), 'utf8'),
+  );
+}
+
 /** Replication helper scripts shipped in the cluster ConfigMap, keyed by file name */
 export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
   [
@@ -53,8 +60,9 @@ export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.from
     'switchover.pl',
     'failover.pl',
     'isolation-check.pl',
+    'segment-request.pl',
   ].map(
-    (name) => [name, readFileSync(join(SCRIPT_DIR, name), 'utf8')],
+    (name) => [name, readScript(name)],
   ),
 );
 
@@ -65,7 +73,7 @@ export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.from
 export const JOB_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
   ['fetch-segments.pl', 'pitr-plan.pl', 'pitr-restore.sh', 'sync-standby.pl'].map((name) => [
     name,
-    readFileSync(join(SCRIPT_DIR, name), 'utf8'),
+    readScript(name),
   ]),
 );
 

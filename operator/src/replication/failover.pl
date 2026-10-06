@@ -14,6 +14,7 @@
 use strict;
 use warnings;
 use IO::Socket::INET;
+#@include segment-auth.pl
 
 my @candidates = grep { length } split /\s+/, ($ENV{CANDIDATES} // '');
 die "no candidate replicas\n" unless @candidates;
@@ -25,10 +26,8 @@ $| = 1;
 
 sub position {
   my ($host) = @_;
-  my $sock = IO::Socket::INET->new(PeerHost => $host, PeerPort => $port, Proto => 'tcp', Timeout => 10)
-    or return undef;
+  my $sock = eval { segment_open($host, $port, $token, 'POSITION') } or return undef;
   $sock->timeout(30);
-  print $sock "$token POSITION\n";
   my $line = <$sock> // '';
   close $sock;
   return $line =~ /^OK (\d+) (\d+) (\d+)/ ? { sequence => $1, offset => $2, pending => $3 } : undef;

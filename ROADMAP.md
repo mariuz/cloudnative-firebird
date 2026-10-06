@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.63.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.64.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Signed Segment Server Requests** *(v0.64.0, CloudNativePG 1.30 authenticated operator-to-instance calls)*
+  - Every client of the segment server used to send the SYSDBA password in plain text with each request: the operator, the segment pullers, seeding, and the switchover, failover, sync-standby, backup and journal archive Jobs. Requests are now signed instead: `SIG1 <epoch> <nonce> <HMAC-SHA256(password, "<epoch> <nonce> <request>")> <request>`. The server accepts a request within five minutes of its own clock, once per nonce, and answers a bad signature, an old request or a replay with `ERR unauthorized (<reason>)`.
+  - The Firebird image ships perl-base only, without Digest::SHA, so SHA-256 and HMAC are written in plain Perl (`segment-auth.pl`, included into each script when the ConfigMap is built). Unit tests check them against Node's crypto.
+  - Upgrades: each client first sends a signed `PING`. A server of an earlier version answers it with `ERR unauthorized` and gets the legacy form; the client asks again a minute later. Servers still accept the legacy form from clients of earlier versions. Replies and transferred bytes are neither signed nor encrypted (TODO.md).
 - [x] **Failover of a Cut-Off Primary** *(v0.63.0)*
   - A primary whose pod stayed ready but that the rest of the cluster had lost was never failed over. Each replica's segment puller now records when it last reached the primary (`primary-seen`, segment server `PRIMARYSEEN`). The operator treats a ready primary as unavailable when it cannot reach its segment server and every ready replica it reaches has not reached the primary for 30 seconds or more. The automatic failover then runs as usual after `delaySeconds` and deletes the old primary's pod, which re-seeds as a replica.
   - The `PrimaryNotReady` event says why (`ready but cut off`, with each replica's last contact). The kind CI cuts a ready primary off from the other pods (iptables in a `kubectl debug` container, API server still reachable) and checks the failover, the moved Lease, the data, and the re-seeded old primary.

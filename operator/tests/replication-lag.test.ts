@@ -2,6 +2,7 @@ import { describe, it, expect, vi, Mock } from 'vitest';
 import { spawn, spawnSync } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'fs';
 import { createServer } from 'net';
+import { fakeSegmentServer } from './helpers/segment-auth';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { KubeConfig, V1Pod } from '@kubernetes/client-node';
@@ -67,23 +68,51 @@ describe('replication lag computation', () => {
     expect(maxSegmentRetentionHours(c({ enabled: true, segmentRetentionHours: 72, maxSegmentRetentionHours: 24 }))).toBe(72);
   });
 
-  it('segmentRequest sends one line and reads the reply up to the terminator', async () => {
+  it('segmentRequest signs the request and reads the reply up to the terminator', async () => {
     const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
       '../src/utils/replication-lag',
     );
     const received: string[] = [];
-    const server = createServer((sock) => {
-      sock.once('data', (d) => {
-        received.push(d.toString());
-        sock.end('10 30\n11 5\n.\n');
-      });
-    });
+    const server = fakeSegmentServer((request, sock, raw) => {
+      received.push(raw);
+      expect(request).toBe('ARCHIVED');
+      sock.end('10 30\n11 5\n.\n');
+    }, 'tok');
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const port = (server.address() as { port: number }).port;
     try {
       expect(await segmentRequest('127.0.0.1', port, 'tok ARCHIVED')).toEqual(['10 30', '11 5']);
-      expect(received).toEqual(['tok ARCHIVED\n']);
+      expect(await segmentRequest('127.0.0.1', port, 'tok ARCHIVED')).toEqual(['10 30', '11 5']);
+      // the password is never sent, and each request has its own nonce
+      expect(received.every((r) => r.startsWith('SIG1 ') && !r.includes('tok'))).toBe(true);
+      expect(new Set(received.map((r) => r.split(' ')[2])).size).toBe(2);
       await expect(segmentRequest('127.0.0.1', 1, 'tok ARCHIVED', 500)).rejects.toThrow();
+    } finally {
+      server.close();
+    }
+  });
+
+  it('segmentRequest sends the legacy form to a segment server of an earlier version', async () => {
+    const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
+      '../src/utils/replication-lag',
+    );
+    const received: string[] = [];
+    // an earlier server: "<password> <command>" only
+    const server = createServer((sock) =>
+      sock.once('data', (d) => {
+        received.push(d.toString());
+        sock.end(d.toString().startsWith('tok ') ? 'OK primary\n' : 'ERR unauthorized\n');
+      }),
+    );
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    try {
+      expect(await segmentRequest('127.0.0.1', port, 'tok POSITION')).toEqual(['OK primary']);
+      expect(received[0]).toMatch(/^SIG1 \d+ [0-9a-f]{32} [0-9a-f]{64} PING\n$/);
+      expect(received[1]).toBe('tok POSITION\n');
+      // known for a minute: no second probe
+      expect(await segmentRequest('127.0.0.1', port, 'tok POSITION')).toEqual(['OK primary']);
+      expect(received).toHaveLength(3);
     } finally {
       server.close();
     }
@@ -136,7 +165,7 @@ describe.skipIf(!hasPerl)('segment-server.pl ARCHIVED', () => {
       expect(reply.map((s) => s.sequence)).toEqual([7, 8]);
       expect(reply[0].ageSeconds).toBeGreaterThanOrEqual(119);
       expect(reply[1].ageSeconds).toBeLessThan(60);
-      expect(await segmentRequest('127.0.0.1', port, 'wrong ARCHIVED')).toEqual(['ERR unauthorized']);
+      expect(await segmentRequest('127.0.0.1', port, 'wrong ARCHIVED')).toEqual(['ERR unauthorized (signature)']);
     } finally {
       child.kill();
     }
@@ -200,7 +229,7 @@ describe.skipIf(!hasPerl)('segment-server.pl RETAIN and pruning', () => {
       expect(await segmentRequest('127.0.0.1', port, 'tok RETAIN none')).toEqual(['OK']);
       expect(existsSync(join(root, 'repl', 'retain-floor'))).toBe(false);
       expect(await segmentRequest('127.0.0.1', port, 'tok RETAIN -1')).toEqual(['ERR bad request']);
-      expect(await segmentRequest('127.0.0.1', port, 'wrong RETAIN 9')).toEqual(['ERR unauthorized']);
+      expect(await segmentRequest('127.0.0.1', port, 'wrong RETAIN 9')).toEqual(['ERR unauthorized (signature)']);
     } finally {
       child.kill();
     }

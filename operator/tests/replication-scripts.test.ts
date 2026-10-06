@@ -3,7 +3,7 @@ import { execFileSync, spawn, spawnSync } from 'child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { createServer } from 'net';
+import { fakeSegmentServer } from './helpers/segment-auth';
 import { JOB_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
 
 const SCRIPTS: Record<string, string> = { ...REPLICATION_SCRIPTS, ...JOB_SCRIPTS };
@@ -84,14 +84,12 @@ describe('replication scripts shipped to instance pods', () => {
 
   it('replica-control.pl records journaled candidates as sorted active transactions', async () => {
     if (!hasPerl) return;
-    const { createServer } = await import('net');
     const requests: string[] = [];
-    const server = createServer((sock) => {
-      sock.once('data', (buf) => {
-        requests.push(buf.toString());
-        sock.end('30 7\n12 5\n.\n'); // 12 starts in segment 5, 30 in 7; 99 is not journaled
-      });
-    });
+    // requests are recorded as "tok <request>" once their signature is checked
+    const server = fakeSegmentServer((request, sock) => {
+      requests.push(`tok ${request}\n`);
+      sock.end('30 7\n12 5\n.\n'); // 12 starts in segment 5, 30 in 7; 99 is not journaled
+    }, 'tok');
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;
     const script = join(dir, 'replica-control.pl');
@@ -120,15 +118,12 @@ describe('replication scripts shipped to instance pods', () => {
   describe('replica-control.pl --next (live seeds)', () => {
     /** Runs replica-control.pl against a stand-in segment server answering `reply(command)` */
     const plan = async (reply: (cmd: string) => string) => {
-      const { createServer } = await import('net');
       const requests: string[] = [];
-      const server = createServer((sock) => {
-        sock.once('data', (buf) => {
-          const line = buf.toString().trim();
-          requests.push(line);
-          sock.end(reply(line.split(' ')[1]));
-        });
-      });
+      const server = fakeSegmentServer((request, sock) => {
+        const line = `tok ${request}`;
+        requests.push(line);
+        sock.end(reply(line.split(' ')[1]));
+      }, 'tok');
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
       const port = (server.address() as { port: number }).port;
       const script = join(dir, 'replica-control.pl');
@@ -182,18 +177,16 @@ describe('replication scripts shipped to instance pods', () => {
       'mydb.fdb.journal-0000000003': 'three',
     };
     const requests: string[] = [];
-    const server = createServer((sock) => {
-      sock.once('data', (buf) => {
-        const line = buf.toString().trim();
-        requests.push(line);
-        const [, cmd, name] = line.split(' ');
-        if (cmd === 'LIST') sock.end(Object.keys(segments).join('\n') + '\nnot-a-segment\n.\n');
-        else if (cmd === 'ARCHIVED') sock.end('1 7200\n2 3600\n3 60\n.\n');
-        else if (cmd === 'LINEAGE') sock.end('mydb.fdb.lineage-1-2\nmydb.fdb.lineage-0-1\nbad/name\n.\n');
-        else if (cmd === 'POINTS') sock.end(name === '3' ? '1700000000 150\n1700000001 252\nbad\n.\n' : '.\n');
-        else sock.end(`OK ${segments[name].length}\n${segments[name]}`);
-      });
-    });
+    const server = fakeSegmentServer((request, sock) => {
+      const line = `tok ${request}`;
+      requests.push(line);
+      const [, cmd, name] = line.split(' ');
+      if (cmd === 'LIST') sock.end(Object.keys(segments).join('\n') + '\nnot-a-segment\n.\n');
+      else if (cmd === 'ARCHIVED') sock.end('1 7200\n2 3600\n3 60\n.\n');
+      else if (cmd === 'LINEAGE') sock.end('mydb.fdb.lineage-1-2\nmydb.fdb.lineage-0-1\nbad/name\n.\n');
+      else if (cmd === 'POINTS') sock.end(name === '3' ? '1700000000 150\n1700000001 252\nbad\n.\n' : '.\n');
+      else sock.end(`OK ${segments[name].length}\n${segments[name]}`);
+    }, 'tok');
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;
     const script = join(dir, 'fetch-segments.pl');

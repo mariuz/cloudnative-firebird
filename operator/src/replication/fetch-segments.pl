@@ -19,6 +19,7 @@
 use strict;
 use warnings;
 use IO::Socket::INET;
+#@include segment-auth.pl
 
 my $host  = $ENV{FIREBIRD_HOST} or die "FIREBIRD_HOST is required\n";
 my $out   = $ENV{OUT_DIR} or die "OUT_DIR is required\n";
@@ -31,10 +32,8 @@ $| = 1;
 
 sub request {
   my ($line) = @_;
-  my $sock = IO::Socket::INET->new(PeerHost => $host, PeerPort => $port, Proto => 'tcp', Timeout => 10)
-    or die "connect $host:$port: $!\n";
+  my $sock = segment_open($host, $port, $token, $line);
   $sock->timeout(60);
-  print $sock "$token $line\n";
   return $sock;
 }
 

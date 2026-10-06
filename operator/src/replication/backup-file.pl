@@ -15,6 +15,7 @@
 use strict;
 use warnings;
 use IO::Socket::INET;
+#@include segment-auth.pl
 
 my $host  = $ENV{FIREBIRD_HOST} or die "FIREBIRD_HOST is required\n";
 my $token = $ENV{ISC_PASSWORD} // '';
@@ -23,11 +24,9 @@ $| = 1;
 
 sub request {
   my ($line) = @_;
-  my $sock = IO::Socket::INET->new(PeerHost => $host, PeerPort => $port, Proto => 'tcp', Timeout => 10)
-    or die "connect $host:$port: $!\n";
+  my $sock = segment_open($host, $port, $token, $line);
   $sock->timeout(600);
   binmode $sock;
-  print $sock "$token $line\n";
   return $sock;
 }
 
