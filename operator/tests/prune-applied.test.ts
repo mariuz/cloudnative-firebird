@@ -27,4 +27,9 @@ describe('pruneAppliedSegments', () => {
       ARCHIVE_UPLOAD: 'true',
     });
   });
+
+  it('samples recovery points only with a journal archive', () => {
+    expect(serverEnv(cluster({ enabled: true }))).not.toHaveProperty('RECOVERY_POINTS');
+    expect(serverEnv(cluster({ enabled: true, journalArchiveS3: { bucket: 'b' } }))).toMatchObject({ RECOVERY_POINTS: 'true' });
+  });
 });

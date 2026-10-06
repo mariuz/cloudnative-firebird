@@ -9,7 +9,8 @@
 # time the primary archived it (ARCHIVED): point-in-time recovery picks the segments archived up to
 # its target time from these names.
 #
-# Lineage markers of the primary (LINEAGE) are written as empty files too.
+# Lineage markers of the primary (LINEAGE) are written as empty files too, and each fetched
+# segment's recovery points (POINTS) as "<segment>.points".
 #
 # With RESULT_FILE set, "listed=<S>" (that highest sequence) is written to it as well: anything
 # this Job uploads is at most S, and the operator promotes replicas after it.
@@ -130,6 +131,21 @@ for my $name (sort @names) {
   close $s;
   rename("$out/.$name.part", "$out/$name") or die "rename $name: $!\n";
   my ($seq) = $name =~ /journal-(\d+)$/;
+  # its recovery points ("<epoch> <length>", POINTS), when the primary sampled any
+  if (defined $seq) {
+    my $ps = request('POINTS ' . ($seq + 0));
+    my @points;
+    while (my $l = <$ps>) {
+      last if $l =~ /^(?:\.|ERR)/;
+      push @points, $l if $l =~ /^\d+ \d+\n$/;
+    }
+    close $ps;
+    if (@points) {
+      open(my $pf, '>', "$out/$name.points") or die "write points of $name: $!\n";
+      print $pf @points;
+      close $pf;
+    }
+  }
   if (defined $seq && $archived{$seq + 0}) {
     open(my $mark, '>', "$out/$name.archived-$archived{$seq + 0}") or die "write marker for $name: $!\n";
     close $mark;

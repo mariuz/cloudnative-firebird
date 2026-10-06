@@ -38,7 +38,7 @@ describe('segment server: synchronous replication commands', () => {
   const servers: ChildProcess[] = [];
   afterAll(() => servers.forEach((s) => s.kill()));
 
-  async function start(pod: string, primary: string, database = '/var/lib/firebird/data/mydb.fdb') {
+  async function start(pod: string, primary: string, database = '/var/lib/firebird/data/mydb.fdb', extraEnv: Record<string, string> = {}) {
     const ws = workspace();
     const base = join(ws.dir, 'repl');
     for (const d of ['archive', 'source']) mkdirSync(join(base, d), { recursive: true });
@@ -58,6 +58,7 @@ describe('segment server: synchronous replication commands', () => {
         ISC_PASSWORD: 'tok',
         SEGMENT_PORT: String(port),
         SCRIPT_DIR: ws.dir,
+        ...extraEnv,
       },
     });
     servers.push(server);
@@ -114,6 +115,44 @@ describe('segment server: synchronous replication commands', () => {
     expect(await ask('NBACKUP 0 nbackup-l0-x.nbk')).toEqual(['OK']);
     expect(existsSync(join(data, 'nbackup-l0-x.nbk.ctl'))).toBe(false);
     expect(ws.calls().at(-1)).toContain('nbk_level 0');
+  });
+
+  it('samples the primary\'s journal segments as recovery points (POINTS)', async () => {
+    if (!hasPerl) return;
+    const journal = mkdtempSync(join(tmpdir(), 'fb-journal-'));
+    const segment = (seq: number, length: number) => {
+      const h = Buffer.alloc(length);
+      h.write('FBCHANGELOG', 0, 'latin1');
+      h.writeBigUInt64LE(BigInt(seq), 32);
+      h.writeBigUInt64LE(BigInt(length), 40);
+      writeFileSync(join(journal, `mydb.fdb.journal-${String(seq).padStart(9, '0')}`), h);
+    };
+    segment(7, 150);
+    const { base, ask } = await start('db-0', 'db-0', undefined, { RECOVERY_POINTS: 'true', JOURNAL_DIR: journal });
+    const lengths = async () => (await ask('POINTS 7')).filter((l) => l !== '.').map((l) => Number(l.split(' ')[1]));
+    for (let i = 0; i < 40 && (await lengths()).length < 1; i++) await new Promise((r) => setTimeout(r, 100));
+    segment(7, 252);
+    for (let i = 0; i < 40 && (await lengths()).length < 2; i++) await new Promise((r) => setTimeout(r, 100));
+    expect(await lengths()).toEqual([150, 252]);
+    const [line] = await ask('POINTS 7');
+    expect(Math.abs(Number(line.split(' ')[0]) - Date.now() / 1000)).toBeLessThan(10);
+    expect(existsSync(join(base, 'points', '7'))).toBe(true);
+    // a segment without points, and a bad request
+    expect(await ask('POINTS 8')).toEqual(['.']);
+    expect((await ask('POINTS x'))[0]).toBe('ERR bad request');
+  }, 15_000);
+
+  it('samples nothing on a replica', async () => {
+    if (!hasPerl) return;
+    const journal = mkdtempSync(join(tmpdir(), 'fb-journal-'));
+    const h = Buffer.alloc(150);
+    h.write('FBCHANGELOG', 0, 'latin1');
+    h.writeBigUInt64LE(3n, 32);
+    h.writeBigUInt64LE(150n, 40);
+    writeFileSync(join(journal, 'mydb.fdb.journal-000000003'), h);
+    const { ask } = await start('db-1', 'db-0', undefined, { RECOVERY_POINTS: 'true', JOURNAL_DIR: journal });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(await ask('POINTS 3')).toEqual(['.']);
   });
 
   it('reports the lineage switches recorded at promotion (LINEAGE)', async () => {

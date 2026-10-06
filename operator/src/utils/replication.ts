@@ -169,6 +169,8 @@ function replicationEnv(
           ...(cluster.spec.replication.journalArchiveS3 ? [{ name: 'ARCHIVE_UPLOAD', value: 'true' }] : []),
         ]
       : []),
+    // recovery points within a segment, for point-in-time recovery from the journal archive
+    ...(cluster.spec.replication?.journalArchiveS3 ? [{ name: 'RECOVERY_POINTS', value: 'true' }] : []),
     ...isolationCheckEnv(cluster),
   ];
 }

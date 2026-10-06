@@ -810,9 +810,17 @@ backup's sequence hold exactly the later changes; transactions still open in the
 replayed from their first segment (the Job fetches earlier segments when one started before the
 backup). The Job checks that no transaction complete in the backup has changes after it.
 
-Segments are applied whole: `targetTime` recovers every segment archived at or before it, so the
-recovery point is up to `replication.archiveTimeoutSeconds` (plus the archive delay) before the
-target; transactions not committed by the end of the last segment are rolled back. A target before
+`targetTime` recovers every segment archived at or before it, and the next segment up to the
+target: the journal has no timestamps, so the primary's segment server samples the segments
+being written every second and keeps "<time> <length>" recovery points per segment, which the
+journal archive Job uploads as `<segment>.points`. The header length of a segment only grows by
+whole writes (a commit's blocks), so the restore cuts the next segment at its last recorded
+length at or before the target (header length set, file truncated) and replays it too: the
+recovery point is within about a second of the target. Segments without points (archived before
+v0.60.0, or by a primary of an older version) are applied whole, so the recovery point is then up
+to `replication.archiveTimeoutSeconds` (plus the archive delay) before the target. Transactions
+not committed by the recovery point are rolled back. `targetSegment` and the latest point apply
+whole segments. A target before
 the backup fails the restore. The Job pod needs room for the database twice (scratch database and
 its level-0 copy) plus the chain and the segments. Segments uploaded before v0.45.0 have no
 marker: their upload time stands in for the archive time, which only makes `targetTime` more
