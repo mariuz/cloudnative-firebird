@@ -163,7 +163,10 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
       const step = (re: RegExp) => calls.findIndex((c) => re.test(c));
       expect(step(/prp_shutdown_mode prp_sm_full/)).toBeLessThan(step(/prp_online_mode prp_sm_normal/));
       expect(step(/prp_online_mode/)).toBeLessThan(step(/gfix -replica none/));
-      expect(step(/gfix -replica none/)).toBeLessThan(step(/isql .*enable-publication.sql/));
+      expect(step(/gfix -replica none localhost:/)).toBeLessThan(step(/isql .*enable-publication.sql/));
+      // the seed copy (taken in full shutdown) is made what the offline promotion writes, afterwards
+      expect(step(/gfix -online normal .*bootstrap-seed\.fdb\.tmp/)).toBeGreaterThan(step(/prp_online_mode/));
+      expect(calls.some((c) => /gfix -replica none .*bootstrap-seed\.fdb\.tmp/.test(c))).toBe(true);
       // offline bootstrap seed at 12, replica state gone, lineage recorded, marked as the primary
       expect(readFileSync(join(r.base, 'bootstrap-seed.seq'), 'utf8').trim()).toBe('12');
       expect(existsSync(join(r.base, 'bootstrap-seed.fdb'))).toBe(true);

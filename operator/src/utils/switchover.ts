@@ -178,7 +178,13 @@ export function buildPromoteJob(cluster: FirebirdCluster, target: string, archiv
             {
               name: 'promote',
               image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
-              command: ['sh', '-c', `perl ${OPERATOR_CONFIG_DIR}/segment-request.pl "$TARGET" ${request} | tee /dev/termination-log`],
+              // the reply is the termination message; the Job succeeds once it has one
+              command: [
+                'sh',
+                '-c',
+                `reply=$(perl ${OPERATOR_CONFIG_DIR}/segment-request.pl "$TARGET" ${request}); echo "$reply"; ` +
+                  'printf "%s" "$reply" > /dev/termination-log 2>/dev/null; [ -n "$reply" ]',
+              ],
               env: [
                 ...superuserClientEnv(cluster),
                 { name: 'TARGET', value: instanceHost(cluster, target) },
