@@ -35,7 +35,7 @@ Status: **done** (in this repository), **planned** (listed in [ROADMAP.md](../RO
 
 | CloudNativePG | Here |
 |---|---|
-| 1.30: validation during reconciliation when admission webhooks are unavailable, surfaced in status | There is no webhook: the CRDs reject invalid specs with CEL rules (v0.17.0), and every reconcile still validates the spec (and the fencing annotation) and reports `Degraded` with the message. |
+| 1.30: validation during reconciliation when admission webhooks are unavailable, surfaced in status | The CRDs reject invalid specs with CEL rules (v0.17.0), and a validating webhook (v0.65.0, `failurePolicy: Ignore`, certificates managed by the operator) adds the checks that need other objects. Every reconcile still validates the spec (and the fencing annotation) and reports `Degraded` with the message, so objects admitted while the webhook was unavailable are caught too. |
 | 1.29: "terminal error" phase for doomed backups | Invalid backup specs and failed Jobs end in `Failed` and are not retried. |
 | 1.28: standard `app.kubernetes.io/*` labels | Used on every generated resource. |
 | 1.28: replicas detect network drops within 5 s (`tcp_user_timeout`) | The segment puller uses 10 s connect and 60 s read timeouts and polls every 5 s. |

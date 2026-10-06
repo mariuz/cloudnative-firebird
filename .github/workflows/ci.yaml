@@ -88,6 +88,7 @@ jobs:
           kubectl apply -f config/deploy/namespace.yaml
           kubectl apply -f config/deploy/serviceaccount.yaml
           kubectl apply -f config/deploy/rbac.yaml
+          kubectl apply -f config/deploy/webhook.yaml
           # Patch deployment to use the locally built image and avoid pulling from registry
           sed 's|image: ghcr.io/mariuz/cloudnative-firebird:latest|image: cloudnative-firebird:ci|;s|imagePullPolicy: Always|imagePullPolicy: Never|' \
             config/deploy/deployment.yaml | kubectl apply -f -
@@ -139,6 +140,48 @@ jobs:
           timeout 60 bash -c \
             'until [ -n "$(kubectl get firebirdcluster test-cluster -o jsonpath={.status.phase})" ]; do sleep 3; done'
           kubectl get firebirdcluster test-cluster -o jsonpath='{.status}'; echo
+
+      - name: Verify the admission webhook
+        run: |
+          # the operator writes its certificates and fills in the caBundle
+          timeout 120 bash -c "until [ -n \"\$(kubectl get validatingwebhookconfiguration cloudnative-firebird-validating-webhook -o jsonpath='{.webhooks[0].clientConfig.caBundle}')\" ]; do sleep 3; done"
+          kubectl get secret cloudnative-firebird-webhook-cert -n cloudnative-firebird-system -o jsonpath='{.type}' | grep -q kubernetes.io/tls
+          restore() { # <file> <spec lines after clusterName>
+            printf 'apiVersion: firebird.cloudnative-firebird.io/v1\nkind: FirebirdRestore\nmetadata:\n  name: webhook-check\n  namespace: default\nspec:\n  clusterName: test-cluster\n%s\n' "$2" > "$1"
+          }
+          restore /tmp/over.yaml '  backupPath: x.fbk
+            targetDatabase: mydb.fdb'
+          restore /tmp/missing.yaml '  backupName: no-such-backup'
+          restore /tmp/valid.yaml '  backupPath: x.fbk'
+          sed -i 's/^ *targetDatabase/  targetDatabase/' /tmp/over.yaml
+          # a restore over the cluster database is refused (failurePolicy Ignore: retried until the
+          # API server calls the webhook with the new caBundle)
+          for i in $(seq 1 40); do
+            out=$(kubectl apply --dry-run=server -f /tmp/over.yaml 2>&1 || true)
+            echo "$out" | grep -q 'is the cluster database' && break
+            sleep 3
+          done
+          echo "$out"
+          echo "$out" | grep -q 'denied the request'
+          # so is one from a backup that does not exist; a valid one is admitted
+          out=$(kubectl apply --dry-run=server -f /tmp/missing.yaml 2>&1 || true); echo "$out"
+          echo "$out" | grep -q 'FirebirdBackup no-such-backup not found'
+          kubectl apply --dry-run=server -f /tmp/valid.yaml | grep -q 'server dry run'
+          # a user whose password Secret does not exist yet is admitted, with a warning
+          out=$(kubectl apply --dry-run=server -f - 2>&1 <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdUser
+          metadata:
+            name: webhook-check
+            namespace: default
+          spec:
+            clusterName: test-cluster
+            passwordSecret:
+              name: no-such-secret
+          EOF
+          ); echo "$out"
+          echo "$out" | grep -q 'Warning: Secret no-such-secret does not exist'
+          echo "$out" | grep -q 'server dry run'
 
       - name: Verify the Firebird instance persists data on its PVC
         run: |
@@ -337,17 +380,29 @@ jobs:
           [ "$(count restore-from-physical.fdb)" = "30" ]
           echo "both restores contain all 30 rows"
 
-          # restoring over the cluster database is refused
-          kubectl apply -f - <<'EOF'
+          # restoring over the cluster database is refused: by the admission webhook when it is applied,
+          # and by the operator for an object the webhook did not see (failurePolicy Ignore, e.g. the
+          # operator was down): here the webhook skips objects labelled webhook-check=skip for a moment
+          cat > /tmp/over-live.yaml <<'EOF'
           apiVersion: firebird.cloudnative-firebird.io/v1
           kind: FirebirdRestore
           metadata:
             name: over-live
+            labels:
+              webhook-check: skip
           spec:
             clusterName: repl
             backupName: repl-logical
             targetDatabase: mydb.fdb
           EOF
+          out=$(kubectl apply -f /tmp/over-live.yaml 2>&1 || true); echo "$out"
+          echo "$out" | grep -q 'denied the request: targetDatabase mydb.fdb is the cluster database'
+          if kubectl get firebirdrestore over-live 2>/dev/null; then echo "over-live was admitted"; exit 1; fi
+          kubectl patch validatingwebhookconfiguration cloudnative-firebird-validating-webhook --type=json \
+            -p '[{"op":"add","path":"/webhooks/0/objectSelector","value":{"matchExpressions":[{"key":"webhook-check","operator":"NotIn","values":["skip"]}]}}]'
+          for i in $(seq 1 20); do kubectl apply -f /tmp/over-live.yaml 2>/dev/null && break; sleep 3; done
+          kubectl patch validatingwebhookconfiguration cloudnative-firebird-validating-webhook --type=json \
+            -p '[{"op":"remove","path":"/webhooks/0/objectSelector"}]'
           wait_phase firebirdrestore over-live Failed restore-over-live
           kubectl get firebirdrestore over-live -o jsonpath='{.status.error}' | grep -q 'cluster database'
           ! kubectl get job restore-over-live 2>/dev/null

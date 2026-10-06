@@ -31,6 +31,9 @@ spec:
             # /healthz, /readyz and the Prometheus /metrics
             - name: http
               containerPort: 8080
+            # validating admission webhook (config/deploy/webhook.yaml)
+            - name: webhook
+              containerPort: 9443
           env:
             - name: NODE_ENV
               value: production
@@ -39,6 +42,9 @@ spec:
             # Firebird image of clusters without spec.imageName (default firebirdsql/firebird:latest)
             # - name: FIREBIRD_DEFAULT_IMAGE
             #   value: firebirdsql/firebird:5
+            # the admission webhook (config/deploy/webhook.yaml); "false" turns it off
+            - name: WEBHOOK_ENABLED
+              value: "true"
             - name: OPERATOR_NAMESPACE
               valueFrom:
                 fieldRef:

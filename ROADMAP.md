@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.64.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.65.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,11 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Admission Webhook** *(v0.65.0, CloudNativePG's validating webhook)*
+  - The operator serves a validating webhook (`config/deploy/webhook.yaml`) for checks the CRD rules cannot express because they need other objects. It refuses what the operator would fail for good: a restore over the cluster database, from a missing or failed backup, of the wrong type, or with an unusable point-in-time source. It also runs the operator's spec validation, including the checks the CRDs lack.
+  - Missing clusters, Secrets and clone sources, and backups still running, are warnings (`kubectl` shows them), since one apply may create objects in any order. Updates are checked only when the spec changes, so the operator's own updates and deletions are never blocked.
+  - Certificates without cert-manager: the operator creates a CA and a serving certificate (ECDSA P-256; DER written by the operator, since Node has no X.509 writer), keeps them in a Secret, renews them before expiry, and fills in the `caBundle`. `failurePolicy: Ignore`; every reconcile still validates.
+  - The kind CI checks a refused restore, an admitted one, and a warning for a missing Secret against the API server.
 - [x] **Signed Segment Server Requests** *(v0.64.0, CloudNativePG 1.30 authenticated operator-to-instance calls)*
   - Every client of the segment server used to send the SYSDBA password in plain text with each request: the operator, the segment pullers, seeding, and the switchover, failover, sync-standby, backup and journal archive Jobs. Requests are now signed instead: `SIG1 <epoch> <nonce> <HMAC-SHA256(password, "<epoch> <nonce> <request>")> <request>`. The server accepts a request within five minutes of its own clock, once per nonce, and answers a bad signature, an old request or a replay with `ERR unauthorized (<reason>)`.
   - The Firebird image ships perl-base only, without Digest::SHA, so SHA-256 and HMAC are written in plain Perl (`segment-auth.pl`, included into each script when the ConfigMap is built). Unit tests check them against Node's crypto.
@@ -311,7 +316,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `spec.serviceAccountName` for the instance pods and every Job of the cluster; `s3.secretRef` is optional, so S3 can be reached through workload identity (EKS IRSA / Pod Identity) instead of static keys.
   - `firebird.cloudnative-firebird.io/reconciliationDisabled` pauses a single backup, scheduled backup, restore or user.
 - [x] **Admission Validation** *(v0.17.0)*
-  - CRD CEL rules (`x-kubernetes-validations`) and OpenAPI constraints reject invalid specs at apply time, without a webhook: bootstrap sources, cron schedules, S3 references, physical backups to S3 without replication, restore paths, `sync` replication, storage shrink, reserved user and role names.
+  - CRD CEL rules (`x-kubernetes-validations`) and OpenAPI constraints reject invalid specs at apply time (the admission webhook, v0.65.0, adds checks that need other objects): bootstrap sources, cron schedules, S3 references, physical backups to S3 without replication, restore paths, `sync` replication, storage shrink, reserved user and role names.
   - `hack/crd-validation/test.sh` runs valid and invalid manifests against the API server in CI; a unit test keeps the operator's own validation in agreement with the same manifests.
 - [x] **Kubernetes Events** *(v0.16.0)*
   - Events on `FirebirdCluster`, `FirebirdBackup`, `FirebirdRestore` and `FirebirdUser` for switchovers, failovers (including `PrimaryNotReady`, CloudNativePG's `PrimaryStatusCheckFailed`), fencing, re-seeding, rolling updates, lagging replicas, volume expansion, reconcile failures, backups, restores and users (CloudNativePG 1.29 / 1.30).

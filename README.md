@@ -100,6 +100,7 @@ kubectl apply -f config/crds/
 kubectl apply -f config/deploy/namespace.yaml
 kubectl apply -f config/deploy/serviceaccount.yaml
 kubectl apply -f config/deploy/rbac.yaml
+kubectl apply -f config/deploy/webhook.yaml
 kubectl apply -f config/deploy/deployment.yaml
 ```
 
@@ -132,9 +133,34 @@ Invalid specs are rejected when they are applied: the CRDs carry OpenAPI constra
 validation rules (`x-kubernetes-validations`) for the same checks the operator runs on every
 reconcile, e.g. mutually exclusive bootstrap sources, cron schedules, physical backups to S3 without replication,
 restore paths outside the data directory, `sync` replication with one instance, shrinking `storage.size` and
-immutable `clusterName` / `username` fields. No admission webhook is needed. The operator still
+immutable `clusterName` / `username` fields. The operator still
 validates each reconcile (for objects created before an upgrade) and reports `Degraded`.
 `hack/crd-validation/test.sh` checks the rules against an API server.
+
+The **admission webhook** (`config/deploy/webhook.yaml`, served by the operator) adds the checks
+that need other objects. It **refuses**:
+
+- a `FirebirdRestore` whose target is the cluster database;
+- a restore from a `FirebirdBackup` that does not exist or failed;
+- a restore whose `restoreType` does not match its backup;
+- a point-in-time restore whose source cannot be used (not a physical backup, no journal archive);
+- the few spec checks the CRD rules cannot express, e.g. `WireCrypt` settings with
+  `tls.enabled`, or a fencing annotation naming other clusters' instances.
+
+It **warns** without refusing (objects may be applied in any order) about:
+
+- a `FirebirdCluster` that does not exist yet or is hibernated;
+- missing Secrets (superuser, S3 credentials, a user's password and its key);
+- a clone source that does not exist;
+- a backup a restore waits for.
+
+Updates are only checked when the spec (or, on a cluster, the annotations) changes.
+
+The operator creates the webhook's certificates itself, with no cert-manager needed: a CA and a
+serving certificate in the Secret `cloudnative-firebird-webhook-cert`, renewed 30 days before
+they expire, with the CA put into the webhook configuration's `caBundle`. The webhook's
+`failurePolicy` is `Ignore`, so objects are still admitted while the operator is down and checked
+when it reconciles. `WEBHOOK_ENABLED=false` on the operator Deployment turns it off.
 
 ```yaml
 apiVersion: firebird.cloudnative-firebird.io/v1

@@ -1,0 +1,52 @@
+# Validating admission webhook served by the operator (port 9443). The operator creates its
+# certificates (Secret cloudnative-firebird-webhook-cert) and fills in caBundle below; until it
+# has, and whenever the operator is unavailable, objects are admitted (failurePolicy: Ignore) and
+# the operator still validates them when it reconciles.
+apiVersion: v1
+kind: Service
+metadata:
+  name: cloudnative-firebird-webhook
+  namespace: cloudnative-firebird-system
+  labels:
+    app.kubernetes.io/name: cloudnative-firebird
+    app.kubernetes.io/component: operator
+spec:
+  selector:
+    app.kubernetes.io/name: cloudnative-firebird
+    app.kubernetes.io/component: operator
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: 9443
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: cloudnative-firebird-validating-webhook
+  labels:
+    app.kubernetes.io/name: cloudnative-firebird
+    app.kubernetes.io/component: operator
+webhooks:
+  - name: validate.firebird.cloudnative-firebird.io
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    clientConfig:
+      service:
+        name: cloudnative-firebird-webhook
+        namespace: cloudnative-firebird-system
+        path: /validate
+        port: 443
+    rules:
+      - apiGroups: ["firebird.cloudnative-firebird.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources:
+          - firebirdclusters
+          - firebirdbackups
+          - firebirdscheduledbackups
+          - firebirdrestores
+          - firebirdusers
+          - firebirdroles
+        scope: Namespaced
