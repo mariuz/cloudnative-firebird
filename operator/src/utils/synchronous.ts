@@ -13,7 +13,9 @@ import { REPLICATION_LAG_ANNOTATION, isPodReady } from './routing';
  * cannot be reached, so the replica never misses a committed transaction; once it is back, the
  * primary reconnects on its own.
  *
- * One replica, the synchronous standby, is attached at a time. It must not apply the journal as
+ * synchronous.number replicas (default 1), the synchronous standbys, are attached: Firebird applies
+ * each commit on every one of them (verified: with one down, commits fail). They are attached and
+ * detached one at a time. A standby must not apply the journal as
  * well (it would apply every change twice), so the switch happens with the primary briefly in
  * full shutdown at the end of its last segment (sync-standby.pl): the standby stops applying
  * segments, the primary's segment server writes the sync_replica entry to the file
@@ -25,7 +27,29 @@ import { REPLICATION_LAG_ANNOTATION, isPodReady } from './routing';
  * when it leaves the cluster; with dataDurability preferred also when it has not been ready for
  * standbyUnavailableSeconds. After a failover the attached standby is promoted (it has every
  * committed transaction), and the other replicas are re-seeded from it.
+ *
+ * status.synchronous: standby / phase / time / message describe the last attach or detach (phase
+ * Attaching or Detaching while its Job runs), standbys every standby attached to the primary.
  */
+
+/** Standbys attached to the status's primary (statuses written before standbys: the one standby) */
+export function attachedStandbys(status?: SynchronousStatus): string[] {
+  if (!status) return [];
+  if (status.standbys) return status.standbys;
+  return status.phase === 'Attached' || status.phase === 'Detaching' ? [status.standby] : [];
+}
+
+/** Instances in synchronous replication with the status's primary: attached, or being attached */
+export function synchronousMembers(status?: SynchronousStatus): string[] {
+  if (!status) return [];
+  const members = attachedStandbys(status);
+  return status.phase === 'Attaching' && !members.includes(status.standby) ? [...members, status.standby] : members;
+}
+
+/** synchronous.number, at most the replicas there are */
+export function synchronousNumber(cluster: FirebirdCluster): number {
+  return Math.max(1, Math.min(cluster.spec.replication?.synchronous?.number ?? 1, cluster.spec.instances - 1));
+}
 
 export const DEFAULT_STANDBY_UNAVAILABLE_SECONDS = 30;
 /** How long a failed sync-standby Job blocks the next attempt */
@@ -44,7 +68,13 @@ export function synchronousMode(cluster: FirebirdCluster): boolean {
 }
 
 /** Builds the Job that attaches or detaches the synchronous standby (sync-standby.pl) */
-export function buildSyncStandbyJob(cluster: FirebirdCluster, action: SyncAction, primary: string, standby: string): V1Job {
+export function buildSyncStandbyJob(
+  cluster: FirebirdCluster,
+  action: SyncAction,
+  primary: string,
+  standby: string,
+  others: string[] = [],
+): V1Job {
   const { name, namespace = 'default', uid } = cluster.metadata;
   const labels = { ...clusterLabels(name), 'app.kubernetes.io/component': 'sync-standby' };
   return {
@@ -77,6 +107,8 @@ export function buildSyncStandbyJob(cluster: FirebirdCluster, action: SyncAction
                 { name: 'ACTION', value: action },
                 { name: 'PRIMARY', value: instanceHost(cluster, primary) },
                 { name: 'STANDBY', value: instanceHost(cluster, standby) },
+                // the standbys that stay attached
+                { name: 'OTHERS', value: others.map((pod) => instanceHost(cluster, pod)).join(',') },
                 { name: 'DATABASE_PATH', value: `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}` },
                 { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
                 { name: 'TIMEOUT_SECONDS', value: '120' },
@@ -167,7 +199,7 @@ export function handoverForUpdate(input: SyncPlanInput): boolean {
  * The replica to attach: ready, not fenced or re-seeding, caught up, not about to be restarted by
  * the rolling update; the lowest ordinal first
  */
-export function chooseStandby(input: SyncPlanInput): string | undefined {
+export function chooseStandby(input: SyncPlanInput, exclude: string[] = attachedStandbys(input.status)): string | undefined {
   const { cluster, pods, primaryPod } = input;
   const name = cluster.metadata.name;
   return pods
@@ -176,6 +208,7 @@ export function chooseStandby(input: SyncPlanInput): string | undefined {
       const lag = Number(p.metadata?.annotations?.[REPLICATION_LAG_ANNOTATION]);
       return (
         pod !== primaryPod &&
+        !exclude.includes(pod) &&
         Number(pod.slice(name.length + 1)) < cluster.spec.instances &&
         isPodReady(p) &&
         !p.metadata?.deletionTimestamp &&
@@ -196,11 +229,17 @@ export function planSynchronous(input: SyncPlanInput): SyncStep {
   const at = new Date(now).toISOString();
   const primary = pods.find((p) => p.metadata?.name === primaryPod);
   const primaryReady = Boolean(primary && isPodReady(primary));
+  const before = attachedStandbys(status);
+  const without = (pod: string) => before.filter((s) => s !== pod);
 
   // a Job in progress or finished
   if (status && (status.phase === 'Attaching' || status.phase === 'Detaching')) {
     if (!job) {
-      return { kind: 'finished', status: { ...status, phase: 'Failed', message: `the sync-standby Job disappeared`, time: at }, event: 'SyncStandbyFailed' };
+      return {
+        kind: 'finished',
+        status: { ...status, standbys: before, phase: 'Failed', message: `the sync-standby Job disappeared`, time: at },
+        event: 'SyncStandbyFailed',
+      };
     }
     if (conditionTrue(job, 'Failed') && status.phase === 'Detaching') {
       // the primary may still replicate to the standby: attached as before, retried later
@@ -208,6 +247,7 @@ export function planSynchronous(input: SyncPlanInput): SyncStep {
         kind: 'finished',
         status: {
           ...status,
+          standbys: before,
           phase: 'Attached',
           message: `detaching ${status.standby} failed (see the Job logs); retried`,
           time: at,
@@ -224,6 +264,7 @@ export function planSynchronous(input: SyncPlanInput): SyncStep {
         kind: 'finished',
         status: {
           ...status,
+          standbys: without(status.standby),
           phase: 'Failed',
           message: `${status.phase === 'Attaching' ? 'attaching' : 'detaching'} ${status.standby} failed (see the Job logs)` +
             (reseed ? `; ${status.standby} is re-seeded` : ''),
@@ -238,17 +279,25 @@ export function planSynchronous(input: SyncPlanInput): SyncStep {
     if (status.phase === 'Attaching' && outcome === 'attached') {
       return {
         kind: 'finished',
-        status: { ...withoutRetry(status), phase: 'Attached', message: `${status.standby} is the synchronous standby of ${status.primary}`, time: at },
+        status: {
+          ...withoutRetry(status),
+          standbys: [...without(status.standby), status.standby],
+          phase: 'Attached',
+          message: `${status.standby} is a synchronous standby of ${status.primary}`,
+          time: at,
+        },
         event: 'SyncStandbyAttached',
       };
     }
     if (status.phase === 'Detaching' && outcome.startsWith('detached')) {
       const unreachable = outcome === 'detached unreachable';
+      const rest = without(status.standby);
       return {
         kind: 'finished',
         status: {
           ...status,
-          phase: 'Detached',
+          standbys: rest,
+          phase: rest.length > 0 ? 'Attached' : 'Detached',
           message: unreachable
             ? `${status.standby} detached while unreachable: it is re-seeded`
             : `${status.standby} detached; it continues from the journal`,
@@ -258,41 +307,80 @@ export function planSynchronous(input: SyncPlanInput): SyncStep {
         event: 'SyncStandbyDetached',
       };
     }
-    return { kind: 'finished', status: { ...status, phase: 'Failed', message: `unexpected sync-standby Job outcome: ${outcome || 'none'}`, time: at }, event: 'SyncStandbyFailed' };
+    return {
+      kind: 'finished',
+      status: { ...status, standbys: without(status.standby), phase: 'Failed', message: `unexpected sync-standby Job outcome: ${outcome || 'none'}`, time: at },
+      event: 'SyncStandbyFailed',
+    };
   }
 
-  // the primary moved (failover, or a switchover after the detach): no standby attached to it
+  // the primary moved (failover, or a switchover after the detach): nothing attached to it
   const current = status && status.primary === primaryPod ? status : undefined;
+  const attached = current ? attachedStandbys(current) : [];
 
-  if (current?.phase === 'Attached') {
-    const standbyPod = pods.find((p) => p.metadata?.name === current.standby);
-    const standbyReady = Boolean(standbyPod && isPodReady(standbyPod));
-    const unavailableSince = standbyReady ? undefined : (current.unavailableSince ?? at);
-    const attached: SynchronousStatus = { ...current, unavailableSince };
-    if (!unavailableSince) delete attached.unavailableSince;
-    if (!primaryReady) return { kind: 'none', status: attached }; // a primary restart keeps its standby; failover handles a lost one
-    const reason = detachReason(input, current.standby, unavailableSince);
-    if (!reason || (current.retryAfter && now < Date.parse(current.retryAfter))) return { kind: 'none', status: attached };
+  if (current && attached.length > 0) {
+    // since when each attached standby has not been ready (statuses before v0.61.0: unavailableSince)
+    const unavailable: Record<string, string> = {};
+    for (const standby of attached) {
+      const pod = pods.find((p) => p.metadata?.name === standby);
+      if (pod && isPodReady(pod)) continue;
+      unavailable[standby] =
+        current.unavailable?.[standby] ?? (standby === current.standby ? current.unavailableSince : undefined) ?? at;
+    }
+    const kept: SynchronousStatus = { ...current, standbys: attached };
+    delete kept.unavailableSince;
+    delete kept.unavailable;
+    if (Object.keys(unavailable).length > 0) kept.unavailable = unavailable;
+    if (!primaryReady) return { kind: 'none', status: kept }; // a primary restart keeps its standbys; failover handles a lost one
+    const retrying = Boolean(current.retryAfter && now < Date.parse(current.retryAfter));
+    // more standbys than synchronous.number: the highest ordinal goes first
+    const excess = synchronousMode(cluster) && attached.length > synchronousNumber(cluster)
+      ? [...attached].sort((a, b) => ordinalOf(cluster, b) - ordinalOf(cluster, a))[0]
+      : undefined;
+    for (const standby of excess ? [excess, ...attached.filter((s) => s !== excess)] : attached) {
+      const reason = standby === excess && !detachReason(input, standby, unavailable[standby])
+        ? `more synchronous standbys than synchronous.number (${synchronousNumber(cluster)})`
+        : detachReason(input, standby, unavailable[standby]);
+      if (!reason || retrying) continue;
+      const next: SynchronousStatus = { ...withoutRetry(kept), standby, phase: 'Detaching', message: `detaching ${standby}: ${reason}`, time: at };
+      return { kind: 'start', action: 'detach', standby, status: next };
+    }
+    if (retrying || !synchronousMode(cluster) || attached.length >= synchronousNumber(cluster) || input.busy || input.fenced.includes(primaryPod)) {
+      return { kind: 'none', status: kept };
+    }
+    // one more standby
+    if (current.phase === 'Failed' && now - Date.parse(current.time) < SYNC_RETRY_SECONDS * 1000) return { kind: 'none', status: kept };
+    const standby = chooseStandby(input, attached);
+    if (!standby) return { kind: 'none', status: kept };
     return {
       kind: 'start',
-      action: 'detach',
-      standby: current.standby,
-      status: { ...withoutRetry(attached), phase: 'Detaching', message: `detaching ${current.standby}: ${reason}`, time: at },
+      action: 'attach',
+      standby,
+      status: { ...withoutRetry(kept), standby, phase: 'Attaching', message: `attaching ${standby} as a synchronous standby`, time: at },
     };
   }
 
   // nothing attached: attach a standby when possible
-  const keep = synchronousMode(cluster) && (current?.phase === 'Failed' || current?.phase === 'Detached') ? current : undefined;
+  const keep: SynchronousStatus | undefined =
+    synchronousMode(cluster) && (current?.phase === 'Failed' || current?.phase === 'Detached')
+      ? { ...current, standbys: [] }
+      : undefined;
+  if (keep) {
+    delete keep.unavailableSince;
+    delete keep.unavailable;
+  }
   if (!synchronousMode(cluster) || !primaryReady || input.busy || input.fenced.includes(primaryPod)) {
     return { kind: 'none', status: keep };
   }
   if (keep?.phase === 'Failed' && now - Date.parse(keep.time) < SYNC_RETRY_SECONDS * 1000) return { kind: 'none', status: keep };
-  const standby = chooseStandby(input);
+  const standby = chooseStandby(input, []);
   if (!standby) return { kind: 'none', status: keep };
   return {
     kind: 'start',
     action: 'attach',
     standby,
-    status: { standby, primary: primaryPod, phase: 'Attaching', message: `attaching ${standby} as the synchronous standby`, time: at },
+    status: { standby, primary: primaryPod, standbys: [], phase: 'Attaching', message: `attaching ${standby} as a synchronous standby`, time: at },
   };
 }
+
+const ordinalOf = (cluster: FirebirdCluster, pod: string) => Number(pod.slice(cluster.metadata.name.length + 1));

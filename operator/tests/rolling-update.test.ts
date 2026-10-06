@@ -49,13 +49,29 @@ describe('rolling update planning', () => {
 
   it('restarts the synchronous standby last, and not while it is held', () => {
     const pods = [pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-old')];
-    expect(plan(pods, { syncStandby: { pod: 'db-2', hold: false } })?.restart).toBe('db-1');
-    expect(plan(pods, { syncStandby: { pod: 'db-2', hold: true } })?.restart).toBe('db-1');
+    expect(plan(pods, { syncStandbys: [{ pod: 'db-2', hold: false }] })?.restart).toBe('db-1');
+    expect(plan(pods, { syncStandbys: [{ pod: 'db-2', hold: true }] })?.restart).toBe('db-1');
     const last = [pod('db-0', 'db-old'), pod('db-1', 'db-new'), pod('db-2', 'db-old')];
-    expect(plan(last, { syncStandby: { pod: 'db-2', hold: false } })?.restart).toBe('db-2');
-    const held = plan(last, { syncStandby: { pod: 'db-2', hold: true } });
+    expect(plan(last, { syncStandbys: [{ pod: 'db-2', hold: false }] })?.restart).toBe('db-2');
+    const held = plan(last, { syncStandbys: [{ pod: 'db-2', hold: true }] });
     expect(held?.restart).toBeUndefined();
     expect(held?.message).toContain('synchronous standby db-2');
+  });
+
+  it('restarts several synchronous standbys from the highest ordinal, each once handed over', () => {
+    const c = makeCluster({ instances: 4 });
+    const pods = [pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-old'), pod('db-3', 'db-old')];
+    // db-3 is not a standby: first
+    const standbys = [{ pod: 'db-1', hold: false }, { pod: 'db-2', hold: false }];
+    expect(plan(pods, { cluster: c, syncStandbys: standbys })?.restart).toBe('db-3');
+    expect(rollingUpdateTarget(c, sts(), pods, 'db-0', [], ['db-1', 'db-2'])).toBeUndefined();
+    // then db-2: never db-1 while db-2 waits for its handover
+    const rest = [pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-old'), pod('db-3', 'db-new')];
+    expect(rollingUpdateTarget(c, sts(), rest, 'db-0', [], ['db-1', 'db-2'])).toBe('db-2');
+    const waiting = plan(rest, { cluster: c, syncStandbys: [{ pod: 'db-1', hold: false }, { pod: 'db-2', hold: true }] });
+    expect(waiting?.restart).toBeUndefined();
+    expect(waiting?.message).toContain('synchronous standby db-2');
+    expect(plan(rest, { cluster: c, syncStandbys: standbys })?.restart).toBe('db-2');
   });
 
   it('names the replica restarted last (the only outdated one)', () => {

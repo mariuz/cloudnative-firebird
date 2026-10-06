@@ -505,13 +505,25 @@ spec:
     synchronous:
       dataDurability: required      # default; or preferred
       standbyUnavailableSeconds: 30 # preferred only
+      number: 1                     # synchronous standbys (default 1, at most instances - 1)
 ```
 
 With `mode: sync` one replica, the **synchronous standby**, receives every change from the
 primary directly (Firebird's `sync_replica`): a commit completes only once the standby applied it,
 so the standby never misses a committed transaction. The other replicas stay asynchronous.
-`status.synchronous` shows the standby and its state (`Attaching`, `Attached`, `Detaching`,
-`Detached`, `Failed`), with `SyncStandby*` events.
+`status.synchronous` shows the last attach or detach and its state (`Attaching`, `Attached`,
+`Detaching`, `Detached`, `Failed`) and `standbys`, every attached standby, with `SyncStandby*`
+events.
+
+**Several standbys** (`synchronous.number`, CloudNativePG's `number`): the primary lists every
+attached standby as a `sync_replica`, and Firebird applies each commit on all of them before it
+completes (verified: with one of two standbys down, commits fail and are applied on neither). So
+`number: 2` means two standbys that each have every committed transaction; there is no "any one
+of them" quorum. They are attached and detached one at a time; each one's unavailability counts
+on its own (`preferred` detaches only the one that is down, `required` blocks writes until it is
+back), and lowering `number` detaches the highest ordinal. A failover promotes the lowest-ordinal
+ready standby. Rolling updates restart the other replicas first, then the standbys from the
+highest ordinal down, each handed over as below.
 
 - **Attaching** (a sync-standby Job, as soon as a replica is ready and has caught up, lowest
   ordinal first): the primary is put into full shutdown for a moment, the replica applies the

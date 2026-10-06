@@ -152,6 +152,11 @@ describe('validateClusterSpec', () => {
     expect(() => sync({ dataDurability: 'preferred', standbyUnavailableSeconds: 10 })).not.toThrow();
     expect(() => sync({ dataDurability: 'maybe' })).toThrow(/dataDurability/);
     expect(() => sync({ standbyUnavailableSeconds: 0 })).toThrow(/standbyUnavailableSeconds/);
+    // number: at most instances - 1
+    expect(() => sync({ number: 1 })).not.toThrow();
+    expect(() => sync({ number: 2 })).toThrow(/synchronous.number \(2\) needs at least 3 instances/);
+    expect(() => sync({ number: 0 })).toThrow(/positive integer/);
+    expect(() => validateClusterSpec(makeCluster({ instances: 3, replication: { enabled: true, mode: 'sync', synchronous: { number: 2 } } }))).not.toThrow();
   });
 
   it.each(['/var/lib/firebird/data/repl', '/var/lib/firebird/data/a/b_c-1'])(

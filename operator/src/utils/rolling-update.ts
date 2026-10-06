@@ -66,10 +66,11 @@ export function planRollingUpdate(options: {
   /** A switchover, failover or re-seed is in progress: restart nothing */
   busy?: string;
   lastSwitchover?: SwitchoverStatus;
-  /** The synchronous standby of the primary; hold: it is not to be restarted now */
-  syncStandby?: { pod: string; hold: boolean };
+  /** The synchronous standbys of the primary; hold: not to be restarted now */
+  syncStandbys?: Array<{ pod: string; hold: boolean }>;
 }): RollingUpdatePlan | undefined {
-  const { cluster, statefulSet, pods, primaryPod, fenced, busy, lastSwitchover, syncStandby } = options;
+  const { cluster, statefulSet, pods, primaryPod, fenced, busy, lastSwitchover } = options;
+  const syncStandbys = options.syncStandbys ?? [];
   if (!operatorRollsPods(cluster) || cluster.spec.hibernated) return undefined;
   const revision = statefulSet.status?.updateRevision;
   const generation = statefulSet.metadata?.generation ?? 0;
@@ -114,8 +115,10 @@ export function planRollingUpdate(options: {
   // replicas first, highest ordinal first like the StatefulSet controller; the synchronous
   // standby last
   const replicas = [...outdated].reverse().filter((pod) => pod !== primaryPod && !fenced.includes(pod));
-  const replica = replicas.find((pod) => pod !== syncStandby?.pod) ?? replicas[0];
-  if (replica && replica === syncStandby?.pod && syncStandby.hold) {
+  const sync = (pod: string) => syncStandbys.find((s) => s.pod === pod);
+  // synchronous standbys from the highest ordinal down (rollingUpdateTarget), each once handed over
+  const replica = replicas.find((pod) => !sync(pod)) ?? replicas[0];
+  if (replica && sync(replica)?.hold) {
     plan.message = `waiting for the synchronous standby ${replica} to be handed over or detached before restarting it`;
     return plan;
   }
@@ -159,9 +162,10 @@ export function planRollingUpdate(options: {
 }
 
 /**
- * The replica a rolling update restarts last: the only outdated replica left (fenced instances
- * aside). Undefined when the operator does not roll the pods, or none or several replicas are
- * outdated.
+ * The synchronous standby a rolling update restarts next: once only synchronous standbys
+ * (syncStandbys) are outdated, the highest ordinal of them; without synchronous standbys, the only
+ * outdated replica left (fenced instances aside). Undefined when the operator does not roll the
+ * pods, or other replicas are restarted first.
  */
 export function rollingUpdateTarget(
   cluster: FirebirdCluster,
@@ -169,6 +173,7 @@ export function rollingUpdateTarget(
   pods: V1Pod[],
   primaryPod: string,
   fenced: string[],
+  syncStandbys: string[] = [],
 ): string | undefined {
   if (!statefulSet || !operatorRollsPods(cluster) || cluster.spec.hibernated) return undefined;
   const revision = statefulSet.status?.updateRevision;
@@ -177,5 +182,10 @@ export function rollingUpdateTarget(
     .filter((p) => p.metadata?.labels?.[REVISION_LABEL] !== revision)
     .map((p) => p.metadata?.name ?? '')
     .filter((pod) => pod !== primaryPod && !fenced.includes(pod));
-  return outdated.length === 1 ? outdated[0] : undefined;
+  if (syncStandbys.length === 0) return outdated.length === 1 ? outdated[0] : undefined;
+  if (outdated.length === 0 || outdated.some((pod) => !syncStandbys.includes(pod))) {
+    // other replicas first; a lone outdated replica is the target all the same
+    return outdated.length === 1 ? outdated[0] : undefined;
+  }
+  return [...outdated].sort((a, b) => ordinal(b) - ordinal(a))[0];
 }

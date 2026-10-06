@@ -11,14 +11,14 @@
 #   1. stop writes on the primary: full shutdown (idempotent);
 #   2. read its final replication sequence S, wait until the standby has applied everything up to
 #      S (POSITION);
-#   3. SYNC <standby> on the primary (sync_replica in the file replication.conf includes), then
+#   3. SYNC <standby> (and OTHERS) on the primary (sync_replica in the file replication.conf includes), then
 #      STANDBY on (the standby stops applying journal segments);
 #   4. bring the primary back online: from its next attachment on, every commit is applied on the
 #      standby before it completes.
 # detach:
 #   1. stop writes on the primary, read its final sequence S;
 #   2. STANDBY off S on the standby (its replica control file and segment puller continue after S),
-#      then SYNC none on the primary; a standby that cannot be reached is reported, and the
+#      then SYNC OTHERS (none without) on the primary; a standby that cannot be reached is reported, and the
 #      operator re-seeds it;
 #   3. bring the primary back online.
 #
@@ -26,8 +26,12 @@
 # was (attach). The outcome goes to the termination message: "attached", "detached",
 # "detached unreachable", "failed clean" (nothing changed on the standby) or "failed".
 #
-# Environment: ACTION (attach | detach), PRIMARY, STANDBY (hosts), DATABASE_PATH,
-# ISC_USER / ISC_PASSWORD, SEGMENT_PORT, TIMEOUT_SECONDS, RESULT_FILE.
+# With several synchronous standbys (synchronous.number), OTHERS lists the ones that stay
+# attached: every SYNC names them too, so only STANDBY changes.
+#
+# Environment: ACTION (attach | detach), PRIMARY, STANDBY (hosts), OTHERS (comma-separated
+# hosts, may be empty), DATABASE_PATH, ISC_USER / ISC_PASSWORD, SEGMENT_PORT, TIMEOUT_SECONDS,
+# RESULT_FILE.
 use strict;
 use warnings;
 use IO::Socket::INET;
@@ -40,6 +44,9 @@ my $token   = $ENV{ISC_PASSWORD} // '';
 my $port    = $ENV{SEGMENT_PORT} // 3051;
 my $timeout = $ENV{TIMEOUT_SECONDS} // 300;
 my $result  = $ENV{RESULT_FILE} // '/dev/termination-log';
+my @others  = grep { length } split /,/, ($ENV{OTHERS} // '');
+# the SYNC argument: the standbys that stay attached, with or without this one
+sub sync_list { my @h = (@others, @_); return @h ? join(',', @h) : 'none'; }
 die "ACTION must be attach or detach\n" unless $action eq 'attach' || $action eq 'detach';
 $| = 1;
 
@@ -111,7 +118,7 @@ my $outcome = eval {
     # the standby first: its segment puller applies the journal again only once the primary no
     # longer names it (SYNCTO), and nothing after segment S exists while the primary is shut down
     my $reached = ok($standby, "STANDBY off $final");
-    if (!ok($primary, 'SYNC none')) {
+    if (!ok($primary, 'SYNC ' . sync_list())) {
       # still attached: the standby must not apply the journal (the primary is still shut down)
       ok($standby, 'STANDBY on') if $reached;
       die "cannot turn synchronous replication off on $primary\n";
@@ -136,7 +143,7 @@ my $outcome = eval {
   print "$standby has applied everything up to segment $final\n";
   # the primary first: the standby's segment puller stops applying the journal only once the
   # primary names it (SYNCTO) and it is the standby
-  ok($primary, "SYNC $standby") or die "cannot turn synchronous replication on on $primary\n";
+  ok($primary, 'SYNC ' . sync_list($standby)) or die "cannot turn synchronous replication on on $primary\n";
   print "synchronous replication to $standby on $primary (from its next opening)\n";
   $standby_on = $final;
   ok($standby, 'STANDBY on') or die "$standby refused to become the synchronous standby\n";
@@ -148,7 +155,7 @@ if (!defined $outcome) {
   # never received a change synchronously, anything else that it has to be re-seeded
   my $clean = 1;
   if ($action eq 'attach') {
-    ok($primary, 'SYNC none') or $clean = 0;
+    ok($primary, 'SYNC ' . sync_list()) or $clean = 0;
     if (defined $standby_on) { ok($standby, "STANDBY off $standby_on") or $clean = 0; }
   }
   online();

@@ -176,6 +176,13 @@ describe('segment server: synchronous replication commands', () => {
     expect(await ask('SYNC none')).toEqual(['OK']);
     expect(readFileSync(join(base, 'sync.conf'), 'utf8')).toBe('');
     expect(await ask('SYNCTO')).toEqual(['OK none']);
+    // several standbys: an entry each, every commit waits for all of them
+    expect(await ask('SYNC db-1.db-headless,db-2.db-headless')).toEqual(['OK']);
+    expect(readFileSync(join(base, 'sync.conf'), 'utf8').match(/^sync_replica = /gm)).toHaveLength(2);
+    expect(readFileSync(join(base, 'sync.conf'), 'utf8')).toContain('sync_replica = db-2.db-headless:/var/lib/firebird/data/mydb.fdb\n');
+    expect(await ask('SYNCTO')).toEqual(['OK db-1.db-headless,db-2.db-headless']);
+    expect((await ask('SYNC db-1,,db-2'))[0]).toBe('ERR bad request');
+    expect(await ask('SYNC none')).toEqual(['OK']);
     // the primary is never a standby
     expect((await ask('STANDBY on'))[0]).toMatch(/^ERR this instance is the primary/);
   });
@@ -225,7 +232,11 @@ describe('sync-standby.pl', () => {
    * Runs the Job script against fake segment servers for the primary (127.0.0.1) and the standby
    * (127.0.0.2, same port; none with __down): answers per command prefix, requests logged
    */
-  async function run(action: string, answers: { primary: Record<string, string>; standby: Record<string, string | null> }) {
+  async function run(
+    action: string,
+    answers: { primary: Record<string, string>; standby: Record<string, string | null> },
+    extraEnv: Record<string, string> = {},
+  ) {
     const ws = workspace();
     const log: string[] = [];
     const make = (who: 'primary' | 'standby', host: string, port: number) =>
@@ -273,6 +284,7 @@ describe('sync-standby.pl', () => {
         SEGMENT_PORT: String(port),
         TIMEOUT_SECONDS: '4',
         RESULT_FILE: join(ws.dir, 'result'),
+        ...extraEnv,
       },
     });
     let out = '';
@@ -306,6 +318,20 @@ describe('sync-standby.pl', () => {
     });
     expect(r.code).toBe(0);
     expect(r.result).toBe('attached');
+  });
+
+  it('keeps the other standbys in every SYNC (OTHERS)', async () => {
+    if (!hasPerl) return;
+    const attach = await run(
+      'attach',
+      { primary: { HEADER: 'OK 9', SYNC: 'OK' }, standby: { POSITION: 'OK 9 0 0', 'STANDBY on': 'OK' } },
+      { OTHERS: 'db-1.db-headless' },
+    );
+    expect(attach.result).toBe('attached');
+    expect(attach.log).toContain('primary SYNC db-1.db-headless,127.0.0.2');
+    const detach = await run('detach', { primary: { HEADER: 'OK 31', SYNC: 'OK' }, standby: { 'STANDBY off': 'OK' } }, { OTHERS: 'db-1.db-headless' });
+    expect(detach.result).toBe('detached');
+    expect(detach.log).toContain('primary SYNC db-1.db-headless');
   });
 
   it('undoes a half-done attach and brings the primary back online', async () => {

@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { V1Job, V1Pod } from '@kubernetes/client-node';
 import { FirebirdCluster, SynchronousStatus } from '../src/types';
-import { buildSyncStandbyJob, planSynchronous, SyncPlanInput } from '../src/utils/synchronous';
+import { attachedStandbys, buildSyncStandbyJob, planSynchronous, SyncPlanInput, synchronousMembers, synchronousNumber } from '../src/utils/synchronous';
 import { buildReplicationConf } from '../src/utils/replication';
 import { REPLICATION_LAG_ANNOTATION } from '../src/utils/routing';
 
@@ -20,7 +20,10 @@ const pod = (name: string, ready = true, lag: string | null = '0'): V1Pod => ({
 
 const now = Date.parse('2026-10-03T10:00:00Z');
 const ago = (s: number) => new Date(now - s * 1000).toISOString();
+// a status written before v0.61.0 (no standbys list): read as the one standby attached
 const attached: SynchronousStatus = { standby: 'db-1', primary: 'db-0', phase: 'Attached', time: ago(600) };
+/** what the operator stores for it */
+const kept: SynchronousStatus = { ...attached, standbys: ['db-1'] };
 const done = (type: 'Complete' | 'Failed'): V1Job => ({ status: { conditions: [{ type, status: 'True' }] } });
 
 const plan = (over: Partial<SyncPlanInput> = {}) =>
@@ -56,7 +59,7 @@ describe('planSynchronous: attaching', () => {
 
   it('retries a failed attach after a minute', () => {
     const failed: SynchronousStatus = { ...attached, phase: 'Failed', time: ago(10) };
-    expect(plan({ status: failed })).toEqual({ kind: 'none', status: failed });
+    expect(plan({ status: failed })).toEqual({ kind: 'none', status: { ...failed, standbys: [] } });
     expect(plan({ status: { ...failed, time: ago(61) } }).kind).toBe('start');
   });
 
@@ -91,9 +94,10 @@ describe('planSynchronous: attaching', () => {
 
 describe('planSynchronous: attached', () => {
   it('keeps the standby attached while nothing calls for a detach', () => {
-    expect(plan({ status: attached })).toEqual({ kind: 'none', status: attached });
+    expect(plan({ status: attached })).toEqual({ kind: 'none', status: kept });
+    expect(plan({ status: kept })).toEqual({ kind: 'none', status: kept });
     // a primary restart keeps its standby
-    expect(plan({ status: attached, pods: [pod('db-0', false), pod('db-1'), pod('db-2')] })).toEqual({ kind: 'none', status: attached });
+    expect(plan({ status: kept, pods: [pod('db-0', false), pod('db-1'), pod('db-2')] })).toEqual({ kind: 'none', status: kept });
   });
 
   it.each([
@@ -110,21 +114,23 @@ describe('planSynchronous: attached', () => {
 
   it('with dataDurability required, keeps a standby that is not ready (writes wait for it)', () => {
     const down = [pod('db-0'), pod('db-1', false), pod('db-2')];
+    // the time a status before v0.61.0 recorded is kept, per standby
     const step = plan({ status: { ...attached, unavailableSince: ago(3600) }, pods: down });
-    expect(step).toMatchObject({ kind: 'none', status: { phase: 'Attached', unavailableSince: ago(3600) } });
+    expect(step).toMatchObject({ kind: 'none', status: { phase: 'Attached', unavailable: { 'db-1': ago(3600) } } });
+    expect(step.status?.unavailableSince).toBeUndefined();
   });
 
   it('with dataDurability preferred, detaches a standby unavailable for standbyUnavailableSeconds', () => {
     const cluster = makeCluster({ synchronous: { dataDurability: 'preferred', standbyUnavailableSeconds: 20 } });
     const down = [pod('db-0'), pod('db-1', false), pod('db-2')];
     // just went down: the time is recorded
-    expect(plan({ cluster, status: attached, pods: down })).toMatchObject({ kind: 'none', status: { unavailableSince: ago(0) } });
-    expect(plan({ cluster, status: { ...attached, unavailableSince: ago(10) }, pods: down }).kind).toBe('none');
-    const step = plan({ cluster, status: { ...attached, unavailableSince: ago(25) }, pods: down });
+    expect(plan({ cluster, status: kept, pods: down })).toMatchObject({ kind: 'none', status: { unavailable: { 'db-1': ago(0) } } });
+    expect(plan({ cluster, status: { ...kept, unavailable: { 'db-1': ago(10) } }, pods: down }).kind).toBe('none');
+    const step = plan({ cluster, status: { ...kept, unavailable: { 'db-1': ago(25) } }, pods: down });
     expect(step).toMatchObject({ kind: 'start', action: 'detach' });
     expect(step.kind === 'start' && step.status.message).toContain('has not been ready for 25s');
     // back in time: forgotten
-    expect(plan({ cluster, status: { ...attached, unavailableSince: ago(10) } })).toEqual({ kind: 'none', status: attached });
+    expect(plan({ cluster, status: { ...kept, unavailable: { 'db-1': ago(10) } } })).toEqual({ kind: 'none', status: kept });
   });
 
   it('records a detach, and re-seeds a standby that could not be reached', () => {
@@ -161,15 +167,15 @@ describe('planSynchronous: rolling updates', () => {
     expect(plan({ status: detached, rollingTarget: 'db-1' })).toMatchObject({ kind: 'start', action: 'attach', standby: 'db-2' });
     expect(plan({ rollingTarget: 'db-1' })).toMatchObject({ kind: 'start', action: 'attach', standby: 'db-2' });
     // a standby that is not restarted next stays
-    expect(plan({ status: attached, rollingTarget: 'db-2' })).toEqual({ kind: 'none', status: attached });
+    expect(plan({ status: attached, rollingTarget: 'db-2' })).toEqual({ kind: 'none', status: kept });
   });
 
   it('with dataDurability required and no other replica, restarts the standby attached', () => {
     const pods = [pod('db-0'), pod('db-1')];
-    expect(plan({ cluster: makeCluster({}, 2), pods, status: attached, rollingTarget: 'db-1' })).toEqual({ kind: 'none', status: attached });
+    expect(plan({ cluster: makeCluster({}, 2), pods, status: attached, rollingTarget: 'db-1' })).toEqual({ kind: 'none', status: kept });
     // another replica that has not caught up cannot take over
     const lagging = [pod('db-0'), pod('db-1'), pod('db-2', true, '300')];
-    expect(plan({ pods: lagging, status: attached, rollingTarget: 'db-1' })).toEqual({ kind: 'none', status: attached });
+    expect(plan({ pods: lagging, status: attached, rollingTarget: 'db-1' })).toEqual({ kind: 'none', status: kept });
   });
 
   it('with dataDurability preferred, detaches the standby before its restart', () => {
@@ -179,6 +185,79 @@ describe('planSynchronous: rolling updates', () => {
     // and attaches nothing until it was restarted
     expect(plan({ cluster, pods, status: { ...attached, phase: 'Detached' }, rollingTarget: 'db-1' }).kind).toBe('none');
     expect(plan({ cluster, pods, status: { ...attached, phase: 'Detached' } })).toMatchObject({ kind: 'start', action: 'attach', standby: 'db-1' });
+  });
+});
+
+describe('planSynchronous: several standbys (synchronous.number)', () => {
+  const two = makeCluster({ synchronous: { number: 2 } });
+  const one: SynchronousStatus = { standby: 'db-1', primary: 'db-0', standbys: ['db-1'], phase: 'Attached', time: ago(600) };
+  const both: SynchronousStatus = { ...one, standby: 'db-2', standbys: ['db-1', 'db-2'] };
+
+  it('attaches standbys one at a time up to the number', () => {
+    expect(plan({ cluster: two })).toMatchObject({ kind: 'start', action: 'attach', standby: 'db-1', status: { standbys: [] } });
+    const second = plan({ cluster: two, status: one });
+    expect(second).toMatchObject({ kind: 'start', action: 'attach', standby: 'db-2', status: { phase: 'Attaching', standbys: ['db-1'] } });
+    const attaching = second.kind === 'start' ? second.status : one;
+    expect(plan({ cluster: two, status: attaching, job: done('Complete'), jobOutcome: 'attached' })).toMatchObject({
+      kind: 'finished',
+      status: { phase: 'Attached', standby: 'db-2', standbys: ['db-1', 'db-2'] },
+    });
+    expect(plan({ cluster: two, status: both })).toEqual({ kind: 'none', status: both });
+    // a failed attach of the second leaves the first attached, retried a minute later
+    const failed = plan({ cluster: two, status: attaching, job: done('Failed'), jobOutcome: 'failed clean' });
+    expect(failed).toMatchObject({ kind: 'finished', status: { phase: 'Failed', standbys: ['db-1'] } });
+    const failedStatus = failed.kind === 'finished' ? failed.status : one;
+    expect(plan({ cluster: two, status: failedStatus })).toEqual({ kind: 'none', status: failedStatus });
+    expect(plan({ cluster: two, status: failedStatus, now: now + 61_000 })).toMatchObject({ kind: 'start', action: 'attach', standby: 'db-2' });
+  });
+
+  it('detaches the standby that needs it, keeping the others', () => {
+    const step = plan({ cluster: two, status: both, fenced: ['db-2'] });
+    expect(step).toMatchObject({ kind: 'start', action: 'detach', standby: 'db-2', status: { phase: 'Detaching', standbys: ['db-1', 'db-2'] } });
+    const detaching = step.kind === 'start' ? step.status : both;
+    expect(plan({ cluster: two, status: detaching, job: done('Complete'), jobOutcome: 'detached' })).toMatchObject({
+      kind: 'finished',
+      status: { phase: 'Attached', standbys: ['db-1'] },
+    });
+    // the last one: Detached
+    const last: SynchronousStatus = { ...one, standby: 'db-1', phase: 'Detaching' };
+    expect(plan({ cluster: two, status: last, job: done('Complete'), jobOutcome: 'detached' })).toMatchObject({
+      kind: 'finished',
+      status: { phase: 'Detached', standbys: [] },
+    });
+  });
+
+  it('detaches the highest ordinal when the number is lowered', () => {
+    const step = plan({ cluster: makeCluster({ synchronous: { number: 1 } }), status: both });
+    expect(step).toMatchObject({ kind: 'start', action: 'detach', standby: 'db-2' });
+    expect(step.kind === 'start' && step.status.message).toContain('more synchronous standbys than synchronous.number (1)');
+  });
+
+  it('tracks each standby\'s unavailability on its own', () => {
+    const pods = [pod('db-0'), pod('db-1'), pod('db-2', false)];
+    expect(plan({ cluster: two, status: both, pods })).toMatchObject({ kind: 'none', status: { unavailable: { 'db-2': ago(0) } } });
+    const preferred = makeCluster({ synchronous: { number: 2, dataDurability: 'preferred', standbyUnavailableSeconds: 20 } });
+    expect(plan({ cluster: preferred, status: { ...both, unavailable: { 'db-2': ago(30) } }, pods })).toMatchObject({
+      kind: 'start',
+      action: 'detach',
+      standby: 'db-2',
+    });
+  });
+
+  it('builds the Job with the standbys that stay attached', () => {
+    const env = (others: string[]) =>
+      Object.fromEntries(buildSyncStandbyJob(two, 'attach', 'db-0', 'db-2', others).spec!.template.spec!.containers[0].env!.map((e) => [e.name, e.value]));
+    expect(env(['db-1']).OTHERS).toBe('db-1.db-headless');
+    expect(env([]).OTHERS).toBe('');
+  });
+
+  it('reads the standbys of statuses written before v0.61.0', () => {
+    expect(attachedStandbys(attached)).toEqual(['db-1']);
+    expect(attachedStandbys({ ...attached, phase: 'Detaching' })).toEqual(['db-1']);
+    expect(attachedStandbys({ ...attached, phase: 'Attaching' })).toEqual([]);
+    expect(synchronousMembers({ ...attached, phase: 'Attaching' })).toEqual(['db-1']);
+    expect(synchronousMembers({ ...both, standby: 'db-3', phase: 'Attaching' })).toEqual(['db-1', 'db-2', 'db-3']);
+    expect(synchronousNumber(makeCluster({ synchronous: { number: 5 } }))).toBe(2);
   });
 });
 

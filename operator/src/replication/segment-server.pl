@@ -43,14 +43,16 @@
 #                                 service manager then, and gstat reads local files only)
 #   "<token> ISOLATION\n"       -> "OK fenced <epoch>" when the isolation check fenced this
 #                                 primary (isolation-check.pl), "OK online" otherwise
-#   "<token> SYNC <host>|none\n" -> "OK": primary, synchronous replication: writes SYNC_FILE (included
-#                                 by replication.conf) with a sync_replica entry for the replica
-#                                 <host>, or empties it. Firebird reads it when the database is
-#                                 opened, so the sync-standby Job sends it while the database is in
-#                                 full shutdown (sync-standby.pl)
-#   "<token> SYNCTO\n"          -> "OK <host>" or "OK none": the replica the primary replicates to
-#                                 synchronously (from SYNC_FILE: what applies once the database is
-#                                 opened; the sync-standby Job changes it only in full shutdown)
+#   "<token> SYNC <host>[,<host>...]|none\n" -> "OK": primary, synchronous replication: writes
+#                                 SYNC_FILE (included by replication.conf) with a sync_replica entry
+#                                 per replica (every commit waits for all of them), or empties it.
+#                                 Firebird reads it when the database is opened, so the sync-standby
+#                                 Job sends it while the database is in full shutdown
+#                                 (sync-standby.pl)
+#   "<token> SYNCTO\n"          -> "OK <host>[,<host>...]" or "OK none": the replicas the primary
+#                                 replicates to synchronously (from SYNC_FILE: what applies once the
+#                                 database is opened; the sync-standby Job changes it only in full
+#                                 shutdown)
 #   "<token> STANDBY on\n"      -> "OK": replica, becomes the synchronous standby: the segment
 #                                 puller stops applying journal segments (the primary sends every
 #                                 change directly), and only records the last archived one
@@ -644,12 +646,13 @@ while (1) {
     } else {
       print $client "ERR cannot bring $database online\n";
     }
-  } elsif ($cmd eq 'SYNC' && defined $arg && $arg =~ /^(none|[A-Za-z0-9][A-Za-z0-9.-]*)$/) {
+  } elsif ($cmd eq 'SYNC' && defined $arg && $arg =~ /^(none|[A-Za-z0-9][A-Za-z0-9.-]*(?:,[A-Za-z0-9][A-Za-z0-9.-]*)*)$/) {
     # the server's ISC_USER / ISC_PASSWORD are the credentials: Firebird 4 ignores the sub-section
     # and uses them, Firebird 5 and later read password_env
     my $user = $ENV{ISC_USER} || 'SYSDBA';
-    my $content = $arg eq 'none' ? '' :
-      "sync_replica = $arg:$database\n{\n  username = $user\n  password_env = ISC_PASSWORD\n}\n";
+    my $content = $arg eq 'none' ? '' : join('', map {
+      "sync_replica = $_:$database\n{\n  username = $user\n  password_env = ISC_PASSWORD\n}\n"
+    } split /,/, $arg);
     if (write_file($sync_file, $content)) {
       print "synchronous replication " . ($arg eq 'none' ? "off" : "to $arg") . " (applied when the database is opened)\n";
       print $client "OK\n";
@@ -657,8 +660,8 @@ while (1) {
       print $client "ERR cannot write $sync_file: $!\n";
     }
   } elsif ($cmd eq 'SYNCTO') {
-    my ($host) = slurp($sync_file) =~ /^sync_replica\s*=\s*([^:\s]+):/m;
-    print $client "OK " . ($host // 'none') . "\n";
+    my @hosts = slurp($sync_file) =~ /^sync_replica\s*=\s*([^:\s]+):/mg;
+    print $client "OK " . (@hosts ? join(',', @hosts) : 'none') . "\n";
   } elsif ($cmd eq 'STANDBY' && defined $arg && $arg eq 'on') {
     if (is_primary()) {
       print $client "ERR this instance is the primary\n";

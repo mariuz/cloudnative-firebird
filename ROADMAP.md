@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.60.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.61.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -41,7 +41,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - Replicas behind it and the old primary (when it returns) are re-seeded. Asynchronous replication: unshipped transactions are lost. A fenced primary is never failed over.
 - [x] **Firebird 4.0+ Journal-Based Replication Management & PITR Archiving** *(v0.5.0, working since v0.9.0)*
   - Dynamic journal file sync, status tracking, and continuous archiving to S3.
-  - Synchronous replication (`mode: sync`) with one synchronous standby since v0.53.0; quorum of several standbys not implemented.
+  - Synchronous replication (`mode: sync`) with one synchronous standby since v0.53.0, several (`synchronous.number`) since v0.61.0; Firebird waits for every listed standby, so there is no "any N of M" quorum.
 - [x] **Smart Read-Only Traffic Routing** *(v0.6.0)*
   - Pod readiness and replication lag-aware endpoint management for read replicas.
   - Role-labelled pods: the rw Service targets the primary (leader Lease holder), the `-replica` Service targets eligible replicas.
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Several Synchronous Standbys** *(v0.61.0, CloudNativePG `synchronous.number`)*
+  - `synchronous.number` (default 1, at most instances - 1) standbys are attached one at a time; the primary lists each as a `sync_replica` (segment server `SYNC h1,h2`, `SYNCTO` reports the list), and Firebird applies every commit on all of them (verified: with one of two down, commits fail and are applied on neither).
+  - `status.synchronous.standbys` lists the attached standbys, `unavailable` tracks each one's readiness (statuses of earlier versions are read as one standby). Each standby is detached on its own (fencing, re-seeding, `preferred` unavailability, scale-down, a lower `number`: the highest ordinal), re-seeds and volume re-creations wait for every standby, a switchover waits until all are detached, a failover promotes the lowest-ordinal ready one, and rolling updates restart the standbys last, highest ordinal first, each handed over first.
+  - Verified with operator-generated pods (two standbys: attach under writes, every commit on both, one down blocks commits, detaching one keeps the other synchronous, convergence without duplicates); the kind CI scales its synchronous cluster to three instances with `number: 2`.
 - [x] **Recovery Points Within a Segment** *(v0.60.0)*
   - Point-in-time recovery applied whole journal segments, so a target time landed on the end of the last segment archived before it (up to `archiveTimeoutSeconds` early). The primary's segment server now samples the segments being written every second (`RECOVERY_POINTS`, with a journal archive) and keeps "<time> <length>" points per segment; the archive Job uploads them as `<segment>.points`.
   - A segment's header length only grows by whole writes (a commit's blocks), and a segment cut at a recorded length (header length set, file truncated) is applied by the replica server up to there (both verified). The restore cuts the segment after the target at its last point at or before it: the recovery point is within about a second of the target.
