@@ -829,6 +829,16 @@ jobs:
           EOF
           kubectl wait pod/sync-0 pod/sync-1 --for=condition=Ready --timeout=600s 2>/dev/null \
             || { timeout 300 bash -c 'until kubectl get pod sync-1 >/dev/null 2>&1; do sleep 3; done'; kubectl wait pod/sync-0 pod/sync-1 --for=condition=Ready --timeout=600s; }
+          if [ "${{ matrix.firebird.image }}" = "firebirdsql/firebird:4" ]; then
+            # Firebird 4 commits while a sync_replica is unreachable: refused, replicating asynchronously
+            timeout 300 bash -c 'until kubectl get firebirdcluster sync -o jsonpath={.status.synchronous.message} | grep -q "Firebird 4"; do sleep 5; done' \
+              || { kubectl get firebirdcluster sync -o jsonpath='{.status.synchronous}'; echo; exit 1; }
+            kubectl get firebirdcluster sync -o jsonpath='{.status.synchronous.message}'; echo
+            [ -z "$(kubectl get firebirdcluster sync -o jsonpath='{.status.synchronous.standbys[*]}')" ]
+            ! kubectl get job sync-sync-standby >/dev/null 2>&1
+            kubectl delete firebirdcluster sync --wait=false
+            exit 0
+          fi
           wait_attached sync-0
           sync_state; echo
           # every instance container runs as uid 84 and the pod meets the restricted standard

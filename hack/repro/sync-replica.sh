@@ -4,7 +4,8 @@
 #
 #   1. strict mode (report_errors = true, disable_on_error = false): a commit is applied on the
 #      replica before it returns; with the replica down the write fails and is not committed; once
-#      the replica is back, writes succeed again;
+#      the replica is back, writes succeed again (Firebird 5 and 6; Firebird 4 commits without the
+#      replica and logs the error only: ISSUES.md, issue 8);
 #   2. a replica that also applies the journal gets every change twice;
 #   3. sync_replica can live in a file replication.conf includes, and Firebird reads it again when
 #      the database is opened after a full shutdown (no server restart).
@@ -15,7 +16,7 @@ set -eu
 IMAGE=${IMAGE:-firebirdsql/firebird:5}
 work=$(mktemp -d)
 net=fbsync-repro
-cleanup() { docker rm -f syncp syncr >/dev/null 2>&1; docker network rm "$net" >/dev/null 2>&1; rm -rf "$work"; }
+cleanup() { docker rm -f syncp syncr >/dev/null 2>&1 || true; docker network rm "$net" >/dev/null 2>&1 || true; rm -rf "$work"; }
 trap cleanup EXIT
 cleanup
 mkdir -p "$work"
@@ -86,7 +87,8 @@ q syncp "insert into t values (5); commit;" | head -3
 docker start syncr >/dev/null
 sleep 10
 q syncp "insert into t values (6); commit;" >/dev/null
-echo "replica back: primary rows $(q syncp 'set list on; select list(i) as l from t;' | awk '/^L /{print $2}'), replica $(q syncr 'set list on; select list(i) as l from t;' | awk '/^L /{print $2}')"
+ids() { q "$1" "select i from t order by i;" | awk '$1 ~ /^[0-9]+$/ { printf "%s ", $1 }'; }
+echo "replica back: primary rows $(ids syncp), replica $(ids syncr)"
 
 echo "--- 2. the same replica fed the journal as well"
 sleep 5

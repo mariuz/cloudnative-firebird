@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.61.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.62.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Synchronous Replication Needs Firebird 5** *(v0.62.0)*
+  - Running the recent features on Firebird 4 and the 6 snapshot showed that Firebird 4.0.7 commits while a `sync_replica` is unreachable: the error goes to `replication.log` only, and the replica never receives the transaction ([ISSUES.md](ISSUES.md) issue 8; `hack/repro/sync-replica.sh` shows it for one replica). A synchronous standby on Firebird 4 could be promoted without committed transactions.
+  - The operator now asks the primary's segment server for its engine version (`VERSION`): on Firebird 4 it attaches no standby, detaches an attached one, replicates asynchronously and reports it (`status.synchronous` phase `Failed`, `SyncStandbyFailed` warning), and automatic failover elects instead of promoting the standby. No standby is attached while the version is not known yet.
+  - The same runs passed on Firebird 4 and the 6 snapshot for recovery points, point-in-time recovery from a replica's backup and across a failover, non-root instances, and (on the 6 snapshot) two synchronous standbys. The kind CI checks the refusal on Firebird 4.
 - [x] **Several Synchronous Standbys** *(v0.61.0, CloudNativePG `synchronous.number`)*
   - `synchronous.number` (default 1, at most instances - 1) standbys are attached one at a time; the primary lists each as a `sync_replica` (segment server `SYNC h1,h2`, `SYNCTO` reports the list), and Firebird applies every commit on all of them (verified: with one of two down, commits fail and are applied on neither).
   - `status.synchronous.standbys` lists the attached standbys, `unavailable` tracks each one's readiness (statuses of earlier versions are read as one standby). Each standby is detached on its own (fencing, re-seeding, `preferred` unavailability, scale-down, a lower `number`: the highest ordinal), re-seeds and volume re-creations wait for every standby, a switchover waits until all are detached, a failover promotes the lowest-ordinal ready one, and rolling updates restart the standbys last, highest ordinal first, each handed over first.

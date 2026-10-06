@@ -17,6 +17,7 @@ own containers and removes them when it finishes.
 | 5 | `gstat -h` omits "Replication sequence" while it is 0 | Minor | Yes, always |
 | 6 | The official image keeps the security database on the container filesystem | Image behaviour, handled | Yes, always |
 | 7 | Firebird 6 refuses header statistics for a database in full shutdown | Firebird 6 behaviour, handled | Yes, always (6.0 snapshot) |
+| 8 | Firebird 4 commits while a synchronous replica is unreachable | Firebird 4 behaviour, handled | Yes, always (4.0.7); not on 5.0.4 or the 6.0 snapshot |
 
 ---
 
@@ -204,6 +205,30 @@ full shutdown: when the service manager refuses, it asks the old primary's segme
 (`HEADER`), which reads the sequence from the header page on disk (nothing writes it in full
 shutdown). The fencing Job takes that error as "in full shutdown". The readiness probe treats
 any failure as not ready, so a fenced instance stays unready either way.
+
+---
+
+## 8. Firebird 4 commits while a synchronous replica is unreachable
+
+**What happens.** With a `sync_replica` and `report_errors = true`, `disable_on_error = false`
+in `replication.conf`, Firebird 5.0.4 and the 6.0 snapshot fail a commit the replica cannot
+apply (`Replication error`, `Unable to complete network request to host ...`) and the
+transaction is not committed. Firebird 4.0.7 writes the same error to `replication.log` but
+commits: the client sees no error, and the replica never receives the transaction (it is not
+resent once the replica is back). With two `sync_replica` entries and one unreachable, Firebird 4
+commits on the other one only.
+
+```sh
+IMAGE=firebirdsql/firebird:4 hack/repro/sync-replica.sh   # "replica stopped; a write on the primary:" shows no error
+```
+
+After `replica stopped`, row 5 is committed on the primary but never reaches the replica.
+
+**Handling.** Synchronous replication is only used from Firebird 5 on: the operator asks the
+primary's segment server for its engine version (`VERSION`) and on Firebird 4 attaches no
+standby, detaches an attached one, replicates asynchronously and reports it in
+`status.synchronous` with a `SyncStandbyFailed` warning. Automatic failover then elects the most
+advanced replica instead of promoting a standby that may lack commits.
 
 ---
 

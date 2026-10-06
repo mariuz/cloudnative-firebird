@@ -559,9 +559,16 @@ highest ordinal down, each handed over as below.
 - Any other pod restart of the standby blocks writes with `required` until it is ready again. A
   standby whose volume is replaced outside the operator waits in its init container until it is
   detached (annotate it `reseed=true`).
+- **Firebird 5 or later.** Firebird 4 commits while a `sync_replica` cannot be reached: it logs
+  the error but does not return it to the client (`report_errors` has no effect there), and the
+  replica never receives the transaction (verified on 4.0.7, [ISSUES.md](ISSUES.md) issue 8). A
+  standby could then be promoted without transactions the primary committed, so on Firebird 4 the
+  operator attaches no standby (it asks the primary's segment server for the engine version,
+  `VERSION`), detaches any attached one, replicates asynchronously, and says so in
+  `status.synchronous` (phase `Failed`) with a `SyncStandbyFailed` warning; automatic failover
+  elects the most advanced replica instead.
 - Firebird 5 and later read the standby's password from the server's environment
-  (`password_env`); Firebird 4 ignores that and connects with the server's `ISC_USER` /
-  `ISC_PASSWORD`, the same credentials. Nothing is written to the ConfigMap.
+  (`password_env`). Nothing is written to the ConfigMap.
 
 `hack/repro/sync-replica.sh` shows the Firebird behaviour this relies on: strict synchronous
 commits, a replica applying the journal as well getting every change twice, and `sync_replica`
