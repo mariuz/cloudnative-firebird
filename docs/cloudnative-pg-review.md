@@ -29,7 +29,7 @@ Status: **done** (in this repository), **planned** (listed in [ROADMAP.md](../RO
 | CloudNativePG | What it means here |
 |---|---|
 | 1.30: primary `Lease` as a promotion mutex; the instance must hold it before acting as primary, and releases it on clean shutdown | Planned switchover (v0.13.0) and automatic failover (v0.14.0) move the `<cluster>-lease` to the promoted instance. The instances do not hold or renew it yet, so it is not a promotion mutex in CloudNativePG's sense (TODO.md, "Failover safety"). |
-| 1.30 security: operator-to-instance calls authenticated with a client certificate | The segment server authenticates with the SYSDBA password over plain TCP inside the cluster; see "Encrypt segment shipping" in TODO.md. |
+| 1.30 security: operator-to-instance calls authenticated with a client certificate | Requests to the segment server are signed with the SYSDBA password (HMAC-SHA256, time and nonce: the password is not sent, requests cannot be replayed) since v0.64.0; the transfers are plain TCP inside the cluster, see "Encrypt segment shipping" in TODO.md. |
 
 ## Already aligned
 

@@ -258,9 +258,13 @@ weaken it (another `WireCrypt`, or `Arc4` in `WireCryptPlugin`) are rejected. `t
 cert-manager Certificate) that Firebird never read; a `TLSCertificateIgnored` event says so.
 
 Not encrypted: journal segment shipping and seed copies between instances, and backup files
-copied through the segment server, travel as plain TCP inside the cluster (authenticated with the
-SYSDBA password); `networkPolicy.enabled` restricts them to the cluster's own pods and Jobs. See
-TODO.md.
+copied through the segment server, travel as plain TCP inside the cluster; `networkPolicy.enabled`
+restricts them to the cluster's own pods and Jobs. Requests to the segment server are signed with
+the SYSDBA password (HMAC-SHA256 over the request, its time and a nonce) instead of carrying it,
+so the password never crosses the network and a captured request cannot be replayed or altered.
+Replies and transferred bytes are not signed. Segment servers still accept the plain password
+from clients of earlier versions (during an upgrade), and clients send it only to servers that
+answer a signed probe the way earlier versions do. See TODO.md.
 
 ### Status Fields
 
@@ -301,8 +305,8 @@ other instances are read-only replicas:
   server starts). Full journal segments are archived on the primary's volume.
 - Two sidecars ship segments: `segment-server` serves the local archive and seed copies, and
   `segment-puller` fetches new segments from the current primary into the replica's
-  `journal_source_directory`. They use only the Firebird image's perl, authenticate with the
-  SYSDBA password, and never open a live database file directly (all access goes through the
+  `journal_source_directory`. They use only the Firebird image's perl, sign their requests with
+  the SYSDBA password (the password itself is not sent), and never open a live database file directly (all access goes through the
   local server).
 - A new replica is seeded from a **ready replica** (locked through that replica's server), or
   from the primary's offline bootstrap seed while every later segment is still archived, and
@@ -674,8 +678,8 @@ copies the file through the primary's backup file server and removes it from the
 not the copy succeeded, so the volume needs room for one backup at a time. The backup file server
 is the replication sidecar (`segment-server`), or on clusters without replication a small sidecar
 (`backup-files`, the same script in a files-only mode); it only serves plain `*.nbk` and `*.fbk`
-names in the data directory, to the cluster's own pods (NetworkPolicy), authenticated with the
-SYSDBA password. A physical restore from S3 works the other way:
+names in the data directory, to the cluster's own pods (NetworkPolicy), for requests signed
+with the SYSDBA password. A physical restore from S3 works the other way:
 the Job downloads the files (`backupPath` and `incrementalBackupPaths` are object keys), copies
 them next to the database (`restore-<name>-<n>.nbk`), restores them with `action_nrest` and
 removes them again. The S3 client image defaults to `amazon/aws-cli` and can be changed with

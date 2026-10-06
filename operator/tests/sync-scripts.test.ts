@@ -4,7 +4,9 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createServer, Server, Socket } from 'net';
+import { createHmac, randomBytes } from 'crypto';
 import { JOB_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
+import { fakeSegmentServer } from './helpers/segment-auth';
 
 const hasPerl = spawnSync('perl', ['-v']).status === 0;
 
@@ -72,7 +74,7 @@ describe('segment server: synchronous replication commands', () => {
         }
       }
     };
-    return { ws, base, ask };
+    return { ws, base, ask, port };
   }
 
   it('takes an nbackup of a replica at a known position, with its control file (NBACKUP)', async () => {
@@ -162,6 +164,62 @@ describe('segment server: synchronous replication commands', () => {
     writeFileSync(join(ws.dir, 'bin', 'isql'), '#!/bin/sh\necho "V                               4.0.7"\n');
     chmodSync(join(ws.dir, 'bin', 'isql'), 0o755);
     expect(await ask('VERSION')).toEqual(['OK 4.0.7']);
+  });
+
+  it('accepts requests signed with the password once, and the legacy form', async () => {
+    if (!hasPerl) return;
+    const { ws, ask, port } = await start('db-0', 'db-0');
+    writeFileSync(join(ws.dir, 'bin', 'isql'), '#!/bin/sh\necho "V                               5.0.4"\n');
+    chmodSync(join(ws.dir, 'bin', 'isql'), 0o755);
+    await ask('PING');   // waits until the server listens
+    const signed = (request: string, secret = 'tok', at = Math.floor(Date.now() / 1000), nonce = randomBytes(16).toString('hex')) =>
+      `SIG1 ${at} ${nonce} ${createHmac('sha256', secret).update(`${at} ${nonce} ${request}`).digest('hex')} ${request}`;
+    expect(await request(port, signed('PING'))).toEqual(['OK']);
+    const line = signed('VERSION');
+    expect(await request(port, line)).toEqual(['OK 5.0.4']);
+    expect(await request(port, line)).toEqual(['ERR unauthorized (replay)']);
+    expect(await request(port, signed('VERSION', 'wrong'))).toEqual(['ERR unauthorized (signature)']);
+    expect(await request(port, signed('VERSION', 'tok', Math.floor(Date.now() / 1000) - 3600))).toEqual(['ERR unauthorized (clock)']);
+    // a tampered request
+    expect(await request(port, line.replace(/VERSION$/, 'SYNC none'))).toEqual(['ERR unauthorized (signature)']);
+    // clients of earlier versions
+    expect(await request(port, 'tok VERSION')).toEqual(['OK 5.0.4']);
+    expect(await request(port, 'wrong VERSION')).toEqual(['ERR unauthorized']);
+
+    // segment-request.pl (shell scripts) signs too: the server answers it
+    writeFileSync(join(ws.dir, 'segment-request.pl'), REPLICATION_SCRIPTS['segment-request.pl']);
+    const out = spawnSync('perl', [join(ws.dir, 'segment-request.pl'), '127.0.0.1', 'VERSION'], {
+      env: { PATH: process.env.PATH, ISC_PASSWORD: 'tok', SEGMENT_PORT: String(port) },
+    });
+    expect(out.stdout.toString()).toBe('OK 5.0.4\n');
+  });
+
+  it('segment-request.pl sends the legacy form to a server of an earlier version', async () => {
+    if (!hasPerl) return;
+    const received: string[] = [];
+    const old: Server = createServer((sock) =>
+      sock.once('data', (d) => {
+        received.push(d.toString());
+        sock.end(d.toString().startsWith('tok ') ? 'OK none\n' : 'ERR unauthorized\n');
+      }),
+    );
+    await new Promise<void>((r) => old.listen(0, '127.0.0.1', r));
+    const dir = mkdtempSync(join(tmpdir(), 'fb-req-'));
+    writeFileSync(join(dir, 'segment-request.pl'), REPLICATION_SCRIPTS['segment-request.pl']);
+    try {
+      // asynchronously: the stand-in server runs in this process
+      const child = spawn('perl', [join(dir, 'segment-request.pl'), '127.0.0.1', 'SYNCTO'], {
+        env: { PATH: process.env.PATH, ISC_PASSWORD: 'tok', SEGMENT_PORT: String((old.address() as { port: number }).port) },
+      });
+      let stdout = '';
+      child.stdout.on('data', (d) => (stdout += d.toString()));
+      await new Promise((r) => child.once('exit', r));
+      expect(stdout).toBe('OK none\n');
+      expect(received[0]).toMatch(/^SIG1 \d+ [0-9a-f]{32} [0-9a-f]{64} PING\n$/);
+      expect(received[1]).toBe('tok SYNCTO\n');
+    } finally {
+      old.close();
+    }
   });
 
   it('reports when the replica last reached the primary (PRIMARYSEEN)', async () => {
@@ -262,17 +320,14 @@ describe('sync-standby.pl', () => {
     const log: string[] = [];
     const make = (who: 'primary' | 'standby', host: string, port: number) =>
       new Promise<Server>((resolve, reject) => {
-        const server = createServer((sock) =>
-          sock.once('data', (buf) => {
-            const line = buf.toString().trim().split(' ').slice(1).join(' ');
-            log.push(`${who} ${line}`);
-            const table = answers[who] as Record<string, string | null>;
-            const key = Object.keys(table).find((k) => line.startsWith(k));
-            const reply = key === undefined ? 'ERR bad request' : table[key];
-            if (reply === null) sock.destroy();
-            else sock.end(`${reply}\n`);
-          }),
-        );
+        const server = fakeSegmentServer((line, sock) => {
+          log.push(`${who} ${line}`);
+          const table = answers[who] as Record<string, string | null>;
+          const key = Object.keys(table).find((k) => line.startsWith(k));
+          const reply = key === undefined ? 'ERR bad request' : table[key];
+          if (reply === null) sock.destroy();
+          else sock.end(`${reply}\n`);
+        });
         server.once('error', reject);
         server.listen(port, host, () => resolve(server));
       });
@@ -430,9 +485,7 @@ describe('segment puller: primary contact', () => {
     writeFileSync(join(dir, 'segment-puller.pl'), REPLICATION_SCRIPTS['segment-puller.pl']);
     mkdirSync(join(dir, 'source'));
     writeFileSync(join(dir, 'primary'), '127.0.0.1\n');
-    const primary: Server = createServer((socket) =>
-      socket.once('data', (line) => socket.end(line.toString().includes(' LIST') ? '.\n' : 'OK none\n')),
-    );
+    const primary: Server = fakeSegmentServer((request, socket) => socket.end(request === 'LIST' ? '.\n' : 'OK none\n'), 'tok');
     await new Promise<void>((r) => primary.listen(0, '127.0.0.1', r));
     const port = (primary.address() as { port: number }).port;
     const puller = spawn('perl', [join(dir, 'segment-puller.pl')], {

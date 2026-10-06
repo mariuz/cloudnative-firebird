@@ -920,6 +920,7 @@ describe('buildConfigMap (replication)', () => {
       'reseed',
       'seed-sources',
       'segment-puller.pl',
+      'segment-request.pl',
       'segment-server.pl',
       'set-repl-seq.pl',
       'switchover.pl',

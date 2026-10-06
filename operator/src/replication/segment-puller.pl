@@ -6,6 +6,7 @@
 use strict;
 use warnings;
 use IO::Socket::INET;
+#@include segment-auth.pl
 
 my $source   = $ENV{SOURCE_DIR}   or die "SOURCE_DIR is required\n";
 my $state    = $ENV{STATE_FILE}   or die "STATE_FILE is required\n";
@@ -21,10 +22,8 @@ sub slurp { my ($f) = @_; open(my $fh, '<', $f) or return ''; local $/; my $v = 
 
 sub request {
   my ($host, $line) = @_;
-  my $sock = IO::Socket::INET->new(PeerHost => $host, PeerPort => $port, Proto => 'tcp', Timeout => 10)
-    or die "connect $host:$port: $!\n";
+  my $sock = segment_open($host, $port, $token, $line);
   $sock->timeout(60);
-  print $sock "$token $line\n";
   return $sock;
 }
 

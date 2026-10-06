@@ -25,10 +25,14 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   the database is opened); a restart of the only replica without blocking writes in `required`
   mode; an "any N of M" quorum (Firebird waits for every `sync_replica`).
 - [ ] **Encrypt segment shipping**: client connections are encrypted (WireCrypt, v0.54.0), but the
-  segment server (journal segments, seed copies, backup files) authenticates with the SYSDBA
-  password over plain TCP inside the cluster (restricted by the NetworkPolicy when enabled). The
-  image's Perl has no TLS module; options are carrying the bytes over a Firebird connection, or a
-  sidecar image with TLS.
+  segment server (journal segments, seed copies, backup files) transfers over plain TCP inside the
+  cluster (restricted by the NetworkPolicy when enabled). Since v0.64.0 requests are signed
+  instead of carrying the SYSDBA password, but replies and data are neither encrypted nor
+  signed. The image ships perl-base only (no TLS, no Digest modules); options are carrying the
+  bytes over a Firebird connection, or a sidecar image with TLS.
+- [ ] **Stop accepting the plain password** on the segment server once no supported upgrade path
+  starts from a version before v0.64.0 (clients of those versions send it; current clients send it
+  only to servers that answer the signed probe like those versions).
 - [ ] **Firebird internal formats**: seeding writes the replica control file
   (`ControlFile::DataV1` in `src/remote/server/ReplServer.cpp`) and switchover writes the
   `HDR_repl_seq` header clump (`src/jrd/ods.h`). Verified for Firebird 4.0.7 (ODS 13.0), 5.0.4

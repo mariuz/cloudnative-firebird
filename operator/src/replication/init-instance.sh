@@ -250,9 +250,11 @@ esac
 # top of a seed that also receives them from the journal. The operator detaches the standby
 # before re-seeding it; a volume lost otherwise waits here until it does (re-seed annotation).
 while :; do
-  syncto=$(perl -MIO::Socket::INET -e '
-    my $s = IO::Socket::INET->new(PeerHost => $ARGV[0], PeerPort => $ENV{SEGMENT_PORT} || 3051, Timeout => 10) or exit 0;
-    print $s "$ENV{ISC_PASSWORD} SYNCTO\n"; my $l = <$s> // ""; print $1 if $l =~ /^OK (\S+)/;' "$primary" 2>/dev/null || true)
+  reply=$(perl "$SCRIPT_DIR/segment-request.pl" "$primary" SYNCTO 2>/dev/null || true)
+  case "$reply" in
+    "OK "*) syncto=${reply#OK }; syncto=${syncto%% *} ;;
+    *) syncto="" ;;
+  esac
   case ",$syncto," in
     *",$POD_NAME,"*|*",$POD_NAME."*) echo "the primary still replicates to this instance synchronously; waiting for it to be detached (annotate the pod with reseed=true)"; sleep 10 ;;
     *) break ;;

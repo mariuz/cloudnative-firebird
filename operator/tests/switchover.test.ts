@@ -1,13 +1,13 @@
 import { describe, it, expect, vi, Mock } from 'vitest';
 import { execFileSync, spawn, spawnSync } from 'child_process';
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
-import { createServer } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { KubeConfig, V1Job } from '@kubernetes/client-node';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
 import { TARGET_PRIMARY_ANNOTATION, buildSwitchoverJob } from '../src/utils/switchover';
 import { REPLICATION_SCRIPTS } from '../src/utils/replication';
+import { fakeSegmentServer } from './helpers/segment-auth';
 import { FirebirdCluster, SwitchoverStatus } from '../src/types';
 
 const makeCluster = (target?: string, status?: FirebirdCluster['status']): FirebirdCluster => ({
@@ -307,15 +307,13 @@ describe('switchover.pl with Firebird 6', () => {
     writeFileSync(fbsvcmgr, '#!/bin/sh\necho "$*" >> "$(dirname "$0")/calls"\necho "database /var/lib/firebird/data/mydb.fdb shutdown"\nexit 1\n');
     chmodSync(fbsvcmgr, 0o755);
     const requests: string[] = [];
-    const server = createServer((sock) => {
-      sock.once('data', (buf) => {
-        const cmd = buf.toString().trim().split(' ')[1];
-        requests.push(cmd);
-        if (cmd === 'HEADER') sock.end('OK 53\n');
-        else if (cmd === 'LIST') sock.end('mydb.fdb_GUID.journal-000000053\n.\n');
-        else if (cmd === 'POSITION') sock.end('OK 53 0 0\n');
-        else sock.end('ERR unknown\n');
-      });
+    const server = fakeSegmentServer((request, sock) => {
+      const cmd = request.split(' ')[0];
+      requests.push(cmd);
+      if (cmd === 'HEADER') sock.end('OK 53\n');
+      else if (cmd === 'LIST') sock.end('mydb.fdb_GUID.journal-000000053\n.\n');
+      else if (cmd === 'POSITION') sock.end('OK 53 0 0\n');
+      else sock.end('ERR unknown\n');
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;

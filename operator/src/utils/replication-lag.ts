@@ -1,3 +1,4 @@
+import { createHmac, randomBytes } from 'crypto';
 import { Socket } from 'net';
 import { ReplicaLagStatus, SegmentRetentionStatus } from '../types';
 
@@ -17,8 +18,9 @@ export type SegmentClient = (host: string, port: number, line: string, timeoutMs
 
 export const SEGMENT_REQUEST_TIMEOUT_MS = 3000;
 
-export const segmentRequest: SegmentClient = (host, port, line, timeoutMs = SEGMENT_REQUEST_TIMEOUT_MS) =>
-  new Promise((resolve, reject) => {
+/** One request line to a segment server, as it is sent; returns the reply lines */
+function rawSegmentRequest(host: string, port: number, line: string, timeoutMs: number): Promise<string[]> {
+  return new Promise((resolve, reject) => {
     const socket = new Socket();
     let data = '';
     const done = (err?: Error) => {
@@ -34,6 +36,48 @@ export const segmentRequest: SegmentClient = (host, port, line, timeoutMs = SEGM
     socket.once('end', () => done());
     socket.connect(port, host, () => socket.write(`${line}\n`));
   });
+}
+
+/**
+ * A request signed with the SYSDBA password (segment-server.pl): "SIG1 <epoch> <nonce> <mac>
+ * <request>", mac = hex HMAC-SHA256 of "<epoch> <nonce> <request>". The password never crosses
+ * the network.
+ */
+export function signSegmentRequest(secret: string, request: string, now = Date.now()): string {
+  const at = Math.floor(now / 1000);
+  const nonce = randomBytes(16).toString('hex');
+  const mac = createHmac('sha256', secret).update(`${at} ${nonce} ${request}`).digest('hex');
+  return `SIG1 ${at} ${nonce} ${mac} ${request}`;
+}
+
+/** Segment servers of an earlier version (legacy plain password), by "host:port", with when they said so */
+const legacySegmentServers = new Map<string, number>();
+const signedSegmentServers = new Set<string>();
+const LEGACY_RECHECK_MS = 60_000;
+
+/**
+ * The line is "<password> <request>". It is sent signed to segment servers that support it; a
+ * server of an earlier version (during a rolling update) answers the signed PING probe with
+ * "ERR unauthorized" and gets the line as it is.
+ */
+export const segmentRequest: SegmentClient = async (host, port, line, timeoutMs = SEGMENT_REQUEST_TIMEOUT_MS) => {
+  const space = line.indexOf(' ');
+  const [secret, request] = space < 0 ? ['', line] : [line.slice(0, space), line.slice(space + 1)];
+  const key = `${host}:${port}`;
+  if (!signedSegmentServers.has(key)) {
+    const legacySince = legacySegmentServers.get(key);
+    if (legacySince === undefined || Date.now() - legacySince > LEGACY_RECHECK_MS) {
+      const [reply] = await rawSegmentRequest(host, port, signSegmentRequest(secret, 'PING'), timeoutMs);
+      if (reply === undefined) throw new Error(`segment server ${host}:${port}: no answer`);
+      if (reply === 'ERR unauthorized') legacySegmentServers.set(key, Date.now());
+      else {
+        legacySegmentServers.delete(key);
+        signedSegmentServers.add(key);
+      }
+    }
+  }
+  return rawSegmentRequest(host, port, signedSegmentServers.has(key) ? signSegmentRequest(secret, request) : line, timeoutMs);
+};
 
 export interface ArchivedSegment {
   sequence: number;

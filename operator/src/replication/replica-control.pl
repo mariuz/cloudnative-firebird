@@ -24,6 +24,7 @@
 use strict;
 use warnings;
 use IO::Socket::INET;
+#@include segment-auth.pl
 
 if (@ARGV && $ARGV[0] eq '--adopt') {
   my (undef, $from, $dbseq, $target) = @ARGV;
@@ -52,10 +53,8 @@ my $port = $ENV{SEGMENT_PORT} // 3051;
 # one request to the primary's segment server; undef when it does not know the command
 sub ask {
   my ($line) = @_;
-  my $sock = IO::Socket::INET->new(PeerHost => $host, PeerPort => $port, Proto => 'tcp', Timeout => 10)
-    or die "connect $host:$port: $!\n";
+  my $sock = segment_open($host, $port, ($ENV{ISC_PASSWORD} // ''), $line);
   $sock->timeout(300);
-  print $sock (($ENV{ISC_PASSWORD} // '') . " $line\n");
   my @lines;
   while (my $l = <$sock>) {
     $l =~ s/\r?\n$//;

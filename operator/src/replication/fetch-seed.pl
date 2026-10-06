@@ -6,14 +6,13 @@
 use strict;
 use warnings;
 use IO::Socket::INET;
+#@include segment-auth.pl
 
 my ($host, $target) = @ARGV;
 die "usage: fetch-seed.pl <host> <target-file>\n" unless defined $target;
 my $port = $ENV{SEGMENT_PORT} // 3051;
-my $sock = IO::Socket::INET->new(PeerHost => $host, PeerPort => $port, Proto => 'tcp', Timeout => 10)
-  or die "connect $host:$port: $!\n";
+my $sock = segment_open($host, $port, ($ENV{ISC_PASSWORD} // ''), 'SEED');
 $sock->timeout(900);
-print $sock (($ENV{ISC_PASSWORD} // '') . " SEED\n");
 my $hdr = <$sock> // '';
 die "$host: $hdr" unless $hdr =~ /^OK (\d+) (\d+) (replica|offline|live)$/;
 my ($db_size, $ctl_size, $kind) = ($1, $2, $3);

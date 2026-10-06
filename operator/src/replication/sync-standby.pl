@@ -35,6 +35,7 @@
 use strict;
 use warnings;
 use IO::Socket::INET;
+#@include segment-auth.pl
 
 my $action  = $ENV{ACTION} // '';
 my $primary = $ENV{PRIMARY} or die "PRIMARY is required\n";
@@ -52,10 +53,8 @@ $| = 1;
 
 sub request {
   my ($host, $line) = @_;
-  my $sock = IO::Socket::INET->new(PeerHost => $host, PeerPort => $port, Proto => 'tcp', Timeout => 10)
-    or return undef;
+  my $sock = eval { segment_open($host, $port, $token, $line) } or return undef;
   $sock->timeout(60);
-  print $sock "$token $line\n";
   my @lines;
   while (my $l = <$sock>) { $l =~ s/\r?\n$//; push @lines, $l; last if $l eq '.' || $l =~ /^(OK|ERR)/; }
   close $sock;
