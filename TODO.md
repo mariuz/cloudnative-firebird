@@ -52,10 +52,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **In-place configuration reloads**: every template change restarts the instances, even
   settings Firebird could apply without a restart. CloudNativePG reloads PostgreSQL in place when
   possible.
-- [ ] **Non-root instances**: the official image runs the server as root (its entrypoint edits
-  `/opt/firebird/*.conf` and the server needs its firebird-owned lock directory), so instance pods
-  meet the `baseline` Pod Security Standard, not `restricted`. Running as the `firebird` user
-  needs the configuration moved to a writable location (or an image that supports it).
 - [ ] **Validation that needs other objects** stays in the operator: e.g. a restore into the
   cluster database, a clone of a cluster in another namespace, a missing Secret. A
   ValidatingAdmissionPolicy with parameter resources, or a webhook, could reject these at apply

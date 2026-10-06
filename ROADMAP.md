@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.58.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.59.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Non-Root Instances** *(v0.59.0)*
+  - `runAsFirebirdUser: true` runs every instance container as the image's `firebird` user (uid 84, `fsGroup` 84) with all capabilities dropped: the instance pods meet the `restricted` Pod Security Standard (the default stays `baseline`, root).
+  - The unmodified image entrypoint runs on a writable copy of `/opt/firebird` (an `emptyDir` filled by the `firebird-home` init container); the init scripts chown only as root.
+  - Verified with operator-generated pods on Firebird 5 (seeding, switchover, failover, synchronous replication, point-in-time recovery across a failover, server process as uid 84); the kind CI runs the synchronous replication cluster this way and checks it against an enforced `restricted` namespace.
 - [x] **Point-in-Time Recovery from a Replica's Backup** *(v0.58.0)*
   - A physical backup with `target: prefer-standby` is taken through the replica's segment server (`NBACKUP`): the segment puller is paused, every received segment applied, and the replica control file (position and transactions in progress) is kept with the backup as `<file>.nbk.ctl` in S3. Retention removes it with the backup.
   - Point-in-time recovery adopts it instead of planning from the database header (`pitr-plan.pl --describe`), downloading from the first segment its transactions in progress need. Backups without one (older ones, the synchronous standby's) are still refused.

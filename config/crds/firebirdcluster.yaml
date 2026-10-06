@@ -666,6 +666,13 @@ spec:
                   items:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
+                runAsFirebirdUser:
+                  description: >-
+                    Run every instance container as the image's firebird user (uid 84) with no
+                    capabilities, on a writable copy of /opt/firebird, so the instance pods meet
+                    the restricted Pod Security Standard (default false: the official image runs
+                    the server as root)
+                  type: boolean
                 podSecurityContext:
                   description: >-
                     Pod security context of the instance pods (a Kubernetes PodSecurityContext),

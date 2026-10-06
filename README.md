@@ -201,17 +201,27 @@ use online validation (`fbsvcmgr action_validate`), which works while clients ar
 
 ### Security Contexts
 
-The official image runs the Firebird server as root, so the instance pods cannot meet the
-`restricted` Pod Security Standard; they meet `baseline` and drop what they can
-(CloudNativePG 1.28 `podSecurityContext` / `securityContext`):
+The official image runs the Firebird server as root, so by default the instance pods meet the
+`baseline` Pod Security Standard and drop what they can (CloudNativePG 1.28
+`podSecurityContext` / `securityContext`). With `runAsFirebirdUser: true` every instance
+container runs as the image's `firebird` user instead, and the pods meet `restricted`:
 
-| | Instance pods (all containers) | Operator Jobs (backups, restores, archive, maintenance, fencing, switchover, users) |
-|---|---|---|
-| user | root (image default) | `firebird` (uid 84), `runAsNonRoot` |
-| capabilities | all dropped except `CHOWN`, `DAC_OVERRIDE` (the server's firebird-owned lock directory), `FOWNER` (init scripts) | all dropped |
-| privilege escalation | no | no |
-| seccomp | `RuntimeDefault` | `RuntimeDefault` |
-| Pod Security Standard | `baseline` | `restricted` |
+| | Instance pods (default) | Instance pods (`runAsFirebirdUser: true`) | Operator Jobs (backups, restores, archive, maintenance, fencing, switchover, users) |
+|---|---|---|---|
+| user | root (image default) | `firebird` (uid 84), `runAsNonRoot`, `fsGroup` 84 | `firebird` (uid 84), `runAsNonRoot` |
+| capabilities | all dropped except `CHOWN`, `DAC_OVERRIDE` (the server's firebird-owned lock directory), `FOWNER` (init scripts) | all dropped | all dropped |
+| privilege escalation | no | no | no |
+| seccomp | `RuntimeDefault` | `RuntimeDefault` | `RuntimeDefault` |
+| Pod Security Standard | `baseline` | `restricted` | `restricted` |
+
+The image entrypoint applies `FIREBIRD_CONF_*` settings by editing `/opt/firebird/firebird.conf`,
+which only root may write: with `runAsFirebirdUser` a first init container (`firebird-home`) copies
+`/opt/firebird` (about 45 MB) into an `emptyDir` that the Firebird container mounts there, and the
+init scripts no longer `chown` (everything they write is the firebird user's). Turning it on rolls
+the instances; the volume becomes group-owned by `fsGroup` 84 (on storage that supports
+`fsGroup`; local-path volumes are world-writable). Verified with operator-generated pods on
+Firebird 5: seeding, journal shipping, switchover, failover, synchronous replication and
+point-in-time recovery, with the server process running as uid 84.
 
 `spec.podSecurityContext` and `spec.securityContext` are merged over the instance defaults, e.g.
 to add `supplementalGroups` or use a different `fsGroup`:

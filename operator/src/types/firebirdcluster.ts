@@ -396,6 +396,12 @@ export interface FirebirdClusterSpec {
    */
   serviceAccountName?: string;
   /**
+   * Runs every instance container as the image's firebird user (uid 84) with no capabilities, on
+   * a writable copy of /opt/firebird: the instance pods meet the "restricted" Pod Security
+   * Standard. Default false (the official image runs the server as root).
+   */
+  runAsFirebirdUser?: boolean;
+  /**
    * Pod security context of the instance pods (CloudNativePG 1.28 podSecurityContext), merged
    * over the defaults: fsGroup 999, seccomp RuntimeDefault
    */

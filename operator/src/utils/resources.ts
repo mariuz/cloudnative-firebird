@@ -111,7 +111,8 @@ export function buildSecurityDbInitContainer(image: string): V1Container {
         // users whose FirebirdUser was deleted while this instance was down (utils/pending-drops.ts)
         pendingDropsInitScript(SECURITY_DB_PATH),
         `printf '%s\n' 'security.db = ${SECURITY_DB_PATH}' '{' '    RemoteAccess = false' '    DefaultDbCachePages = 256' '}' > "$d/databases.conf"`,
-        'chown -R firebird:firebird "$d"',
+        // as root; running as the firebird user (runAsFirebirdUser) it owns what it writes
+        '[ "$(id -u)" -ne 0 ] || chown -R firebird:firebird "$d"',
       ].join('\n'),
     ],
     env: [{ name: 'POD_NAME', valueFrom: { fieldRef: { fieldPath: 'metadata.name' } } }],
@@ -293,6 +294,7 @@ export function buildStatefulSet(
   // Persistent security database, then bootstrap from a backup or another cluster, before the
   // replication init
   const initContainers: V1Container[] = [
+    ...(spec.runAsFirebirdUser ? [buildFirebirdHomeInitContainer(image)] : []),
     buildSecurityDbInitContainer(image),
     ...buildBootstrapInitContainers(cluster),
   ];
@@ -327,6 +329,7 @@ export function buildStatefulSet(
           name: 'firebird-data',
           mountPath: '/var/lib/firebird/data',
         },
+        ...(spec.runAsFirebirdUser ? [{ name: FIREBIRD_HOME_VOLUME, mountPath: '/opt/firebird' }] : []),
         // written by the security-db-init container
         {
           name: 'firebird-data',
@@ -383,6 +386,7 @@ export function buildStatefulSet(
   ];
 
   const volumes = [
+    ...(spec.runAsFirebirdUser ? [{ name: FIREBIRD_HOME_VOLUME, emptyDir: {} }] : []),
     { name: PENDING_DROPS_VOLUME, configMap: { name: pendingDropsConfigMapName(name), optional: true } },
     ...bootstrapVolumes(cluster),
     ...(usesConfigVolume
@@ -695,15 +699,42 @@ export const INSTANCE_CAPABILITIES = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER'];
 
 /** Pod security context of the instance pods: defaults, overridden by spec.podSecurityContext */
 export function instancePodSecurityContext(cluster: FirebirdCluster): V1PodSecurityContext {
-  return { fsGroup: 999, seccompProfile: { type: 'RuntimeDefault' }, ...(cluster.spec.podSecurityContext ?? {}) };
+  const defaults: V1PodSecurityContext = cluster.spec.runAsFirebirdUser
+    ? { runAsNonRoot: true, runAsUser: FIREBIRD_UID, runAsGroup: FIREBIRD_UID, fsGroup: FIREBIRD_UID }
+    : { fsGroup: 999 };
+  return { ...defaults, seccompProfile: { type: 'RuntimeDefault' }, ...(cluster.spec.podSecurityContext ?? {}) };
 }
 
 /** Security context of every instance container: defaults, overridden by spec.securityContext */
 export function instanceSecurityContext(cluster: FirebirdCluster): V1SecurityContext {
   return {
     allowPrivilegeEscalation: false,
-    capabilities: { drop: ['ALL'], add: [...INSTANCE_CAPABILITIES] },
+    // as the firebird user nothing needs a capability (runAsFirebirdUser)
+    capabilities: cluster.spec.runAsFirebirdUser ? { drop: ['ALL'] } : { drop: ['ALL'], add: [...INSTANCE_CAPABILITIES] },
     ...(cluster.spec.securityContext ?? {}),
+  };
+}
+
+/** Writable copy of the image's /opt/firebird (runAsFirebirdUser): see buildFirebirdHomeInitContainer */
+export const FIREBIRD_HOME_VOLUME = 'firebird-home';
+
+/**
+ * runAsFirebirdUser: the image entrypoint applies FIREBIRD_CONF_* settings by editing
+ * /opt/firebird/firebird.conf, which only root may write. The first init container copies
+ * /opt/firebird (about 45 MB; the few root-only files are not needed) into an emptyDir that the
+ * Firebird container mounts at /opt/firebird.
+ */
+export function buildFirebirdHomeInitContainer(image: string): V1Container {
+  return {
+    name: 'firebird-home',
+    image,
+    command: ['/bin/sh', '-c'],
+    args: [
+      'cp -a /opt/firebird/. /firebird-home/ 2>/dev/null; ' +
+        '[ -x /firebird-home/bin/firebird ] && [ -f /firebird-home/firebird.conf ] || ' +
+        '{ echo "could not copy /opt/firebird" >&2; exit 1; }; echo "writable copy of /opt/firebird ready"',
+    ],
+    volumeMounts: [{ name: FIREBIRD_HOME_VOLUME, mountPath: '/firebird-home' }],
   };
 }
 

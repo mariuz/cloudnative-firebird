@@ -811,6 +811,8 @@ jobs:
             name: sync
           spec:
             instances: 2
+            # as the firebird user (restricted Pod Security Standard), through the whole step
+            runAsFirebirdUser: true
             storage:
               size: 1Gi
             bootstrap:
@@ -829,6 +831,16 @@ jobs:
             || { timeout 300 bash -c 'until kubectl get pod sync-1 >/dev/null 2>&1; do sleep 3; done'; kubectl wait pod/sync-0 pod/sync-1 --for=condition=Ready --timeout=600s; }
           wait_attached sync-0
           sync_state; echo
+          # every instance container runs as uid 84 and the pod meets the restricted standard
+          [ "$(kubectl exec sync-0 -c firebird -- id -u)" = 84 ]
+          [ "$(kubectl exec sync-0 -c firebird -- sh -c 'stat -c %u /proc/$(pgrep -x firebird | head -n 1)')" = 84 ]
+          kubectl create namespace pss-sync
+          kubectl label namespace pss-sync pod-security.kubernetes.io/enforce=restricted
+          timeout 60 bash -c 'until kubectl get serviceaccount default -n pss-sync >/dev/null 2>&1; do sleep 2; done'
+          kubectl get pod sync-0 -o json \
+            | jq '{apiVersion: "v1", kind: "Pod", metadata: {name: "restricted-check", namespace: "pss-sync"}, spec: (.spec | del(.nodeName, .serviceAccountName, .serviceAccount))}' \
+            | kubectl apply --dry-run=server -f -
+          kubectl delete namespace pss-sync --wait=false
           kubectl logs job/sync-sync-standby | tail -5 || true
           # every commit is on the standby when it returns
           for i in 1 2 3; do
