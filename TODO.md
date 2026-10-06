@@ -55,7 +55,7 @@ Nothing open.
 - [ ] **In-place configuration reloads**: every template change restarts the instances, even
   settings Firebird could apply without a restart. CloudNativePG reloads PostgreSQL in place when
   possible.
-- [ ] **Validation that needs other objects** stays in the operator: e.g. a restore into the
-  cluster database, a clone of a cluster in another namespace, a missing Secret. A
-  ValidatingAdmissionPolicy with parameter resources, or a webhook, could reject these at apply
-  time too.
+- [ ] **Admission webhook follow-ups** (webhook since v0.65.0): run more than one operator replica
+  (the webhook would then need leader-independent serving and a shared certificate, which the
+  Secret already allows); check restore targets that already exist (only the Job sees the file
+  system).

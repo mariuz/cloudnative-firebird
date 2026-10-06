@@ -1,3 +1,5 @@
+import { WebhookServer } from './utils/webhook';
+import { apiLookups, createAdmissionValidator } from './utils/admission';
 import { KubeConfig, Watch } from '@kubernetes/client-node';
 import { logger } from './utils/logger';
 import { HealthServer } from './utils/health';
@@ -94,6 +96,7 @@ export class Operator {
   private readonly roleController: FirebirdRoleController;
   private readonly watch: Watch;
   private readonly healthServer: HealthServer;
+  private webhookServer?: WebhookServer;
   private readonly watchRequests = new Map<string, { abort: () => void }>();
   private readonly watchTimers = new Map<string, NodeJS.Timeout>();
   private readonly backupKinds: BackupKind[];
@@ -174,13 +177,31 @@ export class Operator {
     if (this.resyncIntervalMs > 0) {
       this.resyncTimer = setInterval(() => this.resync(), this.resyncIntervalMs);
     }
+    await this.startWebhook();
     this.healthServer.setReady(true);
+  }
+
+  /**
+   * Starts the admission webhook (webhook.ts) unless WEBHOOK_ENABLED=false. It needs the
+   * operator's namespace (OPERATOR_NAMESPACE) for its certificates; a failure is logged and the
+   * operator runs without it (the webhook configuration ignores an unavailable webhook).
+   */
+  private async startWebhook(): Promise<void> {
+    const namespace = process.env.OPERATOR_NAMESPACE;
+    if (process.env.WEBHOOK_ENABLED === 'false' || !namespace) return;
+    try {
+      this.webhookServer = new WebhookServer(this.kubeConfig, namespace, createAdmissionValidator(apiLookups(this.kubeConfig)));
+      await this.webhookServer.start();
+    } catch (err) {
+      logger.error({ err }, 'Admission webhook not started');
+    }
   }
 
   /** Stop the operator and abort any active watch */
   stop(): void {
     logger.info('Stopping cloudnative-firebird operator');
     this.healthServer.setReady(false);
+    this.webhookServer?.stop();
     for (const request of this.watchRequests.values()) request.abort();
     this.watchRequests.clear();
     for (const timer of this.watchTimers.values()) clearTimeout(timer);
