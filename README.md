@@ -490,9 +490,18 @@ there), because it may have committed transactions that never reached a replica.
         timeoutSeconds: 20   # default, 5 to 3600
 ```
 
-A primary that reaches the API server or any replica is never fenced, so a partition that leaves
-the primary and its clients with one of those (but not with the operator's view of readiness)
-is not covered.
+- **Cut-off primary**: a primary whose pod stays ready (the kubelet still sees it) but that the
+  rest of the cluster has lost is failed over too. Each replica's segment puller records when it
+  last reached the primary's segment server (`PRIMARYSEEN`); the primary counts as unavailable
+  when the operator cannot reach its segment server either and every ready replica it reaches
+  has not reached the primary for 30 seconds or more (at least one must answer). The
+  `PrimaryNotReady` event then says `ready but cut off`, and the failover proceeds as above
+  after `delaySeconds`; it deletes the old primary's pod, which comes back as a replica and is
+  re-seeded, so clients connected to it on its side of the partition stop writing to it.
+
+A primary that still reaches the API server is not fenced by the isolation check, so until the
+failover deletes its pod, clients that still reach it can keep writing to it. Those writes are
+discarded when it is re-seeded.
 
 ### Synchronous Replication
 

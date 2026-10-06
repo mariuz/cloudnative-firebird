@@ -19,6 +19,8 @@
 #   "<token> ARCHIVED\n"       -> "<sequence> <age seconds>" for each archived segment, then ".\n"
 #   "<token> NBACKUP <level> <file>\n" -> nbackup into the data directory; on a replica with the
 #                                replica control file next to it (see nbackup_here)
+#   "<token> PRIMARYSEEN\n"    -> "OK <seconds> <primary host>" since the segment puller last reached
+#                                 the primary, or "OK never" (automatic failover of a cut-off primary)
 #   "<token> VERSION\n"        -> "OK <engine version>" of the local server (e.g. 5.0.4)
 #   "<token> POINTS <S>\n"     -> "<epoch> <length>" recovery points of segment S, then ".\n"
 #   "<token> LINEAGE\n"        -> "<database>.lineage-<P>-<U>" for each failover that promoted this
@@ -702,6 +704,10 @@ while (1) {
         print $client "OK $ctl->{sequence} $ctl->{offset} $pending\n";
       }
     }
+  } elsif ($cmd eq 'PRIMARYSEEN') {
+    # replica: seconds since the segment puller last reached the primary, and which one
+    my ($at, $host) = slurp("$base/primary-seen") =~ /^(\d+) (\S+)$/;
+    print $client defined $at ? "OK " . (time - $at) . " $host\n" : "OK never\n";
   } elsif ($cmd eq 'VERSION') {
     my $version = live_value(q{RDB$GET_CONTEXT('SYSTEM', 'ENGINE_VERSION')});
     print $client defined $version && $version =~ /^[\d.]+$/ ? "OK $version\n" : "ERR cannot read the engine version\n";

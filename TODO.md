@@ -13,9 +13,10 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   transactions committed at the moment of the lock (`hack/repro/replica-seed-race.sh`).
 - [ ] **Failover safety**: the Lease is moved by the operator, not held and renewed by the
   instances (CloudNativePG 1.30's promotion mutex). The isolation check (v0.52.0) fences a primary
-  cut off from both the API server and every replica; a primary that is partitioned from the other
-  pods but still ready to the kubelet is not failed over at all, and one that still reaches the API
-  server or a replica is never fenced.
+  cut off from both the API server and every replica. A primary that still looks ready but that
+  neither the operator nor any replica reaches is failed over since v0.63.0, and its pod is
+  deleted. Until then, though, a primary that still reaches the API server is never fenced, and
+  it keeps accepting writes from clients on its side of the partition.
 - [ ] **Switchover downtime**: writes stop from the primary shutdown until the target pod is ready
   again (two pod restarts). Promoting online (replica mode none and publication on a running
   replica) would need the replication sequence set without restarting.

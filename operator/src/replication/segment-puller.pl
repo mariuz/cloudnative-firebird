@@ -34,6 +34,9 @@ my $pause_ack  = $ENV{REPLICATION_DIR} ? "$ENV{REPLICATION_DIR}/.pull-paused" : 
 # segments are not applied here; the last archived one is recorded (POSITION reports it)
 my $standby_flag = $ENV{REPLICATION_DIR} ? "$ENV{REPLICATION_DIR}/sync-standby" : '';
 my $standby_seen = $ENV{REPLICATION_DIR} ? "$ENV{REPLICATION_DIR}/sync-seen" : '';
+# when the primary's segment server last answered (automatic failover: a primary every replica
+# has lost while its pod stays ready is failed over; segment-server.pl PRIMARYSEEN)
+my $primary_seen = $ENV{REPLICATION_DIR} ? "$ENV{REPLICATION_DIR}/primary-seen" : '';
 
 # The replicas the primary replicates to synchronously ("h1,h2" or "none"), or undef when it cannot tell
 sub sync_target {
@@ -63,6 +66,11 @@ sub pull_once {
     push @names, $l if $l =~ $name_re;
   }
   close $sock;
+  if ($primary_seen && open(my $seen, '>', "$primary_seen.tmp")) {
+    print $seen time() . " $primary\n";
+    close $seen;
+    rename("$primary_seen.tmp", $primary_seen);
+  }
   # Synchronous replication: a replica the primary replicates to directly must not apply the
   # journal too (every change would be applied twice). Neither may a standby the primary no longer
   # names without having repositioned it (STANDBY off): it may hold changes after its replica

@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.62.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.63.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Failover of a Cut-Off Primary** *(v0.63.0)*
+  - A primary whose pod stayed ready but that the rest of the cluster had lost was never failed over. Each replica's segment puller now records when it last reached the primary (`primary-seen`, segment server `PRIMARYSEEN`). The operator treats a ready primary as unavailable when it cannot reach its segment server and every ready replica it reaches has not reached the primary for 30 seconds or more. The automatic failover then runs as usual after `delaySeconds` and deletes the old primary's pod, which re-seeds as a replica.
+  - The `PrimaryNotReady` event says why (`ready but cut off`, with each replica's last contact). The kind CI cuts a ready primary off from the other pods (iptables in a `kubectl debug` container, API server still reachable) and checks the failover, the moved Lease, the data, and the re-seeded old primary.
 - [x] **Synchronous Replication Needs Firebird 5** *(v0.62.0)*
   - Running the recent features on Firebird 4 and the 6 snapshot showed that Firebird 4.0.7 commits while a `sync_replica` is unreachable: the error goes to `replication.log` only, and the replica never receives the transaction ([ISSUES.md](ISSUES.md) issue 8; `hack/repro/sync-replica.sh` shows it for one replica). A synchronous standby on Firebird 4 could be promoted without committed transactions.
   - The operator now asks the primary's segment server for its engine version (`VERSION`): on Firebird 4 it attaches no standby, detaches an attached one, replicates asynchronously and reports it (`status.synchronous` phase `Failed`, `SyncStandbyFailed` warning), and automatic failover elects instead of promoting the standby. No standby is attached while the version is not known yet.
