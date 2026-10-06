@@ -328,6 +328,20 @@ describe('synchronous replication and failover, switchover, re-seeding', () => {
     expect(p?.target ?? '').not.toBe('db-2');
   });
 
+  it('on Firebird 4 elects instead of promoting the standby (it may lack commits)', async () => {
+    const segment = vi.fn().mockImplementation(async (_h: string, _p: number, line: string) => (line.endsWith(' VERSION') ? ['OK 4.0.7'] : []));
+    const ready = [pod('db-0', 'u0'), pod('db-1', 'u1'), pod('db-2', 'u2')];
+    const s = setup({ pods: ready, segment });
+    // learnt while the primary is ready
+    await s.controller.reconcile(syncCluster({ synchronous: attached }));
+    expect(segment).toHaveBeenCalledWith(expect.stringContaining('db-0.db-headless'), 3051, expect.stringMatching(/ VERSION$/));
+    s.fn('listNamespacedPod').mockImplementation(({ labelSelector }: { labelSelector: string }) =>
+      Promise.resolve({ items: labelSelector.startsWith('job-name=') ? [] : [pod('db-0', 'u0', false), pod('db-1', 'u1'), pod('db-2', 'u2')] }),
+    );
+    await s.controller.reconcile(syncCluster({ primaryNotReadySince: longAgo, synchronous: attached }));
+    expect(s.created().some((j) => j.metadata?.name === 'db-failover')).toBe(true);
+  });
+
   it('elects as before when the standby is not ready', async () => {
     const s = setup({ pods: [pod('db-0', 'u0', false), pod('db-1', 'u1', false), pod('db-2', 'u2')] });
     await s.controller.reconcile(syncCluster({ primaryNotReadySince: longAgo, synchronous: attached }));

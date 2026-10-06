@@ -232,7 +232,9 @@ function setup(pods: V1Pod[], opts: { existing?: V1StatefulSet; patched?: V1Stat
     const c = fn('patchNamespacedCustomObjectStatus').mock.calls;
     return c[c.length - 1][0].body[0].value;
   };
-  return { controller: new FirebirdClusterController(kubeConfig), fn, status };
+  // segment servers: a Firebird 5 primary, nothing else answers
+  const segment = vi.fn().mockImplementation(async (_h: string, _p: number, line: string) => (line.endsWith(' VERSION') ? ['OK 5.0.4'] : []));
+  return { controller: new FirebirdClusterController(kubeConfig, segment), fn, status };
 }
 
 describe('rolling update reconciliation', () => {

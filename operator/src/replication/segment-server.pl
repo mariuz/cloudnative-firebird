@@ -19,6 +19,7 @@
 #   "<token> ARCHIVED\n"       -> "<sequence> <age seconds>" for each archived segment, then ".\n"
 #   "<token> NBACKUP <level> <file>\n" -> nbackup into the data directory; on a replica with the
 #                                replica control file next to it (see nbackup_here)
+#   "<token> VERSION\n"        -> "OK <engine version>" of the local server (e.g. 5.0.4)
 #   "<token> POINTS <S>\n"     -> "<epoch> <length>" recovery points of segment S, then ".\n"
 #   "<token> LINEAGE\n"        -> "<database>.lineage-<P>-<U>" for each failover that promoted this
 #                                instance from segment P after the journal archive's segment U
@@ -701,6 +702,9 @@ while (1) {
         print $client "OK $ctl->{sequence} $ctl->{offset} $pending\n";
       }
     }
+  } elsif ($cmd eq 'VERSION') {
+    my $version = live_value(q{RDB$GET_CONTEXT('SYSTEM', 'ENGINE_VERSION')});
+    print $client defined $version && $version =~ /^[\d.]+$/ ? "OK $version\n" : "ERR cannot read the engine version\n";
   } elsif ($cmd eq 'POINTS' && defined $arg && $arg =~ /^(\d+)$/) {
     if (open(my $fh, '<', "$points_dir/$1")) {
       while (my $l = <$fh>) { print $client $l if $l =~ /^\d+ \d+\n$/; }

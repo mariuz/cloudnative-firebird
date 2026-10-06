@@ -1,7 +1,15 @@
 import { describe, it, expect } from 'vitest';
 import { V1Job, V1Pod } from '@kubernetes/client-node';
 import { FirebirdCluster, SynchronousStatus } from '../src/types';
-import { attachedStandbys, buildSyncStandbyJob, planSynchronous, SyncPlanInput, synchronousMembers, synchronousNumber } from '../src/utils/synchronous';
+import {
+  attachedStandbys,
+  buildSyncStandbyJob,
+  planSynchronous,
+  SyncPlanInput,
+  synchronousMembers,
+  synchronousNumber,
+  syncUnsupportedReason,
+} from '../src/utils/synchronous';
 import { buildReplicationConf } from '../src/utils/replication';
 import { REPLICATION_LAG_ANNOTATION } from '../src/utils/routing';
 
@@ -258,6 +266,34 @@ describe('planSynchronous: several standbys (synchronous.number)', () => {
     expect(synchronousMembers({ ...attached, phase: 'Attaching' })).toEqual(['db-1']);
     expect(synchronousMembers({ ...both, standby: 'db-3', phase: 'Attaching' })).toEqual(['db-1', 'db-2', 'db-3']);
     expect(synchronousNumber(makeCluster({ synchronous: { number: 5 } }))).toBe(2);
+  });
+});
+
+describe('planSynchronous on Firebird 4', () => {
+  const reason = syncUnsupportedReason('4.0.7')!;
+
+  it('names the engines that commit without an unreachable sync_replica', () => {
+    expect(reason).toContain('Firebird 4.0.7 commits while a synchronous replica is unreachable');
+    expect(syncUnsupportedReason('5.0.4')).toBeUndefined();
+    expect(syncUnsupportedReason('6.0.0')).toBeUndefined();
+    expect(syncUnsupportedReason(undefined)).toBeUndefined();
+  });
+
+  it('attaches nothing until the primary\'s version is known, keeping attached standbys', () => {
+    const blocked = "the primary's Firebird version is not known yet";
+    expect(plan({ attachBlocked: blocked }).kind).toBe('none');
+    expect(plan({ attachBlocked: blocked, status: kept })).toEqual({ kind: 'none', status: kept });
+  });
+
+  it('attaches nothing, detaches an attached standby, and says why', () => {
+    const none = plan({ unsupported: reason });
+    expect(none).toMatchObject({ kind: 'none', status: { phase: 'Failed', primary: 'db-0', standbys: [], message: reason } });
+    // the time stays while the reason does
+    const stored = none.status!;
+    expect(plan({ unsupported: reason, status: stored, now: now + 600_000 })).toEqual({ kind: 'none', status: stored });
+    const step = plan({ unsupported: reason, status: kept });
+    expect(step).toMatchObject({ kind: 'start', action: 'detach', standby: 'db-1' });
+    expect(step.kind === 'start' && step.status.message).toContain('Firebird 4.0.7');
   });
 });
 

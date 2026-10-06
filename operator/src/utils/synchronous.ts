@@ -32,6 +32,19 @@ import { REPLICATION_LAG_ANNOTATION, isPodReady } from './routing';
  * Attaching or Detaching while its Job runs), standbys every standby attached to the primary.
  */
 
+/** Major version from which Firebird fails a commit that a sync_replica could not apply */
+export const SYNC_MIN_FIREBIRD_MAJOR = 5;
+
+/** The unsupported reason for an engine version ("4.0.7"), undefined when it is supported or unknown */
+export function syncUnsupportedReason(engineVersion?: string): string | undefined {
+  const major = Number(engineVersion?.split('.')[0]);
+  if (!Number.isFinite(major) || major >= SYNC_MIN_FIREBIRD_MAJOR) return undefined;
+  return (
+    `Firebird ${engineVersion} commits while a synchronous replica is unreachable (the replica misses the ` +
+    `transaction): synchronous replication needs Firebird ${SYNC_MIN_FIREBIRD_MAJOR} or later; replicating asynchronously`
+  );
+}
+
 /** Standbys attached to the status's primary (statuses written before standbys: the one standby) */
 export function attachedStandbys(status?: SynchronousStatus): string[] {
   if (!status) return [];
@@ -139,6 +152,15 @@ export interface SyncPlanInput {
   /** Instances with a re-seed request */
   reseeding: string[];
   /**
+   * Why synchronous replication cannot be trusted on the primary's server, if it cannot: Firebird 4
+   * does not fail a commit while a sync_replica is unreachable (it logs the error and commits; the
+   * replica never receives the transaction, verified on 4.0.7). Nothing is attached, and attached
+   * standbys are detached.
+   */
+  unsupported?: string;
+  /** Why no standby may be attached yet (e.g. the primary's engine version is not known yet); attached ones stay */
+  attachBlocked?: string;
+  /**
    * The replica the rolling update restarts next and last (the only outdated replica left): it is
    * not attached, and an attached standby is handed over to another replica (or, with
    * dataDurability preferred, detached) before its restart
@@ -167,6 +189,7 @@ const conditionTrue = (job: V1Job, type: string) =>
 export function detachReason(input: SyncPlanInput, standby: string, unavailableSince?: string): string | undefined {
   const { cluster, now } = input;
   if (!synchronousMode(cluster)) return 'synchronous replication is off';
+  if (input.unsupported) return input.unsupported;
   const ordinal = Number(standby.slice(cluster.metadata.name.length + 1));
   if (!(ordinal < cluster.spec.instances)) return `${standby} is being removed (instances)`;
   if (input.fenced.includes(standby)) return `${standby} is fenced`;
@@ -345,7 +368,7 @@ export function planSynchronous(input: SyncPlanInput): SyncStep {
       const next: SynchronousStatus = { ...withoutRetry(kept), standby, phase: 'Detaching', message: `detaching ${standby}: ${reason}`, time: at };
       return { kind: 'start', action: 'detach', standby, status: next };
     }
-    if (retrying || !synchronousMode(cluster) || attached.length >= synchronousNumber(cluster) || input.busy || input.fenced.includes(primaryPod)) {
+    if (retrying || !synchronousMode(cluster) || input.unsupported || input.attachBlocked || attached.length >= synchronousNumber(cluster) || input.busy || input.fenced.includes(primaryPod)) {
       return { kind: 'none', status: kept };
     }
     // one more standby
@@ -361,6 +384,14 @@ export function planSynchronous(input: SyncPlanInput): SyncStep {
   }
 
   // nothing attached: attach a standby when possible
+  if (synchronousMode(cluster) && input.unsupported) {
+    const message = input.unsupported;
+    const unchanged = current?.phase === 'Failed' && current.message === message;
+    return {
+      kind: 'none',
+      status: { standby: current?.standby ?? '', primary: primaryPod, standbys: [], phase: 'Failed', message, time: unchanged ? current.time : at },
+    };
+  }
   const keep: SynchronousStatus | undefined =
     synchronousMode(cluster) && (current?.phase === 'Failed' || current?.phase === 'Detached')
       ? { ...current, standbys: [] }
@@ -369,7 +400,7 @@ export function planSynchronous(input: SyncPlanInput): SyncStep {
     delete keep.unavailableSince;
     delete keep.unavailable;
   }
-  if (!synchronousMode(cluster) || !primaryReady || input.busy || input.fenced.includes(primaryPod)) {
+  if (!synchronousMode(cluster) || !primaryReady || input.busy || input.attachBlocked || input.fenced.includes(primaryPod)) {
     return { kind: 'none', status: keep };
   }
   if (keep?.phase === 'Failed' && now - Date.parse(keep.time) < SYNC_RETRY_SECONDS * 1000) return { kind: 'none', status: keep };

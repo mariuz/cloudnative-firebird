@@ -13,6 +13,7 @@ import {
   V1ConfigMap,
   V1Job,
   V1MicroTime,
+  V1Pod,
   V1StatefulSet,
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
@@ -42,6 +43,7 @@ import { PRIMARY_RESTART_GRACE_SECONDS, operatorRollsPods, planRollingUpdate, ro
 import {
   SyncPlanInput,
   attachedStandbys,
+  syncUnsupportedReason,
   buildSyncStandbyJob,
   handoverForUpdate,
   planSynchronous,
@@ -227,6 +229,8 @@ export class FirebirdClusterController {
   private readonly events: EventRecorder;
   /** Clusters already warned about tls.secretName / tls.issuerRef */
   private readonly certificateWarned = new Set<string>();
+  /** Firebird engine version per instance pod (by UID), from its segment server (VERSION) */
+  private readonly engineVersions = new Map<string, string>();
 
   constructor(
     kubeConfig: KubeConfig,
@@ -701,7 +705,8 @@ export class FirebirdClusterController {
             .filter((s) => !(sync?.phase === 'Detaching' && sync.standby === s))
             .filter((s) => { const p = podOf(s); return p && isPodReady(p) && !fenced.includes(s); })
             .sort((a, b) => Number(a.slice(name.length + 1)) - Number(b.slice(name.length + 1)));
-          const standby = promotable[0];
+          const primaryVersion = this.engineVersions.get(podOf(primaryPod)?.metadata?.uid ?? '');
+          const standby = syncUnsupportedReason(primaryVersion) ? undefined : promotable[0];
           const standbyPod = standby ? podOf(standby) : undefined;
           if (sync && standby && standbyPod) {
             const reseed: Record<string, string> = {};
@@ -2099,11 +2104,18 @@ export class FirebirdClusterController {
       : switchover.wantsSwitchover
         ? 'a switchover is requested'
         : undefined;
+    // Firebird 4 commits without an unreachable sync_replica: nothing is attached there
+    const primaryObj = pods.find((p) => p.metadata?.name === primaryPod);
+    const engine = synchronousMode(cluster) || stored ? await this.engineVersion(cluster, primaryObj) : undefined;
+    const unsupported = syncUnsupportedReason(engine);
     const input: SyncPlanInput = {
       cluster,
       primaryPod,
       pods,
       status: stored,
+      unsupported,
+      // attached only once the primary's engine is known to fail commits without them
+      attachBlocked: engine === undefined ? "the primary's Firebird version is not known yet" : undefined,
       job,
       jobOutcome,
       busy,
@@ -2147,6 +2159,10 @@ export class FirebirdClusterController {
     };
 
     if (step.kind === 'none') {
+      if (unsupported && step.status?.message === unsupported && stored?.message !== unsupported) {
+        log.warn({ primary: primaryPod }, unsupported);
+        await this.event(cluster, 'Warning', EventReason.SyncStandbyFailed, unsupported);
+      }
       await persist(step.status);
       return { status: step.status, rollingHold: rolling(step.status) };
     }
@@ -2184,6 +2200,29 @@ export class FirebirdClusterController {
         });
     }
     return { status: step.status, rollingHold: rolling(step.status) };
+  }
+
+  /**
+   * The Firebird engine version of an instance (segment server VERSION), cached per pod UID;
+   * undefined while it cannot be read (pod not ready, older segment server)
+   */
+  private async engineVersion(cluster: FirebirdCluster, pod?: V1Pod): Promise<string | undefined> {
+    const uid = pod?.metadata?.uid;
+    if (!pod || !uid) return undefined;
+    const cached = this.engineVersions.get(uid);
+    if (cached) return cached;
+    if (!isPodReady(pod)) return undefined;
+    const token = await this.superuserPassword(cluster);
+    if (token === undefined) return undefined;
+    const host = `${instanceHost(cluster, pod.metadata!.name!)}.${cluster.metadata.namespace ?? 'default'}.svc`;
+    try {
+      const reply = await this.segmentClient(host, SEGMENT_PORT, `${token} VERSION`);
+      const version = /^OK ([\d.]+)$/.exec(reply[0] ?? '')?.[1];
+      if (version) this.engineVersions.set(uid, version);
+      return version;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Reconcile the primary leader lease object for HA election */

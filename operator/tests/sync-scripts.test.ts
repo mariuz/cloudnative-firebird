@@ -155,6 +155,15 @@ describe('segment server: synchronous replication commands', () => {
     expect(await ask('POINTS 3')).toEqual(['.']);
   });
 
+  it('reports the engine version of the local server (VERSION)', async () => {
+    if (!hasPerl) return;
+    const { ws, ask } = await start('db-0', 'db-0');
+    expect((await ask('VERSION'))[0]).toMatch(/^ERR/);
+    writeFileSync(join(ws.dir, 'bin', 'isql'), '#!/bin/sh\necho "V                               4.0.7"\n');
+    chmodSync(join(ws.dir, 'bin', 'isql'), 0o755);
+    expect(await ask('VERSION')).toEqual(['OK 4.0.7']);
+  });
+
   it('reports the lineage switches recorded at promotion (LINEAGE)', async () => {
     if (!hasPerl) return;
     const { base, ask } = await start('db-1', 'db-1');
