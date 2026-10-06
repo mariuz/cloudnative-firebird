@@ -38,7 +38,7 @@ describe('segment server: synchronous replication commands', () => {
   const servers: ChildProcess[] = [];
   afterAll(() => servers.forEach((s) => s.kill()));
 
-  async function start(pod: string, primary: string) {
+  async function start(pod: string, primary: string, database = '/var/lib/firebird/data/mydb.fdb') {
     const ws = workspace();
     const base = join(ws.dir, 'repl');
     for (const d of ['archive', 'source']) mkdirSync(join(base, d), { recursive: true });
@@ -51,7 +51,7 @@ describe('segment server: synchronous replication commands', () => {
         SOURCE_DIR: join(base, 'source'),
         REPLICATION_DIR: base,
         STATE_FILE: join(base, '.last-pulled'),
-        DATABASE_PATH: '/var/lib/firebird/data/mydb.fdb',
+        DATABASE_PATH: database,
         PRIMARY_FILE: join(ws.dir, 'primary'),
         POD_NAME: pod,
         ISC_USER: 'SYSDBA',
@@ -73,6 +73,48 @@ describe('segment server: synchronous replication commands', () => {
     };
     return { ws, base, ask };
   }
+
+  it('takes an nbackup of a replica at a known position, with its control file (NBACKUP)', async () => {
+    if (!hasPerl) return;
+    const data = mkdtempSync(join(tmpdir(), 'fb-data-'));
+    const { ws, base, ask } = await start('db-1', 'db-0', join(data, 'mydb.fdb'));
+    const guid = '{11111111-2222-3333-4444-555555555555}';
+    const ctl = Buffer.alloc(56);
+    ctl.write('FBREPLCTL', 0, 'latin1');
+    ctl.writeUInt16LE(1, 10);
+    ctl.writeUInt32LE(1, 12);
+    ctl.writeBigUInt64LE(9n, 16);
+    ctl.writeBigUInt64LE(3n, 32);
+    ctl.writeBigUInt64LE(500n, 40);
+    ctl.writeBigUInt64LE(8n, 48);
+    writeFileSync(join(base, 'source', guid), ctl);
+    // the segment puller acknowledges the pause
+    const ack = setInterval(() => {
+      if (existsSync(join(base, '.pause-pull'))) writeFileSync(join(base, '.pull-paused'), '');
+    }, 50);
+    try {
+      expect(await ask('NBACKUP 1 nbackup-l1-x.nbk')).toEqual(['OK replica 9']);
+    } finally {
+      clearInterval(ack);
+    }
+    expect(readFileSync(join(data, 'nbackup-l1-x.nbk.ctl')).equals(ctl)).toBe(true);
+    expect(existsSync(join(base, '.pause-pull'))).toBe(false);
+    expect(ws.calls().at(-1)).toContain(`action_nbak dbname ${join(data, 'mydb.fdb')} nbk_file ${join(data, 'nbackup-l1-x.nbk')} nbk_level 1`);
+    // served and removed like the backups
+    expect((await ask('FILES'))).toContain('nbackup-l1-x.nbk.ctl');
+    expect(await ask('REMOVE nbackup-l1-x.nbk.ctl')).toEqual(['OK']);
+    expect((await ask('NBACKUP 3 x.nbk'))[0]).toBe('ERR bad request');
+    expect((await ask('NBACKUP 0 ../x.nbk'))[0]).toBe('ERR bad request');
+  });
+
+  it('takes a plain nbackup on the primary (NBACKUP)', async () => {
+    if (!hasPerl) return;
+    const data = mkdtempSync(join(tmpdir(), 'fb-data-'));
+    const { ws, ask } = await start('db-0', 'db-0', join(data, 'mydb.fdb'));
+    expect(await ask('NBACKUP 0 nbackup-l0-x.nbk')).toEqual(['OK']);
+    expect(existsSync(join(data, 'nbackup-l0-x.nbk.ctl'))).toBe(false);
+    expect(ws.calls().at(-1)).toContain('nbk_level 0');
+  });
 
   it('reports the lineage switches recorded at promotion (LINEAGE)', async () => {
     if (!hasPerl) return;

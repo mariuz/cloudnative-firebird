@@ -273,6 +273,22 @@ describe('physical backups and restores with S3', () => {
     expect(pod.containers[0].args![0]).toContain('s3 cp "/work/$f" "s3://bkt/fb/$f"');
   });
 
+  it('takes a replica\'s nbackup through its segment server, with its position', () => {
+    const pod = podOf(buildBackupJob(makeBackup({ type: 'physical', level: 1, s3, target: 'prefer-standby' }), cluster, 'db-1', true));
+    const script = pod.initContainers![0].args![0];
+    expect(script).not.toContain('action_nbak');
+    expect(script).toContain(`trap 'perl /etc/firebird-operator/backup-file.pl remove "$f" "$f.ctl" || true' EXIT`);
+    expect(script).toContain('out=$(perl /etc/firebird-operator/backup-file.pl nbackup 1 "$f")');
+    expect(script).toContain('*"replica position"*) perl /etc/firebird-operator/backup-file.pl get "$f.ctl" "/work/$f.ctl"');
+    // the position before the backup: an uploaded nbackup taken on a replica has its .ctl
+    const upload = pod.containers[0].args![0];
+    expect(upload).toContain(`if [ -f "/work/$f.ctl" ]; then aws --endpoint-url 'http://minio:9000' s3 cp "/work/$f.ctl" "s3://bkt/fb/$f.ctl"; fi`);
+    expect(upload.indexOf('$f.ctl')).toBeLessThan(upload.indexOf('s3 cp "/work/$f" '));
+    // a logical backup has none
+    const logical = podOf(buildBackupJob(makeBackup({ s3, target: 'prefer-standby' }), cluster, 'db-1', true));
+    expect(logical.containers[0].args![0]).not.toContain('.ctl');
+  });
+
   it('prunes nbackup series in S3 along their chains, read from the primary\'s history', () => {
     const sb: FirebirdScheduledBackup = {
       apiVersion: 'firebird.cloudnative-firebird.io/v1',
@@ -288,6 +304,8 @@ describe('physical backups and restores with S3', () => {
     const upload = pod.containers[0].args![0];
     expect(upload).toContain(`grep -E '^nbackup-l[0-2]-nightly-[0-9]{8}T[0-9]{6}Z[.]nbk$'`);
     expect(upload).toContain(' /work/history /work/all /work/series > /work/expired');
+    // with an nbackup's replica position
+    expect(upload).toContain(`s3 rm 's3://bkt/fb/'"$k.ctl" >/dev/null 2>&1 || true`);
     // without a retentionPolicy there is no history query
     const plain = buildScheduledBackupCronJob({ ...sb, spec: { ...sb.spec, retentionPolicy: undefined } }, cluster);
     expect(plain.spec!.jobTemplate.spec!.template.spec!.initContainers![0].args![0]).not.toContain('rdb$backup_history');
@@ -331,6 +349,11 @@ describe('point-in-time recovery', () => {
     expect(download.env).toContainEqual(expect.objectContaining({ name: 'AWS_ACCESS_KEY_ID', valueFrom: { secretKeyRef: { name: 's3-creds', key: 'AWS_ACCESS_KEY_ID' } } }));
     expect(download.args![0]).toContain(`s3 cp 's3://bkt/fb/nbackup-l0-a.nbk' /work/chain/0.nbk`);
     expect(download.args![0]).toContain(`s3 cp 's3://bkt/fb/nbackup-l1-b.nbk' /work/chain/1.nbk`);
+    // the replica position of a chain taken on a replica, when there is one
+    expect(download.args![0]).toContain(
+      `if aws --endpoint-url 'http://minio:9000' s3 ls 's3://bkt/fb/nbackup-l1-b.nbk.ctl' >/dev/null 2>&1; then ` +
+        `aws --endpoint-url 'http://minio:9000' s3 cp 's3://bkt/fb/nbackup-l1-b.nbk.ctl' /work/chain/position.ctl; fi`,
+    );
     const [firebird, fetch] = pod.containers;
     expect(firebird.args![0]).toMatch(/^set -eu; \. \/etc\/firebird-operator\/pitr-restore\.sh; out=\$\(fbsvcmgr/);
     expect(firebird.args![0]).toContain('action_nrest dbname "$TARGET_PATH" nbk_file "/var/lib/firebird/data/restore-$RESTORE_NAME-pitr.nbk"');

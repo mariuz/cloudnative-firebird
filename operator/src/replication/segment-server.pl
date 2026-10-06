@@ -17,6 +17,8 @@
 #                                 which it has every change of);
 #                                 primary: "OK primary" (used by planned switchover)
 #   "<token> ARCHIVED\n"       -> "<sequence> <age seconds>" for each archived segment, then ".\n"
+#   "<token> NBACKUP <level> <file>\n" -> nbackup into the data directory; on a replica with the
+#                                replica control file next to it (see nbackup_here)
 #   "<token> LINEAGE\n"        -> "<database>.lineage-<P>-<U>" for each failover that promoted this
 #                                instance from segment P after the journal archive's segment U
 #                                (segments P+1..U are not in its history), then ".\n"
@@ -119,7 +121,8 @@ my $standby_seen = "$base/sync-seen";
 my $state_file = $ENV{STATE_FILE} // "$base/.last-pulled";
 my $isolation_timeout = $ENV{ISOLATION_TIMEOUT_SECONDS} // 0;
 my $name_re   = qr/^[A-Za-z0-9._-]+\.journal-\d+$/;
-my $backup_re = qr/^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:nbk|fbk)$/;
+# backups, and the replica control file written next to a replica's nbackup (NBACKUP)
+my $backup_re = qr/^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:nbk|fbk|nbk\.ctl)$/;
 (my $data_dir = $database) =~ s{/[^/]*$}{};
 $data_dir = '.' if $data_dir eq '';
 $| = 1;
@@ -349,6 +352,53 @@ sub seed_from_replica {
     print "replica seed refused: $@";
   }
   unlink $pause_flag, $seed_file;
+}
+
+# NBACKUP <level> <file>: an nbackup of this instance's database into the data directory. On a
+# replica (not the synchronous standby, which receives changes outside the journal) the segment
+# puller is paused and every received segment applied first, and the replica control file is
+# written next to the backup as <file>.ctl: the position the copy was taken at, which
+# point-in-time recovery continues from (pitr-restore.sh). Nothing commits on such a replica
+# meanwhile, so the copy and the control file describe the same point. Replies "OK replica <S>"
+# (control file written) or "OK".
+sub nbackup_here {
+  my ($client, $level, $file) = @_;
+  unlink "$data_dir/$file.ctl";
+  my $replica = !is_primary() && !-e $standby_flag;
+  my $ok = eval {
+    my $ctl;
+    if ($replica) {
+      unlink $pause_ack;
+      if (open(my $flag, '>', $pause_flag)) { close $flag; }
+      wait_for(60, sub { -e $pause_ack }) or die "segment puller did not pause\n";
+      my $control = control_path() or die "no replica control file\n";
+      wait_for(300, sub {
+        my $c = read_control($control) or return 0;
+        return 0 if $c->{offset};
+        return !grep { my $s = segment_sequence("$source/$_"); defined $s && $s > $c->{sequence} } segments($source);
+      }) or die "replica did not finish applying received segments\n";
+      $ctl = read_control($control);
+    }
+    system('fbsvcmgr', 'localhost:service_mgr', 'action_nbak', 'dbname', $database,
+      'nbk_file', "$data_dir/$file", 'nbk_level', $level) == 0 or die "nbackup failed\n";
+    if ($ctl) {
+      open(my $out, '>:raw', "$data_dir/$file.ctl.tmp") or die "write $file.ctl: $!\n";
+      print $out $ctl->{data};
+      close $out or die "write $file.ctl: $!\n";
+      rename("$data_dir/$file.ctl.tmp", "$data_dir/$file.ctl") or die "rename $file.ctl: $!\n";
+      print $client "OK replica $ctl->{sequence}\n";
+      print "nbackup $file (level $level) taken at replica position $ctl->{sequence}\n";
+    } else {
+      print $client "OK\n";
+      print "nbackup $file (level $level) taken\n";
+    }
+    1;
+  };
+  unless ($ok) {
+    print $client "ERR $@";
+    print "nbackup $file refused: $@";
+  }
+  unlink $pause_flag if $replica;
 }
 
 sub seed_from_primary {
@@ -636,6 +686,17 @@ while (1) {
     } elsif ($pid == 0) {
       close $server;
       if ($cmd eq 'FILE') { send_file($client, $arg); } else { my ($n, $size) = split / /, $arg; store_file($client, $n, $size); }
+      close $client;
+      exit 0;
+    }
+  } elsif ($cmd eq 'NBACKUP' && !$files_only && defined $arg && $arg =~ /^([0-2]) ([A-Za-z0-9][A-Za-z0-9._-]*\.nbk)$/) {
+    my ($level, $file) = ($1, $2);
+    my $pid = fork;
+    if (!defined $pid) {
+      print $client "ERR fork: $!\n";
+    } elsif ($pid == 0) {
+      close $server;
+      nbackup_here($client, $level, $file);
       close $client;
       exit 0;
     }

@@ -656,6 +656,12 @@ the instance it ran on. An `nbackup` chain lives in the backup history of the da
 taken on, so the schedules of one chain should share a target: a level 1 or 2 on an instance
 without a level 0 fails ("Cannot find record ... backup level 0"). A physical restore clears the
 replica mode a backup taken on a replica carries, so the restored database is writable.
+For point-in-time recovery, the replica's segment server takes the `nbackup` with the segment
+puller paused and every received segment applied, and keeps the replica's control file with it
+(`<file>.nbk.ctl` next to the object): the primary's segment the copy reflects, and the
+transactions it had in progress. The recovery continues the journal from there. The synchronous
+standby receives changes outside the journal, so its backups carry no position and cannot be
+used for point-in-time recovery.
 
 **Retention.** `retentionPolicy` (`<n>d`, `<n>w` or `<n>m` for 30 days, as in CloudNativePG) on
 `spec.backup` or a `FirebirdScheduledBackup` is enforced for backups to S3: after each
@@ -767,7 +773,7 @@ target before the failover replays the lost primary's segments as they were. A b
 the lost primary after segment P cannot reach a target after the failover (refused).
 
 **Point-in-time recovery.** A physical restore with `pointInTime` replays the archived journal on
-top of an `nbackup` chain (taken on the primary), up to a target:
+top of an `nbackup` chain (taken on the primary, or on an asynchronous replica), up to a target:
 
 ```yaml
 apiVersion: firebird.cloudnative-firebird.io/v1

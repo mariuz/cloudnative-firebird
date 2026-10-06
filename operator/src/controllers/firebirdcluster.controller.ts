@@ -1737,7 +1737,7 @@ export class FirebirdClusterController {
           ? (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items
           : [];
       const instance = chooseBackupInstance({ cluster, primaryPod, pods, ...backup });
-      const desired = withHibernation(buildBackupCronJob(cluster, instance), cluster);
+      const desired = withHibernation(buildBackupCronJob(cluster, instance, instance !== primaryPod), cluster);
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: backupName, namespace });
         if (cronJobNeedsUpdate(existing, desired)) {

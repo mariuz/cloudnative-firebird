@@ -37,6 +37,29 @@ $SIG{__DIE__} = sub { print STDERR $_[0]; exit 1; };
 # segment P; the next lineage continues after the archive's segment U. Rewrites the control file
 # to continue after U with no active transaction (those still open at P were never committed in
 # the new lineage; stopping the server rolled them back), keeping db_sequence.
+#   pitr-plan.pl --describe <control file>
+# A replica's control file kept with its nbackup (segment server NBACKUP): prints
+# "<sequence> <offset> <first>", <first> the lowest segment an active transaction starts in (the
+# sequence itself without one): the replay needs the segments from there on.
+if (@ARGV && $ARGV[0] eq '--describe') {
+  my (undef, $control) = @ARGV;
+  die "usage: pitr-plan.pl --describe <control file>\n" unless defined $control;
+  open(my $in, '<:raw', $control) or die "read $control: $!\n";
+  local $/;
+  my $data = <$in>;
+  close $in;
+  die "$control is not a replica control file\n" unless length($data) >= 40 && substr($data, 0, 9) eq 'FBREPLCTL';
+  my (undef, undef, $count, $seq, $offset) = unpack('a10 v V Q< V', $data);
+  die "$control is truncated\n" unless length($data) >= 40 + 16 * $count;
+  my $first = $seq;
+  for my $i (0 .. $count - 1) {
+    my (undef, $tseq) = unpack('Q< Q<', substr($data, 40 + 16 * $i, 16));
+    $first = $tseq if $tseq < $first;
+  }
+  print "$seq $offset $first\n";
+  exit 0;
+}
+
 if (@ARGV && $ARGV[0] eq '--reposition') {
   my (undef, $seq, $control) = @ARGV;
   die "usage: pitr-plan.pl --reposition <U> <control file>\n" unless defined $control && $seq =~ /^\d+$/;
