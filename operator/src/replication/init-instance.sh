@@ -19,6 +19,8 @@ own() { [ "$(id -u)" -ne 0 ] || chown "$@"; }
 mkdir -p "$JOURNAL_DIR" "$ARCHIVE_DIR" "$SOURCE_DIR"
 own firebird:firebird "$JOURNAL_DIR" "$ARCHIVE_DIR" "$SOURCE_DIR"
 primary=$(cat "$PRIMARY_FILE" 2>/dev/null || true)
+# a promotion in place (segment-server.pl PROMOTE) only stands for the ConfigMap until a restart
+rm -f "$REPLICATION_DIR/promoted"
 
 # gstat omits "Replication sequence" while it is 0 (e.g. a database created offline)
 seq_of() { s=$(gstat -h "$1" | sed -n 's/^[[:space:]]*Replication sequence:[[:space:]]*\([0-9]*\).*/\1/p'); echo "${s:-0}"; }
@@ -60,6 +62,12 @@ first_archived() {
 # "promote" and the old primary with a "demote" directive. Both are applied offline to a work copy
 # (not journaled), can be resumed after a crash, and are recorded once complete.
 sw="$DATA_DIR/.switchover.fdb"
+promote_token=$(pending "${PROMOTE_FILE:-/dev/null}" "$REPLICATION_DIR/.promoted")
+if [ -n "$promote_token" ] && [ ! -f "$sw" ] && [ -f "$DATABASE_PATH" ] && ! gstat -h "$DATABASE_PATH" | grep -q 'Attributes.*replica'; then
+  # promoted in place already (segment-server.pl PROMOTE): its journal continues where it is
+  echo "already promoted (in place); the journal continues after segment $(seq_of "$DATABASE_PATH")"
+  echo "$promote_token" > "$REPLICATION_DIR/.promoted"
+fi
 promote_token=$(pending "${PROMOTE_FILE:-/dev/null}" "$REPLICATION_DIR/.promoted")
 if [ -n "$promote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
   # the journal continues after the last segment this replica applied (its control file position)

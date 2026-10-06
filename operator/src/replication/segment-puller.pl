@@ -53,6 +53,8 @@ sub pull_once {
     return;
   }
   unlink $pause_ack if $pause_ack;
+  # promoted in place (segment-server.pl PROMOTE) before the ConfigMap file names this instance
+  return if $ENV{REPLICATION_DIR} && -e "$ENV{REPLICATION_DIR}/promoted";
   my $primary = slurp($primary_file);
   return if $primary eq '' || $primary =~ /^\Q$self\E(\.|$)/;   # we are the primary
   my $last = slurp($state);

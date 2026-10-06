@@ -62,6 +62,14 @@
 #   "<token> STANDBY off <S>\n" -> "OK": back to journal shipping after segment S (the primary's
 #                                 last segment, in full shutdown): the replica control file and the
 #                                 puller's position move to S
+#   "<token> PROMOTE <A>|none\n" -> "OK <S>": planned switchover, promotes this replica in place (no
+#                                 restart): after every received segment is applied, a short full
+#                                 shutdown sets the replication sequence S (the control file
+#                                 position, or the journal archive's last segment A when higher),
+#                                 replaces the replication state and the offline bootstrap seed,
+#                                 then replica mode none and publication. Marks the instance as the
+#                                 primary (PROMOTED_FILE) until its next restart, as the ConfigMap
+#                                 reaches the pod's files later. "ERR ..." leaves it a replica.
 #   "<token> REJOIN\n"          -> "OK": brings a database fenced by the isolation check back
 #                                 online, sent by the operator once it checked that this instance
 #                                 still holds the leader Lease ("OK" too when it is not fenced)
@@ -138,6 +146,9 @@ my $bootstrap_seed = "$base/bootstrap-seed.fdb";
 my $pause_flag = "$base/.pause-pull";
 my $pause_ack  = "$base/.pull-paused";
 my $self_fenced = "$base/self-fenced";
+# promoted in place (PROMOTE): the primary from now on, whatever the ConfigMap file still says;
+# removed when the instance restarts (init-instance.sh)
+my $promoted_flag = "$base/promoted";
 # synchronous replication: the primary's sync_replica entry, and the standby's flag and last seen segment
 my $sync_file = "$base/sync.conf";
 my $standby_flag = "$base/sync-standby";
@@ -187,6 +198,7 @@ print $files_only ? "backup file server listening on $port, serving $data_dir\n"
 sub slurp { my ($f) = @_; open(my $fh, '<', $f) or return ''; local $/; my $v = <$fh>; close $fh; $v //= ''; $v =~ s/\s+$//; return $v; }
 
 sub is_primary {
+  return 1 if !$files_only && -e $promoted_flag;
   my $primary = slurp($primary_file);
   return $primary eq '' || $primary =~ /^\Q$self\E(\.|$)/;
 }
@@ -452,6 +464,88 @@ sub nbackup_here {
     print "nbackup $file refused: $@";
   }
   unlink $pause_flag if $replica;
+}
+
+# PROMOTE: this replica becomes the primary without a restart (planned switchover, once the old
+# primary is in full shutdown and this replica applied its last segment). Does what the init
+# container's offline promotion does (init-instance.sh), during a short full shutdown: the server
+# has the database closed then, so its header can be written. Until the promotion is complete the
+# replica control file is kept and any failure restores the replica, so the operator can still
+# promote it offline instead.
+sub promote_here {
+  my ($client, $archived) = @_;
+  my $fb = sub { system('fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database, @_) == 0 };
+  my ($shut, $writable) = (0, 0);
+  my $ok = eval {
+    my $mode = live_value('MON$REPLICA_MODE');
+    die "cannot read the replica mode\n" unless defined $mode;
+    if ($mode == 0) {
+      # promoted already (a repeated request)
+      my $seq = live_value(q{RDB$GET_CONTEXT('SYSTEM', 'REPLICATION_SEQUENCE')}) // 0;
+      write_file($promoted_flag, time . "\n");
+      print $client "OK $seq\n";
+      print "already promoted (sequence $seq)\n";
+      return 1;
+    }
+    die "this instance is a synchronous standby\n" if -e $standby_flag;
+    unlink $pause_ack;
+    if (open(my $flag, '>', $pause_flag)) { close $flag; }
+    wait_for(60, sub { -e $pause_ack }) or die "segment puller did not pause\n";
+    my $control = control_path() or die "no replica control file\n";
+    wait_for(300, sub {
+      my $c = read_control($control) or return 0;
+      return 0 if $c->{offset};
+      return !grep { my $s = segment_sequence("$source/$_"); defined $s && $s > $c->{sequence} } segments($source);
+    }) or die "replica did not finish applying received segments\n";
+    my $seq = read_control($control)->{sequence};
+    my $lineage;
+    if (defined $archived && $archived > $seq) {
+      # as the offline promotion: segments $seq+1..$archived of the archive are not in this lineage
+      $lineage = "$seq $archived";
+      $seq = $archived;
+    }
+    $fb->('prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') or die "full shutdown failed\n";
+    $shut = 1;
+    system('perl', "$ENV{SCRIPT_DIR}/set-repl-seq.pl", $database, $seq) == 0 or die "cannot set the replication sequence\n";
+    # the replica's journal and archive (the new journal starts empty) and the offline bootstrap
+    # seed new replicas can start from, taken while nothing has the database open
+    for my $d ($journal_dir, $dir) {
+      next unless $d ne '' && opendir(my $dh, $d);
+      unlink map { "$d/$_" } grep { -f "$d/$_" } readdir($dh);
+      closedir($dh);
+    }
+    system('cp', $database, "$bootstrap_seed.tmp") == 0 or die "cannot copy the bootstrap seed\n";
+    write_file("$base/bootstrap-seed.seq", "$seq\n");
+    rename("$bootstrap_seed.tmp", $bootstrap_seed) or die "cannot write the bootstrap seed\n";
+    $fb->('prp_online_mode', 'prp_sm_normal') or die "cannot bring the database online\n";
+    $shut = 0;
+    system('gfix', '-replica', 'none', "localhost:$database") == 0 or die "cannot set replica mode none\n";
+    $writable = 1;
+    system('sh', '-c', "isql -q -b -i \"$ENV{SCRIPT_DIR}/enable-publication.sql\" localhost:$database") == 0
+      or die "cannot enable publication\n";
+    # complete: the replica's state goes (the new journal continues after $seq)
+    write_file($promoted_flag, time . "\n");
+    if (defined $lineage && !grep { $_ eq $lineage } split /\n/, slurp("$base/lineage")) {
+      if (open(my $fh, '>>', "$base/lineage")) { print $fh "$lineage\n"; close $fh; }
+    }
+    if (opendir(my $dh, $source)) {
+      unlink map { "$source/$_" } grep { -f "$source/$_" } readdir($dh);
+      closedir($dh);
+    }
+    unlink $state_file, $standby_seen;
+    print $client "OK $seq\n";
+    print "promoted in place: the journal continues after segment $seq\n";
+    1;
+  };
+  unless ($ok) {
+    my $err = $@;
+    # back to a replica the offline promotion can still take over
+    system('gfix', '-replica', 'read_only', "localhost:$database") if $writable;
+    $fb->('prp_online_mode', 'prp_sm_normal') if $shut;
+    print $client "ERR $err";
+    print "promotion refused: $err";
+  }
+  unlink $pause_flag;
 }
 
 sub seed_from_primary {
@@ -804,6 +898,17 @@ while (1) {
     } elsif ($pid == 0) {
       close $server;
       if ($cmd eq 'FILE') { send_file($client, $arg); } else { my ($n, $size) = split / /, $arg; store_file($client, $n, $size); }
+      close $client;
+      exit 0;
+    }
+  } elsif ($cmd eq 'PROMOTE' && !$files_only && defined $arg && $arg =~ /^(\d+|none)$/) {
+    my $archived = $1 eq 'none' ? undef : $1;
+    my $pid = fork;
+    if (!defined $pid) {
+      print $client "ERR fork: $!\n";
+    } elsif ($pid == 0) {
+      close $server;
+      promote_here($client, $archived);
       close $client;
       exit 0;
     }

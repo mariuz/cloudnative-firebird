@@ -813,7 +813,12 @@ export class FirebirdClusterController {
       try {
         await this.batchApi.createNamespacedJob({
           namespace,
-          body: buildSwitchoverJob(cluster, { from: primaryPod, target, replicas }),
+          body: buildSwitchoverJob(cluster, {
+            from: primaryPod,
+            target,
+            replicas,
+            archived: await this.journalArchiveSequence(cluster, current.status?.journalArchiveSequence),
+          }),
         });
       } catch (err) {
         if ((err as { code?: number })?.code !== 409) throw err;
@@ -916,12 +921,21 @@ export class FirebirdClusterController {
         // lost (e.g. deleted by hand): the Job is idempotent
         await this.batchApi.createNamespacedJob({
           namespace,
-          body: buildSwitchoverJob(cluster, { from: phase.from, target: phase.target, replicas: [] }),
+          body: buildSwitchoverJob(cluster, {
+            from: phase.from,
+            target: phase.target,
+            replicas: [],
+            archived: await this.journalArchiveSequence(cluster, current.status?.journalArchiveSequence),
+          }),
         });
         return result;
       }
       const conditions = job.status?.conditions ?? [];
-      if (conditions.some((c) => c.type === 'Failed' && c.status === 'True')) {
+      const jobFailed = conditions.some((c) => c.type === 'Failed' && c.status === 'True');
+      // a Job that ended after promoting the target in place (before reporting it): the target is
+      // the primary now, and the old primary must stay shut down
+      const targetPromoted = jobFailed && (await this.promotedInPlace(cluster, phase.target));
+      if (jobFailed && !targetPromoted) {
         log.warn({ target: phase.target }, 'Switchover failed; bringing the primary back online');
         await persist({
           ...phase,
@@ -939,7 +953,11 @@ export class FirebirdClusterController {
         }
         return result;
       }
-      if (!conditions.some((c) => c.type === 'Complete' && c.status === 'True')) return result;
+      if (!targetPromoted && !conditions.some((c) => c.type === 'Complete' && c.status === 'True')) return result;
+      // "inplace <S>": the Job promoted the target without a restart (switchover.pl)
+      const jobPods = await this.coreApi.listNamespacedPod({ namespace, labelSelector: `job-name=${jobName}` });
+      const outcome = jobPods.items.map((p) => p.status?.containerStatuses?.[0]?.state?.terminated?.message ?? '').find((m) => m !== '');
+      const promotedInPlace = targetPromoted || /^inplace \d+/.test(outcome ?? '');
 
       // every ready replica has applied the old primary's last segment: move the primary
       const lagging: Record<string, string> = {};
@@ -951,14 +969,17 @@ export class FirebirdClusterController {
       phase = {
         ...phase,
         phase: 'Promoting',
-        message: 'promoting the target and demoting the old primary',
+        message: promotedInPlace
+          ? 'target promoted in place; demoting the old primary'
+          : 'promoting the target and demoting the old primary',
+        ...(promotedInPlace ? { promotedInPlace: true } : {}),
         targetToken: podOf(phase.target)?.metadata?.uid ?? '',
         fromToken: podOf(phase.from)?.metadata?.uid ?? '',
         ...(Object.keys(lagging).length ? { reseed: lagging } : {}),
       };
       await persist(phase);
       await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
-      log.info({ primary: phase.target, demoted: phase.from }, 'Promoting the switchover target');
+      log.info({ primary: phase.target, demoted: phase.from, promotedInPlace, outcome }, 'Promoting the switchover target');
     }
 
     // Promoting (idempotent): Lease, directives and restarts of pods still running as before
@@ -979,13 +1000,17 @@ export class FirebirdClusterController {
       return Boolean(p && p.metadata?.uid !== token && isPodReady(p));
     };
     const isFailover = phase.kind === 'failover';
-    if (restarted(phase.target, phase.targetToken) && (isFailover || restarted(phase.from, phase.fromToken))) {
+    // a target promoted in place keeps running: ready is enough
+    const inPlace = Boolean(phase.promotedInPlace) && !isFailover;
+    const targetDone = inPlace ? Boolean(podOf(phase.target) && isPodReady(podOf(phase.target)!)) : restarted(phase.target, phase.targetToken);
+    if (targetDone && (isFailover || restarted(phase.from, phase.fromToken))) {
       log.info({ primary: phase.target }, 'Switchover completed');
       await persist({ ...phase, phase: 'Completed', message: `${phase.target} is the primary`, completionTime: now });
       return result;
     }
     // the promoted replica's journal continues after every segment the journal archive may hold
     const archived = await this.journalArchiveSequence(cluster, result.journalArchiveSequence);
+    // (in place: the init container only records the directive, should the target restart)
     result.promote = { [phase.target]: `${phase.targetToken ?? ''}${archived !== undefined ? ` ${archived}` : ''}` };
     // after a failover the old primary diverged (its unshipped transactions): it is re-seeded
     result.demote = isFailover ? {} : { [phase.from]: phase.fromToken ?? '' };
@@ -996,7 +1021,9 @@ export class FirebirdClusterController {
     };
     const restartable: Array<[string, string | undefined]> = isFailover
       ? [[phase.target, phase.targetToken]]
-      : [[phase.target, phase.targetToken], [phase.from, phase.fromToken]];
+      : inPlace
+        ? [[phase.from, phase.fromToken]]
+        : [[phase.target, phase.targetToken], [phase.from, phase.fromToken]];
     for (const [pod, token] of restartable) {
       if (stillOld(pod, token)) result.restart.push(pod);
     }
@@ -2045,7 +2072,19 @@ export class FirebirdClusterController {
    * utils/switchover.ts): the operator asks its segment server, and every ready replica's segment
    * server when its puller last reached it (PRIMARYSEEN).
    */
-  private async primaryCutOffReason(
+/** Whether an instance reports itself as the primary (POSITION "OK primary": promoted in place) */
+  private async promotedInPlace(cluster: FirebirdCluster, pod: string): Promise<boolean> {
+    const token = await this.superuserPassword(cluster);
+    if (token === undefined) return false;
+    const host = `${instanceHost(cluster, pod)}.${cluster.metadata.namespace ?? 'default'}.svc`;
+    try {
+      return (await this.segmentClient(host, SEGMENT_PORT, `${token} POSITION`))[0] === 'OK primary';
+    } catch {
+      return false;
+    }
+  }
+
+    private async primaryCutOffReason(
     cluster: FirebirdCluster,
     primaryPod: string,
     pods: V1Pod[],

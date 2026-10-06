@@ -1,6 +1,6 @@
 import { describe, it, expect, afterAll } from 'vitest';
 import { spawn, spawnSync, ChildProcess } from 'child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createServer, Server, Socket } from 'net';
@@ -60,6 +60,7 @@ describe('segment server: synchronous replication commands', () => {
         ISC_PASSWORD: 'tok',
         SEGMENT_PORT: String(port),
         SCRIPT_DIR: ws.dir,
+        JOURNAL_DIR: join(base, 'journal'),
         ...extraEnv,
       },
     });
@@ -108,6 +109,94 @@ describe('segment server: synchronous replication commands', () => {
     expect(await ask('REMOVE nbackup-l1-x.nbk.ctl')).toEqual(['OK']);
     expect((await ask('NBACKUP 3 x.nbk'))[0]).toBe('ERR bad request');
     expect((await ask('NBACKUP 0 ../x.nbk'))[0]).toBe('ERR bad request');
+  });
+
+  describe('promotes a replica in place (PROMOTE)', () => {
+    /** A replica at control file position 9, with fake isql / gfix answering for the local server */
+    async function replica(failGfix = false) {
+      const data = mkdtempSync(join(tmpdir(), 'fb-data-'));
+      const db = join(data, 'mydb.fdb');
+      // ODS 13 header page: page size at 16, ODS version at 18, hdr_end at 66, clumps from 128
+      const page = Buffer.alloc(8192);
+      page[0] = 1;
+      page.writeUInt16LE(8192, 16);
+      page.writeUInt16LE(0x8000 | 13, 18);
+      page.writeUInt16LE(128, 66);
+      writeFileSync(db, Buffer.concat([page, Buffer.alloc(8192)]));
+      const r = await start('db-1', 'db-0', db);
+      const { ws, base } = r;
+      writeFileSync(join(ws.dir, 'set-repl-seq.pl'), REPLICATION_SCRIPTS['set-repl-seq.pl']);
+      writeFileSync(join(ws.dir, 'enable-publication.sql'), REPLICATION_SCRIPTS['enable-publication.sql']);
+      const bin = (name: string, body: string) => {
+        writeFileSync(join(ws.dir, 'bin', name), `#!/bin/sh\n${body}`);
+        chmodSync(join(ws.dir, 'bin', name), 0o755);
+      };
+      bin('isql', `case "$*" in *" -i "*) in="";; *) in=$(cat);; esac; echo "isql $* $in" | tr '\\n' ' ' >> "${ws.dir}/calls"; echo >> "${ws.dir}/calls"
+case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || echo 1)";; *REPLICATION_SEQUENCE*) echo "V   15";; esac\n`);
+      bin('gfix', `echo "gfix $*" >> "${ws.dir}/calls"\n${failGfix ? 'case "$*" in *none*) exit 1;; esac\n' : ''}exit 0\n`);
+      const ctl = Buffer.alloc(40);
+      ctl.write('FBREPLCTL', 0, 'latin1');
+      ctl.writeUInt16LE(1, 10);
+      ctl.writeBigUInt64LE(9n, 16);
+      writeFileSync(join(base, 'source', '{11111111-2222-3333-4444-555555555555}'), ctl);
+      mkdirSync(join(base, 'journal'));
+      writeFileSync(join(base, 'journal', 'mydb.fdb.journal-000000003'), 'old');
+      writeFileSync(join(base, 'archive', 'mydb.fdb.journal-000000009'), 'applied');
+      const ack = setInterval(() => {
+        if (existsSync(join(base, '.pause-pull'))) writeFileSync(join(base, '.pull-paused'), '');
+      }, 50);
+      return { ...r, db, data, stop: () => clearInterval(ack) };
+    }
+
+    it('after the last applied segment, or the journal archive\'s when higher', async () => {
+      if (!hasPerl) return;
+      const r = await replica();
+      try {
+        expect(await r.ask('PROMOTE 12')).toEqual(['OK 12']);
+      } finally {
+        r.stop();
+      }
+      // header: the HDR_repl_seq clump with 12
+      const header = readFileSync(r.db).subarray(128, 140);
+      expect(header.readBigUInt64LE(2)).toBe(12n);
+      const calls = r.ws.calls();
+      const step = (re: RegExp) => calls.findIndex((c) => re.test(c));
+      expect(step(/prp_shutdown_mode prp_sm_full/)).toBeLessThan(step(/prp_online_mode prp_sm_normal/));
+      expect(step(/prp_online_mode/)).toBeLessThan(step(/gfix -replica none/));
+      expect(step(/gfix -replica none/)).toBeLessThan(step(/isql .*enable-publication.sql/));
+      // offline bootstrap seed at 12, replica state gone, lineage recorded, marked as the primary
+      expect(readFileSync(join(r.base, 'bootstrap-seed.seq'), 'utf8').trim()).toBe('12');
+      expect(existsSync(join(r.base, 'bootstrap-seed.fdb'))).toBe(true);
+      expect(readFileSync(join(r.base, 'lineage'), 'utf8')).toBe('9 12\n');
+      expect(readdirSync(join(r.base, 'source'))).toEqual([]);
+      expect(readdirSync(join(r.base, 'journal'))).toEqual([]);
+      expect(readdirSync(join(r.base, 'archive'))).toEqual([]);
+      expect(existsSync(join(r.base, 'promoted'))).toBe(true);
+      expect(existsSync(join(r.base, '.pause-pull'))).toBe(false);
+      expect(await r.ask('POSITION')).toEqual(['OK primary']);
+      // repeated: already promoted
+      writeFileSync(join(r.ws.dir, 'mode'), '0');
+      expect(await r.ask('PROMOTE none')).toEqual(['OK 15']);
+      expect((await r.ask('PROMOTE x'))[0]).toBe('ERR bad request');
+    }, 20_000);
+
+    it('leaves a replica the offline promotion can take over when it fails', async () => {
+      if (!hasPerl) return;
+      const r = await replica(true);
+      try {
+        expect((await r.ask('PROMOTE none'))[0]).toBe('ERR cannot set replica mode none');
+      } finally {
+        r.stop();
+      }
+      const calls = r.ws.calls();
+      expect(calls.some((c) => c === 'gfix -replica read_only localhost:' + r.db)).toBe(false);
+      expect(calls.filter((c) => /prp_online_mode/.test(c))).toHaveLength(1);
+      // the control file (its position) is still there; not marked as the primary
+      expect(readdirSync(join(r.base, 'source'))).toEqual(['{11111111-2222-3333-4444-555555555555}']);
+      expect(existsSync(join(r.base, 'promoted'))).toBe(false);
+      expect(existsSync(join(r.base, '.pause-pull'))).toBe(false);
+      expect(await r.ask('POSITION')).toEqual(['OK 9 0 0']);
+    });
   });
 
   it('takes a plain nbackup on the primary (NBACKUP)', async () => {

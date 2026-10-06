@@ -460,19 +460,29 @@ kubectl get firebirdcluster my-cluster -o jsonpath='{.status.switchover}'
 1. **Stopping**: a Job puts the primary's database into full shutdown (no more writes; clients are
    disconnected), reads its last replication sequence *S*, and waits until segment *S* is archived
    and every ready replica, the target included, has applied it (the segment servers report each
-   replica's control file position with a `POSITION` query).
-2. **Promoting**: the operator moves the leader Lease and the `primary` ConfigMap entry to the
-   target and restarts the target and the old primary. Their init containers work offline: the
-   target's header gets replication sequence *S* (so its journal continues at *S + 1* and the other
-   replicas keep applying without re-seeding), replica mode none and publication, plus a fresh
-   offline bootstrap seed; the old primary becomes a read-only replica positioned after *S*.
-   Replicas that were not ready are re-seeded.
-3. **Completed** once both restarted pods are ready.
+   replica's control file position with a `POSITION` query). It then promotes the target **in
+   place**, without restarting it (its segment server's `PROMOTE`). This takes a full shutdown of
+   about a second, during which:
+   - the target's header gets replication sequence *S*, so its journal continues at *S + 1* and
+     the other replicas keep applying without re-seeding;
+   - it gets a fresh offline bootstrap seed;
+   - it is brought back online with replica mode none and publication.
+2. **Promoting**: the operator moves the leader Lease, the `primary` ConfigMap entry and the
+   routing label to the target, and restarts the old primary. Its init container makes it a
+   read-only replica positioned after *S*. Replicas that were not ready are re-seeded.
+   `status.switchover.promotedInPlace` says the target kept running.
+3. **Completed** once the target is ready and the old primary is ready as a new pod.
 
-Writes are unavailable from the start of step 1 until the target is ready again (the Job plus two
-pod restarts). If the Job fails (for example a replica does not catch up within five minutes) the
-old primary is brought back online and stays primary; change the annotation to retry. There is
-no automatic failover yet; see TODO.md.
+Writes are unavailable from the start of step 1 until the target is promoted, about the Job's
+run time, without pod restarts. If the in-place promotion fails, the target stays a replica:
+the operator then restarts it, and its init container promotes it offline in the same way,
+which is slower (a pod restart). If the Job fails (for example a replica does not catch up
+within five minutes) the old primary is brought back online and stays primary, unless the target
+reports that it was already promoted; change the annotation to retry.
+
+A target promoted in place keeps the role until its next restart even if the ConfigMap has not
+reached its files yet (a `promoted` marker in its replication directory, removed by the init
+container). A restart that finds the promote directive applies nothing twice.
 
 ### Automatic Failover
 

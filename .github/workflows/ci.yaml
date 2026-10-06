@@ -589,6 +589,7 @@ jobs:
             echo "$1 has $(count "$1") rows, expected $2"; return 1
           }
           before=$(count repl-0)
+          target_uid=$(kubectl get pod repl-1 -o jsonpath={.metadata.uid})
           kubectl annotate firebirdcluster repl firebird.cloudnative-firebird.io/targetPrimary=repl-1
           timeout 600 bash -c \
             'until [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.phase})" = "Completed" ]; do
@@ -596,7 +597,10 @@ jobs:
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo; kubectl logs job/repl-switchover || true; exit 1; }
           kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo
           [ "$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})" = "repl-1" ]
-          kubectl logs repl-1 -c replication-init | grep 'promoted to primary'
+          # promoted in place: the target kept its pod (only the old primary restarted)
+          [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.promotedInPlace})" = "true" ]
+          [ "$(kubectl get pod repl-1 -o jsonpath={.metadata.uid})" = "$target_uid" ]
+          kubectl logs repl-1 -c segment-server | grep 'promoted in place'
           kubectl logs repl-0 -c replication-init | grep 'demoted to replica'
           # nothing was lost, the new primary takes writes and both replicas follow it
           [ "$(count repl-1)" = "$before" ]

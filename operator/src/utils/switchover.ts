@@ -10,8 +10,12 @@ import { OPERATOR_CONFIG_DIR, SEGMENT_PORT, instanceHost, isolationCheckTimeoutS
  * 1. Stopping: a Job (switchover.pl) shuts the old primary down (no more writes), reads its last
  *    replication sequence S and waits until segment S is archived and every ready replica, the
  *    target included, has applied it.
+ *    Then it asks the target's segment server to promote it in place (PROMOTE): a short full
+ *    shutdown sets the replication sequence S, then replica mode none and publication, without a
+ *    restart. If that fails the target stays a replica and is promoted offline as below.
  * 2. Promoting: the operator moves the leader Lease and the ConfigMap `primary` entry to the
- *    target and restarts the target and the old primary with "promote" and "demote" directives.
+ *    target and restarts the old primary with a "demote" directive, and the target (unless it was
+ *    promoted in place) with a "promote" directive.
  *    Their init containers apply them offline: the target gets replication sequence S (so its
  *    journal continues at S + 1 and the other replicas keep applying without re-seeding),
  *    replica mode none and publication; the old primary becomes a read-only replica positioned
@@ -29,7 +33,7 @@ export function switchoverJobName(cluster: FirebirdCluster): string {
 
 export function buildSwitchoverJob(
   cluster: FirebirdCluster,
-  options: { from: string; target: string; replicas: string[] },
+  options: { from: string; target: string; replicas: string[]; archived?: number },
 ): V1Job {
   const { name, namespace = 'default', uid } = cluster.metadata;
   const labels = { ...clusterLabels(name), 'app.kubernetes.io/component': 'switchover' };
@@ -65,6 +69,10 @@ export function buildSwitchoverJob(
                 { name: 'DATABASE_PATH', value: `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}` },
                 { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
                 { name: 'TIMEOUT_SECONDS', value: String(SWITCHOVER_TIMEOUT_SECONDS) },
+                // promote the target without a restart (segment server PROMOTE), after every
+                // segment the journal archive may hold
+                { name: 'PROMOTE_IN_PLACE', value: 'true' },
+                { name: 'ARCHIVED', value: options.archived !== undefined ? String(options.archived) : 'none' },
               ],
               volumeMounts: [{ name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }],
             },

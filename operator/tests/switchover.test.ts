@@ -28,12 +28,16 @@ const pod = (name: string, uid: string, ready = true) => ({
   status: { phase: 'Running', conditions: [{ type: 'Ready', status: ready ? 'True' : 'False' }] },
 });
 
-function setup(opts: { pods?: object[]; job?: V1Job; stored?: FirebirdCluster; lease?: string } = {}) {
+function setup(opts: { pods?: object[]; job?: V1Job; stored?: FirebirdCluster; lease?: string; jobPods?: object[]; segment?: Mock } = {}) {
   const notFound = Object.assign(new Error('Not Found'), { code: 404 });
   const api: Record<string, Mock> = {
-    listNamespacedPod: vi.fn().mockResolvedValue({
-      items: opts.pods ?? [pod('db-0', 'u0'), pod('db-1', 'u1'), pod('db-2', 'u2')],
-    }),
+    listNamespacedPod: vi.fn().mockImplementation(({ labelSelector }: { labelSelector?: string }) =>
+      Promise.resolve({
+        items: labelSelector?.startsWith('job-name=')
+          ? (opts.jobPods ?? [])
+          : (opts.pods ?? [pod('db-0', 'u0'), pod('db-1', 'u1'), pod('db-2', 'u2')]),
+      }),
+    ),
     readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: opts.lease ?? 'db-0' } }),
     getNamespacedCustomObject: opts.stored ? vi.fn().mockResolvedValue(opts.stored) : vi.fn().mockRejectedValue(notFound),
     readNamespacedJob: opts.job ? vi.fn().mockResolvedValue(opts.job) : vi.fn().mockRejectedValue(notFound),
@@ -59,7 +63,8 @@ function setup(opts: { pods?: object[]; job?: V1Job; stored?: FirebirdCluster; l
     return c.length ? c[c.length - 1][0].body.data : undefined;
   };
   const created = () => fn('createNamespacedJob').mock.calls.map((c) => c[0].body as V1Job);
-  return { controller: new FirebirdClusterController(kubeConfig), fn, status, cmData, created };
+  const segment = opts.segment ?? vi.fn().mockRejectedValue(new Error('unreachable'));
+  return { controller: new FirebirdClusterController(kubeConfig, segment), fn, status, cmData, created, segment };
 }
 
 const done = (type: 'Complete' | 'Failed'): V1Job => ({ status: { conditions: [{ type, status: 'True' }] } });
@@ -135,6 +140,46 @@ describe('planned switchover', () => {
     expect(unfence?.spec?.template.spec?.containers[0].args?.[0]).toContain('prp_online_mode prp_sm_normal');
     expect(s.status().switchover).toMatchObject({ phase: 'Failed', message: expect.stringContaining('db-0 stays primary') });
     expect(s.fn('patchNamespacedLease')).not.toHaveBeenCalled();
+  });
+
+  it('restarts only the old primary when the Job promoted the target in place', async () => {
+    const jobPod = { metadata: { name: 'db-switchover-x' }, status: { containerStatuses: [{ state: { terminated: { exitCode: 0, message: 'inplace 41' } } }] } };
+    const s = setup({ job: done('Complete'), jobPods: [jobPod] });
+    await s.controller.reconcile(makeCluster('db-1', { switchover: { target: 'db-1', from: 'db-0', phase: 'Stopping' } }));
+    expect(s.fn('patchNamespacedLease').mock.calls[0][0].body[0].value).toBe('db-1');
+    expect(s.cmData().primary).toBe('db-1.db-headless');
+    expect(s.cmData().demote).toBe('db-0 u0\n');
+    expect(s.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name)).toEqual(['db-0']);
+    expect(s.status().switchover).toMatchObject({ phase: 'Promoting', promotedInPlace: true, message: expect.stringContaining('in place') });
+
+    // complete once the old primary restarted; the target keeps its pod
+    const promoting: SwitchoverStatus = { target: 'db-1', from: 'db-0', phase: 'Promoting', targetToken: 'u1', fromToken: 'u0', promotedInPlace: true };
+    const waiting = setup({ pods: [pod('db-0', 'u0', false), pod('db-1', 'u1'), pod('db-2', 'u2')] });
+    await waiting.controller.reconcile(makeCluster('db-1', { switchover: promoting }));
+    expect(waiting.status().switchover.phase).toBe('Promoting');
+    expect(waiting.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name)).toEqual(['db-0']);
+    const finished = setup({ pods: [pod('db-0', 'new0'), pod('db-1', 'u1'), pod('db-2', 'u2')] });
+    await finished.controller.reconcile(makeCluster('db-1', { switchover: promoting }));
+    expect(finished.status().switchover).toMatchObject({ phase: 'Completed' });
+  });
+
+  it('passes the journal archive position to the Job, which promotes in place', async () => {
+    const s = setup();
+    await s.controller.reconcile(makeCluster('db-1', { journalArchiveSequence: 17 }));
+    const env = Object.fromEntries(s.created().find((j) => j.metadata?.name === 'db-switchover')!.spec!.template.spec!.containers[0].env!.map((e) => [e.name, e.value]));
+    expect(env.PROMOTE_IN_PLACE).toBe('true');
+    expect(env.ARCHIVED).toBe('17');
+  });
+
+  it('never brings the old primary back when a failed Job had promoted the target', async () => {
+    const segment = vi.fn().mockImplementation(async (host: string, _p: number, line: string) =>
+      host.startsWith('db-1.') && line.endsWith(' POSITION') ? ['OK primary'] : ['OK 40 0 0'],
+    );
+    const s = setup({ job: done('Failed'), segment });
+    await s.controller.reconcile(makeCluster('db-1', { switchover: { target: 'db-1', from: 'db-0', phase: 'Stopping' } }));
+    expect(s.created().some((j) => j.metadata?.name === 'db-0-fencing')).toBe(false);
+    expect(s.fn('patchNamespacedLease').mock.calls[0][0].body[0].value).toBe('db-1');
+    expect(s.status().switchover).toMatchObject({ phase: 'Promoting', promotedInPlace: true });
   });
 
   it('keeps the directives until both instances are ready as new pods, then completes', async () => {
@@ -345,5 +390,50 @@ describe('switchover.pl with Firebird 6', () => {
     expect(out.text).toContain('final replication sequence of 127.0.0.1: 53');
     expect(out.text).toContain('switchover ready: promote 127.0.0.1 after segment 53');
     expect(requests).toEqual(['HEADER', 'POSITION']);
+  });
+
+  it('promotes the target in place and reports it, or reports why not', async () => {
+    if (!hasPerl) return;
+    const run = async (promoteReply: string) => {
+      const dir = mkdtempSync(join(tmpdir(), 'fb-swp-'));
+      const fbsvcmgr = join(dir, 'fbsvcmgr');
+      writeFileSync(fbsvcmgr, '#!/bin/sh\necho "Attributes force write, full shutdown"\necho "Replication sequence: 53"\n');
+      chmodSync(fbsvcmgr, 0o755);
+      const requests: string[] = [];
+      const server = fakeSegmentServer((request, sock) => {
+        requests.push(request);
+        if (request === 'POSITION') sock.end('OK 53 0 0\n');
+        else if (request.startsWith('PROMOTE ')) sock.end(`${promoteReply}\n`);
+        else sock.end('ERR unknown\n');
+      }, 'tok');
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const script = join(dir, 'switchover.pl');
+      writeFileSync(script, REPLICATION_SCRIPTS['switchover.pl']);
+      const code = await new Promise<number | null>((resolve) => {
+        const child = spawn('perl', [script], {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            OLD_PRIMARY: '127.0.0.1',
+            TARGET: '127.0.0.1',
+            DATABASE_PATH: '/var/lib/firebird/data/mydb.fdb',
+            ISC_PASSWORD: 'tok',
+            SEGMENT_PORT: String((server.address() as { port: number }).port),
+            TIMEOUT_SECONDS: '10',
+            PROMOTE_IN_PLACE: 'true',
+            ARCHIVED: '50',
+            RESULT_FILE: join(dir, 'result'),
+          },
+        });
+        child.on('exit', resolve);
+      });
+      server.close();
+      return { code, requests, result: readFileSync(join(dir, 'result'), 'utf8') };
+    };
+    const promoted = await run('OK 53');
+    expect(promoted).toMatchObject({ code: 0, result: 'inplace 53' });
+    expect(promoted.requests).toEqual(['POSITION', 'PROMOTE 50']);
+    // a failed promotion still lets the operator promote the target offline
+    expect(await run('ERR full shutdown failed')).toMatchObject({ code: 0, result: 'restart ERR full shutdown failed' });
   });
 });

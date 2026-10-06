@@ -643,6 +643,8 @@ export interface SwitchoverStatus {
   fromToken?: string;
   /** Replicas that were not ready when the primary moved, with their pod UIDs: re-seeded */
   reseed?: Record<string, string>;
+  /** The target was promoted without a restart (planned switchover, segment server PROMOTE) */
+  promotedInPlace?: boolean;
 }
 
 /**
