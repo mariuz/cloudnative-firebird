@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync, spawn, spawnSync } from 'child_process';
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createServer } from 'net';
@@ -190,6 +190,7 @@ describe('replication scripts shipped to instance pods', () => {
         if (cmd === 'LIST') sock.end(Object.keys(segments).join('\n') + '\nnot-a-segment\n.\n');
         else if (cmd === 'ARCHIVED') sock.end('1 7200\n2 3600\n3 60\n.\n');
         else if (cmd === 'LINEAGE') sock.end('mydb.fdb.lineage-1-2\nmydb.fdb.lineage-0-1\nbad/name\n.\n');
+        else if (cmd === 'POINTS') sock.end(name === '3' ? '1700000000 150\n1700000001 252\nbad\n.\n' : '.\n');
         else sock.end(`OK ${segments[name].length}\n${segments[name]}`);
       });
     });
@@ -214,16 +215,22 @@ describe('replication scripts shipped to instance pods', () => {
       'tok LINEAGE',
       'tok ARCHIVED',
       'tok GET mydb.fdb.journal-0000000002',
+      'tok POINTS 2',
       'tok GET mydb.fdb.journal-0000000003',
+      'tok POINTS 3',
     ]);
     const files = readdirSync(segDir).sort();
     expect(files.filter((f) => !f.includes('.archived-'))).toEqual([
       'mydb.fdb.journal-0000000002',
       'mydb.fdb.journal-0000000003',
+      'mydb.fdb.journal-0000000003.points',
       // a lineage marker not uploaded yet: an empty object for point-in-time recovery
       'mydb.fdb.lineage-1-2',
     ]);
     expect(readFileSync(join(segDir, 'mydb.fdb.lineage-1-2'), 'utf8')).toBe('');
+    // recovery points of a segment that has any
+    expect(readFileSync(join(segDir, 'mydb.fdb.journal-0000000003.points'), 'utf8')).toBe('1700000000 150\n1700000001 252\n');
+    expect(existsSync(join(segDir, 'mydb.fdb.journal-0000000002.points'))).toBe(false);
     expect(readFileSync(join(segDir, 'mydb.fdb.journal-0000000003'), 'utf8')).toBe('three');
     // the highest sequence it may upload, for the operator
     expect(readFileSync(join(out, 'result'), 'utf8')).toBe('listed=3');

@@ -38,9 +38,8 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 ## Backups and restore
 
-- [ ] **Recovery points within a segment**: point-in-time recovery applies whole journal
-  segments (the journal has no timestamps); a target time lands on the end of the last segment
-  archived before it. A shorter `archiveTimeoutSeconds` narrows the gap.
+Nothing open.
+
 ## Users
 
 - [ ] **Existing users on upgrade**: clusters created before v0.12.0 start with a fresh security

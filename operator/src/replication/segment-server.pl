@@ -19,6 +19,7 @@
 #   "<token> ARCHIVED\n"       -> "<sequence> <age seconds>" for each archived segment, then ".\n"
 #   "<token> NBACKUP <level> <file>\n" -> nbackup into the data directory; on a replica with the
 #                                replica control file next to it (see nbackup_here)
+#   "<token> POINTS <S>\n"     -> "<epoch> <length>" recovery points of segment S, then ".\n"
 #   "<token> LINEAGE\n"        -> "<database>.lineage-<P>-<U>" for each failover that promoted this
 #                                instance from segment P after the journal archive's segment U
 #                                (segments P+1..U are not in its history), then ".\n"
@@ -109,6 +110,10 @@ my $uploaded_file = "$base/uploaded-floor";
 my $prune_applied = ($ENV{PRUNE_APPLIED} // '') eq 'true';
 my $archive_upload = ($ENV{ARCHIVE_UPLOAD} // '') eq 'true';
 my $allow_live = ($ENV{ALLOW_LIVE_SEED} // '') eq 'true';
+# recovery points (journal archive): the primary's journal segments sampled every second
+my $recovery_points = ($ENV{RECOVERY_POINTS} // '') eq 'true';
+my $journal_dir = $ENV{JOURNAL_DIR} // '';
+my $points_dir = "$base/points";
 my $seed_file = "$base/seed.copy";
 my $bootstrap_seed = "$base/bootstrap-seed.fdb";
 my $pause_flag = "$base/.pause-pull";
@@ -435,6 +440,14 @@ sub seed_from_primary {
 # volume.
 sub prune {
   my $now = time;
+  # recovery points of segments long gone
+  if (opendir(my $ph, $points_dir)) {
+    for my $f (grep { /^\d+$/ } readdir($ph)) {
+      my $mtime = (stat("$points_dir/$f"))[9];
+      unlink "$points_dir/$f" if defined $mtime && $now - $mtime > $max_retention;
+    }
+    closedir($ph);
+  }
   my $floor = slurp($floor_file);
   $floor = undef unless $floor =~ /^\d+$/;
   my $measured = $floor;   # from the operator, not the bootstrap seed fallback below
@@ -512,6 +525,46 @@ sub store_file {
   }
 }
 
+# Recovery points (RECOVERY_POINTS, with a journal archive): every second the primary's journal
+# segments still being written are sampled, and each new length of segment S is appended to
+# points/S as "<epoch seconds> <length>". The header length only grows by whole writes (the
+# blocks of a commit; verified), so a segment cut at a recorded length (header length set,
+# file truncated) is a valid segment ending at that moment: point-in-time recovery cuts the
+# segment after its target there (pitr-restore.sh), instead of applying whole segments only.
+my $sampler;
+sub start_sampler {
+  return if $files_only || !$recovery_points || $journal_dir eq '';
+  my $pid = fork;
+  if (!defined $pid) { print "cannot start the recovery point sampler: $!\n"; return; }
+  if ($pid == 0) {
+    close $server;
+    mkdir $points_dir;
+    my %last;
+    while (1) {
+      if (is_primary() && opendir(my $dh, $journal_dir)) {
+        my @names = grep { $_ =~ $name_re } readdir($dh);
+        closedir($dh);
+        for my $name (@names) {
+          open(my $fh, '<:raw', "$journal_dir/$name") or next;
+          my $n = read($fh, my $hdr, 48);
+          close $fh;
+          next unless $n && $n == 48 && substr($hdr, 0, 11) eq 'FBCHANGELOG';
+          my (undef, undef, undef, undef, $seq, $length) = unpack('a12 v v a16 Q< Q<', $hdr);
+          next if !$seq || $length <= 48 || ($last{$seq} // 0) == $length;
+          $last{$seq} = $length;
+          if (open(my $out, '>>', "$points_dir/$seq")) { print $out time() . " $length\n"; close $out; }
+        }
+        # forget segments no longer written
+        my %live = map { /journal-0*(\d+)$/ ? ($1 => 1) : () } @names;
+        delete $last{$_} for grep { !$live{$_} } keys %last;
+      }
+      sleep 1;
+    }
+  }
+  $sampler = $pid;
+}
+start_sampler();
+
 # The isolation check (automatic failover only) runs beside the server, restarted if it exits
 my $monitor;
 sub start_monitor {
@@ -533,6 +586,7 @@ while (1) {
   # reap finished transfers (1 = WNOHANG), and restart the isolation check if it ended
   while ((my $done = waitpid(-1, 1)) > 0) {
     if (defined $monitor && $done == $monitor) { $monitor = undef; sleep 1; start_monitor(); }
+    if (defined $sampler && $done == $sampler) { $sampler = undef; sleep 1; start_sampler(); }
   }
   $server->timeout(30);
   my $client = $server->accept or next;
@@ -644,6 +698,12 @@ while (1) {
         print $client "OK $ctl->{sequence} $ctl->{offset} $pending\n";
       }
     }
+  } elsif ($cmd eq 'POINTS' && defined $arg && $arg =~ /^(\d+)$/) {
+    if (open(my $fh, '<', "$points_dir/$1")) {
+      while (my $l = <$fh>) { print $client $l if $l =~ /^\d+ \d+\n$/; }
+      close $fh;
+    }
+    print $client ".\n";
   } elsif ($cmd eq 'LINEAGE') {
     (my $db_name = $database) =~ s{.*/}{};
     if (open(my $fh, '<', "$base/lineage")) {

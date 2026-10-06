@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.59.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.60.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Recovery Points Within a Segment** *(v0.60.0)*
+  - Point-in-time recovery applied whole journal segments, so a target time landed on the end of the last segment archived before it (up to `archiveTimeoutSeconds` early). The primary's segment server now samples the segments being written every second (`RECOVERY_POINTS`, with a journal archive) and keeps "<time> <length>" points per segment; the archive Job uploads them as `<segment>.points`.
+  - A segment's header length only grows by whole writes (a commit's blocks), and a segment cut at a recorded length (header length set, file truncated) is applied by the replica server up to there (both verified). The restore cuts the segment after the target at its last point at or before it: the recovery point is within about a second of the target.
+  - Verified with operator-generated pods: one connection committing every 0.25 s, target in the middle of a segment; the recovery cut the next segment at its point and has 31 rows, within the 26–33 window one-second sampling allows, where whole segments stopped at the end of the previous segment.
 - [x] **Non-Root Instances** *(v0.59.0)*
   - `runAsFirebirdUser: true` runs every instance container as the image's `firebird` user (uid 84, `fsGroup` 84) with all capabilities dropped: the instance pods meet the `restricted` Pod Security Standard (the default stays `baseline`, root).
   - The unmodified image entrypoint runs on a writable copy of `/opt/firebird` (an `emptyDir` filled by the `firebird-home` init container); the init scripts chown only as root.

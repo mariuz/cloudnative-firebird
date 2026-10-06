@@ -11,7 +11,9 @@
 # 1. Restores the nbackup chain into a scratch database here (nbackup -SEQ -R keeps the
 #    replication sequence S of the last backup in the chain).
 # 2. Picks the last journal segment L to apply: TARGET_SEGMENT, the last one archived at or before
-#    TARGET_TIME, or the newest archived one.
+#    TARGET_TIME, or the newest archived one. With TARGET_TIME and recovery points for the next
+#    segment ("<segment>.points", segment server POINTS), that one is applied too, cut at its last
+#    length recorded at or before the target (whole commits up to that second).
 # 3. Downloads the segments from S3 (through the S3 client container of the pod, see below) and
 #    plans the replay with pitr-plan.pl: segments after S, plus the transactions open in the
 #    backup from their first segment.
@@ -166,6 +168,31 @@ else
 fi
 [ "$L" -ge "$S" ] || fail "the recovery target (segment $L) is before the backup (segment $S)"
 echo "recovery target: segment $L, archived at $(time_of "$L")"
+# recovery points ("<segment>.points": "<epoch> <length>", sampled every second on the primary):
+# the segment after L is replayed up to its last length recorded at or before the target time
+cut_name=""
+cut_length=""
+if [ -n "${TARGET_TIME:-}" ]; then
+  N=$(awk -v l="$L" '$1 > l { print $1; exit }' "$W/segments.idx")
+  if [ -n "$N" ] && awk -v n="$(name_of "$N").points" '$4 == n { found = 1 } END { exit !found }' "$W/journals.list"; then
+    download "$(name_of "$N").points"
+    target_epoch=$(date -u -d "$(echo "$TARGET_TIME" | sed 's/^\(....\)\(..\)\(..\)T\(..\)\(..\)\(..\)Z$/\1-\2-\3 \4:\5:\6/')" +%s)
+    cut_length=$(awk -v e="$target_epoch" '$1 <= e && $2 > 48 { c = $2 } END { print c }' "$W/segments/$(name_of "$N").points")
+    rm -f "$W/segments/$(name_of "$N").points"
+    if [ -n "$cut_length" ]; then
+      cut_name=$(name_of "$N")
+      L=$N
+      echo "recovery target inside segment $L: up to its length $cut_length (recorded at or before the target time)"
+    fi
+  fi
+fi
+apply_cut() { # the segment after the target, cut at the recovery point, wherever it was downloaded to
+  [ -n "$cut_name" ] || return 0
+  for f in "$SRC/$cut_name" "$W"/later/*/"$cut_name"; do
+    [ -f "$f" ] || continue
+    perl -e 'open(my $f, "+<:raw", $ARGV[0]) or die "$ARGV[0]: $!\n"; seek($f, 40, 0); print $f pack("Q<", $ARGV[1]); close $f or die; truncate($ARGV[0], $ARGV[1]) or die "$ARGV[0]: $!\n"' "$f" "$cut_length"
+  done
+}
 
 # 3. download and plan: the open transactions may need segments before S
 if [ -z "$adopt" ]; then
@@ -197,6 +224,7 @@ if [ "$L1" -ge "$first" ]; then
   # shellcheck disable=SC2046 # segment names have no spaces
   download $(want "$first" "$L1")
   for f in "$W/segments"/*.journal-*; do [ -f "$f" ] && mv "$f" "$SRC/"; done
+  apply_cut
 fi
 while [ -z "$adopt" ]; do
   rc=0
@@ -220,6 +248,7 @@ while read -r p u end; do
   # shellcheck disable=SC2046
   download $(want "$((u + 1))" "$end")
   for f in "$W/segments"/*.journal-*; do [ -f "$f" ] && mv "$f" "$W/later/$u/"; done
+  apply_cut
 done < "$W/parts"
 # every download is done: the S3 client container can stop
 touch "$W/finished"
@@ -258,7 +287,11 @@ while read -r p u end; do
   replay "$end"
 done < "$W/parts"
 "$FB/gfix" -user SYSDBA -replica none "$DB"
-echo "recovered to the end of segment $L (archived at $(time_of "$L"))"
+if [ -n "$cut_name" ]; then
+  echo "recovered to segment $L up to its length $cut_length (the last recovery point at or before $TARGET_TIME)"
+else
+  echo "recovered to the end of segment $L (archived at $(time_of "$L"))"
+fi
 
 if [ -n "${LOCAL_TARGET:-}" ]; then
   mv "$DB" "$LOCAL_TARGET"
