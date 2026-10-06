@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.65.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.66.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,19 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Switchover Without Restarting the Target** *(v0.66.0)*
+  - A planned switchover restarted both the target and the old primary, and writes were down for both restarts. The switchover Job now promotes the target in place through its segment server's `PROMOTE`:
+    - it pauses the puller and waits until every received segment is applied;
+    - it puts the database into full shutdown, during which the server has the file closed;
+    - it writes the replication sequence S (or the journal archive's last segment, with a lineage marker) into the header, replaces the replication state, and writes the offline bootstrap seed;
+    - it brings the database back online with replica mode none and publication.
+  - In Docker this took about a second on Firebird 4, 5 and the 6 snapshot. The journal continues at S + 1, and the other replicas follow without re-seeding.
+  - Only the old primary restarts, to be demoted. The routing label moves the clients without a restart, and a `promoted` marker covers the time until the ConfigMap reaches the pod's files.
+  - Safeguards:
+    - on any failure the target stays a replica and is promoted offline, with a restart as before;
+    - a Job that failed after promoting does not bring the old primary back;
+    - a restart with the promote directive applies nothing twice.
+  - Verified end to end with operator-generated pods; the kind CI checks that the target keeps its pod.
 - [x] **Admission Webhook** *(v0.65.0, CloudNativePG's validating webhook)*
   - The operator serves a validating webhook (`config/deploy/webhook.yaml`) for checks the CRD rules cannot express because they need other objects. It refuses what the operator would fail for good: a restore over the cluster database, from a missing or failed backup, of the wrong type, or with an unusable point-in-time source. It also runs the operator's spec validation, including the checks the CRDs lack.
   - Missing clusters, Secrets and clone sources, and backups still running, are warnings (`kubectl` shows them), since one apply may create objects in any order. Updates are checked only when the spec changes, so the operator's own updates and deletions are never blocked.

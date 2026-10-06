@@ -41,6 +41,8 @@ $| = 1;
 sub slurp { my ($f) = @_; open(my $fh, '<', $f) or return ''; local $/; my $v = <$fh>; close $fh; $v //= ''; $v =~ s/\s+$//; return $v; }
 
 sub is_primary {
+  # promoted in place (segment-server.pl PROMOTE) before the ConfigMap file names this instance
+  return 1 if $ENV{REPLICATION_DIR} && -e "$ENV{REPLICATION_DIR}/promoted";
   my $primary = slurp($primary_file);
   return $primary eq '' || $primary =~ /^\Q$self\E(\.|$)/;
 }

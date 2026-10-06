@@ -7,12 +7,17 @@
 #   3. wait until the target and every other ready replica has applied everything up to S
 #      (POSITION on their segment servers: control file at S or beyond, nothing pending).
 #
-# Exits 0 when the target can be promoted: the operator then moves the primary and restarts the
-# target and the old primary, whose init containers promote and demote them offline
-# (init-instance.sh). On failure the operator brings the old primary back online.
+#   4. with PROMOTE_IN_PLACE=true, promote the target without a restart (its segment server's
+#      PROMOTE, ARCHIVED: the journal archive's last segment or "none").
+#
+# Exits 0 when the target can be promoted, with "inplace <S>" in its result (RESULT_FILE, the
+# termination message) when step 4 promoted it, or "restart <reason>" otherwise. The operator then
+# moves the primary and restarts the old primary, whose init container demotes it offline, and
+# (without "inplace") the target, whose init container promotes it offline (init-instance.sh).
+# On failure the operator brings the old primary back online.
 #
 # Environment: OLD_PRIMARY, TARGET, REPLICAS (space separated hosts), DATABASE_PATH,
-# ISC_USER / ISC_PASSWORD, SEGMENT_PORT, TIMEOUT_SECONDS.
+# ISC_USER / ISC_PASSWORD, SEGMENT_PORT, TIMEOUT_SECONDS, PROMOTE_IN_PLACE, ARCHIVED, RESULT_FILE.
 use strict;
 use warnings;
 use IO::Socket::INET;
@@ -85,9 +90,28 @@ print "final replication sequence of $old: $final\n";
 for my $host ($target, @others) {
   wait_until("$host to apply segment $final", sub {
     my $r = request($host, 'POSITION') or return 0;
+    # the target promoted in place by an earlier run of this Job
+    return 1 if $host eq $target && ($r->[0] // '') eq 'OK primary';
     my ($seq, $offset, $pending) = ($r->[0] // '') =~ /^OK (\d+) (\d+) (\d+)$/ or return 0;
     return $seq >= $final && $pending == 0;
   });
   print "$host has applied everything up to segment $final\n";
 }
 print "switchover ready: promote $target after segment $final\n";
+
+# 4. promote the target in place; any failure leaves it a replica for the offline promotion
+my $outcome = 'restart in-place promotion not requested';
+if (($ENV{PROMOTE_IN_PLACE} // '') eq 'true') {
+  my $archived = ($ENV{ARCHIVED} // '') =~ /^(\d+)$/ ? $1 : 'none';
+  my $r = request($target, "PROMOTE $archived");
+  my $reply = $r ? ($r->[0] // 'no reply') : 'segment server not reachable';
+  if ($reply =~ /^OK (\d+)$/) {
+    $outcome = "inplace $1";
+    print "$target promoted in place: its journal continues after segment $1\n";
+  } else {
+    $outcome = "restart $reply";
+    print "in-place promotion of $target failed ($reply): it is promoted offline instead\n";
+  }
+}
+my $result = $ENV{RESULT_FILE} // '/dev/termination-log';
+if (open(my $fh, '>', $result)) { print $fh $outcome; close $fh; }
