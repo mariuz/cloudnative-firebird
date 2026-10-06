@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.66.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.67.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,11 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Failover Without Restarting the Elected Replica** *(v0.67.0)*
+  - Automatic failover restarted the elected replica so that its init container could promote it. Now, once the operator has committed to the failover (the Lease is moved; the election itself stays discardable), a promote Job sends the replica's segment server `PROMOTE`, with the journal archive's last segment, and reports the reply.
+  - On success the replica keeps running (`status.switchover.promotedInPlace`). On any failure, and for the synchronous standby, it is restarted and promoted offline as before; a database already promoted is left as it is.
+  - The offline promotion now also brings a database online first, in case an in-place promotion was cut short.
+  - Verified with operator-generated pods: the elected replica takes writes without a restart, the other replica follows, the old primary is re-seeded, and a later restart with the directive changes nothing. The kind CI checks the in-place promotion.
 - [x] **Switchover Without Restarting the Target** *(v0.66.0)*
   - A planned switchover restarted both the target and the old primary, and writes were down for both restarts. The switchover Job now promotes the target in place through its segment server's `PROMOTE`:
     - it pauses the puller and waits until every received segment is applied;

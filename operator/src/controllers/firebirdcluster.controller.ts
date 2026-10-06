@@ -57,10 +57,12 @@ import {
   primaryCutOff,
   TARGET_PRIMARY_ANNOTATION,
   buildFailoverJob,
+  buildPromoteJob,
   buildSwitchoverJob,
   failoverJobName,
   parseElection,
   switchoverJobName,
+  promoteJobName,
 } from '../utils/switchover';
 import {
   buildFencingJob,
@@ -736,6 +738,8 @@ export class FirebirdClusterController {
               startTime: now,
               targetToken: standbyPod.metadata?.uid ?? '',
               reseed,
+              // the standby's offline promotion takes its last segment from the synchronous state
+              promotedInPlace: false,
             });
             await this.customApi.patchNamespacedCustomObject(
               {
@@ -1001,7 +1005,10 @@ export class FirebirdClusterController {
     };
     const isFailover = phase.kind === 'failover';
     // a target promoted in place keeps running: ready is enough
-    const inPlace = Boolean(phase.promotedInPlace) && !isFailover;
+    const inPlace = Boolean(phase.promotedInPlace);
+    // a failover's target is promoted in place by a Job once the primary moved to it (the election
+    // had to stay discardable); undecided until that Job ended, then restarted only if it failed
+    const promotionPending = isFailover && phase.promotedInPlace === undefined;
     const targetDone = inPlace ? Boolean(podOf(phase.target) && isPodReady(podOf(phase.target)!)) : restarted(phase.target, phase.targetToken);
     if (targetDone && (isFailover || restarted(phase.from, phase.fromToken))) {
       log.info({ primary: phase.target }, 'Switchover completed');
@@ -1020,7 +1027,9 @@ export class FirebirdClusterController {
       return Boolean(p && p.metadata?.uid === token && !p.metadata?.deletionTimestamp);
     };
     const restartable: Array<[string, string | undefined]> = isFailover
-      ? [[phase.target, phase.targetToken]]
+      ? inPlace || promotionPending
+        ? []
+        : [[phase.target, phase.targetToken]]
       : inPlace
         ? [[phase.from, phase.fromToken]]
         : [[phase.target, phase.targetToken], [phase.from, phase.fromToken]];
@@ -1031,8 +1040,62 @@ export class FirebirdClusterController {
       result.reseed[pod] = token;
       if (stillOld(pod, token)) result.restart.push(pod);
     }
+    if (promotionPending) {
+      const promoted = await this.failoverPromotion(cluster, phase.target, archived, log);
+      if (promoted !== undefined) {
+        phase = {
+          ...phase,
+          promotedInPlace: promoted.ok,
+          message: promoted.ok
+            ? `${phase.target} promoted in place (${promoted.reply}); ${phase.from} will be re-seeded`
+            : `in-place promotion of ${phase.target} failed (${promoted.reply}): restarting it to promote it offline`,
+        };
+        await persist(phase);
+        if (!promoted.ok && stillOld(phase.target, phase.targetToken)) result.restart.push(phase.target);
+      }
+    }
     result.status = phase;
     return result;
+  }
+
+  /**
+   * Runs the promote Job of a failover (buildPromoteJob) and reads its outcome: undefined while it
+   * runs, then whether the target was promoted in place and the segment server's reply.
+   */
+  private async failoverPromotion(
+    cluster: FirebirdCluster,
+    target: string,
+    archived: number | undefined,
+    log: Logger,
+  ): Promise<{ ok: boolean; reply: string } | undefined> {
+    const namespace = cluster.metadata.namespace ?? 'default';
+    const jobName = promoteJobName(cluster);
+    let job;
+    try {
+      job = await this.batchApi.readNamespacedJob({ name: jobName, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+    if (!job || job.metadata?.annotations?.[TARGET_PRIMARY_ANNOTATION] !== target) {
+      if (job) {
+        // left over from an earlier failover
+        await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
+        return undefined;
+      }
+      log.info({ target }, 'Promoting the failover target in place');
+      await this.batchApi.createNamespacedJob({ namespace, body: buildPromoteJob(cluster, target, archived) });
+      return undefined;
+    }
+    const conditions = job.status?.conditions ?? [];
+    const failed = conditions.some((c) => (c.type === 'Failed' || c.type === 'FailureTarget') && c.status === 'True');
+    const complete = conditions.some((c) => c.type === 'Complete' && c.status === 'True');
+    if (!failed && !complete) return undefined;
+    const jobPods = await this.coreApi.listNamespacedPod({ namespace, labelSelector: `job-name=${jobName}` });
+    const reply =
+      jobPods.items.map((p) => p.status?.containerStatuses?.[0]?.state?.terminated?.message ?? '').find((m) => m !== '')?.trim() ??
+      'no reply';
+    await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
+    return { ok: complete && /^OK \d+$/.test(reply), reply: failed ? `Job failed: ${reply}` : reply };
   }
 
   /**

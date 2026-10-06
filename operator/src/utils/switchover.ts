@@ -140,6 +140,60 @@ export function primaryCutOff(options: {
   return `ready but cut off: the operator cannot reach it, and no replica has reached it for ${threshold}s or more (${ages})`;
 }
 
+export function promoteJobName(cluster: FirebirdCluster): string {
+  return `${cluster.metadata.name}-promote`;
+}
+
+/**
+ * Job promoting the replica elected by an automatic failover in place (its segment server's
+ * PROMOTE), once the operator moved the primary to it. Its termination message is the reply:
+ * "OK <S>" when promoted, otherwise the operator restarts the target, whose init container
+ * promotes it offline (a database already promoted is left as it is).
+ */
+export function buildPromoteJob(cluster: FirebirdCluster, target: string, archived?: number): V1Job {
+  const { name, namespace = 'default', uid } = cluster.metadata;
+  const labels = { ...clusterLabels(name), 'app.kubernetes.io/component': 'promote' };
+  const request = `PROMOTE ${archived !== undefined ? archived : 'none'}`;
+  return {
+    apiVersion: 'batch/v1',
+    kind: 'Job',
+    metadata: {
+      name: promoteJobName(cluster),
+      namespace,
+      labels,
+      annotations: { [TARGET_PRIMARY_ANNOTATION]: target },
+      ownerReferences: [
+        { apiVersion: `${API_GROUP}/v1`, kind: 'FirebirdCluster', name, uid: uid ?? '', controller: true, blockOwnerDeletion: true },
+      ],
+    },
+    spec: {
+      backoffLimit: 0,
+      ttlSecondsAfterFinished: 3600,
+      activeDeadlineSeconds: SWITCHOVER_TIMEOUT_SECONDS * 2,
+      template: {
+        metadata: { labels },
+        spec: jobPodSpec(cluster, {
+          restartPolicy: 'Never',
+          containers: [
+            {
+              name: 'promote',
+              image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+              command: ['sh', '-c', `perl ${OPERATOR_CONFIG_DIR}/segment-request.pl "$TARGET" ${request} | tee /dev/termination-log`],
+              env: [
+                ...superuserClientEnv(cluster),
+                { name: 'TARGET', value: instanceHost(cluster, target) },
+                { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
+              ],
+              volumeMounts: [{ name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }],
+            },
+          ],
+          volumes: [{ name: 'cluster-config', configMap: { name: `${name}-config` } }],
+        }),
+      },
+    },
+  };
+}
+
 export function failoverJobName(cluster: FirebirdCluster): string {
   return `${cluster.metadata.name}-failover`;
 }

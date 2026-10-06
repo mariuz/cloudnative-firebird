@@ -97,6 +97,8 @@ if [ -n "$promote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
   seq=$(cat "$REPLICATION_DIR/.promote-seq")
   echo "promoting this replica to primary; its journal continues after segment $seq"
   if [ -f "$DATABASE_PATH" ]; then mv "$DATABASE_PATH" "$sw"; fi
+  # an in-place promotion (segment-server.pl PROMOTE) cut short may have left it in full shutdown
+  gfix -online "$sw" 2>/dev/null || true
   perl "$SCRIPT_DIR/set-repl-seq.pl" "$sw" "$seq"
   gfix -replica none "$sw"
   isql -q -i "$SCRIPT_DIR/enable-publication.sql" "$sw"

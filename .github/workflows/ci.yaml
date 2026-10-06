@@ -650,7 +650,9 @@ jobs:
           new=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
           [ "$new" != "$old" ]
           [ "$(kubectl get firebirdcluster repl -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/targetPrimary}')" = "$new" ]
-          kubectl logs "$new" -c replication-init | grep 'promoted to primary'
+          # promoted in place by the promote Job (no restart of the elected replica)
+          [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.promotedInPlace})" = "true" ]
+          kubectl logs "$new" -c segment-server | grep 'promoted in place'
           # no writes happened while the primary was down: nothing is lost here
           [ "$(count "$new")" = "$before" ]
           for i in $(seq 201 210); do sql "$new" "insert into app values ($i, 'after failover'); commit;" >/dev/null; done
