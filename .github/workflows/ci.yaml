@@ -608,6 +608,45 @@ jobs:
           fi
           echo "failed over from $old to $new"
 
+      - name: Verify failover of a cut-off primary
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
+          count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          old=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
+          before=$(count "$old")
+          last_failover=$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})
+          # the primary's pod loses every peer but keeps the API server, so its isolation check
+          # does not fence it and it stays ready (its probes run inside the pod): an ephemeral
+          # container with NET_ADMIN drops all other traffic in the pod's network namespace
+          # (the kubelet's probes come from the node's address, which stays allowed)
+          api=$(kubectl get endpoints kubernetes -o jsonpath='{.subsets[0].addresses[0].ip}')
+          node=$(kubectl get pod "$old" -o jsonpath={.status.hostIP})
+          old_uid=$(kubectl get pod "$old" -o jsonpath={.metadata.uid})
+          kubectl debug "$old" --profile=netadmin --image=alpine:3.20 -- sh -c \
+            "apk add -q iptables && iptables -A OUTPUT -o lo -j ACCEPT && iptables -A OUTPUT -d $api -j ACCEPT &&
+             iptables -A OUTPUT -d $node -j ACCEPT &&
+             iptables -A OUTPUT -d \$KUBERNETES_SERVICE_HOST -j ACCEPT && iptables -A OUTPUT -j DROP &&
+             iptables -A INPUT -i lo -j ACCEPT && iptables -A INPUT -s $node -j ACCEPT &&
+             iptables -A INPUT -m state --state ESTABLISHED -j ACCEPT &&
+             iptables -A INPUT -j DROP && echo cut off && sleep 3600"
+          timeout 600 bash -c \
+            "until kubectl get firebirdcluster repl -o jsonpath='{.status.switchover.kind} {.status.switchover.phase} {.status.switchover.startTime}' | grep -q 'failover Completed' &&
+               [ \"\$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})\" != '$last_failover' ]; do sleep 5; done" \
+            || { kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo; kubectl get pods -o wide; exit 1; }
+          kubectl get events --field-selector involvedObject.name=repl -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' \
+            | grep "cut off" | tee /dev/stderr | grep -q "the operator cannot reach it"
+          new=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
+          [ "$new" != "$old" ]
+          [ "$(count "$new")" = "$before" ]
+          # the cut-off primary's pod was deleted (that ends its writes) and comes back re-seeded
+          timeout 300 bash -c "until uid=\$(kubectl get pod $old -o jsonpath={.metadata.uid} 2>/dev/null) &&
+            [ -n \"\$uid\" ] && [ \"\$uid\" != $old_uid ]; do sleep 3; done"
+          kubectl wait pod/"$old" --for=condition=Ready --timeout=300s
+          kubectl logs "$old" -c replication-init | grep 're-seed requested'
+          sql "$old" "insert into app values (997, 'old primary'); commit;" | grep -q 'read-only'
+          echo "failed over from the cut-off primary $old to $new"
+
       - name: Verify rolling update with the primary last
         run: |
           DB=/var/lib/firebird/data/mydb.fdb

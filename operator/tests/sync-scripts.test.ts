@@ -164,6 +164,18 @@ describe('segment server: synchronous replication commands', () => {
     expect(await ask('VERSION')).toEqual(['OK 4.0.7']);
   });
 
+  it('reports when the replica last reached the primary (PRIMARYSEEN)', async () => {
+    if (!hasPerl) return;
+    const { base, ask } = await start('db-1', 'db-0');
+    expect(await ask('PRIMARYSEEN')).toEqual(['OK never']);
+    writeFileSync(join(base, 'primary-seen'), `${Math.floor(Date.now() / 1000) - 42} db-0.db-headless\n`);
+    const [reply] = await ask('PRIMARYSEEN');
+    const [, age, host] = /^OK (\d+) (\S+)$/.exec(reply)!;
+    expect(Number(age)).toBeGreaterThanOrEqual(42);
+    expect(Number(age)).toBeLessThan(50);
+    expect(host).toBe('db-0.db-headless');
+  });
+
   it('reports the lineage switches recorded at promotion (LINEAGE)', async () => {
     if (!hasPerl) return;
     const { base, ask } = await start('db-1', 'db-1');
@@ -408,5 +420,43 @@ describe('sync-standby.pl', () => {
     expect(r.code).toBe(0);
     expect(r.result).toBe('detached unreachable');
     expect(r.log).toEqual(['primary HEADER', 'primary SYNC none']);
+  });
+});
+
+describe('segment puller: primary contact', () => {
+  it('records when it last reached the primary, for PRIMARYSEEN', async () => {
+    if (!hasPerl) return;
+    const dir = mkdtempSync(join(tmpdir(), 'fb-pull-'));
+    writeFileSync(join(dir, 'segment-puller.pl'), REPLICATION_SCRIPTS['segment-puller.pl']);
+    mkdirSync(join(dir, 'source'));
+    writeFileSync(join(dir, 'primary'), '127.0.0.1\n');
+    const primary: Server = createServer((socket) =>
+      socket.once('data', (line) => socket.end(line.toString().includes(' LIST') ? '.\n' : 'OK none\n')),
+    );
+    await new Promise<void>((r) => primary.listen(0, '127.0.0.1', r));
+    const port = (primary.address() as { port: number }).port;
+    const puller = spawn('perl', [join(dir, 'segment-puller.pl')], {
+      env: {
+        PATH: process.env.PATH,
+        SOURCE_DIR: join(dir, 'source'),
+        STATE_FILE: join(dir, '.last-pulled'),
+        PRIMARY_FILE: join(dir, 'primary'),
+        REPLICATION_DIR: dir,
+        POD_NAME: 'db-1',
+        ISC_PASSWORD: 'tok',
+        SEGMENT_PORT: String(port),
+        POLL_SECONDS: '1',
+      },
+    });
+    try {
+      const seen = join(dir, 'primary-seen');
+      for (let i = 0; i < 50 && !existsSync(seen); i++) await new Promise((r) => setTimeout(r, 100));
+      const [at, host] = readFileSync(seen, 'utf8').trim().split(' ');
+      expect(Math.abs(Number(at) - Date.now() / 1000)).toBeLessThan(10);
+      expect(host).toBe('127.0.0.1');
+    } finally {
+      puller.kill();
+      primary.close();
+    }
   });
 });

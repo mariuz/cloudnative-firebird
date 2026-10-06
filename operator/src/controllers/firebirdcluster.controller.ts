@@ -54,6 +54,7 @@ import {
 import { chooseBackupInstance } from '../utils/backup-target';
 import {
   effectiveFailoverDelaySeconds,
+  primaryCutOff,
   TARGET_PRIMARY_ANNOTATION,
   buildFailoverJob,
   buildSwitchoverJob,
@@ -651,7 +652,12 @@ export class FirebirdClusterController {
     const electionJob = failoverJobName(cluster);
     const now = new Date().toISOString();
     const fenced = current.status?.fencedInstances ?? [];
-    const primaryReady = Boolean(podOf(primaryPod) && isPodReady(podOf(primaryPod)!));
+    const primaryPodReady = Boolean(podOf(primaryPod) && isPodReady(podOf(primaryPod)!));
+    // a ready primary that neither the operator nor any replica reaches counts as unavailable
+    const cutOff = primaryPodReady && failover?.enabled && !fenced.includes(primaryPod)
+      ? await this.primaryCutOffReason(cluster, primaryPod, pods.items, fenced)
+      : undefined;
+    const primaryReady = primaryPodReady && !cutOff;
     // each phase change is stored before it is acted upon, so a failed or concurrent reconcile
     // resumes the phase instead of repeating the previous one
     const persist = async (status: SwitchoverStatus, reason?: string) => {
@@ -691,7 +697,12 @@ export class FirebirdClusterController {
         result.primaryNotReadySince = since;
         if (!current.status?.primaryNotReadySince) {
           const delay = effectiveFailoverDelaySeconds(cluster);
-          await this.event(cluster, 'Warning', EventReason.PrimaryNotReady, `primary ${primaryPod} is not ready; failover in ${delay}s unless it recovers`);
+          await this.event(
+            cluster,
+            'Warning',
+            EventReason.PrimaryNotReady,
+            `primary ${primaryPod} ${cutOff ?? 'is not ready'}; failover in ${delay}s unless it recovers`,
+          );
         }
         const delayMs = effectiveFailoverDelaySeconds(cluster) * 1000;
         const recentFailure =
@@ -2027,6 +2038,36 @@ export class FirebirdClusterController {
       log.warn({ err }, 'Could not list the clusters cloning from this one');
       return undefined;
     }
+  }
+
+  /**
+   * Why a primary whose pod is ready is cut off all the same, if it is (see primaryCutOff in
+   * utils/switchover.ts): the operator asks its segment server, and every ready replica's segment
+   * server when its puller last reached it (PRIMARYSEEN).
+   */
+  private async primaryCutOffReason(
+    cluster: FirebirdCluster,
+    primaryPod: string,
+    pods: V1Pod[],
+    fenced: string[],
+  ): Promise<string | undefined> {
+    const token = await this.superuserPassword(cluster);
+    if (token === undefined) return undefined;
+    const namespace = cluster.metadata.namespace ?? 'default';
+    const address = (pod: string) => `${instanceHost(cluster, pod)}.${namespace}.svc`;
+    const ask = async (pod: string, command: string): Promise<string | undefined> => {
+      try {
+        return (await this.segmentClient(address(pod), SEGMENT_PORT, `${token} ${command}`, 3000))[0];
+      } catch {
+        return undefined;
+      }
+    };
+    if ((await ask(primaryPod, 'ISOLATION')) !== undefined) return undefined;
+    const replicas = pods
+      .map((p) => p.metadata?.name ?? '')
+      .filter((pod) => pod !== primaryPod && !fenced.includes(pod) && isPodReady(pods.find((p) => p.metadata?.name === pod)!));
+    const contacts = await Promise.all(replicas.map(async (pod) => ({ pod, reply: await ask(pod, 'PRIMARYSEEN') })));
+    return primaryCutOff({ primaryHost: instanceHost(cluster, primaryPod), operatorReached: false, replicas: contacts });
   }
 
   /**

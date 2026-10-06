@@ -93,6 +93,45 @@ export function effectiveFailoverDelaySeconds(cluster: FirebirdCluster): number 
   return isolation === undefined ? delay : Math.max(delay, isolation + ISOLATION_FENCE_MARGIN_SECONDS);
 }
 
+/** How long every replica must have lost a ready primary before it counts as unavailable */
+export const PRIMARY_CUT_OFF_SECONDS = 30;
+
+/** What a replica's segment server answered to PRIMARYSEEN (reply undefined: not reachable) */
+export interface PrimaryContact {
+  pod: string;
+  reply?: string;
+}
+
+/**
+ * Whether a primary whose pod is ready is cut off all the same: the operator cannot reach its
+ * segment server, and every ready replica it can reach has not reached this primary for at least
+ * PRIMARY_CUT_OFF_SECONDS (PRIMARYSEEN; "never", or a contact with another primary, counts as
+ * lost). At least one replica must say so. Returns why, or undefined.
+ */
+export function primaryCutOff(options: {
+  primaryHost: string;
+  operatorReached: boolean;
+  replicas: PrimaryContact[];
+  thresholdSeconds?: number;
+}): string | undefined {
+  const { primaryHost, operatorReached, replicas } = options;
+  const threshold = options.thresholdSeconds ?? PRIMARY_CUT_OFF_SECONDS;
+  if (operatorReached) return undefined;
+  const answered = replicas.filter((r) => r.reply !== undefined);
+  if (answered.length === 0) return undefined;
+  const lost = answered.map((r) => {
+    const m = /^OK (\d+) (\S+)$/.exec(r.reply!.trim());
+    if (r.reply!.trim() === 'OK never') return { pod: r.pod, lost: true, age: undefined };
+    if (!m) return { pod: r.pod, lost: false, age: undefined };
+    const age = Number(m[1]);
+    const samePrimary = m[2] === primaryHost || m[2].startsWith(`${primaryHost}.`);
+    return { pod: r.pod, lost: !samePrimary || age >= threshold, age: samePrimary ? age : undefined };
+  });
+  if (!lost.every((r) => r.lost)) return undefined;
+  const ages = lost.map((r) => `${r.pod}${r.age === undefined ? '' : ` ${r.age}s ago`}`).join(', ');
+  return `ready but cut off: the operator cannot reach it, and no replica has reached it for ${threshold}s or more (${ages})`;
+}
+
 export function failoverJobName(cluster: FirebirdCluster): string {
   return `${cluster.metadata.name}-failover`;
 }

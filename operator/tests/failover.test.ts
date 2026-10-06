@@ -7,6 +7,7 @@ import {
   buildFailoverJob,
   effectiveFailoverDelaySeconds,
   parseElection,
+  primaryCutOff,
   TARGET_PRIMARY_ANNOTATION,
 } from '../src/utils/switchover';
 import { buildReplicationContainers } from '../src/utils/replication';
@@ -272,6 +273,65 @@ describe('primary isolation check', () => {
     const spec = (timeoutSeconds: number) => makeCluster(undefined, { enabled: true, isolationCheck: { timeoutSeconds } });
     expect(() => validateClusterSpec(spec(4))).toThrow(/isolationCheck.timeoutSeconds/);
     expect(() => validateClusterSpec(spec(5))).not.toThrow();
+  });
+});
+
+describe('failover of a cut-off primary', () => {
+  const allReady = () => [pod('db-0', 'u0'), pod('db-1', 'u1'), pod('db-2', 'u2')];
+  // the primary's segment server is unreachable; replicas answer PRIMARYSEEN as given
+  const seen = (replies: Record<string, string>) =>
+    vi.fn().mockImplementation(async (host: string, _p: number, line: string) => {
+      const pod = host.split('.')[0];
+      if (line.endsWith(' PRIMARYSEEN') && replies[pod] !== undefined) return [replies[pod]];
+      throw new Error('unreachable');
+    });
+
+  it('decides from what the replicas last saw of the primary', () => {
+    const cut = (operatorReached: boolean, ...replies: (string | undefined)[]) =>
+      primaryCutOff({ primaryHost: 'db-0.db-headless', operatorReached, replicas: replies.map((reply, i) => ({ pod: `db-${i + 1}`, reply })) });
+    expect(cut(false, 'OK 45 db-0.db-headless', 'OK never')).toMatch(/cut off.*db-1 45s ago, db-2/);
+    expect(cut(false, 'OK 45 db-0.db-headless', undefined)).toBeDefined();
+    // a contact with another primary does not count as reaching this one
+    expect(cut(false, 'OK 2 db-1.db-headless')).toBeDefined();
+    expect(cut(true, 'OK 45 db-0.db-headless')).toBeUndefined();
+    expect(cut(false, 'OK 45 db-0.db-headless', 'OK 3 db-0.db-headless')).toBeUndefined();
+    expect(cut(false, undefined, undefined)).toBeUndefined();
+    expect(cut(false, 'ERR bad request')).toBeUndefined();
+    expect(cut(false, 'OK 29 db-0.db-headless')).toBeUndefined();
+  });
+
+  it('fails over a ready primary that neither the operator nor any replica reaches', async () => {
+    const s = setup({ pods: allReady(), segment: seen({ 'db-1': 'OK 45 db-0.db-headless', 'db-2': 'OK never' }) });
+    await s.controller.reconcile(makeCluster());
+    expect(s.status().primaryNotReadySince).toBeDefined();
+    const events = s.fn('createNamespacedEvent').mock.calls.map((c) => c[0].body.message as string);
+    expect(events.some((m) => m.includes('primary db-0 ready but cut off'))).toBe(true);
+
+    const later = setup({ pods: allReady(), segment: seen({ 'db-1': 'OK 45 db-0.db-headless', 'db-2': 'OK 60 db-0.db-headless' }) });
+    await later.controller.reconcile(makeCluster({ primaryNotReadySince: longAgo }));
+    const job = later.created().find((j) => j.metadata?.name === 'db-failover')!;
+    const env = Object.fromEntries(job.spec!.template.spec!.containers[0].env!.map((e) => [e.name, e.value]));
+    expect(env.CANDIDATES).toBe('db-1.db-headless db-2.db-headless');
+  });
+
+  it('keeps the primary while one replica still reaches it, or the operator does', async () => {
+    const fresh = setup({ pods: allReady(), segment: seen({ 'db-1': 'OK 45 db-0.db-headless', 'db-2': 'OK 2 db-0.db-headless' }) });
+    await fresh.controller.reconcile(makeCluster({ primaryNotReadySince: longAgo }));
+    expect(fresh.status().primaryNotReadySince).toBeUndefined();
+    expect(fresh.created().some((j) => j.metadata?.name === 'db-failover')).toBe(false);
+
+    const reached = vi.fn().mockImplementation(async (_h: string, _p: number, line: string) =>
+      line.endsWith(' ISOLATION') ? ['OK online'] : ['OK never'],
+    );
+    const s = setup({ pods: allReady(), segment: reached });
+    await s.controller.reconcile(makeCluster({ primaryNotReadySince: longAgo }));
+    expect(s.created().some((j) => j.metadata?.name === 'db-failover')).toBe(false);
+    expect(reached.mock.calls.map((c) => c[2])).not.toContain('masterkey PRIMARYSEEN');
+
+    // not with automatic failover off
+    const off = setup({ pods: allReady(), segment: seen({ 'db-1': 'OK never', 'db-2': 'OK never' }) });
+    await off.controller.reconcile(makeCluster({ primaryNotReadySince: longAgo }, { enabled: false }));
+    expect(off.segment.mock.calls.map((c) => c[2])).not.toContain('masterkey PRIMARYSEEN');
   });
 });
 
