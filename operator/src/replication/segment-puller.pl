@@ -35,7 +35,7 @@ my $pause_ack  = $ENV{REPLICATION_DIR} ? "$ENV{REPLICATION_DIR}/.pull-paused" : 
 my $standby_flag = $ENV{REPLICATION_DIR} ? "$ENV{REPLICATION_DIR}/sync-standby" : '';
 my $standby_seen = $ENV{REPLICATION_DIR} ? "$ENV{REPLICATION_DIR}/sync-seen" : '';
 
-# The replica the primary replicates to synchronously ("none"), or undef when it cannot tell
+# The replicas the primary replicates to synchronously ("h1,h2" or "none"), or undef when it cannot tell
 sub sync_target {
   my ($primary) = @_;
   my $sock = eval { request($primary, 'SYNCTO') } or return undef;
@@ -68,7 +68,7 @@ sub pull_once {
   # names without having repositioned it (STANDBY off): it may hold changes after its replica
   # control file position, so it waits to be re-seeded.
   my $syncto = sync_target($primary);
-  my $named = defined $syncto && $syncto =~ /^\Q$self\E(\.|$)/;
+  my $named = defined $syncto && grep { /^\Q$self\E(\.|$)/ } split /,/, $syncto;
   my $flagged = $standby_flag && -e $standby_flag;
   if ($named || $flagged) {
     if ($named && $flagged) {

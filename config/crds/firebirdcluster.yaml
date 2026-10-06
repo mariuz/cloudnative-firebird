@@ -80,6 +80,11 @@ spec:
                     !has(self.replication) || !self.replication.enabled || !has(self.replication.mode) ||
                     self.replication.mode != 'sync' || self.instances >= 2
                   message: replication mode 'sync' needs at least 2 instances
+                - rule: >-
+                    !has(self.replication) || !self.replication.enabled || !has(self.replication.mode) ||
+                    self.replication.mode != 'sync' || !has(self.replication.synchronous) ||
+                    !has(self.replication.synchronous.number) || self.replication.synchronous.number < self.instances
+                  message: replication synchronous.number needs more instances (a primary and the standbys)
               required:
                 - instances
                 - storage
@@ -341,6 +346,13 @@ spec:
                             - preferred
                         standbyUnavailableSeconds:
                           description: dataDurability preferred, seconds before an unavailable standby is detached (default 30)
+                          type: integer
+                          minimum: 1
+                        number:
+                          description: >-
+                            How many synchronous standbys (default 1, at most instances - 1;
+                            CloudNativePG's number): every commit is applied on all of them before
+                            it completes
                           type: integer
                           minimum: 1
                     journalDirectory:
@@ -870,6 +882,16 @@ spec:
                       type: string
                     time:
                       type: string
+                    standbys:
+                      description: Every standby attached to the primary
+                      type: array
+                      items:
+                        type: string
+                    unavailable:
+                      description: Since when each attached standby has not been ready
+                      type: object
+                      additionalProperties:
+                        type: string
                     unavailableSince:
                       type: string
                     retryAfter:

@@ -39,7 +39,16 @@ import { recordClusterMetrics, recordReconcile } from '../utils/metrics';
 import { RESEED_VOLUME, dataClaimName, planVolumeRecreation } from '../utils/volume-recreation';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { PRIMARY_RESTART_GRACE_SECONDS, operatorRollsPods, planRollingUpdate, rollingUpdateTarget } from '../utils/rolling-update';
-import { SyncPlanInput, buildSyncStandbyJob, handoverForUpdate, planSynchronous, syncStandbyJobName, synchronousMode } from '../utils/synchronous';
+import {
+  SyncPlanInput,
+  attachedStandbys,
+  buildSyncStandbyJob,
+  handoverForUpdate,
+  planSynchronous,
+  synchronousMembers,
+  syncStandbyJobName,
+  synchronousMode,
+} from '../utils/synchronous';
 import { chooseBackupInstance } from '../utils/backup-target';
 import {
   effectiveFailoverDelaySeconds,
@@ -281,10 +290,7 @@ export class FirebirdClusterController {
       const primaryPod = switchover.primaryPod;
       // the synchronous standby is detached before it is re-seeded: it must never receive the
       // journal and the primary's synchronous changes together
-      const syncHold = switchover.synchronous?.primary === primaryPod &&
-        ['Attached', 'Attaching', 'Detaching'].includes(switchover.synchronous.phase)
-        ? switchover.synchronous.standby
-        : undefined;
+      const syncHold = switchover.synchronous?.primary === primaryPod ? synchronousMembers(switchover.synchronous) : [];
       const volumeRecreation = await this.reconcileVolumeRecreation(cluster, primaryPod, log, syncHold);
       const recreatingVolumes = volumeRecreation.recreating;
       const reseed = await this.resolveReseeds(cluster, primaryPod, log, syncHold);
@@ -690,21 +696,27 @@ export class FirebirdClusterController {
         if (Date.now() - Date.parse(since) >= delayMs && !recentFailure) {
           // the synchronous standby has every committed transaction: promoted without an election,
           // and the other replicas (which may lack the old primary's unarchived changes) re-seeded
-          const standbyPod = sync?.phase === 'Attached' ? podOf(sync.standby) : undefined;
-          if (sync && standbyPod && isPodReady(standbyPod) && !fenced.includes(sync.standby)) {
+          // any ready attached standby (not one being detached): the lowest ordinal
+          const promotable = attachedStandbys(sync)
+            .filter((s) => !(sync?.phase === 'Detaching' && sync.standby === s))
+            .filter((s) => { const p = podOf(s); return p && isPodReady(p) && !fenced.includes(s); })
+            .sort((a, b) => Number(a.slice(name.length + 1)) - Number(b.slice(name.length + 1)));
+          const standby = promotable[0];
+          const standbyPod = standby ? podOf(standby) : undefined;
+          if (sync && standby && standbyPod) {
             const reseed: Record<string, string> = {};
             for (const pod of pods.items) {
               const podName = pod.metadata!.name!;
-              if (podName !== sync.standby) reseed[podName] = pod.metadata?.uid ?? '';
+              if (podName !== standby) reseed[podName] = pod.metadata?.uid ?? '';
             }
             reseed[primaryPod] = podOf(primaryPod)?.metadata?.uid ?? `failover-${Date.parse(now)}`;
-            log.warn({ primary: primaryPod, standby: sync.standby }, 'Primary unavailable: promoting the synchronous standby');
+            log.warn({ primary: primaryPod, standby }, 'Primary unavailable: promoting the synchronous standby');
             await persist({
               kind: 'failover',
-              target: sync.standby,
+              target: standby,
               from: primaryPod,
               phase: 'Promoting',
-              message: `primary unavailable since ${since}: promoting the synchronous standby ${sync.standby} (no transaction lost); ${primaryPod} and the other replicas will be re-seeded`,
+              message: `primary unavailable since ${since}: promoting the synchronous standby ${standby} (no transaction lost); ${primaryPod} and the other replicas will be re-seeded`,
               startTime: now,
               targetToken: standbyPod.metadata?.uid ?? '',
               reseed,
@@ -716,7 +728,7 @@ export class FirebirdClusterController {
                 namespace,
                 plural: RESOURCE_PLURAL,
                 name,
-                body: { metadata: { annotations: { [TARGET_PRIMARY_ANNOTATION]: sync.standby } } },
+                body: { metadata: { annotations: { [TARGET_PRIMARY_ANNOTATION]: standby } } },
               },
               MERGE_PATCH,
             );
@@ -752,9 +764,9 @@ export class FirebirdClusterController {
 
     if (!inFlight && !wantsSwitchover) return result;
 
-    if (!inFlight && sync && sync.phase !== 'Detached' && sync.phase !== 'Failed') {
-      // the standby receives changes synchronously, not from the journal: detached first
-      log.info({ standby: sync.standby, phase: sync.phase }, 'Switchover waits for the synchronous standby to be detached');
+    if (!inFlight && synchronousMembers(sync).length > 0) {
+      // the standbys receive changes synchronously, not from the journal: detached first
+      log.info({ standbys: synchronousMembers(sync), phase: sync?.phase }, 'Switchover waits for the synchronous standbys to be detached');
       return result;
     }
 
@@ -989,7 +1001,7 @@ export class FirebirdClusterController {
     cluster: FirebirdCluster,
     primaryPod: string,
     log: Logger,
-    syncStandby?: string,
+    syncStandbys: string[] = [],
   ): Promise<{ requests: Record<string, string>; restart: string[]; held: string[] }> {
     const result = { requests: {} as Record<string, string>, restart: [] as string[], held: [] as string[] };
     if (!replicationEnabled(cluster) || cluster.spec.hibernated) return result;
@@ -1027,7 +1039,7 @@ export class FirebirdClusterController {
         continue;
       }
       if (result.requests[podName] === pod.metadata.uid) continue; // already requested, restart pending
-      if (podName === syncStandby) {
+      if (syncStandbys.includes(podName)) {
         log.info({ pod: podName }, 'Re-seed of the synchronous standby waits until it is detached');
         result.held.push(podName);
         continue;
@@ -1047,7 +1059,7 @@ export class FirebirdClusterController {
     cluster: FirebirdCluster,
     primaryPod: string,
     log: Logger,
-    syncStandby?: string,
+    syncStandbys: string[] = [],
   ): Promise<{ recreating: VolumeRecreationStatus[]; held: string[] }> {
     const { name, namespace = 'default' } = cluster.metadata;
     // only replicas of a replication cluster can be re-created (others would start empty)
@@ -1058,7 +1070,7 @@ export class FirebirdClusterController {
     );
     // the synchronous standby's request waits until it is detached
     const held = listed
-      .filter((p) => p.metadata?.name === syncStandby && p.metadata?.annotations?.[RESEED_ANNOTATION] === RESEED_VOLUME)
+      .filter((p) => syncStandbys.includes(p.metadata?.name ?? '') && p.metadata?.annotations?.[RESEED_ANNOTATION] === RESEED_VOLUME)
       .filter((p) => !(cluster.status?.recreatingVolumes ?? []).some((r) => r.pod === p.metadata?.name))
       .map((p) => p.metadata!.name!);
     const pods = listed.map((p) =>
@@ -1487,7 +1499,7 @@ export class FirebirdClusterController {
     fenced: string[],
     busy: string | undefined,
     switchover: SwitchoverResult,
-    syncStandby: { pod: string; hold: boolean } | undefined,
+    syncStandbys: Array<{ pod: string; hold: boolean }> | undefined,
     log: Logger,
   ): Promise<RollingUpdateStatus | undefined> {
     const lastSwitchover = switchover.status;
@@ -1500,7 +1512,7 @@ export class FirebirdClusterController {
       (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items,
       name,
     );
-    const plan = planRollingUpdate({ cluster, statefulSet, pods, primaryPod, fenced, busy, lastSwitchover, syncStandby });
+    const plan = planRollingUpdate({ cluster, statefulSet, pods, primaryPod, fenced, busy, lastSwitchover, syncStandbys });
     // the StatefulSet controller has not observed the latest template yet: keep the last status
     if (!plan) return stored;
     const primary = pods.find((p) => p.metadata?.name === primaryPod);
@@ -2056,7 +2068,7 @@ export class FirebirdClusterController {
     fenced: string[],
     statefulSet: V1StatefulSet | undefined,
     log: Logger,
-  ): Promise<{ status?: SynchronousStatus; rollingHold?: { pod: string; hold: boolean } }> {
+  ): Promise<{ status?: SynchronousStatus; rollingHold?: Array<{ pod: string; hold: boolean }> }> {
     const { name, namespace = 'default' } = cluster.metadata;
     const stored = switchover.synchronous;
     if (!replicationEnabled(cluster)) return {};
@@ -2097,19 +2109,28 @@ export class FirebirdClusterController {
       busy,
       fenced: [...new Set([...fenced, ...desiredFencedInstances(cluster)])],
       reseeding,
-      rollingTarget: rollingUpdateTarget(cluster, statefulSet, pods, primaryPod, fenced),
+      rollingTarget: rollingUpdateTarget(
+        cluster,
+        statefulSet,
+        pods,
+        primaryPod,
+        fenced,
+        stored?.primary === primaryPod ? synchronousMembers(stored) : [],
+      ),
       now: Date.now(),
     };
     const step = planSynchronous(input);
     // the standby of the primary is restarted by the rolling update once neither being attached or
     // detached nor to be handed over first
     const rolling = (status: SynchronousStatus | undefined) =>
-      status?.primary === primaryPod && ['Attached', 'Attaching', 'Detaching'].includes(status.phase)
-        ? {
-            pod: status.standby,
-            hold: status.phase !== 'Attached' || (status.standby === input.rollingTarget && handoverForUpdate(input)),
-          }
-        : undefined;
+      status?.primary === primaryPod
+        ? synchronousMembers(status).map((pod) => ({
+            pod,
+            hold:
+              ((status.phase === 'Attaching' || status.phase === 'Detaching') && status.standby === pod) ||
+              (pod === input.rollingTarget && handoverForUpdate(input)),
+          }))
+        : [];
     const persist = async (status: SynchronousStatus | undefined) => {
       if (JSON.stringify(status) === JSON.stringify(stored)) return;
       await this.customApi.patchNamespacedCustomObjectStatus({
@@ -2139,7 +2160,9 @@ export class FirebirdClusterController {
       await persist(step.status);
       await this.event(cluster, 'Normal', step.action === 'attach' ? EventReason.SyncStandbyAttaching : EventReason.SyncStandbyDetaching, step.status.message ?? '');
       try {
-        await this.batchApi.createNamespacedJob({ namespace, body: buildSyncStandbyJob(cluster, step.action, primaryPod, step.standby) });
+        // the standbys that stay attached are named in every sync_replica change
+        const others = attachedStandbys(step.status).filter((pod) => pod !== step.standby);
+        await this.batchApi.createNamespacedJob({ namespace, body: buildSyncStandbyJob(cluster, step.action, primaryPod, step.standby, others) });
       } catch (err) {
         if ((err as { code?: number })?.code !== 409) throw err;
       }

@@ -903,6 +903,18 @@ jobs:
           [ "$(sql sync-0 'select count(*) from app where id = 101;' | awk '$1 ~ /^[0-9]+$/ { print $1 }')" = 1 ]
           [ "$(count sync-0)" = 15 ] || { echo "the standby has $(count sync-0) rows, expected 15"; exit 1; }
           echo "rolling update detached the synchronous standby before its restart and attached it again"
+          # two synchronous standbys: a third instance, synchronous.number 2
+          kubectl patch firebirdcluster sync --type merge -p '{"spec":{"instances":3,"replication":{"synchronous":{"number":2}}}}'
+          timeout 600 bash -c 'until [ "$(kubectl get firebirdcluster sync -o jsonpath="{.status.synchronous.phase} {.status.synchronous.standbys[*]}" | wc -w)" = 3 ] &&
+            kubectl get firebirdcluster sync -o jsonpath="{.status.synchronous.phase}" | grep -q "^Attached$"; do sleep 5; done' \
+            || { kubectl get firebirdcluster sync -o jsonpath='{.status.synchronous}'; echo; kubectl logs job/sync-sync-standby || true; exit 1; }
+          kubectl get firebirdcluster sync -o jsonpath='{.status.synchronous.standbys}'; echo
+          sql sync-1 "insert into app values (102, 'two standbys'); commit;" >/dev/null
+          for pod in sync-0 sync-2; do
+            [ "$(sql $pod 'select count(*) from app where id = 102;' | awk '$1 ~ /^[0-9]+$/ { print $1 }')" = 1 ] \
+              || { echo "row 102 is not on $pod right after its commit"; exit 1; }
+          done
+          echo "every commit is applied on both synchronous standbys"
           kubectl delete firebirdcluster sync --wait=false
 
       - name: Verify Kubernetes events

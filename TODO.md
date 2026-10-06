@@ -19,11 +19,10 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Switchover downtime**: writes stop from the primary shutdown until the target pod is ready
   again (two pod restarts). Promoting online (replica mode none and publication on a running
   replica) would need the replication sequence set without restarting.
-- [ ] **Synchronous replication follow-ups** (v0.53.0 attaches one standby): quorum of several
-  standbys (CloudNativePG's `number` / `method: any`); attaching and detaching without the short
-  write pause (Firebird reads `sync_replica` only when the database is opened); a restart of the
-  only replica without blocking writes in `required` mode (v0.55.0 hands the standby over to
-  another replica before a rolling update restarts it).
+- [ ] **Synchronous replication follow-ups** (one standby since v0.53.0, several since v0.61.0):
+  attaching and detaching without the short write pause (Firebird reads `sync_replica` only when
+  the database is opened); a restart of the only replica without blocking writes in `required`
+  mode; an "any N of M" quorum (Firebird waits for every `sync_replica`).
 - [ ] **Encrypt segment shipping**: client connections are encrypted (WireCrypt, v0.54.0), but the
   segment server (journal segments, seed copies, backup files) authenticates with the SYSDBA
   password over plain TCP inside the cluster (restricted by the NetworkPolicy when enabled). The

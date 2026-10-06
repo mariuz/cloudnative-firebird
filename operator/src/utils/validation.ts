@@ -94,6 +94,16 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       throw new ValidationError("Replication mode 'sync' needs at least 2 instances (a primary and a standby).");
     }
     const sync = spec.replication.synchronous;
+    if (sync?.number !== undefined) {
+      if (!Number.isInteger(sync.number) || sync.number < 1) {
+        throw new ValidationError('Replication synchronous.number must be a positive integer.');
+      }
+      if (spec.replication.mode === 'sync' && sync.number > spec.instances - 1) {
+        throw new ValidationError(
+          `Replication synchronous.number (${sync.number}) needs at least ${sync.number + 1} instances (a primary and the standbys).`,
+        );
+      }
+    }
     if (sync?.dataDurability !== undefined && !['required', 'preferred'].includes(sync.dataDurability)) {
       throw new ValidationError(
         `Invalid replication synchronous.dataDurability: ${sync.dataDurability}. Must be required or preferred.`,

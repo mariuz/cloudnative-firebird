@@ -313,6 +313,21 @@ describe('synchronous replication and failover, switchover, re-seeding', () => {
     expect(stuck.created().some((j) => j.metadata?.name === 'db-failover')).toBe(true);
   });
 
+  it('with several standbys, promotes the lowest-ordinal ready one', async () => {
+    const both = { standby: 'db-2', primary: 'db-0', standbys: ['db-1', 'db-2'], phase: 'Attached' as const, time: longAgo };
+    const promotion = async (pods: object[], synchronous: object) => {
+      const s = setup({ pods });
+      await s.controller.reconcile(syncCluster({ primaryNotReadySince: longAgo, synchronous } as never));
+      return s.fn('patchNamespacedCustomObjectStatus').mock.calls.map((c) => c[0].body[0]).find((op) => op.path === '/status/switchover')?.value;
+    };
+    expect(await promotion([pod('db-0', 'u0', false), pod('db-1', 'u1'), pod('db-2', 'u2')], both)).toMatchObject({ target: 'db-1' });
+    // db-1 not ready: db-2, which has every committed transaction too
+    expect(await promotion([pod('db-0', 'u0', false), pod('db-1', 'u1', false), pod('db-2', 'u2')], both)).toMatchObject({ target: 'db-2' });
+    // not the one being detached
+    const p = await promotion([pod('db-0', 'u0', false), pod('db-1', 'u1', false), pod('db-2', 'u2')], { ...both, phase: 'Detaching' });
+    expect(p?.target ?? '').not.toBe('db-2');
+  });
+
   it('elects as before when the standby is not ready', async () => {
     const s = setup({ pods: [pod('db-0', 'u0', false), pod('db-1', 'u1', false), pod('db-2', 'u2')] });
     await s.controller.reconcile(syncCluster({ primaryNotReadySince: longAgo, synchronous: attached }));

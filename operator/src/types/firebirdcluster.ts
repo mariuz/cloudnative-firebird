@@ -575,11 +575,16 @@ export interface SynchronousReplicationConfiguration {
   dataDurability?: 'required' | 'preferred';
   /** dataDurability preferred: how long the standby may be unavailable before it is detached (default 30) */
   standbyUnavailableSeconds?: number;
+  /**
+   * How many synchronous standbys (default 1, at most instances - 1; CloudNativePG's number):
+   * every commit is applied on all of them before it completes
+   */
+  number?: number;
 }
 
 /** State of synchronous replication (mode sync) */
 export interface SynchronousStatus {
-  /** The synchronous standby (instance name) */
+  /** The standby of the last attach or detach (instance name) */
   standby: string;
   /** The primary it is attached to */
   primary: string;
@@ -588,7 +593,11 @@ export interface SynchronousStatus {
   message?: string;
   /** When the phase was entered */
   time: string;
-  /** Since when the attached standby has not been ready */
+  /** Every standby attached to the primary (written since v0.61.0; before, the one standby) */
+  standbys?: string[];
+  /** Since when each attached standby has not been ready */
+  unavailable?: Record<string, string>;
+  /** Since when the attached standby has not been ready (statuses before v0.61.0) */
   unavailableSince?: string;
   /** A detach failed: not retried before this time */
   retryAfter?: string;
