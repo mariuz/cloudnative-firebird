@@ -514,9 +514,8 @@ sub promote_here {
       unlink map { "$d/$_" } grep { -f "$d/$_" } readdir($dh);
       closedir($dh);
     }
+    unlink $bootstrap_seed, "$base/bootstrap-seed.seq";
     system('cp', $database, "$bootstrap_seed.tmp") == 0 or die "cannot copy the bootstrap seed\n";
-    write_file("$base/bootstrap-seed.seq", "$seq\n");
-    rename("$bootstrap_seed.tmp", $bootstrap_seed) or die "cannot write the bootstrap seed\n";
     $fb->('prp_online_mode', 'prp_sm_normal') or die "cannot bring the database online\n";
     $shut = 0;
     system('gfix', '-replica', 'none', "localhost:$database") == 0 or die "cannot set replica mode none\n";
@@ -535,12 +534,25 @@ sub promote_here {
     unlink $state_file, $standby_seen;
     print $client "OK $seq\n";
     print "promoted in place: the journal continues after segment $seq\n";
+    # the copy taken in full shutdown becomes what the offline promotion's seed is: online, not a
+    # replica, publishing (a file no server has open, as the init container's tools use them);
+    # without it new replicas seed from a ready replica
+    my $tmp = "$bootstrap_seed.tmp";
+    if (system('gfix', '-online', 'normal', $tmp) == 0 && system('gfix', '-replica', 'none', $tmp) == 0 &&
+        system('sh', '-c', "isql -q -b -i \"$ENV{SCRIPT_DIR}/enable-publication.sql\" \"$tmp\"") == 0 &&
+        write_file("$base/bootstrap-seed.seq", "$seq\n") && rename($tmp, $bootstrap_seed)) {
+      print "offline bootstrap seed written (sequence $seq)\n";
+    } else {
+      unlink $tmp, "$base/bootstrap-seed.seq";
+      print "no offline bootstrap seed: the copy could not be prepared\n";
+    }
     1;
   };
   unless ($ok) {
     my $err = $@;
     # back to a replica the offline promotion can still take over
     system('gfix', '-replica', 'read_only', "localhost:$database") if $writable;
+    unlink "$bootstrap_seed.tmp";
     $fb->('prp_online_mode', 'prp_sm_normal') if $shut;
     print $client "ERR $err";
     print "promotion refused: $err";

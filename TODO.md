@@ -17,10 +17,10 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   neither the operator nor any replica reaches is failed over since v0.63.0, and its pod is
   deleted. Until then, though, a primary that still reaches the API server is never fenced, and
   it keeps accepting writes from clients on its side of the partition.
-- [ ] **Failover without a restart**: planned switchovers promote the target in place since
-  v0.66.0 (a short full shutdown sets the replication sequence). Automatic failover still
-  restarts the elected replica; it could use the same `PROMOTE` (the archive position is already
-  known at election).
+- [ ] **In-place promotion of a synchronous standby**: switchovers (v0.66.0) and elected failover
+  targets (v0.67.0) are promoted without a restart; an attached synchronous standby still
+  restarts, because its position comes from the synchronous state (`sync-seen`), which `PROMOTE`
+  does not take over yet.
 - [ ] **Synchronous replication follow-ups** (one standby since v0.53.0, several since v0.61.0):
   attaching and detaching without the short write pause (Firebird reads `sync_replica` only when
   the database is opened); a restart of the only replica without blocking writes in `required`

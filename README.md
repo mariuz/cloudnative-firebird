@@ -500,11 +500,18 @@ spec:
 When the primary pod has not been ready for `delaySeconds` (`status.primaryNotReadySince`), the
 operator runs an election Job: every ready replica gets up to a minute to apply the segments it
 already received, then reports its position (`POSITION`), and the most advanced one wins. The
-election changes nothing, so if the primary recovers meanwhile it is simply discarded. The winner
-is promoted exactly like a planned switchover (its journal continues after the last segment it
-applied), the Lease and the `targetPrimary` annotation move to it, replicas behind it are
-re-seeded, and the old primary is **re-seeded** when it comes back (restarted if its pod is still
-there), because it may have committed transactions that never reached a replica.
+election changes nothing, so if the primary recovers meanwhile it is simply discarded.
+
+Once the operator commits to the failover:
+- The Lease and the `targetPrimary` annotation move to the winner.
+- A promote Job then promotes the winner **in place**, like a planned switchover: no restart, and
+  its journal continues after the last segment it applied, or after the journal archive's last
+  segment if that is higher. `status.switchover.promotedInPlace` records it.
+- If that fails, or the winner is the synchronous standby, the winner is restarted and promoted
+  offline instead.
+- Replicas behind the winner are re-seeded.
+- The old primary is **re-seeded** when it comes back (restarted if its pod is still there),
+  because it may have committed transactions that never reached a replica.
 
 - Replication is asynchronous: transactions the replicas had not received when the primary
   failed are lost. `archiveTimeoutSeconds` bounds how long a committed transaction can wait on

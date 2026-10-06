@@ -650,7 +650,9 @@ jobs:
           new=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
           [ "$new" != "$old" ]
           [ "$(kubectl get firebirdcluster repl -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/targetPrimary}')" = "$new" ]
-          kubectl logs "$new" -c replication-init | grep 'promoted to primary'
+          # promoted in place by the promote Job (no restart of the elected replica)
+          [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.promotedInPlace})" = "true" ]
+          kubectl logs "$new" -c segment-server | grep 'promoted in place'
           # no writes happened while the primary was down: nothing is lost here
           [ "$(count "$new")" = "$before" ]
           for i in $(seq 201 210); do sql "$new" "insert into app values ($i, 'after failover'); commit;" >/dev/null; done
@@ -672,6 +674,21 @@ jobs:
           DB=/var/lib/firebird/data/mydb.fdb
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
           count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          # the previous failover promoted its target in place, without the pod template enabling
+          # failover changed: the rolling update restarts it (the primary, last) once the failover
+          # completed. Cutting a pod off before that would be undone by its restart.
+          SEL=firebird.cloudnative-firebird.io/cluster=repl,app.kubernetes.io/component=database
+          updated() {
+            rev=$(kubectl get statefulset repl -o jsonpath={.status.updateRevision})
+            kubectl get pods -l "$SEL" \
+              -o jsonpath='{range .items[*]}{.metadata.labels.controller-revision-hash} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+              | grep -c "^$rev True$"
+          }
+          for n in $(seq 1 120); do
+            [ "$(updated)" = 3 ] && [ -z "$(kubectl get firebirdcluster repl -o jsonpath={.status.rollingUpdate})" ] && break
+            sleep 5
+          done
+          [ "$(updated)" = 3 ] || { kubectl get pods -l "$SEL" -L controller-revision-hash; exit 1; }
           old=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
           before=$(count "$old")
           last_failover=$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})

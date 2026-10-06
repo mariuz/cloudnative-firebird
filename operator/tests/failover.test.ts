@@ -29,7 +29,7 @@ const pod = (name: string, uid: string, ready = true) => ({
 
 const longAgo = new Date(Date.now() - 120_000).toISOString();
 
-function setup(opts: { pods?: object[]; job?: V1Job; jobPods?: object[]; archivePods?: object[]; segment?: Mock } = {}) {
+function setup(opts: { pods?: object[]; job?: V1Job; jobs?: Record<string, V1Job>; jobPods?: object[]; archivePods?: object[]; segment?: Mock } = {}) {
   const notFound = Object.assign(new Error('Not Found'), { code: 404 });
   const api: Record<string, Mock> = {
     listNamespacedPod: vi.fn().mockImplementation(({ labelSelector }: { labelSelector: string }) =>
@@ -42,7 +42,11 @@ function setup(opts: { pods?: object[]; job?: V1Job; jobPods?: object[]; archive
       }),
     ),
     readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: 'db-0' } }),
-    readNamespacedJob: opts.job ? vi.fn().mockResolvedValue(opts.job) : vi.fn().mockRejectedValue(notFound),
+    readNamespacedJob: opts.jobs
+      ? vi.fn().mockImplementation(({ name }: { name: string }) => (opts.jobs![name] ? Promise.resolve(opts.jobs![name]) : Promise.reject(notFound)))
+      : opts.job
+        ? vi.fn().mockResolvedValue(opts.job)
+        : vi.fn().mockRejectedValue(notFound),
     readNamespacedConfigMap: vi.fn().mockResolvedValue({ data: {} }),
   };
   const calls: Record<string, Mock> = {};
@@ -134,7 +138,7 @@ describe('automatic failover', () => {
   it('promotes the elected replica and re-seeds the old primary and replicas behind it', async () => {
     const electing: SwitchoverStatus = { kind: 'failover', target: '', from: 'db-0', phase: 'Electing' };
     const s = setup({
-      job: done('Complete'),
+      jobs: { 'db-failover': done('Complete') },
       jobPods: [electionPod('target=db-2.db-headless sequence=41 positions=db-1.db-headless:40,db-2.db-headless:41')],
     });
     await s.controller.reconcile(makeCluster({ switchover: electing }));
@@ -145,7 +149,10 @@ describe('automatic failover', () => {
     expect(data.promote).toBe('db-2 u2\n');
     expect(data.demote).toBe('');
     expect(data.reseed).toBe('db-0 u0\ndb-1 u1\n');
-    expect(s.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name).sort()).toEqual(['db-0', 'db-1', 'db-2']);
+    // the elected replica keeps running: a Job promotes it in place once the primary moved
+    expect(s.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name).sort()).toEqual(['db-0', 'db-1']);
+    const promote = s.created().find((j) => j.metadata?.name === 'db-promote')!;
+    expect(promote.spec!.template.spec!.containers[0].command![2]).toContain('segment-request.pl "$TARGET" PROMOTE none');
     // the targetPrimary annotation follows, so it cannot switch back to the failed primary
     expect(s.fn('patchNamespacedCustomObject').mock.calls[0][0].body).toEqual({
       metadata: { annotations: { [TARGET_PRIMARY_ANNOTATION]: 'db-2' } },
@@ -169,6 +176,36 @@ describe('automatic failover', () => {
     await s.controller.reconcile(makeCluster({ switchover: electing }));
     expect(s.status().switchover).toMatchObject({ phase: 'Failed', message: expect.stringContaining('recovered') });
     expect(s.fn('patchNamespacedLease')).not.toHaveBeenCalled();
+  });
+
+  it('keeps the target running when the promote Job promoted it in place, and restarts it otherwise', async () => {
+    const promoting: SwitchoverStatus = {
+      kind: 'failover', target: 'db-2', from: 'db-0', phase: 'Promoting', targetToken: 'u2', reseed: { 'db-0': 'u0' },
+    };
+    const promoteJob = (reply: string, type: 'Complete' | 'Failed' = 'Complete'): V1Job => ({
+      metadata: { annotations: { [TARGET_PRIMARY_ANNOTATION]: 'db-2' } },
+      ...done(type),
+    });
+    const promotePod = (message: string) => ({
+      metadata: { name: 'db-promote-x' },
+      status: { containerStatuses: [{ state: { terminated: { exitCode: 0, message } } }] },
+    });
+    const pods = [pod('db-0', 'new0', false), pod('db-1', 'u1'), pod('db-2', 'u2')];
+
+    const promoted = setup({ pods, job: promoteJob('OK 41'), jobPods: [promotePod('OK 41\n')] });
+    await promoted.controller.reconcile(makeCluster({ switchover: promoting }));
+    expect(promoted.status().switchover).toMatchObject({ phase: 'Promoting', promotedInPlace: true, message: expect.stringContaining('in place (OK 41)') });
+    expect(promoted.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name)).not.toContain('db-2');
+    // then complete as soon as the target is ready, with its pod
+    const done2 = setup({ pods });
+    await done2.controller.reconcile(makeCluster({ switchover: { ...promoting, promotedInPlace: true } }));
+    expect(done2.status().switchover).toMatchObject({ phase: 'Completed' });
+
+    const refused = setup({ pods, job: promoteJob('ERR'), jobPods: [promotePod('ERR this instance is a synchronous standby\n')] });
+    await refused.controller.reconcile(makeCluster({ switchover: promoting }));
+    expect(refused.status().switchover).toMatchObject({ promotedInPlace: false, message: expect.stringContaining('restarting it') });
+    expect(refused.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name)).toContain('db-2');
+    expect(refused.cmData().promote).toBe('db-2 u2\n');
   });
 
   it('completes once the promoted replica is ready, without waiting for the old primary', async () => {

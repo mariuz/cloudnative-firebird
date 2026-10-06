@@ -140,6 +140,20 @@ export class WebhookServer {
    * webhook configuration's caBundle up to date.
    */
   async ensureCertificates(now = new Date()): Promise<WebhookCertificates> {
+    // several operator pods (e.g. during a rollout) may write at the same time: a conflict means
+    // another one did, so its certificates are read and used
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.ensureCertificatesOnce(now);
+      } catch (err) {
+        const code = (err as { code?: number; statusCode?: number }).code ?? (err as { statusCode?: number }).statusCode;
+        if (code !== 409 || attempt >= 5) throw err;
+        logger.info({ attempt }, 'Webhook certificates changed concurrently; reading them again');
+      }
+    }
+  }
+
+  private async ensureCertificatesOnce(now: Date): Promise<WebhookCertificates> {
     const names = webhookDnsNames(this.namespace);
     let secret: V1Secret | undefined;
     try {

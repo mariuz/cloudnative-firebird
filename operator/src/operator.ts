@@ -97,6 +97,7 @@ export class Operator {
   private readonly watch: Watch;
   private readonly healthServer: HealthServer;
   private webhookServer?: WebhookServer;
+  private webhookRetry?: NodeJS.Timeout;
   private readonly watchRequests = new Map<string, { abort: () => void }>();
   private readonly watchTimers = new Map<string, NodeJS.Timeout>();
   private readonly backupKinds: BackupKind[];
@@ -190,10 +191,13 @@ export class Operator {
     const namespace = process.env.OPERATOR_NAMESPACE;
     if (process.env.WEBHOOK_ENABLED === 'false' || !namespace) return;
     try {
-      this.webhookServer = new WebhookServer(this.kubeConfig, namespace, createAdmissionValidator(apiLookups(this.kubeConfig)));
+      this.webhookServer ??= new WebhookServer(this.kubeConfig, namespace, createAdmissionValidator(apiLookups(this.kubeConfig)));
       await this.webhookServer.start();
     } catch (err) {
-      logger.error({ err }, 'Admission webhook not started');
+      // e.g. the API server not reachable yet: tried again until it starts
+      logger.error({ err }, 'Admission webhook not started; retrying in 30 seconds');
+      this.webhookRetry = setTimeout(() => void this.startWebhook(), 30_000);
+      this.webhookRetry.unref();
     }
   }
 
@@ -201,6 +205,7 @@ export class Operator {
   stop(): void {
     logger.info('Stopping cloudnative-firebird operator');
     this.healthServer.setReady(false);
+    if (this.webhookRetry) clearTimeout(this.webhookRetry);
     this.webhookServer?.stop();
     for (const request of this.watchRequests.values()) request.abort();
     this.watchRequests.clear();
