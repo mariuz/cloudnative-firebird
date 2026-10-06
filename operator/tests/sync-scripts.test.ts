@@ -183,6 +183,21 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
       expect((await r.ask('PROMOTE x'))[0]).toBe('ERR bad request');
     }, 20_000);
 
+    it('continues a synchronous standby after the last segment it saw archived', async () => {
+      if (!hasPerl) return;
+      const r = await replica();
+      writeFileSync(join(r.base, 'sync-standby'), '');
+      writeFileSync(join(r.base, 'sync-seen'), '20\n');
+      try {
+        expect(await r.ask('PROMOTE none')).toEqual(['OK 20']);
+      } finally {
+        r.stop();
+      }
+      expect(readFileSync(r.db).subarray(128, 140).readBigUInt64LE(2)).toBe(20n);
+      expect(existsSync(join(r.base, 'sync-standby'))).toBe(false);
+      expect(existsSync(join(r.base, 'sync-seen'))).toBe(false);
+    }, 20_000);
+
     it('leaves a replica the offline promotion can take over when it fails', async () => {
       if (!hasPerl) return;
       const r = await replica(true);

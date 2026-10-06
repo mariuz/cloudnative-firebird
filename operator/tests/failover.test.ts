@@ -394,6 +394,12 @@ describe('synchronous replication and failover, switchover, re-seeding', () => {
     expect(promoting).toMatchObject({ kind: 'failover', from: 'db-0', target: 'db-1', phase: 'Promoting', targetToken: 'u1' });
     expect(Object.keys(promoting.reseed).sort()).toEqual(['db-0', 'db-2']);
     expect(promoting.message).toContain('no transaction lost');
+    // then promoted in place too (its position is the last segment it saw archived)
+    expect(promoting.promotedInPlace).toBeUndefined();
+    const next = setup();
+    await next.controller.reconcile(syncCluster({ switchover: promoting, synchronous: attached }));
+    expect(next.created().some((j) => j.metadata?.name === 'db-promote')).toBe(true);
+    expect(next.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name)).not.toContain('db-1');
   });
 
   it('does not fail over while a sync-standby Job holds the primary in full shutdown', async () => {

@@ -994,6 +994,8 @@ jobs:
             | tee /dev/stderr | grep -q 'promoting the synchronous standby sync-1'
           ! kubectl get events --field-selector involvedObject.name=sync -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}' | grep -q FailoverStarted
           [ "$(kubectl get lease sync-lease -o jsonpath={.spec.holderIdentity})" = "sync-1" ]
+          # the standby was promoted in place (no restart)
+          [ "$(kubectl get firebirdcluster sync -o jsonpath={.status.switchover.promotedInPlace})" = "true" ]
           [ "$(count sync-1)" = 13 ] || { echo "the new primary has $(count sync-1) rows, expected 13"; exit 1; }
           echo "failed over to the synchronous standby without losing a transaction"
           # the old primary returns re-seeded and becomes the standby of the new one
