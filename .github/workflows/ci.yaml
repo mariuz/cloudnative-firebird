@@ -380,17 +380,29 @@ jobs:
           [ "$(count restore-from-physical.fdb)" = "30" ]
           echo "both restores contain all 30 rows"
 
-          # restoring over the cluster database is refused
-          kubectl apply -f - <<'EOF'
+          # restoring over the cluster database is refused: by the admission webhook when it is applied,
+          # and by the operator for an object the webhook did not see (failurePolicy Ignore, e.g. the
+          # operator was down): here the webhook skips objects labelled webhook-check=skip for a moment
+          cat > /tmp/over-live.yaml <<'EOF'
           apiVersion: firebird.cloudnative-firebird.io/v1
           kind: FirebirdRestore
           metadata:
             name: over-live
+            labels:
+              webhook-check: skip
           spec:
             clusterName: repl
             backupName: repl-logical
             targetDatabase: mydb.fdb
           EOF
+          out=$(kubectl apply -f /tmp/over-live.yaml 2>&1 || true); echo "$out"
+          echo "$out" | grep -q 'denied the request: targetDatabase mydb.fdb is the cluster database'
+          if kubectl get firebirdrestore over-live 2>/dev/null; then echo "over-live was admitted"; exit 1; fi
+          kubectl patch validatingwebhookconfiguration cloudnative-firebird-validating-webhook --type=json \
+            -p '[{"op":"add","path":"/webhooks/0/objectSelector","value":{"matchExpressions":[{"key":"webhook-check","operator":"NotIn","values":["skip"]}]}}]'
+          for i in $(seq 1 20); do kubectl apply -f /tmp/over-live.yaml 2>/dev/null && break; sleep 3; done
+          kubectl patch validatingwebhookconfiguration cloudnative-firebird-validating-webhook --type=json \
+            -p '[{"op":"remove","path":"/webhooks/0/objectSelector"}]'
           wait_phase firebirdrestore over-live Failed restore-over-live
           kubectl get firebirdrestore over-live -o jsonpath='{.status.error}' | grep -q 'cluster database'
           ! kubectl get job restore-over-live 2>/dev/null
