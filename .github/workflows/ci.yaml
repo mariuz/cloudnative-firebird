@@ -810,7 +810,9 @@ jobs:
           uids() { kubectl get pods -l "$SEL" -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.uid} {end}'; }
           # every pod runs the update revision with this CPU limit, and the rolling update is over
           rolled() {
-            timeout 120 bash -c 'until [ "$(kubectl get statefulset test-cluster -o jsonpath={.status.observedGeneration})" = "$(kubectl get statefulset test-cluster -o jsonpath={.metadata.generation})" ]; do sleep 3; done'
+            # the operator has patched the template and the StatefulSet controller has seen it
+            timeout 120 bash -c "until [ \"\$(kubectl get statefulset test-cluster -o jsonpath={.spec.template.spec.containers[0].resources.limits.cpu})\" = $1 ] &&
+              [ \"\$(kubectl get statefulset test-cluster -o jsonpath={.status.observedGeneration})\" = \"\$(kubectl get statefulset test-cluster -o jsonpath={.metadata.generation})\" ]; do sleep 3; done"
             rev=$(kubectl get statefulset test-cluster -o jsonpath={.status.updateRevision})
             for i in $(seq 1 120); do
               ok=$(kubectl get pods -l "$SEL" \
