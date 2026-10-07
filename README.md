@@ -311,6 +311,9 @@ answer a signed probe the way earlier versions do. See TODO.md.
 
 #### Segment TLS
 
+Full guide with diagrams, the reasons for it, the mixed-mode window and troubleshooting:
+[docs/segment-tls.md](docs/segment-tls.md).
+
 ```yaml
 spec:
   segmentTLS:
