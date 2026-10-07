@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.72.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.73.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Rolling Updates Without Waiting for the Only Synchronous Standby** *(v0.73.0, opt-in)*
+  - With `dataDurability: required` and one replica, a rolling update restarted the synchronous standby attached, and every write failed until it was ready again: that is what `required` means (as with CloudNativePG), since no commit completes without a standby. With two or more replicas the standby is handed over first, so this only concerns clusters with a single replica.
+  - `synchronous.detachForUpdates: true` (default false) lets the rolling update detach the only standby before its restart, as `preferred` does: two short write pauses (detach, then attach after the restart) instead of writes failing through the restart. Commits made meanwhile are asynchronous and reach the standby through the journal. Other restarts (a crash, a node drain) still block writes with `required`.
+  - The kind CI rolls its synchronous cluster with `required` and `detachForUpdates`, commits on the primary while the standby is down, and checks the row on the standby once it is attached again.
 - [x] **In-Place Resource Changes** *(v0.70.0, CloudNativePG applies what it can without a restart)*
   - Firebird has nothing to reload (`firebird.conf` is read when the server starts), but container resources can change without a restart, through Kubernetes in-place pod resize. The rolling update compares each outdated pod's StatefulSet revision with the new one (ControllerRevisions). When only container resources differ, it resizes the running pods (`pods/resize`) and labels them with the new revision once the kubelet has applied it. This covers all instances at once, the primary included.
   - Restarted as before:

@@ -577,6 +577,7 @@ spec:
     synchronous:
       dataDurability: required      # default; or preferred
       standbyUnavailableSeconds: 30 # preferred only
+      detachForUpdates: false       # required only: see Rolling updates below
       number: 1                     # synchronous standbys (default 1, at most instances - 1)
 ```
 
@@ -628,7 +629,11 @@ highest ordinal down, each handed over as below.
   (detach, then attach the other one; two short write pauses instead of writes waiting through
   the restart); with `preferred` it is detached even without one (writes continue asynchronously
   until it is attached again after its restart). With `required` and no other replica, it is
-  restarted attached and writes wait until it is ready again.
+  restarted attached and writes wait until it is ready again, unless `detachForUpdates: true`:
+  then it is detached first as with `preferred`, and commits made during its restart are
+  asynchronous (they reach it through the journal once it is back, and it is attached again).
+  This gives up `required`'s guarantee for the length of the restart, for planned updates only;
+  with two or more replicas the handover keeps it.
 - Any other pod restart of the standby blocks writes with `required` until it is ready again. A
   standby whose volume is replaced outside the operator waits in its init container until it is
   detached (annotate it `reseed=true`).

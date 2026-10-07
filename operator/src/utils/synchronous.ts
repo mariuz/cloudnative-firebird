@@ -209,12 +209,14 @@ export function detachReason(input: SyncPlanInput, standby: string, unavailableS
 /**
  * Whether the standby the rolling update restarts next is detached first: with dataDurability
  * preferred always (writes continue asynchronously during its restart instead of waiting for it),
- * with required only when another replica can take over as the standby (otherwise it is restarted
- * attached, and writes wait until it is ready again)
+ * with required when another replica can take over as the standby, or when detachForUpdates allows
+ * commits without a standby during the restart (otherwise it is restarted attached, and writes
+ * wait until it is ready again)
  */
 export function handoverForUpdate(input: SyncPlanInput): boolean {
   if (!input.rollingTarget) return false;
-  if (input.cluster.spec.replication?.synchronous?.dataDurability === 'preferred') return true;
+  const synchronous = input.cluster.spec.replication?.synchronous;
+  if (synchronous?.dataDurability === 'preferred' || synchronous?.detachForUpdates) return true;
   return chooseStandby(input) !== undefined;
 }
 

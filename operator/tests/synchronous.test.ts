@@ -186,6 +186,24 @@ describe('planSynchronous: rolling updates', () => {
     expect(plan({ pods: lagging, status: attached, rollingTarget: 'db-1' })).toEqual({ kind: 'none', status: kept });
   });
 
+  it('with dataDurability required and detachForUpdates, detaches the only standby before its restart', () => {
+    const cluster = makeCluster({ synchronous: { detachForUpdates: true } }, 2);
+    const pods = [pod('db-0'), pod('db-1')];
+    expect(plan({ cluster, pods, status: attached, rollingTarget: 'db-1' })).toMatchObject({
+      kind: 'start',
+      action: 'detach',
+      standby: 'db-1',
+    });
+    // attached again once restarted; a standby that is not restarted next stays, and one that is
+    // only unavailable still holds writes (required)
+    expect(plan({ cluster, pods, status: { ...attached, phase: 'Detached' } })).toMatchObject({ kind: 'start', action: 'attach', standby: 'db-1' });
+    expect(plan({ cluster, pods, status: attached })).toEqual({ kind: 'none', status: kept });
+    expect(plan({ cluster, pods: [pod('db-0'), pod('db-1', false)], status: attached }).kind).toBe('none');
+    // another replica ready to take over: still a handover
+    const three = makeCluster({ synchronous: { detachForUpdates: true } });
+    expect(plan({ cluster: three, status: attached, rollingTarget: 'db-1' })).toMatchObject({ kind: 'start', action: 'detach', standby: 'db-1' });
+  });
+
   it('with dataDurability preferred, detaches the standby before its restart', () => {
     const cluster = makeCluster({ synchronous: { dataDurability: 'preferred' } }, 2);
     const pods = [pod('db-0'), pod('db-1')];

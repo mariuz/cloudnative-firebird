@@ -348,6 +348,13 @@ spec:
                           description: dataDurability preferred, seconds before an unavailable standby is detached (default 30)
                           type: integer
                           minimum: 1
+                        detachForUpdates:
+                          description: >
+                            dataDurability required: a rolling update may detach the standby before
+                            restarting it when no other replica can take over (default false: it is
+                            restarted attached and writes wait). Commits during its restart are then
+                            asynchronous; it is attached again once ready.
+                          type: boolean
                         number:
                           description: >-
                             How many synchronous standbys (default 1, at most instances - 1;
