@@ -7,9 +7,11 @@ import { isPodReady } from './routing';
  * Rolling updates with the primary last (CloudNativePG `primaryUpdateStrategy` /
  * `primaryUpdateMethod`).
  *
- * With replication the StatefulSet uses the OnDelete update strategy, so a template change
- * (image, resources, configuration) restarts no pod by itself. The operator restarts the outdated
- * replicas one at a time, each only once every instance is ready again, and the primary last:
+ * The StatefulSet uses the OnDelete update strategy, so a template change (image, resources,
+ * configuration) restarts no pod by itself: the operator rolls the pods, which lets it resize
+ * them in place when only container resources changed (utils/in-place.ts). It restarts the
+ * outdated replicas one at a time, each only once every instance is ready again, and the primary
+ * last:
  *
  * - `primaryUpdateMethod: restart` (default): the primary pod is restarted in place.
  * - `primaryUpdateMethod: switchover`: an updated replica is promoted through the targetPrimary
@@ -19,6 +21,10 @@ import { isPodReady } from './routing';
  *   (targetPrimary annotation) or deletes its pod.
  *
  * Fenced instances are not restarted; they are updated once unfenced.
+ *
+ * Without replication the instances are independent: they are restarted one at a time, highest
+ * ordinal first (as the StatefulSet controller's RollingUpdate did), with no switchover and no
+ * supervision.
  *
  * The synchronous standby (replication.mode sync) is the last replica restarted. It is restarted
  * only once it is no longer being attached or detached, and not while it is to be handed over to
@@ -33,11 +39,6 @@ export const PRIMARY_RESTART_GRACE_SECONDS = 300;
 
 /** Pod label set by the StatefulSet controller with the revision the pod was created from */
 export const REVISION_LABEL = 'controller-revision-hash';
-
-/** Whether the operator (rather than the StatefulSet controller) rolls the instance pods */
-export function operatorRollsPods(cluster: FirebirdCluster): boolean {
-  return replicationEnabled(cluster);
-}
 
 export interface RollingUpdatePlan {
   /** StatefulSet revision the pods are updated to */
@@ -54,8 +55,8 @@ export interface RollingUpdatePlan {
 const ordinal = (pod: string) => Number(pod.slice(pod.lastIndexOf('-') + 1));
 
 /**
- * Decides the next step of a rolling update. Returns undefined when the operator does not roll the
- * pods or the StatefulSet controller has not observed the latest template yet.
+ * Decides the next step of a rolling update. Returns undefined for a hibernated cluster, or when
+ * the StatefulSet controller has not observed the latest template yet.
  */
 export function planRollingUpdate(options: {
   cluster: FirebirdCluster;
@@ -71,7 +72,7 @@ export function planRollingUpdate(options: {
 }): RollingUpdatePlan | undefined {
   const { cluster, statefulSet, pods, primaryPod, fenced, busy, lastSwitchover } = options;
   const syncStandbys = options.syncStandbys ?? [];
-  if (!operatorRollsPods(cluster) || cluster.spec.hibernated) return undefined;
+  if (cluster.spec.hibernated) return undefined;
   const revision = statefulSet.status?.updateRevision;
   const generation = statefulSet.metadata?.generation ?? 0;
   if (!revision || (statefulSet.status?.observedGeneration ?? 0) < generation) return undefined;
@@ -99,8 +100,10 @@ export function planRollingUpdate(options: {
   // Replication just enabled: the primary still runs without it and has no seed for the replicas
   // (they could never become ready), so it goes first: its init container enables publication
   // and writes the offline bootstrap seed from which the replicas are then seeded.
+  const replication = replicationEnabled(cluster);
   const primary = pods.find((p) => name(p) === primaryPod);
   if (
+    replication &&
     primary &&
     outdated.includes(primaryPod) &&
     !fenced.includes(primaryPod) &&
@@ -124,7 +127,7 @@ export function planRollingUpdate(options: {
   }
   if (replica) {
     plan.restart = replica;
-    plan.message = `restarting replica ${replica} on revision ${revision}`;
+    plan.message = `restarting ${replication ? 'replica ' : ''}${replica} on revision ${revision}`;
     return plan;
   }
   if (!outdated.includes(primaryPod)) {
@@ -133,6 +136,11 @@ export function planRollingUpdate(options: {
   }
   if (fenced.includes(primaryPod)) {
     plan.message = `the primary ${primaryPod} is fenced: it is updated once unfenced`;
+    return plan;
+  }
+  if (!replication) {
+    plan.restart = primaryPod;
+    plan.message = `restarting ${primaryPod} on revision ${revision}`;
     return plan;
   }
   if (cluster.spec.primaryUpdateStrategy === 'supervised') {
@@ -164,8 +172,8 @@ export function planRollingUpdate(options: {
 /**
  * The synchronous standby a rolling update restarts next: once only synchronous standbys
  * (syncStandbys) are outdated, the highest ordinal of them; without synchronous standbys, the only
- * outdated replica left (fenced instances aside). Undefined when the operator does not roll the
- * pods, or other replicas are restarted first.
+ * outdated replica left (fenced instances aside). Undefined for a hibernated cluster, or when
+ * other replicas are restarted first.
  */
 export function rollingUpdateTarget(
   cluster: FirebirdCluster,
@@ -175,7 +183,7 @@ export function rollingUpdateTarget(
   fenced: string[],
   syncStandbys: string[] = [],
 ): string | undefined {
-  if (!statefulSet || !operatorRollsPods(cluster) || cluster.spec.hibernated) return undefined;
+  if (!statefulSet || cluster.spec.hibernated) return undefined;
   const revision = statefulSet.status?.updateRevision;
   if (!revision || (statefulSet.status?.observedGeneration ?? 0) < (statefulSet.metadata?.generation ?? 0)) return undefined;
   const outdated = pods

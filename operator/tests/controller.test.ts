@@ -97,6 +97,8 @@ function makeMockKubeConfig({
     createNamespacedConfigMap: createNamespacedConfigMapImpl,
     patchNamespacedConfigMap: patchNamespacedConfigMapImpl,
     deleteNamespacedConfigMap: deleteNamespacedConfigMapImpl,
+    // instance pods (rolling updates)
+    listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }),
   };
   const mockAppsApi = {
     readNamespacedStatefulSet: readNamespacedStatefulSetImpl,

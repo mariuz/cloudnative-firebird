@@ -82,7 +82,7 @@ describe('rolling update planning', () => {
     expect(rollingUpdateTarget(c, sts(), [...pods.slice(0, 1), pod('db-1', 'db-old'), pods[2]], 'db-0', [])).toBeUndefined();
     expect(rollingUpdateTarget(c, sts('db-new', 1), pods, 'db-0', [])).toBeUndefined();
     expect(rollingUpdateTarget(c, undefined, pods, 'db-0', [])).toBeUndefined();
-    expect(rollingUpdateTarget(makeCluster({ replication: { enabled: false } }), sts(), pods, 'db-0', [])).toBeUndefined();
+    expect(rollingUpdateTarget(makeCluster({ hibernated: true }), sts(), pods, 'db-0', [])).toBeUndefined();
   });
 
   it('restarts the primary first when replication was just enabled (it seeds the replicas)', () => {
@@ -170,18 +170,28 @@ describe('rolling update planning', () => {
     });
   });
 
-  it('leaves clusters without replication to the StatefulSet controller', () => {
-    expect(plan([pod('db-0', 'db-old')], { cluster: makeCluster({ replication: undefined, instances: 1 }) })).toBeUndefined();
+  it('rolls clusters without replication too: highest ordinal first, no switchover or supervision', () => {
+    const single = makeCluster({ replication: undefined, instances: 1, primaryUpdateStrategy: 'supervised' });
+    // no segment-server container: not mistaken for a primary that just enabled replication
+    const one = plan([{ ...pod('db-0', 'db-old'), spec: { containers: [{ name: 'firebird' }] } }], { cluster: single });
+    expect(one).toMatchObject({ restart: 'db-0', outdated: ['db-0'] });
+    expect(one?.message).toBe('restarting db-0 on revision db-new');
+    // independent instances: one at a time, each once every instance is ready again
+    const several = makeCluster({ replication: undefined, primaryUpdateMethod: 'switchover' });
+    const pods = [pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-old')];
+    expect(plan(pods, { cluster: several })).toMatchObject({ restart: 'db-2', message: 'restarting db-2 on revision db-new' });
+    expect(plan([pod('db-0', 'db-old'), pod('db-1', 'db-new'), pod('db-2', 'db-new')], { cluster: several })).toMatchObject({
+      restart: 'db-0',
+    });
+    expect(plan([pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-new', { ready: false })], { cluster: several })?.restart).toBeUndefined();
     expect(plan([pod('db-0', 'db-old')], { cluster: makeCluster({ hibernated: true }) })).toBeUndefined();
   });
 });
 
 describe('StatefulSet update strategy', () => {
-  it('uses OnDelete with replication and RollingUpdate otherwise', () => {
+  it('uses OnDelete with and without replication (the operator rolls the pods)', () => {
     expect(buildStatefulSet(makeCluster()).spec?.updateStrategy).toEqual({ type: 'OnDelete' });
-    expect(buildStatefulSet(makeCluster({ replication: undefined })).spec?.updateStrategy).toEqual({
-      type: 'RollingUpdate',
-    });
+    expect(buildStatefulSet(makeCluster({ replication: undefined })).spec?.updateStrategy).toEqual({ type: 'OnDelete' });
   });
 
   it('updates an existing StatefulSet whose strategy differs', () => {
@@ -277,6 +287,14 @@ describe('in-place resize during a rolling update', () => {
     const labelled = done.fn('patchNamespacedPod').mock.calls.map((c) => c[0]).filter((c) => c.body.metadata?.labels?.[REVISION_LABEL]);
     expect(labelled.map((c) => c.name).sort()).toEqual(['db-0', 'db-1', 'db-2']);
     expect(labelled[0].body.metadata.annotations).toEqual({ 'firebird.cloudnative-firebird.io/resize-revision': null });
+  });
+
+  it('resizes the instance of a cluster without replication in place too', async () => {
+    const pods = [withResources(pod('db-0', 'db-old'), '1')];
+    const s = setup(pods, { revisions });
+    await s.controller.reconcile(makeCluster({ replication: undefined, instances: 1 }));
+    expect(s.fn('deleteNamespacedPod')).not.toHaveBeenCalled();
+    expect(s.fn('patchNamespacedPodResize').mock.calls.map((c) => c[0].name)).toEqual(['db-0']);
   });
 
   it('restarts the instance when the kubelet cannot resize it, or the change is more than resources', async () => {
