@@ -20,7 +20,7 @@ describe('restore targets', () => {
   it('asks the instance segment server with EXISTS, and tells nothing when it cannot', async () => {
     const client = vi.fn().mockResolvedValue(['OK yes']);
     expect(await restoreTargetExists(cluster(), 'db-0', 'pw', 'x.fdb', client, 1500)).toBe(true);
-    expect(client).toHaveBeenCalledWith('db-0.db-headless', 3051, 'pw EXISTS x.fdb', 1500);
+    expect(client).toHaveBeenCalledWith('db-0.db-headless.default.svc', 3051, 'pw EXISTS x.fdb', 1500);
     client.mockResolvedValue(['OK no']);
     expect(await restoreTargetExists(cluster(), 'db-0', 'pw', 'x.fdb', client)).toBe(false);
     client.mockResolvedValue(['ERR not available without replication']);

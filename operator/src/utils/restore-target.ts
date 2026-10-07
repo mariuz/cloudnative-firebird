@@ -32,7 +32,9 @@ export async function restoreTargetExists(
 ): Promise<boolean | undefined> {
   if (!password) return undefined;
   try {
-    const [reply] = await client(instanceHost(cluster, pod), SEGMENT_PORT, `${password} EXISTS ${target}`, timeoutMs);
+    // the operator runs in its own namespace: the instance's name qualified with the cluster's
+    const host = `${instanceHost(cluster, pod)}.${cluster.metadata.namespace ?? 'default'}.svc`;
+    const [reply] = await client(host, SEGMENT_PORT, `${password} EXISTS ${target}`, timeoutMs);
     if (reply === 'OK yes') return true;
     if (reply === 'OK no') return false;
     return undefined;

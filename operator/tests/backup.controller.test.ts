@@ -216,7 +216,7 @@ describe('FirebirdBackupController', () => {
         'targetDatabase old.fdb already exists on test-cluster-1',
       );
       // asked from the primary (Lease holder), signed with the SYSDBA password
-      expect(segment).toHaveBeenCalledWith('test-cluster-1.test-cluster-headless', 3051, 'masterkey EXISTS old.fdb', undefined);
+      expect(segment).toHaveBeenCalledWith('test-cluster-1.test-cluster-headless.default.svc', 3051, 'masterkey EXISTS old.fdb', undefined);
       expect(batchApi.createNamespacedJob).not.toHaveBeenCalled();
       expect(lastStatus()).toMatchObject({ phase: 'Failed', error: expect.stringContaining('never overwrite') });
     });
