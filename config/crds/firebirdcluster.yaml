@@ -418,6 +418,17 @@ spec:
                               type: integer
                               minimum: 5
                               maximum: 3600
+                            fenceWhenUnreached:
+                              description: >-
+                                Also fence a primary that still reaches the API server when neither the
+                                operator nor any replica has reached it for contactTimeoutSeconds (cut off
+                                on the other side of a partition; only with replicas). Default true.
+                              type: boolean
+                            contactTimeoutSeconds:
+                              description: fenceWhenUnreached, seconds nothing may have reached the primary (default 60)
+                              type: integer
+                              minimum: 45
+                              maximum: 3600
                     allowLiveSeedFromPrimary:
                       description: >
                         Allow seeding a replica with a locked copy of the live primary when no ready

@@ -17,6 +17,14 @@
 # (by REJOIN, or by an administrator), the marker is removed and the check starts over.
 #
 # Without peers or an API server address to check, nothing is ever fenced.
+#
+# Reaching the API server is not enough on its own: a primary that neither the operator nor any
+# replica has reached for CONTACT_TIMEOUT_SECONDS (the segment server records each authenticated
+# request in LAST_CONTACT_FILE: the operator's checks at least every reconcile, the replicas'
+# pullers every few seconds) is cut off on the other side of a partition, where the operator
+# fails it over (a "cut-off primary"). It fences itself too, before the operator, which waits
+# longer before it promotes a replica. Only when the headless Service lists other instances: a
+# primary without replicas has nothing to be failed over to.
 use strict;
 use warnings;
 use IO::Socket::INET;
@@ -26,6 +34,8 @@ my $database     = $ENV{DATABASE_PATH} or die "DATABASE_PATH is required\n";
 my $primary_file = $ENV{PRIMARY_FILE} or die "PRIMARY_FILE is required\n";
 my $marker       = $ENV{SELF_FENCED_FILE} or die "SELF_FENCED_FILE is required\n";
 my $timeout      = $ENV{ISOLATION_TIMEOUT_SECONDS} // 0;
+my $contact_timeout = $ENV{CONTACT_TIMEOUT_SECONDS} // 0;
+my $contact_file = $ENV{LAST_CONTACT_FILE} // '';
 my $interval     = $ENV{CHECK_INTERVAL} // 5;
 my $self         = $ENV{POD_NAME} // '';
 my $self_ip      = $ENV{POD_IP} // '';
@@ -68,6 +78,8 @@ sub peer_addresses {
   return sort keys %seen;
 }
 
+sub has_peers { my @peers = peer_addresses(); return scalar @peers; }
+
 sub connected {
   return 1 if $api_host ne '' && reachable($api_host, $api_port);
   for my $ip (peer_addresses()) { return 1 if reachable($ip, $peer_port); }
@@ -83,14 +95,25 @@ sub database_state {
   return $out =~ /shutdown/ ? 'shutdown' : 'online';
 }
 
+# Seconds since the operator or a replica last reached this instance's segment server, counted
+# from when it became the primary at the earliest; undef when the check is off
+my $primary_since = time;
+sub unreached_for {
+  return undef unless $contact_timeout =~ /^\d+$/ && $contact_timeout > 0 && $contact_file ne '';
+  my $last = $primary_since;
+  my $mtime = (stat $contact_file)[9];
+  $last = $mtime if defined $mtime && $mtime > $last;
+  return time - $last;
+}
+
 sub fence {
-  my ($since) = @_;
+  my ($since, $reason) = @_;
   # the marker first: a restarted sidecar must not take a fenced database for an online one
   open(my $fh, '>', "$marker.tmp") or do { print "cannot write $marker: $!\n"; return };
   print $fh time, "\n";
   close $fh;
   rename "$marker.tmp", $marker;
-  print "isolated: neither the Kubernetes API server nor another instance reachable for " . (time - $since) . "s; fencing the primary (database in full shutdown)\n";
+  print "isolated: " . ($reason // "neither the Kubernetes API server nor another instance reachable for " . (time - $since) . "s") . "; fencing the primary (database in full shutdown)\n";
   if (system('fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database,
              'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') != 0) {
     unlink $marker;
@@ -100,9 +123,13 @@ sub fence {
 
 # LAST_CONNECTED (epoch seconds; tests) backdates the last successful check
 my $last_ok = ($ENV{LAST_CONNECTED} // '') =~ /^\d+$/ ? $ENV{LAST_CONNECTED} : time;
+# LAST_CONTACT_BASE (epoch seconds; tests) backdates when this instance became the primary
+$primary_since = $ENV{LAST_CONTACT_BASE} if ($ENV{LAST_CONTACT_BASE} // '') =~ /^\d+$/;
 while (1) {
+  my $unreached = unreached_for();
   if (!is_primary()) {
     $last_ok = time;
+    $primary_since = time;
   } elsif (-f $marker) {
     # fenced: wait until the database is online again (REJOIN from the operator, or an administrator)
     $last_ok = time;
@@ -110,6 +137,8 @@ while (1) {
       unlink $marker;
       print "database online again: isolation fence lifted\n";
     }
+  } elsif (defined $unreached && $unreached >= $contact_timeout && has_peers()) {
+    fence(time - $unreached, "neither the operator nor any replica has reached this primary for ${unreached}s");
   } elsif (connected()) {
     $last_ok = time;
   } elsif (time - $last_ok >= $timeout) {

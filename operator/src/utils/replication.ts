@@ -195,6 +195,18 @@ export function isolationCheckTimeoutSeconds(cluster: FirebirdCluster): number |
 
 export const DEFAULT_ISOLATION_TIMEOUT_SECONDS = 20;
 
+/**
+ * The isolation check's fence of a primary nothing reaches (fenceWhenUnreached): how long neither
+ * the operator nor a replica may have reached it, or undefined when off
+ */
+export function contactTimeoutSeconds(cluster: FirebirdCluster): number | undefined {
+  const check = cluster.spec.replication?.failover?.isolationCheck;
+  if (isolationCheckTimeoutSeconds(cluster) === undefined || check?.fenceWhenUnreached === false) return undefined;
+  return check?.contactTimeoutSeconds ?? DEFAULT_CONTACT_TIMEOUT_SECONDS;
+}
+
+export const DEFAULT_CONTACT_TIMEOUT_SECONDS = 60;
+
 function isolationCheckEnv(cluster: FirebirdCluster): V1EnvVar[] {
   const timeout = isolationCheckTimeoutSeconds(cluster);
   // only when enabled, so the instance pods of other clusters do not change
@@ -203,6 +215,9 @@ function isolationCheckEnv(cluster: FirebirdCluster): V1EnvVar[] {
     { name: 'ISOLATION_TIMEOUT_SECONDS', value: String(timeout) },
     { name: 'POD_IP', valueFrom: { fieldRef: { fieldPath: 'status.podIP' } } },
     { name: 'PEERS_SERVICE', value: `${cluster.metadata.name}-headless` },
+    ...(contactTimeoutSeconds(cluster) !== undefined
+      ? [{ name: 'CONTACT_TIMEOUT_SECONDS', value: String(contactTimeoutSeconds(cluster)) }]
+      : []),
   ];
 }
 

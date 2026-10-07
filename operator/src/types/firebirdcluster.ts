@@ -631,6 +631,14 @@ export interface IsolationCheckConfiguration {
   enabled?: boolean;
   /** How long the primary may be isolated before it fences itself (default 20) */
   timeoutSeconds?: number;
+  /**
+   * Whether the primary also fences itself when it still reaches the API server but neither the
+   * operator nor any replica has reached it for contactTimeoutSeconds: cut off on the other side
+   * of a partition, where the operator fails it over (default true). Only with replicas.
+   */
+  fenceWhenUnreached?: boolean;
+  /** fenceWhenUnreached: how long nothing may have reached the primary (default 60, 45 to 3600) */
+  contactTimeoutSeconds?: number;
 }
 
 /** State of a planned switchover */

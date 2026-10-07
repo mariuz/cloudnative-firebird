@@ -310,6 +310,39 @@ describe('primary isolation check', () => {
     const spec = (timeoutSeconds: number) => makeCluster(undefined, { enabled: true, isolationCheck: { timeoutSeconds } });
     expect(() => validateClusterSpec(spec(4))).toThrow(/isolationCheck.timeoutSeconds/);
     expect(() => validateClusterSpec(spec(5))).not.toThrow();
+    const contact = (contactTimeoutSeconds: number) =>
+      makeCluster(undefined, { enabled: true, isolationCheck: { contactTimeoutSeconds } });
+    expect(() => validateClusterSpec(contact(44))).toThrow(/contactTimeoutSeconds/);
+    expect(() => validateClusterSpec(contact(45))).not.toThrow();
+  });
+
+  it('also fences a primary nothing reaches any more, unless fenceWhenUnreached is off', () => {
+    const env = (failover: object) =>
+      buildReplicationContainers(makeCluster(undefined, failover), {
+        image: 'fb',
+        databasePath: '/var/lib/firebird/data/db.fdb',
+        dataDir: '/var/lib/firebird/data',
+        credentials: [],
+      }).sidecars[0].env!;
+    expect(env({ enabled: true })).toContainEqual({ name: 'CONTACT_TIMEOUT_SECONDS', value: '60' });
+    expect(env({ enabled: true, isolationCheck: { contactTimeoutSeconds: 120 } })).toContainEqual({
+      name: 'CONTACT_TIMEOUT_SECONDS',
+      value: '120',
+    });
+    const names = (failover: object) => env(failover).map((e) => e.name);
+    expect(names({ enabled: true, isolationCheck: { fenceWhenUnreached: false } })).not.toContain('CONTACT_TIMEOUT_SECONDS');
+    expect(names({ enabled: true, isolationCheck: { enabled: false } })).not.toContain('CONTACT_TIMEOUT_SECONDS');
+    expect(names({ enabled: false })).not.toContain('CONTACT_TIMEOUT_SECONDS');
+  });
+
+  it('waits longer before failing over a cut-off primary, until it has fenced itself', () => {
+    // nothing reached it for 60s by then: every replica lost it 30s in, at most one 5s pull after
+    // it was last reached, plus the margin for the fence
+    expect(effectiveFailoverDelaySeconds(makeCluster(), true)).toBe(45);
+    expect(effectiveFailoverDelaySeconds(makeCluster(), false)).toBe(30);
+    expect(effectiveFailoverDelaySeconds(makeCluster(undefined, { enabled: true, isolationCheck: { contactTimeoutSeconds: 120 } }), true)).toBe(105);
+    expect(effectiveFailoverDelaySeconds(makeCluster(undefined, { enabled: true, isolationCheck: { fenceWhenUnreached: false } }), true)).toBe(30);
+    expect(effectiveFailoverDelaySeconds(makeCluster(undefined, { enabled: true, delaySeconds: 90 }), true)).toBe(90);
   });
 });
 
@@ -349,6 +382,27 @@ describe('failover of a cut-off primary', () => {
     const job = later.created().find((j) => j.metadata?.name === 'db-failover')!;
     const env = Object.fromEntries(job.spec!.template.spec!.containers[0].env!.map((e) => [e.name, e.value]));
     expect(env.CANDIDATES).toBe('db-1.db-headless db-2.db-headless');
+  });
+
+  it('fails a cut-off primary over only once it has fenced itself (45s by default)', async () => {
+    const lost = () => seen({ 'db-1': 'OK 45 db-0.db-headless', 'db-2': 'OK 60 db-0.db-headless' });
+    const fortySecondsAgo = new Date(Date.now() - 40_000).toISOString();
+    const early = setup({ pods: allReady(), segment: lost() });
+    await early.controller.reconcile(makeCluster({ primaryNotReadySince: fortySecondsAgo }));
+    expect(early.created().some((j) => j.metadata?.name === 'db-failover')).toBe(false);
+    expect(early.status().primaryNotReadySince).toBe(fortySecondsAgo);
+
+    const first = setup({ pods: allReady(), segment: lost() });
+    await first.controller.reconcile(makeCluster());
+    const events = first.fn('createNamespacedEvent').mock.calls.map((c) => c[0].body.message as string);
+    expect(events.some((m) => m.includes('ready but cut off') && m.includes('failover in 45s'))).toBe(true);
+
+    // without the fence of a primary nothing reaches, the failover delay applies as before
+    const off = setup({ pods: allReady(), segment: lost() });
+    await off.controller.reconcile(
+      makeCluster({ primaryNotReadySince: fortySecondsAgo }, { enabled: true, delaySeconds: 30, isolationCheck: { fenceWhenUnreached: false } }),
+    );
+    expect(off.created().some((j) => j.metadata?.name === 'db-failover')).toBe(true);
   });
 
   it('keeps the primary while one replica still reaches it, or the operator does', async () => {
