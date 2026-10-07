@@ -1,5 +1,5 @@
 #!/bin/sh
-# Issue 2 (ISSUES.md, suspected, not reproduced): a replica created with Firebird's documented procedure (nbackup lock,
+# Issue 2 (ISSUES.md, confirmed with 8 writers): a replica created with Firebird's documented procedure (nbackup lock,
 # file copy, unlock, "nbackup -SEQ -F", "gfix -replica read_only") while clients commit can
 # silently miss a transaction committed at the moment of the lock.
 #

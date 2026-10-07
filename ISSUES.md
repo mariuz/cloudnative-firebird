@@ -10,8 +10,8 @@ own containers and removes them when it finishes.
 
 | # | Issue | Kind | Reproduces |
 |---|-------|------|------------|
-| 1 | A publishing database hangs under concurrent connect / commit / disconnect | Firebird bug, open | Yes: 7 of 7 runs on 5.0.4, 3 of 3 on the 6.0 snapshot, 2 of 3 on 4.0.7; 0 of 7 with pooled connections or without publication |
-| 2 | Commit journaled before its TIP state: lock-based replica copies miss transactions | Firebird behaviour, handled | Yes: window transactions in 18 of 20 backups; 2 transactions lost in 3 of 3 documented-procedure replicas (8 writers) |
+| 1 | A publishing database deadlocks under concurrent connect / commit / disconnect | Firebird bug, open ([report](docs/upstream/01-replication-manager-header-deadlock.md)) | Yes: 4 writers, 7 of 7 runs on 5.0.4 on one host (0 of 5 on another), 5 of 5 on the 6.0 snapshot, 2 of 3 on 4.0.7; 8 writers, 4 of 4 on 5.0.4; 0 of 7 with pooled connections or without publication |
+| 2 | Commit journaled before its TIP state: lock-based replica copies miss transactions | Firebird behaviour, handled ([report](docs/upstream/02-commit-journaled-before-tip.md)) | Yes: window transactions in 18 of 20 backups; 2 transactions lost in 3 of 3 documented-procedure replicas (8 writers) |
 | 3 | A physical copy inherits publication; a publishing replica fast-forwards past segments | Expected behaviour, handled | Yes, always |
 | 4 | `nbackup -B 0` copies record the still-active segment | Expected behaviour, handled | Yes, always |
 | 5 | `gstat -h` omits "Replication sequence" while it is 0 | Minor | Yes, always |
@@ -21,7 +21,7 @@ own containers and removes them when it finishes.
 
 ---
 
-## 1. A publishing database hangs under concurrent connect / commit / disconnect
+## 1. A publishing database deadlocks under concurrent connect / commit / disconnect
 
 **What happens.** A database with publication enabled (`ALTER DATABASE ENABLE PUBLICATION`,
 journal and archive configured in `replication.conf`) stops answering after 10 to 40 seconds
@@ -37,8 +37,8 @@ CONNECTIONS=persistent hack/repro/publication-under-load.sh   # pooled connectio
 ARCHIVE_TIMEOUT=60 hack/repro/publication-under-load.sh       # archive timeout does not matter: hangs
 ```
 
-The script starts a server with a replication journal, then runs 4 writers with 600 commits
-each. Every commit is an insert plus an update, made through its own `isql` connection unless
+The script starts a server with a replication journal, then runs 8 writers (`WRITERS`, 4 in
+the runs below) with 600 commits each. Every commit is an insert plus an update, made through its own `isql` connection unless
 `CONNECTIONS=persistent` is set.
 
 **Observed.**
@@ -59,14 +59,27 @@ connection per commit, 3 s archive timeout):
 | `firebirdsql/firebird:4` | 4.0.7 | 3 | 1 hung (after 20 s), 1 stopped progressing while the server still answered, 1 completed |
 
 A single writer that connects once per commit did not hang in any run, so the concurrency
-matters. The replication log (`replication.log`) records nothing when the server hangs.
-Thread stacks were not captured: `gdb` could not be installed in the test container.
+matters. The replication log (`replication.log`) records nothing when the server hangs. On a
+later host (4 vCPUs) 4 writers on 5.0.4 completed 5 of 5 runs, while 8 writers hung in 4 of 4
+within 10 seconds, and the 6.0 snapshot (6.0.0.2196) hung in 2 of 2 with 4.
+
+**Diagnosis.** Thread stacks of the hung 5.0.4 servers, with the release's debug symbols
+(`KEEP=1 hack/repro/publication-under-load.sh`, then `hack/repro/capture-stacks.sh
+fb-repro-load`), show the same deadlock every time. The replication manager is created while
+the load runs (`GlobalObjectHolder::getReplManager`, under its mutex). Its constructor latches
+the header page shared, then `getReplSequence` latches it shared again. A transaction start
+(`bump_transaction_id`) queued for the header page exclusively in between makes the second
+shared request wait behind it (the page latch is a fair `SyncObject` without an owner), while
+the writer waits for the first: the creating thread never returns, and every replicating
+statement waits for the mutex and every attachment for the header page. The code is unchanged
+in `master`. Full analysis, stacks and possible fixes: the
+[upstream report](docs/upstream/01-replication-manager-header-deadlock.md).
 
 **Operator impact.** Replication is marked experimental. Applications that hold pooled
 connections were not affected in testing, including the operator's own end-to-end runs with
 4 pooled writers while three replicas were seeded (3 of 3 runs completed, every replica
 row-for-row identical to the primary). Applications that open a connection per transaction
-against a replicated cluster can hang the primary. Report upstream: see TODO.md.
+against a replicated cluster can hang the primary. The upstream report is ready to file (TODO.md).
 
 **Diagnosis history.** The hang was first attributed to the backup lock (`nbackup -L`,
 `ALTER DATABASE BEGIN BACKUP`) and then to embedded access (`gstat -h` from another container),
@@ -107,6 +120,7 @@ as not committed (`RDB$GET_TRANSACTION_CN` -2). Persistent connections avoid iss
 | Test | Runs | Result |
 |------|------|--------|
 | `tip-window.sh`, 8 writers | 20 backups | 27 window transactions, in 18 of the 20 copies |
+| `tip-window.sh`, 8 writers (repeated later) | 10 backups | 10 window transactions, in 8 of the 10 copies |
 | `replica-seed-race.sh`, 8 writers, persistent connections | 3 | 2 transactions lost on the replica in every run |
 | `replica-seed-race.sh`, 1 to 4 writers (earlier) | 6 | none lost |
 | the operator's live seed (`allowLiveSeedFromPrimary`), 8 writers | 6 | replica identical to the primary; e.g. 4 window transactions replayed from segment 3 |
