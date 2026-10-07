@@ -23,7 +23,6 @@ import {
 import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
 import { bootstrapVolumes, buildBootstrapInitContainers } from './backup';
 import { databaseOnlineCheck } from './fencing';
-import { operatorRollsPods } from './rolling-update';
 import { PENDING_DROPS_DIR, pendingDropsConfigMapName, pendingDropsInitScript } from './pending-drops';
 import {
   PRIMARY_KEY,
@@ -427,7 +426,8 @@ export function buildStatefulSet(
       replicas: spec.hibernated ? 0 : spec.instances,
       // with replication the operator restarts outdated pods itself, replicas first and the
       // primary last (utils/rolling-update.ts)
-      updateStrategy: { type: operatorRollsPods(cluster) ? 'OnDelete' : 'RollingUpdate' },
+      // the operator rolls the pods (utils/rolling-update.ts)
+      updateStrategy: { type: 'OnDelete' },
       // Pods are (re)created independently: with OrderedReady, a deleted pod is not recreated
       // while a lower ordinal is not ready, e.g. a promoted replica behind the failed primary it
       // replaces, which waits for a seed from it

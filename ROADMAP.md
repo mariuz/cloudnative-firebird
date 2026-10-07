@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.70.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.71.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -179,6 +179,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
     - a resize that is infeasible or not applied within five minutes;
     - any other template change.
   - The kind CI (Kubernetes 1.35) changes a replicated cluster's CPU limit and checks that every pod keeps its UID, runs the new revision with the new limit, and that the primary did not move.
+  - Since v0.71.0 clusters without replication too: their StatefulSet uses `OnDelete` as well, and the operator restarts their independent instances one at a time, highest ordinal first (as the StatefulSet controller did), when the change cannot be applied in place. The kind CI resizes a two-instance cluster without replication in place after a QoS change restarted it.
 - [x] **Operator High Availability** *(v0.69.0, CloudNativePG's leader election)*
   - The operator ran a single replica: when it was down, nothing reconciled (failover decisions included) and the admission webhook was not served. It now runs two replicas with leader election on the Lease `cloudnative-firebird-operator`, following client-go's design:
     - expiry is measured on each replica's own clock, so skew between nodes does not matter;

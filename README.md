@@ -655,9 +655,8 @@ their pods: the new StatefulSet adopts them with the same template, and nothing 
 
 ### Rolling Updates
 
-Without replication the StatefulSet controller rolls the pods. With replication the StatefulSet
-uses the `OnDelete` update strategy and the operator rolls them itself (CloudNativePG's
-approach), so the primary is restarted only once:
+The StatefulSet uses the `OnDelete` update strategy and the operator rolls the pods itself
+(CloudNativePG's approach), so the primary is restarted only once:
 
 1. Outdated replicas are restarted one at a time, highest ordinal first, each as soon as every
    instance is ready again (the operator watches the instance pods). A restarted replica continues from its replication state; nothing is
@@ -697,8 +696,13 @@ it is, and a `RollingUpdate` event says `resized in place`. These cases still re
 - any other change.
 
 Firebird reads `firebird.conf` only when the server starts, so `config.settings` changes always
-restart the instances. Without replication the StatefulSet controller rolls the pods, and every
-change restarts them.
+restart the instances.
+
+Without replication the instances are independent. The operator restarts them one at a time,
+highest ordinal first, each once every instance is ready again (as the StatefulSet controller's
+`RollingUpdate` did), with no switchover and no supervision. Resource-only changes are applied in
+place as above. Since v0.71.0 the StatefulSets of such clusters switch to `OnDelete` too; the
+template does not change, so nothing restarts.
 
 ### Re-seeding a Replica
 

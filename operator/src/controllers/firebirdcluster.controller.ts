@@ -41,7 +41,7 @@ import { firebirdUsername } from '../utils/users';
 import { recordClusterMetrics, recordReconcile } from '../utils/metrics';
 import { RESEED_VOLUME, dataClaimName, planVolumeRecreation } from '../utils/volume-recreation';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
-import { PRIMARY_RESTART_GRACE_SECONDS, REVISION_LABEL, operatorRollsPods, planRollingUpdate, rollingUpdateTarget } from '../utils/rolling-update';
+import { PRIMARY_RESTART_GRACE_SECONDS, REVISION_LABEL, planRollingUpdate, rollingUpdateTarget } from '../utils/rolling-update';
 import {
   SyncPlanInput,
   attachedStandbys,
@@ -1613,7 +1613,7 @@ export class FirebirdClusterController {
     // automatic failover gives the restarted primary)
     const stored = switchover.rollingUpdate;
     const { name, namespace = 'default' } = cluster.metadata;
-    if (!operatorRollsPods(cluster) || cluster.spec.hibernated) return undefined;
+    if (cluster.spec.hibernated) return undefined;
     const pods = instancePods(
       (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items,
       name,
