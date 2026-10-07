@@ -1,3 +1,4 @@
+import { inPlaceResize, RESIZE_ANNOTATION, RESIZE_TIMEOUT_SECONDS, resizeApplied, resizeInfeasible } from '../utils/in-place';
 import crypto from 'crypto';
 import {
   AppsV1Api,
@@ -14,6 +15,7 @@ import {
   V1Job,
   V1MicroTime,
   V1Pod,
+  V1PodTemplateSpec,
   V1StatefulSet,
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
@@ -39,7 +41,7 @@ import { firebirdUsername } from '../utils/users';
 import { recordClusterMetrics, recordReconcile } from '../utils/metrics';
 import { RESEED_VOLUME, dataClaimName, planVolumeRecreation } from '../utils/volume-recreation';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
-import { PRIMARY_RESTART_GRACE_SECONDS, operatorRollsPods, planRollingUpdate, rollingUpdateTarget } from '../utils/rolling-update';
+import { PRIMARY_RESTART_GRACE_SECONDS, REVISION_LABEL, operatorRollsPods, planRollingUpdate, rollingUpdateTarget } from '../utils/rolling-update';
 import {
   SyncPlanInput,
   attachedStandbys,
@@ -1634,6 +1636,16 @@ export class FirebirdClusterController {
         : undefined;
     }
 
+    // pods whose only change is container resources are resized in place instead (in-place.ts)
+    const inPlace = busy ? new Set<string>() : await this.resizeInPlace(cluster, pods, plan.revision, log);
+    if (plan.restart && inPlace.has(plan.restart)) {
+      return {
+        revision: plan.revision,
+        outdatedInstances: plan.outdated,
+        message: `resizing ${[...inPlace].sort().join(', ')} in place to revision ${plan.revision}`,
+        ...(primaryRestart ? { primaryRestart } : {}),
+      };
+    }
     if (plan.restart || plan.switchoverTo) {
       await this.event(cluster, 'Normal', EventReason.RollingUpdate, plan.message);
     }
@@ -1669,6 +1681,83 @@ export class FirebirdClusterController {
       message: plan.message,
       ...(primaryRestart ? { primaryRestart } : {}),
     };
+  }
+
+  /**
+   * Resizes the outdated instance pods whose revision differs from the new one only in container
+   * resources (in-place.ts), and relabels each with the new revision once the kubelet applied it.
+   * Returns the pods handled in place (resizing or done); the others are restarted as usual.
+   */
+  private async resizeInPlace(
+    cluster: FirebirdCluster,
+    pods: V1Pod[],
+    revision: string,
+    log: Logger,
+  ): Promise<Set<string>> {
+    const namespace = cluster.metadata.namespace ?? 'default';
+    const handled = new Set<string>();
+    const templates = new Map<string, V1PodTemplateSpec | undefined>();
+    // the revision label (and the StatefulSet's updateRevision) is the ControllerRevision's name
+    const template = async (revisionName: string) => {
+      if (!templates.has(revisionName)) {
+        try {
+          const rev = await this.appsApi.readNamespacedControllerRevision({ name: revisionName, namespace });
+          templates.set(revisionName, (rev.data as { spec?: { template?: V1PodTemplateSpec } } | undefined)?.spec?.template);
+        } catch (err) {
+          if (!isNotFound(err)) throw err;
+          templates.set(revisionName, undefined);
+        }
+      }
+      return templates.get(revisionName);
+    };
+    const target = await template(revision);
+    if (!target) return handled;
+    for (const pod of pods) {
+      const podName = pod.metadata?.name ?? '';
+      const current = pod.metadata?.labels?.[REVISION_LABEL];
+      if (!current || current === revision || pod.metadata?.deletionTimestamp) continue;
+      const marker = pod.metadata?.annotations?.[RESIZE_ANNOTATION] ?? '';
+      if (marker === `failed ${revision}`) continue;
+      const source = await template(current);
+      const resizes = source ? inPlaceResize(source, target) : undefined;
+      if (!resizes) continue;
+      const setMetadata = (labels: Record<string, string | null>, annotations: Record<string, string | null>) =>
+        this.coreApi.patchNamespacedPod(
+          { name: podName, namespace, body: { metadata: { labels, annotations } } },
+          MERGE_PATCH,
+        );
+      const [requested, since] = marker.split(' ');
+      if (requested === revision) {
+        if (resizeApplied(pod, resizes)) {
+          await setMetadata({ [REVISION_LABEL]: revision }, { [RESIZE_ANNOTATION]: null });
+          log.info({ pod: podName, revision }, 'Rolling update: resized in place');
+          await this.event(cluster, 'Normal', EventReason.RollingUpdate, `${podName} resized in place to revision ${revision} (no restart)`);
+          handled.add(podName);
+        } else if (resizeInfeasible(pod) || Date.now() - Number(since) > RESIZE_TIMEOUT_SECONDS * 1000) {
+          await setMetadata({}, { [RESIZE_ANNOTATION]: `failed ${revision}` });
+          log.warn({ pod: podName, revision }, 'Rolling update: in-place resize not applied; restarting instead');
+        } else {
+          handled.add(podName);
+        }
+        continue;
+      }
+      try {
+        await this.coreApi.patchNamespacedPodResize(
+          { name: podName, namespace, body: { spec: { containers: resizes.map((r) => ({ name: r.name, resources: r.resources })) } } },
+          setHeaderOptions('Content-Type', PatchStrategy.StrategicMergePatch),
+        );
+      } catch (err) {
+        // e.g. a cluster without in-place pod resize: restarted as before
+        log.warn({ err, pod: podName }, 'Rolling update: in-place resize refused; restarting instead');
+        await setMetadata({}, { [RESIZE_ANNOTATION]: `failed ${revision}` });
+        continue;
+      }
+      await setMetadata({}, { [RESIZE_ANNOTATION]: `${revision} ${Date.now()}` });
+      log.info({ pod: podName, revision, containers: resizes.map((r) => r.name) }, 'Rolling update: resizing in place');
+      await this.event(cluster, 'Normal', EventReason.RollingUpdate, `resizing ${podName} in place (${resizes.map((r) => r.name).join(', ')})`);
+      handled.add(podName);
+    }
+    return handled;
   }
 
   /** The SYSDBA password, which is also the segment servers' token */
