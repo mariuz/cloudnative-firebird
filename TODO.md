@@ -12,11 +12,11 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **File the commit/TIP window upstream** ([ISSUES.md](ISSUES.md) issue 2, confirmed): the
   report is ready in [docs/upstream](docs/upstream/02-commit-journaled-before-tip.md).
 - [ ] **Failover safety**: the Lease is moved by the operator, not held and renewed by the
-  instances (CloudNativePG 1.30's promotion mutex). The isolation check (v0.52.0) fences a primary
-  cut off from both the API server and every replica. A primary that still looks ready but that
-  neither the operator nor any replica reaches is failed over since v0.63.0, and its pod is
-  deleted. Until then, though, a primary that still reaches the API server is never fenced, and
-  it keeps accepting writes from clients on its side of the partition.
+  instances (CloudNativePG 1.30's promotion mutex). The isolation check fences a primary cut off
+  from both the API server and every replica (v0.52.0), and since v0.74.0 also one that neither
+  the operator nor any replica has reached for `contactTimeoutSeconds`, before a cut-off primary
+  is failed over (v0.63.0). Still open: a primary whose cluster DNS fails as well cannot tell it
+  has replicas, and is then only fenced when it loses the API server too.
 - [ ] **Synchronous replication follow-ups** (one standby since v0.53.0, several since v0.61.0):
   attaching and detaching without the short write pause (Firebird reads `sync_replica` only when
   the database is opened); an "any N of M" quorum (Firebird waits for every `sync_replica`).

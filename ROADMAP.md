@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.73.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.74.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,11 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Fencing a Primary Nothing Reaches** *(v0.74.0, CloudNativePG's isolation check, extended)*
+  - A primary that still reached the API server but that neither the operator nor any replica reached (one side of a network partition) was never fenced: clients on its side kept writing to it for the 1.5 to 3 minutes until the cut-off failover (v0.63.0) deleted its pod, and those writes were lost at the re-seed. Without a ready replica answering the operator, indefinitely.
+  - The segment server now records every authenticated request it answers (`last-contact`): the operator's checks at least every reconcile, the replicas' segment pullers every 5 seconds. The isolation check fences the primary (database in full shutdown, as before) when nothing has reached it for `failover.isolationCheck.contactTimeoutSeconds` (default 60, 45 to 3600), counted from when it became the primary, and the headless Service lists other instances. On by default with the isolation check; `fenceWhenUnreached: false` turns it off. The operator brings it back online if it still holds the Lease when it reaches it again (`REJOIN`).
+  - The operator waits `contactTimeoutSeconds - 15` (45 seconds) before failing over a cut-off primary, so it has fenced itself first: every replica must have lost it for 30 seconds, at most one pull after it was last reached, plus 10 seconds for the fence.
+  - Unit tests run the isolation check against a recorded contact; the kind CI cuts a primary off from every pod and the operator with iptables (keeping the API server and DNS), and checks that it fences itself before the failover replaces it.
 - [x] **Rolling Updates Without Waiting for the Only Synchronous Standby** *(v0.73.0, opt-in)*
   - With `dataDurability: required` and one replica, a rolling update restarted the synchronous standby attached, and every write failed until it was ready again: that is what `required` means (as with CloudNativePG), since no commit completes without a standby. With two or more replicas the standby is handed over first, so this only concerns clusters with a single replica.
   - `synchronous.detachForUpdates: true` (default false) lets the rolling update detach the only standby before its restart, as `preferred` does: two short write pauses (detach, then attach after the restart) instead of writes failing through the restart. Commits made meanwhile are asynchronous and reach the standby through the journal. Other restarts (a crash, a node drain) still block writes with `required`.

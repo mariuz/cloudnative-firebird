@@ -1,7 +1,7 @@
 import { V1Job } from '@kubernetes/client-node';
 import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, jobPodSpec } from './resources';
-import { OPERATOR_CONFIG_DIR, SEGMENT_PORT, instanceHost, isolationCheckTimeoutSeconds } from './replication';
+import { OPERATOR_CONFIG_DIR, SEGMENT_PORT, contactTimeoutSeconds, instanceHost, isolationCheckTimeoutSeconds } from './replication';
 
 /**
  * Planned switchover, requested with the targetPrimary annotation (CloudNativePG's
@@ -90,15 +90,26 @@ export const DEFAULT_FAILOVER_DELAY_SECONDS = 30;
 /** Time the isolation check may need beyond its timeout to fence (check interval and timeouts) */
 export const ISOLATION_FENCE_MARGIN_SECONDS = 10;
 
+/** How often a replica's segment puller reaches the primary (segment-puller.pl POLL_SECONDS) */
+export const SEGMENT_PULL_SECONDS = 5;
+
 /**
  * How long the primary must be unavailable before a failover starts: failover.delaySeconds, but
  * never less than an isolated primary needs to fence itself, so a promoted replica cannot
- * coexist with a primary still accepting writes on the other side of a partition.
+ * coexist with a primary still accepting writes on the other side of a partition. For a ready
+ * primary cut off from the operator and every replica (cutOff), which fences itself only once
+ * nothing has reached it for contactTimeoutSeconds: the operator counts from when every replica
+ * has lost it for PRIMARY_CUT_OFF_SECONDS, at most one pull after the primary was last reached.
  */
-export function effectiveFailoverDelaySeconds(cluster: FirebirdCluster): number {
+export function effectiveFailoverDelaySeconds(cluster: FirebirdCluster, cutOff = false): number {
   const delay = cluster.spec.replication?.failover?.delaySeconds ?? DEFAULT_FAILOVER_DELAY_SECONDS;
   const isolation = isolationCheckTimeoutSeconds(cluster);
-  return isolation === undefined ? delay : Math.max(delay, isolation + ISOLATION_FENCE_MARGIN_SECONDS);
+  if (isolation === undefined) return delay;
+  const contact = cutOff ? contactTimeoutSeconds(cluster) : undefined;
+  const unreached = contact === undefined
+    ? 0
+    : contact + ISOLATION_FENCE_MARGIN_SECONDS + SEGMENT_PULL_SECONDS - PRIMARY_CUT_OFF_SECONDS;
+  return Math.max(delay, isolation + ISOLATION_FENCE_MARGIN_SECONDS, unreached);
 }
 
 /** How long every replica must have lost a ready primary before it counts as unavailable */

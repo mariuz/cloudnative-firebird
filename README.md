@@ -551,7 +551,22 @@ Once the operator commits to the failover:
       isolationCheck:
         enabled: true        # default
         timeoutSeconds: 20   # default, 5 to 3600
+        fenceWhenUnreached: true   # default
+        contactTimeoutSeconds: 60  # default, 45 to 3600
 ```
+
+- **A primary nothing reaches** (`fenceWhenUnreached`, since v0.74.0): reaching the API server
+  is not enough. The segment server records every authenticated request it answers (the
+  operator's checks at least every reconcile, the replicas' pullers every 5 seconds). When
+  neither the operator nor any replica has reached the primary for `contactTimeoutSeconds`, and
+  the headless Service lists other instances, the primary fences itself the same way, although
+  it still reaches the API server. That is a primary cut off on the other side of a partition
+  (below): it stops taking writes before the operator promotes a replica, which waits
+  `contactTimeoutSeconds - 15` (45 seconds by default) for a cut-off primary instead of
+  `delaySeconds` when that is longer. The price: if the operator (every replica of it) and every
+  instance stop reaching the primary for that long at the same time, it stops taking writes until
+  the operator reaches it again and brings it back online. `fenceWhenUnreached: false` turns
+  this off.
 
 - **Cut-off primary**: a primary whose pod stays ready (the kubelet still sees it) but that the
   rest of the cluster has lost is failed over too. Each replica's segment puller records when it
@@ -562,9 +577,10 @@ Once the operator commits to the failover:
   after `delaySeconds`; it deletes the old primary's pod, which comes back as a replica and is
   re-seeded, so clients connected to it on its side of the partition stop writing to it.
 
-A primary that still reaches the API server is not fenced by the isolation check, so until the
-failover deletes its pod, clients that still reach it can keep writing to it. Those writes are
-discarded when it is re-seeded.
+Before v0.74.0, a primary that still reached the API server was not fenced, so clients that
+still reached it could keep writing to it until the failover deleted its pod (writes then
+discarded by the re-seed). It now fences itself first (above), unless `fenceWhenUnreached` is
+off. The fence needs the cluster DNS (the headless Service) to know that replicas exist.
 
 ### Synchronous Replication
 

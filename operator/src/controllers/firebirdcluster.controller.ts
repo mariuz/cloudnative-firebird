@@ -701,7 +701,7 @@ export class FirebirdClusterController {
         const since = current.status?.primaryNotReadySince ?? now;
         result.primaryNotReadySince = since;
         if (!current.status?.primaryNotReadySince) {
-          const delay = effectiveFailoverDelaySeconds(cluster);
+          const delay = effectiveFailoverDelaySeconds(cluster, cutOff !== undefined);
           await this.event(
             cluster,
             'Warning',
@@ -709,7 +709,8 @@ export class FirebirdClusterController {
             `primary ${primaryPod} ${cutOff ?? 'is not ready'}; failover in ${delay}s unless it recovers`,
           );
         }
-        const delayMs = effectiveFailoverDelaySeconds(cluster) * 1000;
+        // a cut-off primary may still take writes until it fenced itself (isolation check)
+        const delayMs = effectiveFailoverDelaySeconds(cluster, cutOff !== undefined) * 1000;
         const recentFailure =
           state?.kind === 'failover' && state.phase === 'Failed' && state.from === primaryPod &&
           Date.now() - Date.parse(state.completionTime ?? now) < delayMs;

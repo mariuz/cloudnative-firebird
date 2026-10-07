@@ -144,6 +144,16 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
         `Invalid replication failover.isolationCheck.timeoutSeconds: ${isolationTimeout}. Must be an integer from 5 to 3600.`,
       );
     }
+    const contactTimeout = spec.replication.failover?.isolationCheck?.contactTimeoutSeconds;
+    if (
+      contactTimeout !== undefined &&
+      (!Number.isInteger(contactTimeout) || contactTimeout < 45 || contactTimeout > 3600)
+    ) {
+      // at least 45: the operator reaches the primary at least every reconcile (30s resync)
+      throw new ValidationError(
+        `Invalid replication failover.isolationCheck.contactTimeoutSeconds: ${contactTimeout}. Must be an integer from 45 to 3600.`,
+      );
+    }
     const routing = spec.replication.readOnlyRouting;
     if (
       routing?.maxLagSeconds !== undefined &&

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, spawnSync, ChildProcess } from 'child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createServer, Server, Socket } from 'net';
@@ -18,6 +18,17 @@ const segmentRequest = (port: number, line: string): Promise<string[]> =>
   });
 
 const hasPerl = spawnSync('perl', ['-v']).status === 0;
+
+/** A port no other server listens on */
+const freePort = (): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, () => {
+      const { port } = probe.address() as { port: number };
+      probe.close(() => resolve(port));
+    });
+  });
 
 /**
  * A directory with the scripts and a fake fbsvcmgr: it logs its arguments, answers header
@@ -144,6 +155,63 @@ describe('isolation-check.pl', () => {
     expect(existsSync(fenced.marker)).toBe(false);
   });
 
+  describe('a primary nothing reaches any more (CONTACT_TIMEOUT_SECONDS)', () => {
+    const minutesAgo = (m: number) => Math.floor(Date.now() / 1000) - m * 60;
+    /** API server reachable; the headless Service lists another instance (localhost) */
+    const env = (ws: ReturnType<typeof workspace>, extra: Record<string, string> = {}) => ({
+      KUBERNETES_SERVICE_HOST: '127.0.0.1',
+      KUBERNETES_SERVICE_PORT: port,
+      PEERS_SERVICE: 'localhost',
+      SEGMENT_PORT: closedPort,
+      CONTACT_TIMEOUT_SECONDS: '60',
+      LAST_CONTACT_FILE: join(ws.dir, 'last-contact'),
+      LAST_CONTACT_BASE: String(minutesAgo(10)),
+      ...extra,
+    });
+    const contactedAt = (ws: ReturnType<typeof workspace>, epoch: number) => {
+      writeFileSync(join(ws.dir, 'last-contact'), `${epoch}\n`);
+      utimesSync(join(ws.dir, 'last-contact'), epoch, epoch);
+    };
+
+    it('fences it although it reaches the API server', () => {
+      if (!hasPerl) return;
+      const ws = workspace();
+      contactedAt(ws, minutesAgo(2));
+      expect(check(ws, env(ws))).toMatch(/neither the operator nor any replica has reached this primary for 1[0-9]{2}s; fencing/);
+      expect(ws.calls()).toHaveLength(1);
+      expect(existsSync(ws.marker)).toBe(true);
+    });
+
+    it('leaves it alone while the operator or a replica reached it recently', () => {
+      if (!hasPerl) return;
+      const ws = workspace();
+      contactedAt(ws, minutesAgo(0));
+      check(ws, env(ws));
+      expect(ws.calls()).toEqual([]);
+    });
+
+    it('counts from when the instance became the primary, not from an earlier contact', () => {
+      if (!hasPerl) return;
+      const ws = workspace();
+      contactedAt(ws, minutesAgo(5));
+      check(ws, env(ws, { LAST_CONTACT_BASE: String(minutesAgo(0)) }));
+      expect(ws.calls()).toEqual([]);
+    });
+
+    it('leaves a primary without replicas alone, and does nothing when off', () => {
+      if (!hasPerl) return;
+      const alone = workspace();
+      contactedAt(alone, minutesAgo(5));
+      // the only address of the headless Service is this pod's own
+      check(alone, env(alone, { POD_IP: '127.0.0.1' }));
+      expect(alone.calls()).toEqual([]);
+      const off = workspace();
+      contactedAt(off, minutesAgo(5));
+      check(off, env(off, { CONTACT_TIMEOUT_SECONDS: '0' }));
+      expect(off.calls()).toEqual([]);
+    });
+  });
+
   it('does nothing when disabled', () => {
     if (!hasPerl) return;
     const ws = workspace();
@@ -161,7 +229,7 @@ describe('segment server ISOLATION and REJOIN', () => {
     const ws = workspace();
     const base = join(ws.dir, 'repl');
     for (const d of ['archive', 'source']) mkdirSync(join(base, d), { recursive: true });
-    const port = 41000 + Math.floor(Math.random() * 2000);
+    const port = await freePort();
     server = spawn('perl', [join(ws.dir, 'segment-server.pl')], {
       env: {
         PATH: `${join(ws.dir, 'bin')}:${process.env.PATH}`,
@@ -186,7 +254,19 @@ describe('segment server ISOLATION and REJOIN', () => {
         }
       }
     };
+    // only authenticated requests count as contact (the isolation check's LAST_CONTACT_FILE)
+    for (let i = 0; ; i++) {
+      try {
+        expect((await segmentRequest(port, 'wrong ISOLATION'))[0]).toMatch(/^ERR unauthorized/);
+        break;
+      } catch (err) {
+        if (i > 50) throw err;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
+    expect(existsSync(join(base, 'last-contact'))).toBe(false);
     expect(await ask('ISOLATION')).toEqual(['OK online']);
+    expect(Number(readFileSync(join(base, 'last-contact'), 'utf8'))).toBeGreaterThan(Date.now() / 1000 - 30);
     expect(await ask('REJOIN')).toEqual(['OK']);
     expect(ws.calls()).toEqual([]);
 

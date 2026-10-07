@@ -152,6 +152,15 @@ my $bootstrap_seed = "$base/bootstrap-seed.fdb";
 my $pause_flag = "$base/.pause-pull";
 my $pause_ack  = "$base/.pull-paused";
 my $self_fenced = "$base/self-fenced";
+# when this server last answered an authenticated request (the operator, a replica's puller, a
+# Job): the isolation check fences a primary nothing reaches any more (CONTACT_TIMEOUT_SECONDS)
+my $last_contact_file = "$base/last-contact";
+my $last_contact_touch = 0;
+sub contacted {
+  return if time == $last_contact_touch;
+  $last_contact_touch = time;
+  if (open(my $fh, '>', $last_contact_file)) { print $fh time, "\n"; close $fh; }
+}
 # promoted in place (PROMOTE): the primary from now on, whatever the ConfigMap file still says;
 # removed when the instance restarts (init-instance.sh)
 my $promoted_flag = "$base/promoted";
@@ -733,6 +742,7 @@ my $monitor;
 sub start_monitor {
   return if $files_only || $isolation_timeout !~ /^\d+$/ || $isolation_timeout == 0;
   $ENV{SELF_FENCED_FILE} = $self_fenced;
+  $ENV{LAST_CONTACT_FILE} = $last_contact_file;
   my $pid = fork;
   if (!defined $pid) { print "cannot start the isolation check: $!\n"; return; }
   if ($pid == 0) {
@@ -758,6 +768,7 @@ while (1) {
   if (!defined $line) { close $client; next; }
   $line =~ s/\r?\n$//;
   my ($cmd, $arg, $denied) = authorize($line);
+  contacted() if defined $cmd;
   if (defined $denied) {
     print $client $denied eq '' ? "ERR unauthorized\n" : "ERR unauthorized ($denied)\n";
   } elsif ($cmd eq 'PING') {
