@@ -155,6 +155,9 @@ The **admission webhook** (`config/deploy/webhook.yaml`, served by the operator)
 that need other objects. It **refuses**:
 
 - a `FirebirdRestore` whose target is the cluster database;
+- a new `FirebirdRestore` whose target file already exists on the primary (asked from its segment
+  server, or the backup file server without replication; admitted when it does not answer within
+  1.5 seconds, and the operator asks again before it creates the restore Job);
 - a restore from a `FirebirdBackup` that does not exist or failed;
 - a restore whose `restoreType` does not match its backup;
 - a point-in-time restore whose source cannot be used (not a physical backup, no journal archive);
@@ -299,7 +302,7 @@ cert-manager Certificate) that Firebird never read; a `TLSCertificateIgnored` ev
 
 Not encrypted: journal segment shipping and seed copies between instances, and backup files
 copied through the segment server, travel as plain TCP inside the cluster; `networkPolicy.enabled`
-restricts them to the cluster's own pods and Jobs. Requests to the segment server are signed with
+restricts the segment port to the cluster's own pods and Jobs, and the operator. Requests to the segment server are signed with
 the SYSDBA password (HMAC-SHA256 over the request, its time and a nonce) instead of carrying it,
 so the password never crosses the network and a captured request cannot be replayed or altered.
 Replies and transferred bytes are not signed. Segment servers still accept the plain password
@@ -835,7 +838,9 @@ The status of each resource follows its Job (`Running`/`Restoring`, then `Comple
 next to the cluster database (default `restore-<name>.fdb`) and refuses to overwrite the cluster
 database. A physical restore that fails (e.g. an increment that does not belong to the chain)
 removes its partial database, which `nbackup` leaves locked, so the Job's retries start clean; a
-target file that existed before is never touched. To replace a database, bootstrap a new cluster from the backup:
+target file that existed before is never touched: the operator refuses a restore into an existing
+file before it creates the Job (status `Failed`, `already exists on <pod>`), and so does the
+admission webhook when the restore is applied. To replace a database, bootstrap a new cluster from the backup:
 
 ```yaml
 spec:

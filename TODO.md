@@ -49,5 +49,4 @@ Nothing open.
 
 ## Other roadmap items
 
-- [ ] **Admission webhook follow-up** (webhook since v0.65.0, served by every operator replica
-  since v0.69.0): check restore targets that already exist (only the Job sees the file system).
+Nothing open.

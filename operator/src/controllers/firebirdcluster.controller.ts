@@ -1,3 +1,4 @@
+import { superuserPasswordFrom } from '../utils/restore-target';
 import { inPlaceResize, RESIZE_ANNOTATION, RESIZE_TIMEOUT_SECONDS, resizeApplied, resizeInfeasible } from '../utils/in-place';
 import crypto from 'crypto';
 import {
@@ -1763,11 +1764,9 @@ export class FirebirdClusterController {
   /** The SYSDBA password, which is also the segment servers' token */
   private async superuserPassword(cluster: FirebirdCluster): Promise<string | undefined> {
     const secret = cluster.spec.superuserSecret?.name;
-    if (!secret) return 'masterkey'; // the pods' ISC_PASSWORD without a superuser Secret
+    if (!secret) return superuserPasswordFrom(cluster, undefined);
     try {
-      const data = (await this.coreApi.readNamespacedSecret({ name: secret, namespace: cluster.metadata.namespace ?? 'default' }))
-        .data?.password;
-      return data ? Buffer.from(data, 'base64').toString('utf8') : undefined;
+      return superuserPasswordFrom(cluster, await this.coreApi.readNamespacedSecret({ name: secret, namespace: cluster.metadata.namespace ?? 'default' }));
     } catch {
       return undefined;
     }

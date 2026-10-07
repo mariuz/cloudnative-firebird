@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.71.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.72.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -215,6 +215,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - Missing clusters, Secrets and clone sources, and backups still running, are warnings (`kubectl` shows them), since one apply may create objects in any order. Updates are checked only when the spec changes, so the operator's own updates and deletions are never blocked.
   - Certificates without cert-manager: the operator creates a CA and a serving certificate (ECDSA P-256; DER written by the operator, since Node has no X.509 writer), keeps them in a Secret, renews them before expiry, and fills in the `caBundle`. `failurePolicy: Ignore`; every reconcile still validates.
   - The kind CI checks a refused restore, an admitted one, and a warning for a missing Secret against the API server.
+  - Since v0.72.0 it also refuses a new restore into a database file that already exists on the primary. Only the instance sees its data directory, so the webhook asks the primary's segment server (`EXISTS <name>`, a plain file name in the data directory; also served by the backup file sidecar of clusters without replication). Without an answer within 1.5 seconds the restore is admitted. The operator asks again before it creates the restore Job and fails the restore with the reason, instead of a Job failing on nbackup's "File exists". The kind CI checks both paths on a replicated cluster and the webhook on a cluster without replication.
 - [x] **Signed Segment Server Requests** *(v0.64.0, CloudNativePG 1.30 authenticated operator-to-instance calls)*
   - Every client of the segment server used to send the SYSDBA password in plain text with each request: the operator, the segment pullers, seeding, and the switchover, failover, sync-standby, backup and journal archive Jobs. Requests are now signed instead: `SIG1 <epoch> <nonce> <HMAC-SHA256(password, "<epoch> <nonce> <request>")> <request>`. The server accepts a request within five minutes of its own clock, once per nonce, and answers a bad signature, an old request or a replay with `ERR unauthorized (<reason>)`.
   - The Firebird image ships perl-base only, without Digest::SHA, so SHA-256 and HMAC are written in plain Perl (`segment-auth.pl`, included into each script when the ConfigMap is built). Unit tests check them against Node's crypto.

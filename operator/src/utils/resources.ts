@@ -1193,18 +1193,17 @@ export function buildNetworkPolicy(cluster: FirebirdCluster, clones: CloneTarget
       ports: [{ protocol: 'TCP', port: 3050 }],
     });
   }
-  // the operator measures replication lag from the segment servers
-  if (replicationEnabled(cluster)) {
-    ingressRules.push({
-      _from: [
-        {
-          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': operatorNamespace() } },
-          podSelector: { matchLabels: { 'app.kubernetes.io/name': 'cloudnative-firebird' } },
-        },
-      ],
-      ports: [{ protocol: 'TCP', port: SEGMENT_PORT }],
-    });
-  }
+  // the operator asks the segment servers (replication lag, switchover) and, without replication,
+  // the backup file server (restore targets, admission webhook included)
+  ingressRules.push({
+    _from: [
+      {
+        namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': operatorNamespace() } },
+        podSelector: { matchLabels: { 'app.kubernetes.io/name': 'cloudnative-firebird' } },
+      },
+    ],
+    ports: [{ protocol: 'TCP', port: SEGMENT_PORT }],
+  });
 
   const networkPolicy: V1NetworkPolicy = {
     apiVersion: 'networking.k8s.io/v1',

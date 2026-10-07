@@ -1041,14 +1041,22 @@ describe('buildNetworkPolicy (intra-cluster traffic)', () => {
       ],
       ports: [{ protocol: 'TCP', port: 3050 }],
     });
-    // no clone, no rule
-    expect(buildNetworkPolicy(source).spec?.ingress).toHaveLength(2);
+    // no clone, no rule (clients, the cluster's own pods, the operator)
+    expect(buildNetworkPolicy(source).spec?.ingress).toHaveLength(3);
   });
 
-  it('opens the backup file server port to the cluster\'s own pods only, without replication', () => {
+  it('opens the backup file server port to the cluster\'s own pods and the operator only, without replication', () => {
     const np = buildNetworkPolicy(makeCluster({ networkPolicy: { enabled: true } }));
     const withPort = (np.spec?.ingress ?? []).filter((rule) => (rule.ports ?? []).some((p) => p.port === 3051));
-    expect(withPort).toHaveLength(1);
-    expect(withPort[0]._from).toEqual([{ podSelector: { matchLabels: { 'firebird.cloudnative-firebird.io/cluster': 'test-cluster' } } }]);
+    expect(withPort.map((rule) => rule._from)).toEqual([
+      [{ podSelector: { matchLabels: { 'firebird.cloudnative-firebird.io/cluster': 'test-cluster' } } }],
+      // the operator asks it whether restore targets exist
+      [
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'cloudnative-firebird-system' } },
+          podSelector: { matchLabels: { 'app.kubernetes.io/name': 'cloudnative-firebird' } },
+        },
+      ],
+    ]);
   });
 });

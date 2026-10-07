@@ -3,12 +3,23 @@ import { spawn, spawnSync, ChildProcess } from 'child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { createServer, Server, Socket } from 'net';
+import { AddressInfo, createServer, Server, Socket } from 'net';
 import { createHmac, randomBytes } from 'crypto';
 import { JOB_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { fakeSegmentServer } from './helpers/segment-auth';
 
 const hasPerl = spawnSync('perl', ['-v']).status === 0;
+
+/** A port no other server listens on (random ports collided between the servers these tests start) */
+const freePort = (): Promise<number> =>
+  new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.once('error', reject);
+    probe.listen(0, () => {
+      const { port } = probe.address() as AddressInfo;
+      probe.close(() => resolve(port));
+    });
+  });
 
 /** One request to a segment server (the shared client is mocked in unit tests) */
 const request = (port: number, line: string): Promise<string[]> =>
@@ -45,7 +56,7 @@ describe('segment server: synchronous replication commands', () => {
     const base = join(ws.dir, 'repl');
     for (const d of ['archive', 'source']) mkdirSync(join(base, d), { recursive: true });
     writeFileSync(join(ws.dir, 'primary'), `${primary}.db-headless\n`);
-    const port = 43000 + Math.floor(Math.random() * 2000);
+    const port = await freePort();
     const server = spawn('perl', [join(ws.dir, 'segment-server.pl')], {
       env: {
         PATH: `${join(ws.dir, 'bin')}:${process.env.PATH}`,
@@ -109,6 +120,21 @@ describe('segment server: synchronous replication commands', () => {
     expect(await ask('REMOVE nbackup-l1-x.nbk.ctl')).toEqual(['OK']);
     expect((await ask('NBACKUP 3 x.nbk'))[0]).toBe('ERR bad request');
     expect((await ask('NBACKUP 0 ../x.nbk'))[0]).toBe('ERR bad request');
+  });
+
+  it('tells whether a file exists in the data directory (EXISTS), without replication too', async () => {
+    if (!hasPerl) return;
+    const data = mkdtempSync(join(tmpdir(), 'fb-data-'));
+    writeFileSync(join(data, 'restored.fdb'), 'x');
+    for (const env of [{}, { FILES_ONLY: 'true' }]) {
+      const { ask } = await start('db-0', 'db-0', join(data, 'mydb.fdb'), env);
+      expect(await ask('EXISTS restored.fdb')).toEqual(['OK yes']);
+      expect(await ask('EXISTS other.fdb')).toEqual(['OK no']);
+      // plain names only: nothing outside the data directory
+      expect(await ask('EXISTS ../restored.fdb')).toEqual(['ERR bad request']);
+      expect(await ask('EXISTS .hidden')).toEqual(['ERR bad request']);
+      expect(await ask('EXISTS')).toEqual(['ERR bad request']);
+    }
   });
 
   describe('promotes a replica in place (PROMOTE)', () => {

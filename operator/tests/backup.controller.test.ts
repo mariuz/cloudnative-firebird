@@ -14,6 +14,7 @@ describe('FirebirdBackupController', () => {
   let customApi: Record<string, ReturnType<typeof vi.fn>>;
   let coordinationApi: Record<string, ReturnType<typeof vi.fn>>;
   let controller: FirebirdBackupController;
+  let segment: ReturnType<typeof vi.fn>;
   let cluster: FirebirdCluster;
   let objects: Record<string, unknown>;
 
@@ -50,7 +51,9 @@ describe('FirebirdBackupController', () => {
       if (apiClass === CoordinationV1Api) return coordinationApi as unknown as CoordinationV1Api;
       return {} as never;
     });
-    controller = new FirebirdBackupController(kubeConfig);
+    // the primary's segment server: the restore target does not exist
+    segment = vi.fn().mockResolvedValue(['OK no']);
+    controller = new FirebirdBackupController(kubeConfig, segment);
   });
 
   const lastStatus = () => {
@@ -205,6 +208,30 @@ describe('FirebirdBackupController', () => {
         'not found',
       );
       expect(lastStatus()).toMatchObject({ phase: 'Failed' });
+    });
+
+    it('refuses a target that already exists on the primary, without creating the Job', async () => {
+      segment.mockResolvedValue(['OK yes']);
+      await expect(controller.reconcileRestore(makeRestore({ targetDatabase: 'old.fdb' }))).rejects.toThrow(
+        'targetDatabase old.fdb already exists on test-cluster-1',
+      );
+      // asked from the primary (Lease holder), signed with the SYSDBA password
+      expect(segment).toHaveBeenCalledWith('test-cluster-1.test-cluster-headless.default.svc', 3051, 'masterkey EXISTS old.fdb', undefined);
+      expect(batchApi.createNamespacedJob).not.toHaveBeenCalled();
+      expect(lastStatus()).toMatchObject({ phase: 'Failed', error: expect.stringContaining('never overwrite') });
+    });
+
+    it('creates the Job when the segment server cannot tell (no answer, earlier version, no password)', async () => {
+      segment.mockRejectedValueOnce(new Error('timed out'));
+      await controller.reconcileRestore(makeRestore());
+      segment.mockResolvedValueOnce(['ERR bad request']);
+      await controller.reconcileRestore(makeRestore({ targetDatabase: 'b.fdb' }));
+      // a superuser Secret that cannot be read: nothing to sign with, so nothing is asked
+      cluster.spec.superuserSecret = { name: 'missing' };
+      segment.mockClear();
+      await controller.reconcileRestore(makeRestore({ targetDatabase: 'c.fdb' }));
+      expect(segment).not.toHaveBeenCalled();
+      expect(batchApi.createNamespacedJob).toHaveBeenCalledTimes(3);
     });
 
     it('refuses to restore over the cluster database', async () => {
