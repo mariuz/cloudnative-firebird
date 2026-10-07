@@ -507,8 +507,7 @@ Once the operator commits to the failover:
 - A promote Job then promotes the winner **in place**, like a planned switchover: no restart, and
   its journal continues after the last segment it applied, or after the journal archive's last
   segment if that is higher. `status.switchover.promotedInPlace` records it.
-- If that fails, or the winner is the synchronous standby, the winner is restarted and promoted
-  offline instead.
+- If that fails, the winner is restarted and promoted offline instead.
 - Replicas behind the winner are re-seeded.
 - The old primary is **re-seeded** when it comes back (restarted if its pod is still there),
   because it may have committed transactions that never reached a replica.
@@ -602,7 +601,8 @@ highest ordinal down, each handed over as below.
   being re-seeded; a standby that cannot be reached is re-seeded. A re-seed request for the
   standby (`reseed` annotation) waits until it is detached.
 - **Failover**: an attached, ready standby is promoted without an election, and no committed
-  transaction is lost. The other replicas, which may lack the old primary's unshipped segments,
+  transaction is lost. It is promoted in place like an elected replica; its journal continues
+  after the last segment it saw archived on the old primary. The other replicas, which may lack the old primary's unshipped segments,
   are re-seeded from it, like the old primary when it returns. Without a ready standby, the
   election runs as for asynchronous replication.
 - **Rolling updates** restart nothing while a sync-standby Job runs, and the standby last of the

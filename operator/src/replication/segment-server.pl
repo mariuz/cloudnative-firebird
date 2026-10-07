@@ -68,8 +68,10 @@
 #                                 position, or the journal archive's last segment A when higher),
 #                                 replaces the replication state and the offline bootstrap seed,
 #                                 then replica mode none and publication. Marks the instance as the
-#                                 primary (PROMOTED_FILE) until its next restart, as the ConfigMap
-#                                 reaches the pod's files later. "ERR ..." leaves it a replica.
+#                                 primary (the "promoted" file) until its next restart, as the ConfigMap
+#                                 reaches the pod's files later. A synchronous standby continues
+#                                 after the last segment it saw archived (sync-seen) when higher.
+#                                 "ERR ..." leaves it a replica.
 #   "<token> REJOIN\n"          -> "OK": brings a database fenced by the isolation check back
 #                                 online, sent by the operator once it checked that this instance
 #                                 still holds the leader Lease ("OK" too when it is not fenced)
@@ -487,7 +489,6 @@ sub promote_here {
       print "already promoted (sequence $seq)\n";
       return 1;
     }
-    die "this instance is a synchronous standby\n" if -e $standby_flag;
     unlink $pause_ack;
     if (open(my $flag, '>', $pause_flag)) { close $flag; }
     wait_for(60, sub { -e $pause_ack }) or die "segment puller did not pause\n";
@@ -498,6 +499,10 @@ sub promote_here {
       return !grep { my $s = segment_sequence("$source/$_"); defined $s && $s > $c->{sequence} } segments($source);
     }) or die "replica did not finish applying received segments\n";
     my $seq = read_control($control)->{sequence};
+    # a synchronous standby has every change up to the last segment archived on the old primary
+    # (as the offline promotion: its puller records it, the control file stays where it was)
+    my $seen = slurp($standby_seen);
+    $seq = $seen if -e $standby_flag && $seen =~ /^\d+$/ && $seen > $seq;
     my $lineage;
     if (defined $archived && $archived > $seq) {
       # as the offline promotion: segments $seq+1..$archived of the archive are not in this lineage
@@ -531,7 +536,7 @@ sub promote_here {
       unlink map { "$source/$_" } grep { -f "$source/$_" } readdir($dh);
       closedir($dh);
     }
-    unlink $state_file, $standby_seen;
+    unlink $state_file, $standby_seen, $standby_flag;
     print $client "OK $seq\n";
     print "promoted in place: the journal continues after segment $seq\n";
     # the copy taken in full shutdown becomes what the offline promotion's seed is: online, not a

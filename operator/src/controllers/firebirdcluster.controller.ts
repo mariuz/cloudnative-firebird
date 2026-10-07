@@ -738,8 +738,6 @@ export class FirebirdClusterController {
               startTime: now,
               targetToken: standbyPod.metadata?.uid ?? '',
               reseed,
-              // the standby's offline promotion takes its last segment from the synchronous state
-              promotedInPlace: false,
             });
             await this.customApi.patchNamespacedCustomObject(
               {
