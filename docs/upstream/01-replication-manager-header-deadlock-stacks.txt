@@ -1,0 +1,404 @@
+[New LWP 21995]
+[New LWP 21956]
+[New LWP 21921]
+[New LWP 21911]
+[New LWP 21908]
+[New LWP 21892]
+[New LWP 21837]
+[New LWP 21829]
+[New LWP 21740]
+[New LWP 21664]
+[New LWP 21537]
+[New LWP 21536]
+[New LWP 21490]
+[New LWP 21489]
+[New LWP 21488]
+
+warning: "target:/proc/21487/exe": could not open as an executable file: Input/output error.
+
+warning: `target:/proc/21487/exe': can't open to read symbols: Input/output error.
+
+warning: Could not load vsyscall page because no executable was specified
+
+warning: Target and debugger are in different PID namespaces; thread lists and other data are likely unreliable.  Connect to gdbserver inside the container.
+0x00007f909ac949ee in ?? ()
+Error reading attached process's symbol file.
+: No such file or directory.
+warning: File "/usr/lib/x86_64-linux-gnu/libthread_db.so.1" auto-loading has been declined by your `auto-load safe-path' set to "$debugdir:$datadir/auto-load".
+To enable execution of this file add
+	add-auto-load-safe-path /usr/lib/x86_64-linux-gnu/libthread_db.so.1
+line to your configuration file "/root/.config/gdb/gdbinit".
+To completely disable this security protection add
+	set auto-load safe-path /
+line to your configuration file "/root/.config/gdb/gdbinit".
+For more information about this security protection see the
+"Auto-loading safe path" section in the GDB manual.  E.g., run from the shell:
+	info "(gdb)Auto-loading safe path"
+warning: Unable to find libthread_db matching inferior's thread library, thread debugging will not be available.
+Error reading attached process's symbol file.
+: No such file or directory.
+Error reading attached process's symbol file.
+: No such file or directory.
+From                To                  Syms Read   Shared Object Library
+0x00007f909afe6a40  0x00007f909b1bd451  Yes (*)     /opt/firebird/bin/../lib/libfbclient.so.2
+0x00007f909af84880  0x00007f909af98593  Yes (*)     /lib/x86_64-linux-gnu/libtommath.so.1
+0x00007f909af21ea0  0x00007f909af5dfc7  Yes (*)     /opt/firebird/bin/../lib/libtomcrypt.so.1
+0x00007f909af13040  0x00007f909af13101  Yes (*)     /lib/x86_64-linux-gnu/libdl.so.2
+0x00007f909ae312c0  0x00007f909aeaddc6  Yes (*)     /lib/x86_64-linux-gnu/libm.so.6
+0x00007f909adf73c0  0x00007f909ae19f95  Yes (*)     /lib/x86_64-linux-gnu/libgcc_s.so.1
+0x00007f909adef040  0x00007f909adef101  Yes (*)     /lib/x86_64-linux-gnu/libpthread.so.0
+0x00007f909ac22400  0x00007f909ad848fd  Yes (*)     /lib/x86_64-linux-gnu/libc.so.6
+0x00007f909b29e000  0x00007f909b2c53d1  Yes (*)     /lib64/ld-linux-x86-64.so.2
+0x00007f90991839f0  0x00007f9099857851  Yes         /opt/firebird/plugins/libEngine13.so
+0x00007f90990e9060  0x00007f90990e9177  Yes (*)     /opt/firebird/lib/libib_util.so
+0x00007f9098f38cd0  0x00007f9098fe5161  Yes (*)     /opt/firebird/intl/fbintl
+0x00007f9098d01500  0x00007f9098e0b5f8  Yes (*)     /lib/x86_64-linux-gnu/libicuuc.so.76.1
+0x00007f9096e30040  0x00007f9096e300f9  Yes (*)     /lib/x86_64-linux-gnu/libicudata.so.76
+0x00007f9096c6a240  0x00007f9096d8ea5e  Yes (*)     /lib/x86_64-linux-gnu/libstdc++.so.6
+0x00007f909693c880  0x00007f9096b16039  Yes (*)     /lib/x86_64-linux-gnu/libicui18n.so.76.1
+0x00007f90965f9f40  0x00007f9096736ac1  Yes (*)     /opt/firebird/plugins/libfbtrace.so
+0x00007f9094a87d20  0x00007f9094b28e81  Yes (*)     /opt/firebird/plugins/libChaCha.so
+(*): Shared library is missing debugging information.
+  Id   Target Id            Frame 
+* 1    LWP 21487 "firebird" 0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  2    LWP 21995 "firebird" 0x00007f909ac89e9b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  3    LWP 21956 "firebird" 0x00007f909ac89e9b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  4    LWP 21921 "firebird" 0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  5    LWP 21911 "firebird" 0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  6    LWP 21908 "firebird" 0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  7    LWP 21892 "firebird" 0x00007f909ac89e9b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  8    LWP 21837 "firebird" 0x00007f909ac89e9b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  9    LWP 21829 "firebird" 0x00007f909ac89e9b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  10   LWP 21740 "firebird" 0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  11   LWP 21664 "firebird" 0x00007f909ac89e9b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  12   LWP 21537 "firebird" 0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  13   LWP 21536 "firebird" 0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  14   LWP 21490 "firebird" 0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  15   LWP 21489 "firebird" 0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+  16   LWP 21488 "firebird" 0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+
+Thread 16 (LWP 21488 "firebird"):
+#0  0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac89668 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f909ac89c8c in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f909ac94920 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#4  0x00007f909b1367d2 in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#5  0x00007f909b05c295 in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#6  0x00007f909b0e62c4 in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#7  0x00007f909ac8cb7b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#8  0x00007f909ad0a630 in clone () from /lib/x86_64-linux-gnu/libc.so.6
+
+Thread 15 (LWP 21489 "firebird"):
+#0  0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac89668 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f909ac89c8c in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f909ac9472b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#4  0x00007f909b1368ab in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#5  0x00007f909b00a07d in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#6  0x00007f909b0e62c4 in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#7  0x00007f909ac8cb7b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#8  0x00007f909ad0a630 in clone () from /lib/x86_64-linux-gnu/libc.so.6
+
+Thread 14 (LWP 21490 "firebird"):
+#0  0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac89668 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f909ac89c8c in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f909ac9472b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#4  0x00007f909979c8ab in Firebird::SignalSafeSemaphore::tryEnter (this=this@entry=0x7f9099102fe8, seconds=seconds@entry=10, milliseconds=10000, milliseconds@entry=0) at /firebird/src/common/classes/semaphore.cpp:202
+#5  0x00007f909946fd69 in Jrd::Database::garbage_collector (dbb=0x7f90991028c0) at /firebird/src/jrd/vio.cpp:5507
+#6  0x00007f9099472e81 in ThreadFinishSync<Jrd::Database*, (void (*)(Jrd::Database*))0>::internalRun (this=this@entry=0x7f9099103028) at /firebird/src/include/../common/ThreadStart.h:274
+#7  ThreadFinishSync<Jrd::Database*, (void (*)(Jrd::Database*))0>::internalRun (arg=arg@entry=0x7f9099103028) at /firebird/src/include/../common/ThreadStart.h:266
+#8  0x00007f9099747cb4 in (anonymous namespace)::ThreadArgs::run (this=<synthetic pointer>) at /firebird/src/common/ThreadStart.cpp:78
+#9  (anonymous namespace)::threadStart (arg=0x7f90967d9780) at /firebird/src/common/ThreadStart.cpp:94
+#10 0x00007f909ac8cb7b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#11 0x00007f909ad0a630 in clone () from /lib/x86_64-linux-gnu/libc.so.6
+
+Thread 13 (LWP 21536 "firebird"):
+#0  0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac89668 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f909ac89c8c in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f909ac8c158 in pthread_cond_wait () from /lib/x86_64-linux-gnu/libc.so.6
+#4  0x00007f9099794aeb in Firebird::Synchronize::sleep (this=0x7f90991100c0) at /firebird/src/common/classes/Synchronize.cpp:103
+#5  0x00007f90997946a5 in Firebird::SyncObject::wait (this=0x7f9086efced0, type=Firebird::SYNC_EXCLUSIVE, thread=0x7f90991100c0, sync=<optimized out>, timeOut=<optimized out>) at /firebird/src/common/classes/SyncObject.cpp:299
+#6  0x00007f9099794a05 in Firebird::SyncObject::lock (this=<optimized out>, sync=<optimized out>, type=<optimized out>, from=<optimized out>, timeOut=<optimized out>) at /firebird/src/common/classes/SyncObject.cpp:148
+#7  0x00007f909932c254 in Firebird::SyncObject::lock (from=0x7f909985ca6d "addRef", type=Firebird::SYNC_EXCLUSIVE, sync=0x0, this=0x7f9086efced0) at /firebird/src/include/../common/classes/SyncObject.h:72
+#8  Jrd::BufferDesc::addRef (this=this@entry=0x7f9086efcec0, tdbb=tdbb@entry=0x7f90953d5668, syncType=syncType@entry=Firebird::SYNC_EXCLUSIVE, wait=wait@entry=1) at /firebird/src/jrd/cch.cpp:5187
+#9  0x00007f9099332fd4 in get_buffer (tdbb=tdbb@entry=0x7f90953d5668, page=..., syncType=syncType@entry=Firebird::SYNC_EXCLUSIVE, wait=wait@entry=1) at /firebird/src/jrd/cch.cpp:3815
+#10 0x00007f90993337fd in CCH_fetch_lock (tdbb=0x7f90953d5668, window=0x7f90953d5260, lock_type=6, wait=1, page_type=<optimized out>) at /firebird/src/jrd/cch.cpp:872
+#11 0x00007f9099333902 in CCH_fetch (tdbb=tdbb@entry=0x7f90953d5668, window=window@entry=0x7f90953d5260, lock_type=lock_type@entry=6, page_type=page_type@entry=1 '\001', wait=wait@entry=1, read_shadow=read_shadow@entry=true) at /firebird/src/jrd/cch.cpp:801
+#12 0x00007f909943a8ad in CCH_FETCH (page_type=1 '\001', lock_type=6, window=0x7f90953d5260, tdbb=0x7f90953d5668) at /firebird/src/jrd/../jrd/cch_proto.h:84
+#13 bump_transaction_id (tdbb=tdbb@entry=0x7f90953d5668, window=window@entry=0x7f90953d5260, dontWrite=<optimized out>) at /firebird/src/jrd/tra.cpp:2099
+#14 0x00007f909943e39b in transaction_start (tdbb=tdbb@entry=0x7f90953d5668, trans=trans@entry=0x7f90841946c0) at /firebird/src/jrd/tra.cpp:3552
+#15 0x00007f9099449e15 in TRA_start (tdbb=tdbb@entry=0x7f90953d5668, tpb_length=<optimized out>, tpb=<optimized out>, outer=outer@entry=0x0) at /firebird/src/jrd/tra.cpp:1789
+#16 0x00007f90993bfd0b in start_transaction (tdbb=tdbb@entry=0x7f90953d5668, transliterate=transliterate@entry=true, tra_handle=tra_handle@entry=0x7f90953d5578, tpb_length=tpb_length@entry=5, tpb=tpb@entry=0x7f909abd4c50 "\001\t\017\006\022", attachment=<optimized out>) at /firebird/src/jrd/jrd.cpp:9624
+#17 0x00007f90993bfe20 in Jrd::JAttachment::startTransaction (this=this@entry=0x7f90967de110, user_status=user_status@entry=0x7f90953d5800, tpbLength=tpbLength@entry=5, tpb=tpb@entry=0x7f909abd4c50 "\001\t\017\006\022") at /firebird/src/jrd/../jrd/jrd.h:811
+#18 0x00007f90993d7db9 in Firebird::IAttachmentBaseImpl<Jrd::JAttachment, Firebird::CheckStatusWrapper, Firebird::IReferenceCountedImpl<Jrd::JAttachment, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IVersionedImpl<Jrd::JAttachment, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IAttachment> > > > >::cloopstartTransactionDispatcher (self=<optimized out>, status=0x7f90953d58f8, tpbLength=5, tpb=0x7f909abd4c50 "\001\t\017\006\022") at /firebird/src/include/firebird/IdlFbInterfaces.h:11821
+#19 0x00007f909b04c16c in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#20 0x00007f909b07c1cd in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#21 0x000000000044e292 in ?? ()
+#22 0x00007f909abcbf50 in ?? ()
+#23 0x0000000000442710 in ?? ()
+#24 0x00007f9096142cd8 in ?? ()
+#25 0x0000001d00000000 in ?? ()
+#26 0x0000000000000000 in ?? ()
+
+Thread 12 (LWP 21537 "firebird"):
+#0  0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac89668 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f909ac89c8c in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f909ac8c158 in pthread_cond_wait () from /lib/x86_64-linux-gnu/libc.so.6
+#4  0x00007f9099766a1f in Firebird::SharedMemoryBase::eventWait (this=<optimized out>, event=event@entry=0x7f909495e460, value=value@entry=1, micro_seconds=micro_seconds@entry=0) at /firebird/src/common/isc_sync.cpp:810
+#5  0x00007f9099273fb8 in (anonymous namespace)::MappingIpc::clearDeliveryThread (this=0x7f909910d9d0) at /firebird/src/include/../common/classes/auto.h:169
+#6  (anonymous namespace)::MappingIpc::clearDelivery (mapping=0x7f909910d9d0) at /firebird/src/jrd/Mapping.cpp:981
+#7  0x00007f909926d0b1 in ThreadFinishSync<(anonymous namespace)::MappingIpc*, 0>::internalRun (this=this@entry=0x7f909910da30) at /firebird/src/jrd/../common/ThreadStart.h:274
+#8  ThreadFinishSync<(anonymous namespace)::MappingIpc*, 0>::internalRun (arg=arg@entry=0x7f909910da30) at /firebird/src/jrd/../common/ThreadStart.h:266
+#9  0x00007f9099747cb4 in (anonymous namespace)::ThreadArgs::run (this=<synthetic pointer>) at /firebird/src/common/ThreadStart.cpp:78
+#10 (anonymous namespace)::threadStart (arg=0x7f90967d9780) at /firebird/src/common/ThreadStart.cpp:94
+#11 0x00007f909ac8cb7b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#12 0x00007f909ad0a630 in clone () from /lib/x86_64-linux-gnu/libc.so.6
+
+Thread 11 (LWP 21664 "firebird"):
+#0  0x00007f909ac89e9b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac8ffd9 in pthread_mutex_lock () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f9099228715 in Firebird::Mutex::enter (aReason=<synthetic pointer>, this=0x7f90990e4568) at /firebird/src/include/../common/classes/locks.h:209
+#3  Firebird::RaiiLockGuard<Firebird::Mutex>::RaiiLockGuard (aReason=<synthetic pointer>, aLock=..., this=0x7f90856dc9b8) at /firebird/src/include/../common/classes/locks.h:331
+#4  Jrd::Database::GlobalObjectHolder::getReplManager (this=0x7f90990e44f0, create=create@entry=true) at /firebird/src/jrd/Database.cpp:721
+#5  0x00007f909967bc4a in Jrd::Database::replManager (create=true, this=<optimized out>) at /firebird/src/include/../jrd/../jrd/Database.h:699
+#6  (anonymous namespace)::getReplicator (tdbb=tdbb@entry=0x7f90856dd538) at /firebird/src/jrd/replication/Publisher.cpp:131
+#7  0x00007f909967c7a3 in (anonymous namespace)::getReplicator (tdbb=tdbb@entry=0x7f90856dd538, status=..., transaction=transaction@entry=0x7f90844eedc0) at /firebird/src/jrd/replication/Publisher.cpp:190
+#8  0x00007f909967d25a in (anonymous namespace)::getReplicator (transaction=0x7f90844eedc0, status=..., tdbb=0x7f90856dd538) at /firebird/src/jrd/replication/Publisher.cpp:184
+#9  REPL_store (tdbb=tdbb@entry=0x7f90856dd538, rpb=rpb@entry=0x7f90840c9270, transaction=transaction@entry=0x7f90844eedc0) at /firebird/src/jrd/replication/Publisher.cpp:516
+#10 0x00007f9099577be3 in Jrd::StoreNode::store (this=this@entry=0x7f90840bc310, tdbb=0x7f90856dd538, request=0x7f90842f0b80, whichTrig=whichTrig@entry=Jrd::StmtNode::ALL_TRIGS) at /firebird/src/dsql/StmtNodes.cpp:8220
+#11 0x00007f9099577c2a in Jrd::StoreNode::execute (this=0x7f90840bc310, tdbb=<optimized out>, request=<optimized out>, exeState=0x7f90856dcfe0) at /firebird/src/dsql/StmtNodes.cpp:8143
+#12 0x00007f90993708ff in EXE_looper (tdbb=tdbb@entry=0x7f90856dd538, request=request@entry=0x7f90842f0b80, node=0x7f90840bc310, node@entry=0x7f90840bc2c0) at /firebird/src/jrd/exe.cpp:1473
+#13 0x00007f9099371baf in looper_seh (node=0x7f90840bc2c0, request=0x7f90842f0b80, tdbb=0x7f90856dd538) at /firebird/src/jrd/exe.cpp:1605
+#14 execute_looper (tdbb=0x7f90856dd538, request=0x7f90842f0b80, transaction=0x7f90844eedc0, node=0x7f90840bc2c0, next_state=next_state@entry=Jrd::Request::req_evaluate) at /firebird/src/jrd/exe.cpp:1057
+#15 0x00007f9099372d07 in EXE_start (tdbb=<optimized out>, request=<optimized out>, transaction=<optimized out>) at /firebird/src/jrd/exe.cpp:910
+#16 0x00007f90993af119 in JRD_start (tdbb=tdbb@entry=0x7f90856dd538, request=0x7f90842f0b80, transaction=0x7f90844eedc0) at /firebird/src/jrd/jrd.cpp:9463
+#17 0x00007f90994fafb8 in Jrd::DsqlDmlRequest::doExecute (this=this@entry=0x7f90842f3c30, tdbb=tdbb@entry=0x7f90856dd538, traHandle=traHandle@entry=0x7f90856dd448, outMetadata=outMetadata@entry=0x0, outMsg=outMsg@entry=0x0, singleton=<optimized out>) at /firebird/src/dsql/DsqlRequests.cpp:582
+#18 0x00007f90994ff305 in Jrd::DsqlDmlRequest::execute (this=0x7f90842f3c30, tdbb=0x7f90856dd538, traHandle=0x7f90856dd448, inMetadata=<optimized out>, inMsg=<optimized out>, outMetadata=0x0, outMsg=0x0, singleton=false) at /firebird/src/dsql/DsqlRequests.cpp:741
+#19 0x00007f90995b0b08 in DSQL_execute (tdbb=tdbb@entry=0x7f90856dd538, tra_handle=tra_handle@entry=0x7f90856dd448, dsqlRequest=0x7f90842f3c30, in_meta=in_meta@entry=0x0, in_msg=in_msg@entry=0x0, out_meta=out_meta@entry=0x0, out_msg=0x0) at /firebird/src/dsql/dsql.cpp:183
+#20 0x00007f90993c022f in Jrd::JStatement::execute (this=this@entry=0x7f90967dd000, user_status=user_status@entry=0x7f90856dd6e0, apiTra=apiTra@entry=0x7f90967ddca8, inMetadata=inMetadata@entry=0x0, inBuffer=inBuffer@entry=0x0, outMetadata=outMetadata@entry=0x0, outBuffer=0x0) at /firebird/src/jrd/../jrd/jrd.h:811
+#21 0x00007f90993dadca in Firebird::IStatementBaseImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::IReferenceCountedImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IVersionedImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IStatement> > > > >::cloopexecuteDispatcher (self=<optimized out>, status=0x7f90856dd828, transaction=0x7f90967ddca8, inMetadata=0x0, inBuffer=0x0, outMetadata=0x0, outBuffer=0x0) at /firebird/src/include/firebird/IdlFbInterfaces.h:10756
+#22 0x00007f909b0529b3 in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#23 0x00007f909b07c13a in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#24 0x00000000004544a2 in ?? ()
+#25 0x0000000000000000 in ?? ()
+
+Thread 10 (LWP 21740 "firebird"):
+#0  0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac89668 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f909ac89c8c in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f909ac8c158 in pthread_cond_wait () from /lib/x86_64-linux-gnu/libc.so.6
+#4  0x00007f9099794aeb in Firebird::Synchronize::sleep (this=0x7f90990e29d0) at /firebird/src/common/classes/Synchronize.cpp:103
+#5  0x00007f90997946a5 in Firebird::SyncObject::wait (this=0x7f9086efced0, type=Firebird::SYNC_SHARED, thread=0x7f90990e29d0, sync=<optimized out>, timeOut=<optimized out>) at /firebird/src/common/classes/SyncObject.cpp:299
+#6  0x00007f9099794a05 in Firebird::SyncObject::lock (this=<optimized out>, sync=<optimized out>, type=<optimized out>, from=<optimized out>, timeOut=<optimized out>) at /firebird/src/common/classes/SyncObject.cpp:148
+#7  0x00007f909932c254 in Firebird::SyncObject::lock (from=0x7f909985ca6d "addRef", type=Firebird::SYNC_SHARED, sync=0x0, this=0x7f9086efced0) at /firebird/src/include/../common/classes/SyncObject.h:72
+#8  Jrd::BufferDesc::addRef (this=this@entry=0x7f9086efcec0, tdbb=tdbb@entry=0x7f9084edc538, syncType=syncType@entry=Firebird::SYNC_SHARED, wait=wait@entry=1) at /firebird/src/jrd/cch.cpp:5187
+#9  0x00007f9099332fd4 in get_buffer (tdbb=tdbb@entry=0x7f9084edc538, page=..., syncType=syncType@entry=Firebird::SYNC_SHARED, wait=wait@entry=1) at /firebird/src/jrd/cch.cpp:3815
+#10 0x00007f90993337fd in CCH_fetch_lock (tdbb=0x7f9084edc538, window=0x7f9084edb640, lock_type=3, wait=1, page_type=<optimized out>) at /firebird/src/jrd/cch.cpp:872
+#11 0x00007f9099333902 in CCH_fetch (tdbb=tdbb@entry=0x7f9084edc538, window=window@entry=0x7f9084edb640, lock_type=lock_type@entry=3, page_type=page_type@entry=1 '\001', wait=wait@entry=1, read_shadow=read_shadow@entry=true) at /firebird/src/jrd/cch.cpp:801
+#12 0x00007f9099401e89 in CCH_FETCH (page_type=1 '\001', lock_type=3, window=0x7f9084edb640, tdbb=0x7f9084edc538) at /firebird/src/jrd/../jrd/cch_proto.h:84
+#13 PAG_get_clump (tdbb=0x7f9084edc538, type=type@entry=11, inout_len=inout_len@entry=0x7f9084edb6ae, entry=entry@entry=0x7f90857965f0 "\t") at /firebird/src/jrd/pag.cpp:1054
+#14 0x00007f90992279cd in Jrd::Database::getReplSequence (this=this@entry=0x7f9085795c40, tdbb=<optimized out>) at /firebird/src/jrd/Database.cpp:394
+#15 0x00007f9099679d6b in Replication::Manager::Manager (this=0x7f90967dbf10, dbId=..., config=0x7f90967d82b0) at /firebird/src/jrd/replication/Manager.cpp:133
+#16 0x00007f909922877a in Jrd::Database::GlobalObjectHolder::getReplManager (this=0x7f90990e44f0, create=create@entry=true) at /firebird/src/jrd/Database.cpp:724
+#17 0x00007f909967bc4a in Jrd::Database::replManager (create=true, this=<optimized out>) at /firebird/src/include/../jrd/../jrd/Database.h:699
+#18 (anonymous namespace)::getReplicator (tdbb=tdbb@entry=0x7f9084edc538) at /firebird/src/jrd/replication/Publisher.cpp:131
+#19 0x00007f909967c7a3 in (anonymous namespace)::getReplicator (tdbb=tdbb@entry=0x7f9084edc538, status=..., transaction=transaction@entry=0x7f9085711dc0) at /firebird/src/jrd/replication/Publisher.cpp:190
+#20 0x00007f909967d25a in (anonymous namespace)::getReplicator (transaction=0x7f9085711dc0, status=..., tdbb=0x7f9084edc538) at /firebird/src/jrd/replication/Publisher.cpp:184
+#21 REPL_store (tdbb=tdbb@entry=0x7f9084edc538, rpb=rpb@entry=0x7f9084159270, transaction=transaction@entry=0x7f9085711dc0) at /firebird/src/jrd/replication/Publisher.cpp:516
+#22 0x00007f9099577be3 in Jrd::StoreNode::store (this=this@entry=0x7f9084168b90, tdbb=0x7f9084edc538, request=0x7f9084157500, whichTrig=whichTrig@entry=Jrd::StmtNode::ALL_TRIGS) at /firebird/src/dsql/StmtNodes.cpp:8220
+#23 0x00007f9099577c2a in Jrd::StoreNode::execute (this=0x7f9084168b90, tdbb=<optimized out>, request=<optimized out>, exeState=0x7f9084edbfe0) at /firebird/src/dsql/StmtNodes.cpp:8143
+#24 0x00007f90993708ff in EXE_looper (tdbb=tdbb@entry=0x7f9084edc538, request=request@entry=0x7f9084157500, node=0x7f9084168b90, node@entry=0x7f9084168b40) at /firebird/src/jrd/exe.cpp:1473
+#25 0x00007f9099371baf in looper_seh (node=0x7f9084168b40, request=0x7f9084157500, tdbb=0x7f9084edc538) at /firebird/src/jrd/exe.cpp:1605
+#26 execute_looper (tdbb=0x7f9084edc538, request=0x7f9084157500, transaction=0x7f9085711dc0, node=0x7f9084168b40, next_state=next_state@entry=Jrd::Request::req_evaluate) at /firebird/src/jrd/exe.cpp:1057
+#27 0x00007f9099372d07 in EXE_start (tdbb=<optimized out>, request=<optimized out>, transaction=<optimized out>) at /firebird/src/jrd/exe.cpp:910
+#28 0x00007f90993af119 in JRD_start (tdbb=tdbb@entry=0x7f9084edc538, request=0x7f9084157500, transaction=0x7f9085711dc0) at /firebird/src/jrd/jrd.cpp:9463
+#29 0x00007f90994fafb8 in Jrd::DsqlDmlRequest::doExecute (this=this@entry=0x7f9084263c30, tdbb=tdbb@entry=0x7f9084edc538, traHandle=traHandle@entry=0x7f9084edc448, outMetadata=outMetadata@entry=0x0, outMsg=outMsg@entry=0x0, singleton=<optimized out>) at /firebird/src/dsql/DsqlRequests.cpp:582
+#30 0x00007f90994ff305 in Jrd::DsqlDmlRequest::execute (this=0x7f9084263c30, tdbb=0x7f9084edc538, traHandle=0x7f9084edc448, inMetadata=<optimized out>, inMsg=<optimized out>, outMetadata=0x0, outMsg=0x0, singleton=false) at /firebird/src/dsql/DsqlRequests.cpp:741
+#31 0x00007f90995b0b08 in DSQL_execute (tdbb=tdbb@entry=0x7f9084edc538, tra_handle=tra_handle@entry=0x7f9084edc448, dsqlRequest=0x7f9084263c30, in_meta=in_meta@entry=0x0, in_msg=in_msg@entry=0x0, out_meta=out_meta@entry=0x0, out_msg=0x0) at /firebird/src/dsql/dsql.cpp:183
+#32 0x00007f90993c022f in Jrd::JStatement::execute (this=this@entry=0x7f90967dbbd0, user_status=user_status@entry=0x7f9084edc6e0, apiTra=apiTra@entry=0x7f90967dd968, inMetadata=inMetadata@entry=0x0, inBuffer=inBuffer@entry=0x0, outMetadata=outMetadata@entry=0x0, outBuffer=0x0) at /firebird/src/jrd/../jrd/jrd.h:811
+#33 0x00007f90993dadca in Firebird::IStatementBaseImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::IReferenceCountedImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IVersionedImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IStatement> > > > >::cloopexecuteDispatcher (self=<optimized out>, status=0x7f9084edc828, transaction=0x7f90967dd968, inMetadata=0x0, inBuffer=0x0, outMetadata=0x0, outBuffer=0x0) at /firebird/src/include/firebird/IdlFbInterfaces.h:10756
+#34 0x00007f909b0529b3 in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#35 0x00007f909b07c13a in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#36 0x00000000004544a2 in ?? ()
+#37 0x0000000000000000 in ?? ()
+
+Thread 9 (LWP 21829 "firebird"):
+#0  0x00007f909ac89e9b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac8ffd9 in pthread_mutex_lock () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f9099228715 in Firebird::Mutex::enter (aReason=<synthetic pointer>, this=0x7f90990e4568) at /firebird/src/include/../common/classes/locks.h:209
+#3  Firebird::RaiiLockGuard<Firebird::Mutex>::RaiiLockGuard (aReason=<synthetic pointer>, aLock=..., this=0x7f9077ffc9b8) at /firebird/src/include/../common/classes/locks.h:331
+#4  Jrd::Database::GlobalObjectHolder::getReplManager (this=0x7f90990e44f0, create=create@entry=true) at /firebird/src/jrd/Database.cpp:721
+#5  0x00007f909967bc4a in Jrd::Database::replManager (create=true, this=<optimized out>) at /firebird/src/include/../jrd/../jrd/Database.h:699
+#6  (anonymous namespace)::getReplicator (tdbb=tdbb@entry=0x7f9077ffd538) at /firebird/src/jrd/replication/Publisher.cpp:131
+#7  0x00007f909967c7a3 in (anonymous namespace)::getReplicator (tdbb=tdbb@entry=0x7f9077ffd538, status=..., transaction=transaction@entry=0x7f908463fdc0) at /firebird/src/jrd/replication/Publisher.cpp:190
+#8  0x00007f909967d25a in (anonymous namespace)::getReplicator (transaction=0x7f908463fdc0, status=..., tdbb=0x7f9077ffd538) at /firebird/src/jrd/replication/Publisher.cpp:184
+#9  REPL_store (tdbb=tdbb@entry=0x7f9077ffd538, rpb=rpb@entry=0x7f908402ddf0, transaction=transaction@entry=0x7f908463fdc0) at /firebird/src/jrd/replication/Publisher.cpp:516
+#10 0x00007f9099577be3 in Jrd::StoreNode::store (this=this@entry=0x7f908403e090, tdbb=0x7f9077ffd538, request=0x7f9084184700, whichTrig=whichTrig@entry=Jrd::StmtNode::ALL_TRIGS) at /firebird/src/dsql/StmtNodes.cpp:8220
+#11 0x00007f9099577c2a in Jrd::StoreNode::execute (this=0x7f908403e090, tdbb=<optimized out>, request=<optimized out>, exeState=0x7f9077ffcfe0) at /firebird/src/dsql/StmtNodes.cpp:8143
+#12 0x00007f90993708ff in EXE_looper (tdbb=tdbb@entry=0x7f9077ffd538, request=request@entry=0x7f9084184700, node=0x7f908403e090, node@entry=0x7f908403e040) at /firebird/src/jrd/exe.cpp:1473
+#13 0x00007f9099371baf in looper_seh (node=0x7f908403e040, request=0x7f9084184700, tdbb=0x7f9077ffd538) at /firebird/src/jrd/exe.cpp:1605
+#14 execute_looper (tdbb=0x7f9077ffd538, request=0x7f9084184700, transaction=0x7f908463fdc0, node=0x7f908403e040, next_state=next_state@entry=Jrd::Request::req_evaluate) at /firebird/src/jrd/exe.cpp:1057
+#15 0x00007f9099372d07 in EXE_start (tdbb=<optimized out>, request=<optimized out>, transaction=<optimized out>) at /firebird/src/jrd/exe.cpp:910
+#16 0x00007f90993af119 in JRD_start (tdbb=tdbb@entry=0x7f9077ffd538, request=0x7f9084184700, transaction=0x7f908463fdc0) at /firebird/src/jrd/jrd.cpp:9463
+#17 0x00007f90994fafb8 in Jrd::DsqlDmlRequest::doExecute (this=this@entry=0x7f9084185a30, tdbb=tdbb@entry=0x7f9077ffd538, traHandle=traHandle@entry=0x7f9077ffd448, outMetadata=outMetadata@entry=0x0, outMsg=outMsg@entry=0x0, singleton=<optimized out>) at /firebird/src/dsql/DsqlRequests.cpp:582
+#18 0x00007f90994ff305 in Jrd::DsqlDmlRequest::execute (this=0x7f9084185a30, tdbb=0x7f9077ffd538, traHandle=0x7f9077ffd448, inMetadata=<optimized out>, inMsg=<optimized out>, outMetadata=0x0, outMsg=0x0, singleton=false) at /firebird/src/dsql/DsqlRequests.cpp:741
+#19 0x00007f90995b0b08 in DSQL_execute (tdbb=tdbb@entry=0x7f9077ffd538, tra_handle=tra_handle@entry=0x7f9077ffd448, dsqlRequest=0x7f9084185a30, in_meta=in_meta@entry=0x0, in_msg=in_msg@entry=0x0, out_meta=out_meta@entry=0x0, out_msg=0x0) at /firebird/src/dsql/dsql.cpp:183
+#20 0x00007f90993c022f in Jrd::JStatement::execute (this=this@entry=0x7f90967de890, user_status=user_status@entry=0x7f9077ffd6e0, apiTra=apiTra@entry=0x7f90967de718, inMetadata=inMetadata@entry=0x0, inBuffer=inBuffer@entry=0x0, outMetadata=outMetadata@entry=0x0, outBuffer=0x0) at /firebird/src/jrd/../jrd/jrd.h:811
+#21 0x00007f90993dadca in Firebird::IStatementBaseImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::IReferenceCountedImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IVersionedImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IStatement> > > > >::cloopexecuteDispatcher (self=<optimized out>, status=0x7f9077ffd828, transaction=0x7f90967de718, inMetadata=0x0, inBuffer=0x0, outMetadata=0x0, outBuffer=0x0) at /firebird/src/include/firebird/IdlFbInterfaces.h:10756
+#22 0x00007f909b0529b3 in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#23 0x00007f909b07c13a in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#24 0x00000000004544a2 in ?? ()
+#25 0x0000000000000000 in ?? ()
+
+Thread 8 (LWP 21837 "firebird"):
+#0  0x00007f909ac89e9b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac8ffd9 in pthread_mutex_lock () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f9099228715 in Firebird::Mutex::enter (aReason=<synthetic pointer>, this=0x7f90990e4568) at /firebird/src/include/../common/classes/locks.h:209
+#3  Firebird::RaiiLockGuard<Firebird::Mutex>::RaiiLockGuard (aReason=<synthetic pointer>, aLock=..., this=0x7f90767f99b8) at /firebird/src/include/../common/classes/locks.h:331
+#4  Jrd::Database::GlobalObjectHolder::getReplManager (this=0x7f90990e44f0, create=create@entry=true) at /firebird/src/jrd/Database.cpp:721
+#5  0x00007f909967bc4a in Jrd::Database::replManager (create=true, this=<optimized out>) at /firebird/src/include/../jrd/../jrd/Database.h:699
+#6  (anonymous namespace)::getReplicator (tdbb=tdbb@entry=0x7f90767fa538) at /firebird/src/jrd/replication/Publisher.cpp:131
+#7  0x00007f909967c7a3 in (anonymous namespace)::getReplicator (tdbb=tdbb@entry=0x7f90767fa538, status=..., transaction=transaction@entry=0x7f90846cfdc0) at /firebird/src/jrd/replication/Publisher.cpp:190
+#8  0x00007f909967d25a in (anonymous namespace)::getReplicator (transaction=0x7f90846cfdc0, status=..., tdbb=0x7f90767fa538) at /firebird/src/jrd/replication/Publisher.cpp:184
+#9  REPL_store (tdbb=tdbb@entry=0x7f90767fa538, rpb=rpb@entry=0x7f90840f9270, transaction=transaction@entry=0x7f90846cfdc0) at /firebird/src/jrd/replication/Publisher.cpp:516
+#10 0x00007f9099577be3 in Jrd::StoreNode::store (this=this@entry=0x7f90840ec310, tdbb=0x7f90767fa538, request=0x7f9084320b80, whichTrig=whichTrig@entry=Jrd::StmtNode::ALL_TRIGS) at /firebird/src/dsql/StmtNodes.cpp:8220
+#11 0x00007f9099577c2a in Jrd::StoreNode::execute (this=0x7f90840ec310, tdbb=<optimized out>, request=<optimized out>, exeState=0x7f90767f9fe0) at /firebird/src/dsql/StmtNodes.cpp:8143
+#12 0x00007f90993708ff in EXE_looper (tdbb=tdbb@entry=0x7f90767fa538, request=request@entry=0x7f9084320b80, node=0x7f90840ec310, node@entry=0x7f90840ec2c0) at /firebird/src/jrd/exe.cpp:1473
+#13 0x00007f9099371baf in looper_seh (node=0x7f90840ec2c0, request=0x7f9084320b80, tdbb=0x7f90767fa538) at /firebird/src/jrd/exe.cpp:1605
+#14 execute_looper (tdbb=0x7f90767fa538, request=0x7f9084320b80, transaction=0x7f90846cfdc0, node=0x7f90840ec2c0, next_state=next_state@entry=Jrd::Request::req_evaluate) at /firebird/src/jrd/exe.cpp:1057
+#15 0x00007f9099372d07 in EXE_start (tdbb=<optimized out>, request=<optimized out>, transaction=<optimized out>) at /firebird/src/jrd/exe.cpp:910
+#16 0x00007f90993af119 in JRD_start (tdbb=tdbb@entry=0x7f90767fa538, request=0x7f9084320b80, transaction=0x7f90846cfdc0) at /firebird/src/jrd/jrd.cpp:9463
+#17 0x00007f90994fafb8 in Jrd::DsqlDmlRequest::doExecute (this=this@entry=0x7f9084323c30, tdbb=tdbb@entry=0x7f90767fa538, traHandle=traHandle@entry=0x7f90767fa448, outMetadata=outMetadata@entry=0x0, outMsg=outMsg@entry=0x0, singleton=<optimized out>) at /firebird/src/dsql/DsqlRequests.cpp:582
+#18 0x00007f90994ff305 in Jrd::DsqlDmlRequest::execute (this=0x7f9084323c30, tdbb=0x7f90767fa538, traHandle=0x7f90767fa448, inMetadata=<optimized out>, inMsg=<optimized out>, outMetadata=0x0, outMsg=0x0, singleton=false) at /firebird/src/dsql/DsqlRequests.cpp:741
+#19 0x00007f90995b0b08 in DSQL_execute (tdbb=tdbb@entry=0x7f90767fa538, tra_handle=tra_handle@entry=0x7f90767fa448, dsqlRequest=0x7f9084323c30, in_meta=in_meta@entry=0x0, in_msg=in_msg@entry=0x0, out_meta=out_meta@entry=0x0, out_msg=0x0) at /firebird/src/dsql/dsql.cpp:183
+#20 0x00007f90993c022f in Jrd::JStatement::execute (this=this@entry=0x7f90967dde70, user_status=user_status@entry=0x7f90767fa6e0, apiTra=apiTra@entry=0x7f90967dcfc8, inMetadata=inMetadata@entry=0x0, inBuffer=inBuffer@entry=0x0, outMetadata=outMetadata@entry=0x0, outBuffer=0x0) at /firebird/src/jrd/../jrd/jrd.h:811
+#21 0x00007f90993dadca in Firebird::IStatementBaseImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::IReferenceCountedImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IVersionedImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IStatement> > > > >::cloopexecuteDispatcher (self=<optimized out>, status=0x7f90767fa828, transaction=0x7f90967dcfc8, inMetadata=0x0, inBuffer=0x0, outMetadata=0x0, outBuffer=0x0) at /firebird/src/include/firebird/IdlFbInterfaces.h:10756
+#22 0x00007f909b0529b3 in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#23 0x00007f909b07c13a in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#24 0x00000000004544a2 in ?? ()
+#25 0x0000000000000000 in ?? ()
+
+Thread 7 (LWP 21892 "firebird"):
+#0  0x00007f909ac89e9b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac8ffd9 in pthread_mutex_lock () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f9099228715 in Firebird::Mutex::enter (aReason=<synthetic pointer>, this=0x7f90990e4568) at /firebird/src/include/../common/classes/locks.h:209
+#3  Firebird::RaiiLockGuard<Firebird::Mutex>::RaiiLockGuard (aReason=<synthetic pointer>, aLock=..., this=0x7f90868b19b8) at /firebird/src/include/../common/classes/locks.h:331
+#4  Jrd::Database::GlobalObjectHolder::getReplManager (this=0x7f90990e44f0, create=create@entry=true) at /firebird/src/jrd/Database.cpp:721
+#5  0x00007f909967bc4a in Jrd::Database::replManager (create=true, this=<optimized out>) at /firebird/src/include/../jrd/../jrd/Database.h:699
+#6  (anonymous namespace)::getReplicator (tdbb=tdbb@entry=0x7f90868b2538) at /firebird/src/jrd/replication/Publisher.cpp:131
+#7  0x00007f909967c7a3 in (anonymous namespace)::getReplicator (tdbb=tdbb@entry=0x7f90868b2538, status=..., transaction=transaction@entry=0x7f90857b8e40) at /firebird/src/jrd/replication/Publisher.cpp:190
+#8  0x00007f909967d25a in (anonymous namespace)::getReplicator (transaction=0x7f90857b8e40, status=..., tdbb=0x7f90868b2538) at /firebird/src/jrd/replication/Publisher.cpp:184
+#9  REPL_store (tdbb=tdbb@entry=0x7f90868b2538, rpb=rpb@entry=0x7f908407fb70, transaction=transaction@entry=0x7f90857b8e40) at /firebird/src/jrd/replication/Publisher.cpp:516
+#10 0x00007f9099577be3 in Jrd::StoreNode::store (this=this@entry=0x7f90840a1b90, tdbb=0x7f90868b2538, request=0x7f9084206480, whichTrig=whichTrig@entry=Jrd::StmtNode::ALL_TRIGS) at /firebird/src/dsql/StmtNodes.cpp:8220
+#11 0x00007f9099577c2a in Jrd::StoreNode::execute (this=0x7f90840a1b90, tdbb=<optimized out>, request=<optimized out>, exeState=0x7f90868b1fe0) at /firebird/src/dsql/StmtNodes.cpp:8143
+#12 0x00007f90993708ff in EXE_looper (tdbb=tdbb@entry=0x7f90868b2538, request=request@entry=0x7f9084206480, node=0x7f90840a1b90, node@entry=0x7f90840a1b40) at /firebird/src/jrd/exe.cpp:1473
+#13 0x00007f9099371baf in looper_seh (node=0x7f90840a1b40, request=0x7f9084206480, tdbb=0x7f90868b2538) at /firebird/src/jrd/exe.cpp:1605
+#14 execute_looper (tdbb=0x7f90868b2538, request=0x7f9084206480, transaction=0x7f90857b8e40, node=0x7f90840a1b40, next_state=next_state@entry=Jrd::Request::req_evaluate) at /firebird/src/jrd/exe.cpp:1057
+#15 0x00007f9099372d07 in EXE_start (tdbb=<optimized out>, request=<optimized out>, transaction=<optimized out>) at /firebird/src/jrd/exe.cpp:910
+#16 0x00007f90993af119 in JRD_start (tdbb=tdbb@entry=0x7f90868b2538, request=0x7f9084206480, transaction=0x7f90857b8e40) at /firebird/src/jrd/jrd.cpp:9463
+#17 0x00007f90994fafb8 in Jrd::DsqlDmlRequest::doExecute (this=this@entry=0x7f90841dc330, tdbb=tdbb@entry=0x7f90868b2538, traHandle=traHandle@entry=0x7f90868b2448, outMetadata=outMetadata@entry=0x0, outMsg=outMsg@entry=0x0, singleton=<optimized out>) at /firebird/src/dsql/DsqlRequests.cpp:582
+#18 0x00007f90994ff305 in Jrd::DsqlDmlRequest::execute (this=0x7f90841dc330, tdbb=0x7f90868b2538, traHandle=0x7f90868b2448, inMetadata=<optimized out>, inMsg=<optimized out>, outMetadata=0x0, outMsg=0x0, singleton=false) at /firebird/src/dsql/DsqlRequests.cpp:741
+#19 0x00007f90995b0b08 in DSQL_execute (tdbb=tdbb@entry=0x7f90868b2538, tra_handle=tra_handle@entry=0x7f90868b2448, dsqlRequest=0x7f90841dc330, in_meta=in_meta@entry=0x0, in_msg=in_msg@entry=0x0, out_meta=out_meta@entry=0x0, out_msg=0x0) at /firebird/src/dsql/dsql.cpp:183
+#20 0x00007f90993c022f in Jrd::JStatement::execute (this=this@entry=0x7f90967dbd90, user_status=user_status@entry=0x7f90868b26e0, apiTra=apiTra@entry=0x7f90967dd928, inMetadata=inMetadata@entry=0x0, inBuffer=inBuffer@entry=0x0, outMetadata=outMetadata@entry=0x0, outBuffer=0x0) at /firebird/src/jrd/../jrd/jrd.h:811
+#21 0x00007f90993dadca in Firebird::IStatementBaseImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::IReferenceCountedImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IVersionedImpl<Jrd::JStatement, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IStatement> > > > >::cloopexecuteDispatcher (self=<optimized out>, status=0x7f90868b2828, transaction=0x7f90967dd928, inMetadata=0x0, inBuffer=0x0, outMetadata=0x0, outBuffer=0x0) at /firebird/src/include/firebird/IdlFbInterfaces.h:10756
+#22 0x00007f909b0529b3 in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#23 0x00007f909b07c13a in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#24 0x00000000004544a2 in ?? ()
+#25 0x0000000000000000 in ?? ()
+
+Thread 6 (LWP 21908 "firebird"):
+#0  0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac89668 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f909ac89c8c in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f909ac9472b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#4  0x00007f909979c8ab in Firebird::SignalSafeSemaphore::tryEnter (this=this@entry=0x7f90845ff078, seconds=seconds@entry=10, milliseconds=10000, milliseconds@entry=0) at /firebird/src/common/classes/semaphore.cpp:202
+#5  0x00007f9099336832 in Jrd::BufferControl::cache_writer (bcb=0x7f90845fedf0) at /firebird/src/jrd/cch.cpp:3120
+#6  0x00007f9099337551 in ThreadFinishSync<Jrd::BufferControl*, (void (*)(Jrd::BufferControl*))0>::internalRun (this=this@entry=0x7f90845ff0b8) at /firebird/src/include/../common/ThreadStart.h:274
+#7  ThreadFinishSync<Jrd::BufferControl*, (void (*)(Jrd::BufferControl*))0>::internalRun (arg=arg@entry=0x7f90845ff0b8) at /firebird/src/include/../common/ThreadStart.h:266
+#8  0x00007f9099747cb4 in (anonymous namespace)::ThreadArgs::run (this=<synthetic pointer>) at /firebird/src/common/ThreadStart.cpp:78
+#9  (anonymous namespace)::threadStart (arg=0x7f90967dc600) at /firebird/src/common/ThreadStart.cpp:94
+#10 0x00007f909ac8cb7b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#11 0x00007f909ad0a630 in clone () from /lib/x86_64-linux-gnu/libc.so.6
+
+Thread 5 (LWP 21911 "firebird"):
+#0  0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac89668 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f909ac89c8c in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f909ac9472b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#4  0x00007f909979c8ab in Firebird::SignalSafeSemaphore::tryEnter (this=this@entry=0x7f9085796368, seconds=seconds@entry=10, milliseconds=10000, milliseconds@entry=0) at /firebird/src/common/classes/semaphore.cpp:202
+#5  0x00007f909946fd69 in Jrd::Database::garbage_collector (dbb=0x7f9085795c40) at /firebird/src/jrd/vio.cpp:5507
+#6  0x00007f9099472e81 in ThreadFinishSync<Jrd::Database*, (void (*)(Jrd::Database*))0>::internalRun (this=this@entry=0x7f90857963a8) at /firebird/src/include/../common/ThreadStart.h:274
+#7  ThreadFinishSync<Jrd::Database*, (void (*)(Jrd::Database*))0>::internalRun (arg=arg@entry=0x7f90857963a8) at /firebird/src/include/../common/ThreadStart.h:266
+#8  0x00007f9099747cb4 in (anonymous namespace)::ThreadArgs::run (this=<synthetic pointer>) at /firebird/src/common/ThreadStart.cpp:78
+#9  (anonymous namespace)::threadStart (arg=0x7f90967dc600) at /firebird/src/common/ThreadStart.cpp:94
+#10 0x00007f909ac8cb7b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#11 0x00007f909ad0a630 in clone () from /lib/x86_64-linux-gnu/libc.so.6
+
+Thread 4 (LWP 21921 "firebird"):
+#0  0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac89668 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f909ac89c8c in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f909ac8c158 in pthread_cond_wait () from /lib/x86_64-linux-gnu/libc.so.6
+#4  0x00007f9099794aeb in Firebird::Synchronize::sleep (this=0x7f90990e2260) at /firebird/src/common/classes/Synchronize.cpp:103
+#5  0x00007f90997946a5 in Firebird::SyncObject::wait (this=0x7f9086efced0, type=Firebird::SYNC_SHARED, thread=0x7f90990e2260, sync=<optimized out>, timeOut=<optimized out>) at /firebird/src/common/classes/SyncObject.cpp:299
+#6  0x00007f9099794a05 in Firebird::SyncObject::lock (this=<optimized out>, sync=<optimized out>, type=<optimized out>, from=<optimized out>, timeOut=<optimized out>) at /firebird/src/common/classes/SyncObject.cpp:148
+#7  0x00007f909932c254 in Firebird::SyncObject::lock (from=0x7f909985ca6d "addRef", type=Firebird::SYNC_SHARED, sync=0x0, this=0x7f9086efced0) at /firebird/src/include/../common/classes/SyncObject.h:72
+#8  Jrd::BufferDesc::addRef (this=this@entry=0x7f9086efcec0, tdbb=tdbb@entry=0x7f90777fb538, syncType=syncType@entry=Firebird::SYNC_SHARED, wait=wait@entry=1) at /firebird/src/jrd/cch.cpp:5187
+#9  0x00007f9099332bd3 in get_buffer (tdbb=tdbb@entry=0x7f90777fb538, page=..., syncType=syncType@entry=Firebird::SYNC_SHARED, wait=wait@entry=1) at /firebird/src/jrd/cch.cpp:3853
+#10 0x00007f90993337fd in CCH_fetch_lock (tdbb=0x7f90777fb538, window=0x7f90777fafb0, lock_type=3, wait=1, page_type=<optimized out>) at /firebird/src/jrd/cch.cpp:872
+#11 0x00007f9099333902 in CCH_fetch (tdbb=tdbb@entry=0x7f90777fb538, window=window@entry=0x7f90777fafb0, lock_type=lock_type@entry=3, page_type=page_type@entry=1 '\001', wait=wait@entry=1, read_shadow=read_shadow@entry=true) at /firebird/src/jrd/cch.cpp:801
+#12 0x00007f9099405140 in CCH_FETCH (page_type=1 '\001', lock_type=3, window=0x7f90777fafb0, tdbb=0x7f90777fb538) at /firebird/src/jrd/../jrd/cch_proto.h:84
+#13 PAG_header (tdbb=tdbb@entry=0x7f90777fb538, info=info@entry=true) at /firebird/src/jrd/pag.cpp:1103
+#14 0x00007f90993c5aef in Jrd::JProvider::internalAttach (this=0x7f90967ddb10, user_status=0x7f90777fc1b0, filename=0x7f90777fc32c "/var/lib/firebird/data/mydb.fdb", dpb_length=<optimized out>, dpb=<optimized out>, existingId=existingId@entry=0x0) at /firebird/src/jrd/../jrd/jrd.h:811
+#15 0x00007f90993c6b58 in Jrd::JProvider::attachDatabase (this=<optimized out>, user_status=<optimized out>, filename=<optimized out>, dpb_length=<optimized out>, dpb=<optimized out>) at /firebird/src/jrd/jrd.cpp:1623
+#16 0x00007f909922509d in Firebird::IProviderBaseImpl<Jrd::JProvider, Firebird::CheckStatusWrapper, Firebird::IPluginBaseImpl<Jrd::JProvider, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IReferenceCountedImpl<Jrd::JProvider, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IVersionedImpl<Jrd::JProvider, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IProvider> > > > > > >::cloopattachDatabaseDispatcher (self=<optimized out>, status=0x7f90777fc758, fileName=0x7f90777fc32c "/var/lib/firebird/data/mydb.fdb", dpbLength=210, dpb=0x7f909abf2d10 "\001OD") at /firebird/src/include/firebird/IdlFbInterfaces.h:12484
+#17 0x00007f909b064e82 in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#18 0x00007f909b00cf3d in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#19 0x000000000044ede7 in ?? ()
+#20 0x0000000000000000 in ?? ()
+
+Thread 3 (LWP 21956 "firebird"):
+#0  0x00007f909ac89e9b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac8ffd9 in pthread_mutex_lock () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f90993b85ad in Firebird::Mutex::enter (aReason=<synthetic pointer>, this=<optimized out>) at /firebird/src/include/../common/classes/locks.h:209
+#3  Jrd::Database::ExistenceRefMutex::enter (this=<optimized out>) at /firebird/src/jrd/../jrd/../jrd/Database.h:366
+#4  (anonymous namespace)::RefMutexUnlock::enter (this=0x7f9075fd80d0) at /firebird/src/jrd/jrd.cpp:525
+#5  initAttachment (tdbb=<optimized out>, tdbb@entry=0x7f9075fd8338, expanded_name=..., alias_name=..., config=..., attach_flag=attach_flag@entry=true, options=..., initGuard=..., pConf=<optimized out>, provider=<optimized out>) at /firebird/src/jrd/jrd.cpp:7432
+#6  0x00007f90993c4626 in Jrd::JProvider::internalAttach (this=0x7f90967deb30, user_status=0x7f9075fd91b0, filename=0x7f9075fd932c "/var/lib/firebird/data/mydb.fdb", dpb_length=<optimized out>, dpb=<optimized out>, existingId=existingId@entry=0x0) at /firebird/src/jrd/../jrd/jrd.h:811
+#7  0x00007f90993c6b58 in Jrd::JProvider::attachDatabase (this=<optimized out>, user_status=<optimized out>, filename=<optimized out>, dpb_length=<optimized out>, dpb=<optimized out>) at /firebird/src/jrd/jrd.cpp:1623
+#8  0x00007f909922509d in Firebird::IProviderBaseImpl<Jrd::JProvider, Firebird::CheckStatusWrapper, Firebird::IPluginBaseImpl<Jrd::JProvider, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IReferenceCountedImpl<Jrd::JProvider, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IVersionedImpl<Jrd::JProvider, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IProvider> > > > > > >::cloopattachDatabaseDispatcher (self=<optimized out>, status=0x7f9075fd9758, fileName=0x7f9075fd932c "/var/lib/firebird/data/mydb.fdb", dpbLength=210, dpb=0x7f909abef040 "\001OD") at /firebird/src/include/firebird/IdlFbInterfaces.h:12484
+#9  0x00007f909b064e82 in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#10 0x00007f909b00cf3d in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#11 0x000000000044ede7 in ?? ()
+#12 0x0000000000000000 in ?? ()
+
+Thread 2 (LWP 21995 "firebird"):
+#0  0x00007f909ac89e9b in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac8ffd9 in pthread_mutex_lock () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f90993aa5b9 in Firebird::Mutex::enter (this=<optimized out>, aReason=<optimized out>) at /firebird/src/include/../common/classes/locks.h:209
+#3  0x00007f90993c458e in Firebird::EnsureUnlock<Firebird::Mutex, Firebird::NotRefCounted>::enter (this=<synthetic pointer>) at /firebird/src/include/../common/classes/RefMutex.h:127
+#4  Jrd::JProvider::internalAttach (this=0x7f909910f330, user_status=0x7f90757d7da0, filename=0x7f90757d7f1c "/opt/firebird/security5.fdb", dpb_length=<optimized out>, dpb=<optimized out>, existingId=existingId@entry=0x0) at /firebird/src/jrd/jrd.cpp:1742
+#5  0x00007f90993c6b58 in Jrd::JProvider::attachDatabase (this=<optimized out>, user_status=<optimized out>, filename=<optimized out>, dpb_length=<optimized out>, dpb=<optimized out>) at /firebird/src/jrd/jrd.cpp:1623
+#6  0x00007f909922509d in Firebird::IProviderBaseImpl<Jrd::JProvider, Firebird::CheckStatusWrapper, Firebird::IPluginBaseImpl<Jrd::JProvider, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IReferenceCountedImpl<Jrd::JProvider, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IVersionedImpl<Jrd::JProvider, Firebird::CheckStatusWrapper, Firebird::Inherit<Firebird::IProvider> > > > > > >::cloopattachDatabaseDispatcher (self=<optimized out>, status=0x7f90757d8348, fileName=0x7f90757d7f1c "/opt/firebird/security5.fdb", dpbLength=45, dpb=0x7f90757d7f98 "\0017\001\001\035\002pwM") at /firebird/src/include/firebird/IdlFbInterfaces.h:12484
+#7  0x00007f909b064e82 in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#8  0x00007f909b00cf3d in ?? () from /opt/firebird/bin/../lib/libfbclient.so.2
+#9  0x0000000000462cd7 in ?? ()
+#10 0x0000000000000000 in ?? ()
+
+Thread 1 (LWP 21487 "firebird"):
+#0  0x00007f909ac949ee in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#1  0x00007f909ac89668 in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#2  0x00007f909ac896ad in ?? () from /lib/x86_64-linux-gnu/libc.so.6
+#3  0x00007f909acfda06 in poll () from /lib/x86_64-linux-gnu/libc.so.6
+#4  0x000000000041b4e9 in ?? ()
+#5  0x00007ffd65b231b0 in ?? ()
+#6  0x00007ffd65b231c8 in ?? ()
+#7  0x0000200065b231f0 in ?? ()
+#8  0x00007f909ab5dd40 in ?? ()
+#9  0x00007ffd65b23296 in ?? ()
+#10 0x0000000000000008 in ?? ()
+#11 0x0000000000000000 in ?? ()
+[Inferior 1 (process 21487) detached]

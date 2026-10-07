@@ -5,12 +5,12 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 ## Replication
 
-- [ ] **Report the publication hang upstream** ([ISSUES.md](ISSUES.md) issue 1) with
-  `hack/repro/publication-under-load.sh`, capture thread stacks of the hung server, and track the
+- [ ] **File the publication deadlock upstream** ([ISSUES.md](ISSUES.md) issue 1): the report,
+  with the diagnosis from symbolized thread stacks, is ready in
+  [docs/upstream](docs/upstream/01-replication-manager-header-deadlock.md); file it and track the
   fix version. Replication stays experimental until then.
-- [ ] **Report the commit/TIP window upstream** ([ISSUES.md](ISSUES.md) issue 2, confirmed):
-  replicas created with Firebird's documented procedure (`nbackup -L`, `-SEQ -F`) lose the
-  transactions committed at the moment of the lock (`hack/repro/replica-seed-race.sh`).
+- [ ] **File the commit/TIP window upstream** ([ISSUES.md](ISSUES.md) issue 2, confirmed): the
+  report is ready in [docs/upstream](docs/upstream/02-commit-journaled-before-tip.md).
 - [ ] **Failover safety**: the Lease is moved by the operator, not held and renewed by the
   instances (CloudNativePG 1.30's promotion mutex). The isolation check (v0.52.0) fences a primary
   cut off from both the API server and every replica. A primary that still looks ready but that
