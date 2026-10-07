@@ -40,6 +40,9 @@
 #   "<token> REMOVE <name>\n"   -> "OK\n": deletes the backup file <name> from the data directory
 #                                 (physical backups to S3, retention of server-side backups)
 #   "<token> FILES\n"           -> the backup file names in the data directory, one per line, then ".\n"
+#   "<token> EXISTS <name>\n"   -> "OK yes" or "OK no": whether a file <name> (a plain name, no
+#                                 directories) exists in the data directory; nothing else is read
+#                                 (the operator refuses restores into an existing database)
 #   "<token> HEADER\n"          -> "OK <sequence>": the replication sequence in the database header
 #                                 page on disk (planned switchover, once the old primary is in full
 #                                 shutdown: Firebird 6 refuses header statistics through the
@@ -111,8 +114,9 @@ use warnings;
 use IO::Socket::INET;
 #@include segment-auth.pl
 
-# FILES_ONLY: only the backup file commands (FILE, STORE, REMOVE, FILES), for instances without
-# replication (physical backups to and restores from S3, retention of server-side backups)
+# FILES_ONLY: only the backup file commands (FILE, STORE, REMOVE, FILES) and EXISTS, for instances
+# without replication (physical backups to and restores from S3, retention of server-side backups,
+# restore targets)
 my $files_only = ($ENV{FILES_ONLY} // '') eq 'true';
 sub required { my ($name) = @_; my $v = $ENV{$name} // ''; die "$name is required\n" if $v eq '' && !$files_only; return $v; }
 my $dir       = required('ARCHIVE_DIR');
@@ -758,7 +762,7 @@ while (1) {
     print $client $denied eq '' ? "ERR unauthorized\n" : "ERR unauthorized ($denied)\n";
   } elsif ($cmd eq 'PING') {
     print $client "OK\n";
-  } elsif ($files_only && $cmd !~ /^(?:FILE|STORE|REMOVE|FILES)$/) {
+  } elsif ($files_only && $cmd !~ /^(?:FILE|STORE|REMOVE|FILES|EXISTS)$/) {
     print $client "ERR not available without replication\n";
   } elsif ($cmd eq 'LIST') {
     print $client "$_\n" for segments();
@@ -948,6 +952,8 @@ while (1) {
       closedir($dh);
     }
     print $client ".\n";
+  } elsif ($cmd eq 'EXISTS' && defined $arg && $arg =~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/) {
+    print $client (-e "$data_dir/$arg" ? "OK yes\n" : "OK no\n");
   } elsif ($cmd eq 'SEED') {
     is_primary() ? seed_from_primary($client) : seed_from_replica($client);
   } else {

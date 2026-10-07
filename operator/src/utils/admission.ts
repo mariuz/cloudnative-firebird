@@ -1,4 +1,4 @@
-import { CoreV1Api, CustomObjectsApi, KubeConfig, V1Secret } from '@kubernetes/client-node';
+import { CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Secret } from '@kubernetes/client-node';
 import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdRestore, FirebirdRole, FirebirdUser, RESOURCE_PLURAL } from '../types';
 import { validateBackupSpec, validateClusterSpec, validateRestoreSpec, validateScheduledBackupSpec } from './validation';
 import { validateUserSpec } from './users';
@@ -7,6 +7,7 @@ import { desiredFencedInstances } from './fencing';
 import { pointInTimeSourceError, restoreTargetDatabase } from './backup';
 import { databaseName } from './resources';
 import { AdmissionRequest, AdmissionVerdict, AdmissionValidator } from './webhook';
+import { existingTargetMessage, restoreTargetExists, superuserPasswordFrom } from './restore-target';
 
 /**
  * What the admission webhook checks (webhook.ts):
@@ -15,7 +16,9 @@ import { AdmissionRequest, AdmissionVerdict, AdmissionValidator } from './webhoo
  *   rules; a few checks exist only here, e.g. WireCrypt settings with tls.enabled);
  * - FirebirdRestore: what the operator refuses for good (status Failed) and that depends on other
  *   objects: a target that is the cluster database, a FirebirdBackup that does not exist or
- *   failed, a restoreType that does not match it, and a point-in-time source it cannot use;
+ *   failed, a restoreType that does not match it, and a point-in-time source it cannot use; and,
+ *   for a new restore, a target file that already exists on the primary (asked from its segment
+ *   server; not refused when it does not answer in time);
  * - as warnings only (the objects may be created in any order, e.g. by one `kubectl apply` of a
  *   directory): a FirebirdCluster that does not exist (yet) or is hibernated, Secrets that do not
  *   exist (superuser, S3 credentials, a user's password and its key), a clone source that does
@@ -30,7 +33,15 @@ export interface AdmissionLookups {
   cluster(namespace: string, name: string): Promise<FirebirdCluster | undefined>;
   backup(namespace: string, name: string): Promise<FirebirdBackup | undefined>;
   secret(namespace: string, name: string): Promise<V1Secret | undefined>;
+  /**
+   * The primary (Lease holder) and whether the file `target` exists in its data directory, or
+   * undefined when that cannot be told
+   */
+  restoreTarget?(cluster: FirebirdCluster, target: string): Promise<{ pod: string; exists: boolean } | undefined>;
 }
+
+/** The webhook answers within its 5s timeout: the segment server gets less than that */
+const RESTORE_TARGET_TIMEOUT_MS = 1500;
 
 const notFound = (err: unknown) => {
   const e = err as { code?: number; statusCode?: number; response?: { statusCode?: number } };
@@ -49,7 +60,17 @@ export function apiLookups(kubeConfig: KubeConfig): AdmissionLookups {
       throw err;
     }
   };
+  const coordination = kubeConfig.makeApiClient(CoordinationV1Api);
   return {
+    restoreTarget: async (cluster, target) => {
+      const { name, namespace = 'default' } = cluster.metadata;
+      const lease = await get<{ spec?: { holderIdentity?: string } }>(() => coordination.readNamespacedLease({ name: `${name}-lease`, namespace }));
+      const pod = lease?.spec?.holderIdentity || `${name}-0`;
+      const secretName = cluster.spec.superuserSecret?.name;
+      const secret = secretName ? await get<V1Secret>(() => core.readNamespacedSecret({ namespace, name: secretName })) : undefined;
+      const exists = await restoreTargetExists(cluster, pod, superuserPasswordFrom(cluster, secret), target, undefined, RESTORE_TARGET_TIMEOUT_MS);
+      return exists === undefined ? undefined : { pod, exists };
+    },
     cluster: (namespace, name) =>
       get(() => custom.getNamespacedCustomObject({ group: API_GROUP, version: API_VERSION, namespace, plural: RESOURCE_PLURAL, name })),
     backup: (namespace, name) =>
@@ -152,7 +173,7 @@ export function createAdmissionValidator(lookups: AdmissionLookups): AdmissionVa
           const restore = object as FirebirdRestore;
           validateRestoreSpec(restore);
           await secretWarnings(secretRefNames(restore.spec));
-          const denied = await restoreRefusal(restore, namespace, lookups, clusterOf, warnings);
+          const denied = await restoreRefusal(restore, namespace, lookups, clusterOf, warnings, request.operation === 'CREATE');
           if (denied) return { denied, warnings };
           break;
         }
@@ -191,6 +212,7 @@ async function restoreRefusal(
   lookups: AdmissionLookups,
   clusterOf: (name: string) => Promise<FirebirdCluster | undefined>,
   warnings: string[],
+  created: boolean,
 ): Promise<string | undefined> {
   const spec = restore.spec;
   const cluster = await clusterOf(spec.clusterName);
@@ -217,5 +239,13 @@ async function restoreRefusal(
   } else {
     source = { type: spec.restoreType ?? 'logical', path: spec.backupPath ?? '', incrementalPaths: spec.incrementalBackupPaths, s3: spec.s3 };
   }
-  return cluster ? pointInTimeSourceError(restore, cluster, source) : undefined;
+  if (!cluster) return undefined;
+  const sourceError = pointInTimeSourceError(restore, cluster, source);
+  if (sourceError) return sourceError;
+  // only a new restore: once it ran, its target exists
+  if (created && !cluster.spec.hibernated && lookups.restoreTarget) {
+    const found = await lookups.restoreTarget(cluster, target);
+    if (found?.exists) return existingTargetMessage(target, found.pod);
+  }
+  return undefined;
 }

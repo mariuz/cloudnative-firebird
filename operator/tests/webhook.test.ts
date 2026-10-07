@@ -166,6 +166,30 @@ describe('admission checks', () => {
     );
   });
 
+  it('refuses a new restore whose target already exists on the primary', async () => {
+    const asked: string[] = [];
+    const files = ['old.fdb'];
+    const validate = createAdmissionValidator({
+      ...lookups({ clusters: [cluster], backups: [backup('ok', 'Completed')] }),
+      restoreTarget: async (_cluster, target) => {
+        asked.push(target);
+        return target === 'unknown.fdb' ? undefined : { pod: 'db-1', exists: files.includes(target) };
+      },
+    });
+    const restore = (spec: object) => ({ metadata: { name: 'r', namespace: 'default' }, spec: { clusterName: 'db', backupName: 'ok', ...spec } });
+    expect((await validate(req('FirebirdRestore', restore({ targetDatabase: 'old.fdb' })))).denied).toBe(
+      'targetDatabase old.fdb already exists on db-1; restores never overwrite a database (choose another targetDatabase, or drop that database first)',
+    );
+    expect(await validate(req('FirebirdRestore', restore({ targetDatabase: 'new.fdb' })))).toEqual({});
+    // no answer from the segment server: admitted, the operator checks again before the Job
+    expect(await validate(req('FirebirdRestore', restore({ targetDatabase: 'unknown.fdb' })))).toEqual({});
+    // an update (its own restore created the target) and other refusals do not ask
+    const existing = restore({ targetDatabase: 'old.fdb' });
+    expect(await validate(req('FirebirdRestore', { ...existing, spec: { ...existing.spec, s3: undefined } }, 'UPDATE', { ...existing, spec: { ...existing.spec, x: 1 } }))).toEqual({});
+    expect((await validate(req('FirebirdRestore', restore({ targetDatabase: 'mydb.fdb' })))).denied).toMatch(/is the cluster database/);
+    expect(asked).toEqual(['old.fdb', 'new.fdb', 'unknown.fdb']);
+  });
+
   it('warns about what a restore waits for', async () => {
     const validate = createAdmissionValidator(lookups({ backups: [backup('running', 'Running')] }));
     const verdict = await validate(req('FirebirdRestore', { metadata: { name: 'r' }, spec: { clusterName: 'db', backupName: 'running' } }));

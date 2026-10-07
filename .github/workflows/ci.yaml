@@ -409,6 +409,49 @@ jobs:
           kubectl get firebirdrestore over-live -o jsonpath='{.status.error}' | grep -q 'cluster database'
           ! kubectl get job restore-over-live 2>/dev/null
 
+          # a target that already exists (the first restore's) is refused the same way: the webhook
+          # and the operator ask the primary's segment server (EXISTS) before the Job would fail
+          cat > /tmp/over-restored.yaml <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: over-restored
+            labels:
+              webhook-check: skip
+          spec:
+            clusterName: repl
+            backupName: repl-logical
+            targetDatabase: restore-from-logical.fdb
+          EOF
+          out=$(kubectl apply -f /tmp/over-restored.yaml 2>&1 || true); echo "$out"
+          echo "$out" | grep -q 'denied the request: targetDatabase restore-from-logical.fdb already exists on repl-0'
+          if kubectl get firebirdrestore over-restored 2>/dev/null; then echo "over-restored was admitted"; exit 1; fi
+          kubectl patch validatingwebhookconfiguration cloudnative-firebird-validating-webhook --type=json \
+            -p '[{"op":"add","path":"/webhooks/0/objectSelector","value":{"matchExpressions":[{"key":"webhook-check","operator":"NotIn","values":["skip"]}]}}]'
+          for i in $(seq 1 20); do kubectl apply -f /tmp/over-restored.yaml 2>/dev/null && break; sleep 3; done
+          kubectl patch validatingwebhookconfiguration cloudnative-firebird-validating-webhook --type=json \
+            -p '[{"op":"remove","path":"/webhooks/0/objectSelector"}]'
+          wait_phase firebirdrestore over-restored Failed restore-over-restored
+          kubectl get firebirdrestore over-restored -o jsonpath='{.status.error}' | grep -q 'already exists on repl-0'
+          ! kubectl get job restore-over-restored 2>/dev/null
+          [ "$(count restore-from-logical.fdb)" = "30" ]
+          # without replication the backup file server answers (test-cluster)
+          kubectl exec test-cluster-0 -c firebird -- touch $DB_DIR/stale.fdb
+          out=$(kubectl apply -f - 2>&1 <<'EOF' || true
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: over-stale
+          spec:
+            clusterName: test-cluster
+            backupPath: whatever.fbk
+            targetDatabase: stale.fdb
+          EOF
+          ); echo "$out"
+          echo "$out" | grep -q 'denied the request: targetDatabase stale.fdb already exists on test-cluster-0'
+          kubectl exec test-cluster-0 -c firebird -- rm $DB_DIR/stale.fdb
+          echo "restores into existing targets are refused"
+
       - name: Verify service account and paused reconciliation
         run: |
           # instance pods run with spec.serviceAccountName (workload identity for S3)

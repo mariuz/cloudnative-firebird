@@ -111,6 +111,21 @@ describe('segment server: synchronous replication commands', () => {
     expect((await ask('NBACKUP 0 ../x.nbk'))[0]).toBe('ERR bad request');
   });
 
+  it('tells whether a file exists in the data directory (EXISTS), without replication too', async () => {
+    if (!hasPerl) return;
+    const data = mkdtempSync(join(tmpdir(), 'fb-data-'));
+    writeFileSync(join(data, 'restored.fdb'), 'x');
+    for (const env of [{}, { FILES_ONLY: 'true' }]) {
+      const { ask } = await start('db-0', 'db-0', join(data, 'mydb.fdb'), env);
+      expect(await ask('EXISTS restored.fdb')).toEqual(['OK yes']);
+      expect(await ask('EXISTS other.fdb')).toEqual(['OK no']);
+      // plain names only: nothing outside the data directory
+      expect(await ask('EXISTS ../restored.fdb')).toEqual(['ERR bad request']);
+      expect(await ask('EXISTS .hidden')).toEqual(['ERR bad request']);
+      expect(await ask('EXISTS')).toEqual(['ERR bad request']);
+    }
+  });
+
   describe('promotes a replica in place (PROMOTE)', () => {
     /** A replica at control file position 9, with fake isql / gfix answering for the local server */
     async function replica(failGfix = false) {

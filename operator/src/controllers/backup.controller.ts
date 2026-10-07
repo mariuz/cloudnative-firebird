@@ -23,6 +23,8 @@ import {
   pointInTimeSourceError,
   restoreTargetDatabase,
 } from '../utils/backup';
+import { existingTargetMessage, restoreTargetExists, superuserPasswordFrom } from '../utils/restore-target';
+import { SegmentClient, segmentRequest } from '../utils/replication-lag';
 import { cronJobNeedsUpdate, databaseName, FIREBIRD_DATA_DIR, instancePodSelector } from '../utils/resources';
 import {
   ValidationError,
@@ -72,7 +74,10 @@ export class FirebirdBackupController {
   private readonly events: EventRecorder;
   private readonly coreApi: CoreV1Api;
 
-  constructor(kubeConfig: KubeConfig) {
+  constructor(
+    kubeConfig: KubeConfig,
+    private readonly segment: SegmentClient = segmentRequest,
+  ) {
     this.batchApi = kubeConfig.makeApiClient(BatchV1Api);
     this.customApi = kubeConfig.makeApiClient(CustomObjectsApi);
     this.coordinationApi = kubeConfig.makeApiClient(CoordinationV1Api);
@@ -123,6 +128,17 @@ export class FirebirdBackupController {
       // no Lease yet
     }
     return `${name}-0`;
+  }
+
+  /** The SYSDBA password, or undefined when the superuser Secret cannot be read */
+  private async superuserPassword(cluster: FirebirdCluster): Promise<string | undefined> {
+    const name = cluster.spec.superuserSecret?.name;
+    if (!name) return superuserPasswordFrom(cluster, undefined);
+    try {
+      return superuserPasswordFrom(cluster, await this.coreApi.readNamespacedSecret({ name, namespace: cluster.metadata.namespace ?? 'default' }));
+    } catch {
+      return undefined;
+    }
   }
 
   /** Reads a Job, or returns undefined when it does not exist */
@@ -335,7 +351,13 @@ export class FirebirdBackupController {
           await this.updateRestoreStatus(restore, { ...base, phase: 'Pending', error: 'cluster is hibernated' });
           return;
         }
-        const desired = buildRestoreJob(restore, cluster, source, await this.primaryPod(cluster));
+        const primary = await this.primaryPod(cluster);
+        // the Job would fail on an existing target: refused here with the reason instead
+        const password = await this.superuserPassword(cluster);
+        if ((await restoreTargetExists(cluster, primary, password, target, this.segment)) === true) {
+          throw new ValidationError(existingTargetMessage(target, primary));
+        }
+        const desired = buildRestoreJob(restore, cluster, source, primary);
         log.info({ jobName }, 'Creating restore Job');
         job = await this.batchApi.createNamespacedJob({ namespace, body: desired });
         await this.event(restore, 'FirebirdRestore', 'Normal', EventReason.RestoreStarted, `restoring into ${base.targetPath} (Job ${jobName})`);
