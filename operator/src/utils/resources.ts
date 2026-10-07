@@ -1,3 +1,4 @@
+import { withSegmentTls } from './segment-tls-pods';
 import { createHash } from 'crypto';
 import {
   V1StatefulSet,
@@ -448,7 +449,8 @@ export function buildStatefulSet(
               : { [BACKUP_FILES_HASH_ANNOTATION]: backupFilesHash() }),
           },
         },
-        spec: {
+        // segment TLS: the proxy sidecar, the certificates, the segment server on localhost
+        spec: withSegmentTls(cluster, {
           ...serviceAccount(cluster),
           securityContext: instancePodSecurityContext(cluster),
           ...(initContainers.length > 0 ? { initContainers: initContainers.map(secured) } : {}),
@@ -457,7 +459,7 @@ export function buildStatefulSet(
           ...(spec.tolerations ? { tolerations: spec.tolerations } : {}),
           containers: containers.map(secured),
           ...(volumes.length > 0 ? { volumes } : {}),
-        },
+        }, true),
       },
       volumeClaimTemplates: [
         {
@@ -749,7 +751,8 @@ export function jobPodSpec<T extends V1PodSpec>(cluster: FirebirdCluster, podSpe
     ...c,
     securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, ...(c.securityContext ?? {}) },
   });
-  return {
+  // segment TLS: Jobs reach the segment servers through the proxy's client side
+  return withSegmentTls(cluster, {
     ...podSpec,
     ...serviceAccount(cluster),
     securityContext: {
@@ -761,7 +764,7 @@ export function jobPodSpec<T extends V1PodSpec>(cluster: FirebirdCluster, podSpe
     },
     containers: podSpec.containers.map(container),
     ...(podSpec.initContainers ? { initContainers: podSpec.initContainers.map(container) } : {}),
-  };
+  }, false);
 }
 
 /**

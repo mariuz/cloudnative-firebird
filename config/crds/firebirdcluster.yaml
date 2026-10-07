@@ -310,6 +310,17 @@ spec:
                           type: string
                         group:
                           type: string
+                segmentTLS:
+                  description: >
+                    Mutual TLS for the segment servers (journal segments, seed copies, backup files)
+                    and their clients, with a CA the operator manages for the cluster
+                    (<cluster>-segment-tls Secret), through a proxy sidecar from the operator image.
+                    Needs native sidecars (Kubernetes 1.29 or later). Switching it restarts the
+                    instances. Default off.
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
                 replication:
                   description: >
                     Journal-based asynchronous replication (Firebird 4.0+). Instance 0 is the

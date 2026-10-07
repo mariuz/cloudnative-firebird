@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.74.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.75.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,12 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Encrypted Segment Shipping** *(v0.75.0, CloudNativePG's TLS between instances)*
+  - Journal segments, seed copies and backup files went over plain TCP between the segment servers (requests were signed since v0.64.0, replies and data were not). The Firebird images have no TLS tooling (no openssl CLI, stunnel or Perl TLS module) and a pure-Perl cipher was too slow (under 1 MB/s).
+  - `segmentTLS.enabled: true` runs a proxy from the operator image (`dist/segment-tls.js`) as a native sidecar in every instance pod (Kubernetes 1.29+): mutual TLS 1.3 on the segment port, forwarded to the segment server on localhost, and a client side the Perl clients reach with `SEGMENT_PROXY` (`CONNECT <host> <port>`, then the request as before). Jobs get the client side; the operator connects over TLS itself.
+  - The operator manages a CA per cluster and one client/server certificate in `<cluster>-segment-tls` (renewed 30 days before expiry, the CA a year before; proxies reload it). Pods never mount the CA's key. During the rolling update that switches the mode, the operator reaches each instance in the mode its pod runs.
+  - Unit tests run the proxy against the Perl segment server and client and check refused foreign CAs and plain connections; the kind CI enables it on the replicated cluster and checks replication, the lag measurement, a refused plain request, a backup Job and the restricted Pod Security Standard.
+  - Design, diagrams and operations: [docs/segment-tls.md](docs/segment-tls.md).
 - [x] **Fencing a Primary Nothing Reaches** *(v0.74.0, CloudNativePG's isolation check, extended)*
   - A primary that still reached the API server but that neither the operator nor any replica reached (one side of a network partition) was never fenced: clients on its side kept writing to it for the 1.5 to 3 minutes until the cut-off failover (v0.63.0) deleted its pod, and those writes were lost at the re-seed. Without a ready replica answering the operator, indefinitely.
   - The segment server now records every authenticated request it answers (`last-contact`): the operator's checks at least every reconcile, the replicas' segment pullers every 5 seconds. The isolation check fences the primary (database in full shutdown, as before) when nothing has reached it for `failover.isolationCheck.contactTimeoutSeconds` (default 60, 45 to 3600), counted from when it became the primary, and the headless Service lists other instances. On by default with the isolation check; `fenceWhenUnreached: false` turns it off. The operator brings it back online if it still holds the Lease when it reaches it again (`REJOIN`).

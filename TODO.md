@@ -23,12 +23,11 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   A restart of the only replica in `required` mode blocks writes by definition; since v0.73.0
   `detachForUpdates` lets rolling updates detach it first (asynchronous commits meanwhile), while
   other restarts (crash, drain) still block writes until it is back.
-- [ ] **Encrypt segment shipping**: client connections are encrypted (WireCrypt, v0.54.0), but the
-  segment server (journal segments, seed copies, backup files) transfers over plain TCP inside the
-  cluster (restricted by the NetworkPolicy when enabled). Since v0.64.0 requests are signed
-  instead of carrying the SYSDBA password, but replies and data are neither encrypted nor
-  signed. The image ships perl-base only (no TLS, no Digest modules); options are carrying the
-  bytes over a Firebird connection, or a sidecar image with TLS.
+- [ ] **Segment TLS by default**: since v0.75.0 `segmentTLS.enabled` carries segment shipping,
+  seed copies and backup files over mutual TLS (a proxy sidecar from the operator image, a CA per
+  cluster). It is opt-in because it needs Kubernetes 1.29+ (native sidecars) and pulls the operator
+  image into every instance pod. Turning it on by default (and then refusing plain segment
+  connections) would need a rollout without the replica lag of a mixed-mode rolling update.
 - [ ] **Stop accepting the plain password** on the segment server once no supported upgrade path
   starts from a version before v0.64.0 (clients of those versions send it; current clients send it
   only to servers that answer the signed probe like those versions).

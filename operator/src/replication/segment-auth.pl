@@ -76,7 +76,16 @@ sub segment_open {
   $connect_timeout //= 10;
   my $key = "$host:$port";
   my $known = $segment_auth_signed{$key};
+  # segment TLS (spec.replication.segmentTLS): through the local proxy, which opens mutual TLS to
+  # the host named on the first line (segment-tls in the operator image)
+  my $proxy = $ENV{SEGMENT_PROXY} // '';
   my $connect = sub {
+    if ($proxy =~ /^(.+):(\d+)$/) {
+      my $sock = IO::Socket::INET->new(PeerHost => $1, PeerPort => $2, Proto => 'tcp', Timeout => $connect_timeout)
+        or die "connect to the segment TLS proxy $proxy: $!\n";
+      print $sock "CONNECT $host $port\n";
+      return $sock;
+    }
     IO::Socket::INET->new(PeerHost => $host, PeerPort => $port, Proto => 'tcp', Timeout => $connect_timeout)
       or die "connect $host:$port: $!\n";
   };

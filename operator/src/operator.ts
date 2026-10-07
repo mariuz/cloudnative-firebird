@@ -1,7 +1,10 @@
 import { apiLease, LeaderElector, OPERATOR_LEASE } from './utils/leader-election';
 import { WebhookServer } from './utils/webhook';
 import { apiLookups, createAdmissionValidator } from './utils/admission';
-import { KubeConfig, Watch } from '@kubernetes/client-node';
+import { CoreV1Api, KubeConfig, Watch } from '@kubernetes/client-node';
+import { discoverOperatorImage } from './utils/operator-image';
+import { setSegmentTlsResolver } from './utils/replication-lag';
+import { createSegmentTlsResolver } from './utils/segment-tls-client';
 import { logger } from './utils/logger';
 import { HealthServer } from './utils/health';
 import { metrics } from './utils/metrics';
@@ -162,6 +165,10 @@ export class Operator {
   async start(): Promise<void> {
     logger.info('Starting cloudnative-firebird operator');
     this.healthServer.start();
+    // segment TLS: the proxy image for instance pods and Jobs, and TLS per instance for the
+    // operator's own segment server requests
+    logger.info({ image: await discoverOperatorImage(this.kubeConfig) }, 'Segment TLS proxy image');
+    setSegmentTlsResolver(createSegmentTlsResolver(this.kubeConfig.makeApiClient(CoreV1Api)));
     // several replicas: only the one holding the Lease reconciles; all serve the webhook
     const namespace = process.env.OPERATOR_NAMESPACE;
     const identity = process.env.POD_NAME;

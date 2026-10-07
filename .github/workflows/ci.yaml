@@ -1036,6 +1036,84 @@ jobs:
             | kubectl apply --dry-run=server -f -
           kubectl delete namespace pss-restricted --wait=false
 
+      - name: Verify segment TLS
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
+          count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          wait_count() {
+            for n in $(seq 1 36); do [ "$(count "$1")" = "$2" ] && return 0; sleep 5; done
+            echo "$1 has $(count "$1") rows, expected $2"; return 1
+          }
+          SEL=firebird.cloudnative-firebird.io/cluster=repl,app.kubernetes.io/component=database
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"segmentTLS":{"enabled":true}}}'
+          # the operator creates the cluster's CA and certificate
+          timeout 60 bash -c 'until kubectl get secret repl-segment-tls >/dev/null 2>&1; do sleep 2; done'
+          [ "$(kubectl get secret repl-segment-tls -o jsonpath={.type})" = kubernetes.io/tls ]
+          [ -n "$(kubectl get secret repl-segment-tls -o jsonpath='{.data.ca\.key}')" ]
+          # every instance restarts with the proxy (the primary last)
+          tls_ready() {
+            kubectl get pods -l "$SEL" \
+              -o jsonpath='{range .items[*]}{.spec.initContainers[0].name} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+              | grep -c '^segment-tls True$'
+          }
+          for n in $(seq 1 180); do [ "$(tls_ready)" = 3 ] && break; sleep 5; done
+          [ "$(tls_ready)" = 3 ] || {
+            kubectl get firebirdcluster repl -o jsonpath='{.status.rollingUpdate}'; echo
+            kubectl get pods -l "$SEL"; exit 1
+          }
+          timeout 180 bash -c 'until [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.phase})" = "Running" ] &&
+            [ -z "$(kubectl get firebirdcluster repl -o jsonpath={.status.rollingUpdate})" ]; do sleep 5; done'
+          primary=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
+          kubectl logs "$primary" -c segment-tls | grep -q 'accepting on 0.0.0.0:3051'
+          # the segment server listens on localhost only, behind the proxy
+          kubectl logs "$primary" -c segment-server | grep -q 'listening on 127.0.0.1:3061'
+
+          # replication flows over TLS
+          before=$(count "$primary")
+          for i in $(seq 401 410); do sql "$primary" "insert into app values ($i, 'over tls'); commit;" >/dev/null; done
+          for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$primary" ] || wait_count "$pod" $((before + 10)); done
+          echo "replicas applied the rows shipped over TLS"
+          # the operator reaches the segment servers over TLS too: the lag is measured again
+          replica=$(for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$primary" ] || echo "$pod"; done | head -1)
+          timeout 120 bash -c "until [ \"\$(kubectl get pod $replica -o jsonpath='{.metadata.annotations.firebird\\.cloudnative-firebird\\.io/replication-lag-seconds}')\" = 0 ]; do sleep 5; done" \
+            || { kubectl get firebirdcluster repl -o jsonpath='{.status.replicationStatus}'; exit 1; }
+
+          # a signed request through the proxy is answered; the same request in plain text is not
+          kubectl exec "$replica" -c segment-server -- perl /etc/firebird-operator/segment-request.pl "$primary.repl-headless" PING | tee /tmp/tls-ping.txt
+          grep -q '^OK' /tmp/tls-ping.txt
+          if kubectl exec "$replica" -c segment-server -- env -u SEGMENT_PROXY \
+              perl /etc/firebird-operator/segment-request.pl "$primary.repl-headless" PING 2>&1 | grep -q '^OK'; then
+            echo "the segment server answered a plain connection"; exit 1
+          fi
+          echo "plain connections are refused"
+
+          # Jobs reach the instances through their own proxy, and still meet the restricted Pod Security Standard
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: repl-tls
+          spec:
+            clusterName: repl
+            type: physical
+            level: 0
+          EOF
+          for n in $(seq 1 60); do
+            phase=$(kubectl get firebirdbackup repl-tls -o jsonpath='{.status.phase}')
+            [ "$phase" = Completed ] || [ "$phase" = Failed ] && break
+            sleep 5
+          done
+          [ "$phase" = Completed ] || { kubectl get firebirdbackup repl-tls -o yaml; kubectl logs job/backup-repl-tls --all-containers || true; exit 1; }
+          [ "$(kubectl get job backup-repl-tls -o jsonpath='{.spec.template.spec.initContainers[0].name}')" = segment-tls ]
+          kubectl create namespace pss-restricted-tls
+          kubectl label namespace pss-restricted-tls pod-security.kubernetes.io/enforce=restricted
+          timeout 60 bash -c 'until kubectl get serviceaccount default -n pss-restricted-tls >/dev/null 2>&1; do sleep 2; done'
+          kubectl get job backup-repl-tls -o json \
+            | jq '{apiVersion: "v1", kind: "Pod", metadata: {name: "restricted-check", namespace: "pss-restricted-tls"}, spec: .spec.template.spec}' \
+            | kubectl apply --dry-run=server -f -
+          kubectl delete namespace pss-restricted-tls --wait=false
+
       - name: Verify synchronous replication
         run: |
           DB=/var/lib/firebird/data/mydb.fdb

@@ -206,9 +206,12 @@ sub authorize {
   return ($cmd, $arg, undef);
 }
 
-my $server = IO::Socket::INET->new(LocalPort => $port, Listen => 16, ReuseAddr => 1, Proto => 'tcp')
-  or die "listen on $port: $!\n";
-print $files_only ? "backup file server listening on $port, serving $data_dir\n" : "segment server listening on $port, serving $dir\n";
+# segment TLS: the TLS proxy accepts on the segment port, this server on SEGMENT_LISTEN (localhost)
+my ($listen_host, $listen_port) = ($ENV{SEGMENT_LISTEN} // '') =~ /^(.+):(\d+)$/ ? ($1, $2) : (undef, $port);
+my $server = IO::Socket::INET->new((defined $listen_host ? (LocalAddr => $listen_host) : ()), LocalPort => $listen_port, Listen => 16, ReuseAddr => 1, Proto => 'tcp')
+  or die "listen on " . ($listen_host // '') . ":$listen_port: $!\n";
+my $listening = (defined $listen_host ? "$listen_host:" : '') . $listen_port . (defined $listen_host ? " (segment TLS on $port)" : '');
+print $files_only ? "backup file server listening on $listening, serving $data_dir\n" : "segment server listening on $listening, serving $dir\n";
 
 sub slurp { my ($f) = @_; open(my $fh, '<', $f) or return ''; local $/; my $v = <$fh>; close $fh; $v //= ''; $v =~ s/\s+$//; return $v; }
 

@@ -1,5 +1,6 @@
 import { createHmac, randomBytes } from 'crypto';
 import { Socket } from 'net';
+import { connect as tlsConnect } from 'tls';
 import { ReplicaLagStatus, SegmentRetentionStatus } from '../types';
 
 /**
@@ -18,10 +19,38 @@ export type SegmentClient = (host: string, port: number, line: string, timeoutMs
 
 export const SEGMENT_REQUEST_TIMEOUT_MS = 3000;
 
+/** The cluster's segment TLS certificates (PEM): CA, and the certificate and key its instances share */
+export interface SegmentTlsMaterial {
+  ca: string;
+  cert: string;
+  key: string;
+}
+
+/**
+ * Whether a segment server is reached over TLS, and with which certificates (segment-tls.ts):
+ * undefined for a plain connection. Set by the operator at startup (segment-tls-client.ts).
+ */
+export type SegmentTlsResolver = (host: string) => Promise<SegmentTlsMaterial | undefined>;
+let segmentTlsResolver: SegmentTlsResolver | undefined;
+export function setSegmentTlsResolver(resolver: SegmentTlsResolver | undefined): void {
+  segmentTlsResolver = resolver;
+}
+
 /** One request line to a segment server, as it is sent; returns the reply lines */
-function rawSegmentRequest(host: string, port: number, line: string, timeoutMs: number): Promise<string[]> {
+function rawSegmentRequest(host: string, port: number, line: string, timeoutMs: number, tls?: SegmentTlsMaterial): Promise<string[]> {
   return new Promise((resolve, reject) => {
-    const socket = new Socket();
+    const socket: Socket = tls
+      ? tlsConnect({
+          host,
+          port,
+          ca: tls.ca,
+          cert: tls.cert,
+          key: tls.key,
+          minVersion: 'TLSv1.3',
+          // a chain to the cluster's CA authenticates the instance (segment-tls.ts)
+          checkServerIdentity: () => undefined,
+        })
+      : new Socket();
     let data = '';
     const done = (err?: Error) => {
       socket.destroy();
@@ -34,7 +63,8 @@ function rawSegmentRequest(host: string, port: number, line: string, timeoutMs: 
       data += chunk.toString('utf8');
     });
     socket.once('end', () => done());
-    socket.connect(port, host, () => socket.write(`${line}\n`));
+    if (tls) socket.once('secureConnect', () => socket.write(`${line}\n`));
+    else socket.connect(port, host, () => socket.write(`${line}\n`));
   });
 }
 
@@ -64,10 +94,12 @@ export const segmentRequest: SegmentClient = async (host, port, line, timeoutMs 
   const space = line.indexOf(' ');
   const [secret, request] = space < 0 ? ['', line] : [line.slice(0, space), line.slice(space + 1)];
   const key = `${host}:${port}`;
+  // segment TLS when the instance runs the TLS proxy (segment-tls-client.ts)
+  const tls = segmentTlsResolver ? await segmentTlsResolver(host).catch(() => undefined) : undefined;
   if (!signedSegmentServers.has(key)) {
     const legacySince = legacySegmentServers.get(key);
     if (legacySince === undefined || Date.now() - legacySince > LEGACY_RECHECK_MS) {
-      const [reply] = await rawSegmentRequest(host, port, signSegmentRequest(secret, 'PING'), timeoutMs);
+      const [reply] = await rawSegmentRequest(host, port, signSegmentRequest(secret, 'PING'), timeoutMs, tls);
       if (reply === undefined) throw new Error(`segment server ${host}:${port}: no answer`);
       if (reply === 'ERR unauthorized') legacySegmentServers.set(key, Date.now());
       else {
@@ -76,7 +108,7 @@ export const segmentRequest: SegmentClient = async (host, port, line, timeoutMs 
       }
     }
   }
-  return rawSegmentRequest(host, port, signedSegmentServers.has(key) ? signSegmentRequest(secret, request) : line, timeoutMs);
+  return rawSegmentRequest(host, port, signedSegmentServers.has(key) ? signSegmentRequest(secret, request) : line, timeoutMs, tls);
 };
 
 export interface ArchivedSegment {

@@ -300,14 +300,48 @@ weaken it (another `WireCrypt`, or `Arc4` in `WireCryptPlugin`) are rejected. `t
 `tls.issuerRef` are deprecated and ignored: earlier versions mounted a certificate (and created a
 cert-manager Certificate) that Firebird never read; a `TLSCertificateIgnored` event says so.
 
-Not encrypted: journal segment shipping and seed copies between instances, and backup files
-copied through the segment server, travel as plain TCP inside the cluster; `networkPolicy.enabled`
+Journal segment shipping, seed copies between instances and backup files copied through the
+segment server travel as plain TCP inside the cluster unless `segmentTLS` is enabled (below); `networkPolicy.enabled`
 restricts the segment port to the cluster's own pods and Jobs, and the operator. Requests to the segment server are signed with
 the SYSDBA password (HMAC-SHA256 over the request, its time and a nonce) instead of carrying it,
 so the password never crosses the network and a captured request cannot be replayed or altered.
 Replies and transferred bytes are not signed. Segment servers still accept the plain password
 from clients of earlier versions (during an upgrade), and clients send it only to servers that
 answer a signed probe the way earlier versions do. See TODO.md.
+
+#### Segment TLS
+
+Full guide with diagrams, the reasons for it, the mixed-mode window and troubleshooting:
+[docs/segment-tls.md](docs/segment-tls.md).
+
+```yaml
+spec:
+  segmentTLS:
+    enabled: true   # Kubernetes 1.29 or later (native sidecar containers)
+```
+
+With `segmentTLS.enabled`, every segment server connection (journal segments, seed copies, backup
+files, the operator's lag and health checks) is carried over mutual TLS 1.3. The Firebird images
+have no TLS tooling, so each instance pod runs a small proxy from the operator's own image as a
+native sidecar (`segment-tls`, an init container with `restartPolicy: Always`): it accepts TLS on
+the segment port (3051) and forwards to the segment server, which then listens on localhost only,
+and it relays the pod's own segment clients to the other instances. Backup, restore and failover
+Jobs get the client side of the proxy only. The operator connects over TLS itself.
+
+The operator creates a CA per cluster and one certificate signed by it (client and server use) in
+the `<cluster>-segment-tls` Secret, owned by the cluster. It renews the certificate 30 days before
+it expires and the CA a year before; the proxies load renewed files without a restart. Pods mount
+the certificate, its key and the CA certificate, never the CA's key. A peer is authenticated by its
+certificate's chain to the cluster's CA, so only the cluster's own pods and Jobs (and the operator)
+are accepted; signed requests (above) still apply on top.
+
+Switching `segmentTLS` on or off is a template change: the rolling update restarts every instance,
+the primary last. Until the primary has restarted, replicas restarted in the other mode cannot pull
+from it and lag behind (they catch up from the archived segments afterwards), and Jobs reach only
+the instances in their own mode. The operator reaches each instance in the mode its pod runs.
+Managing the Secret needs `create` and `update` on Secrets in the operator's ClusterRole
+(`config/deploy/rbac.yaml`). The sidecar uses the image of the running operator (`OPERATOR_IMAGE`
+overrides it), so instance and Job pods must be able to pull it.
 
 ### Status Fields
 
