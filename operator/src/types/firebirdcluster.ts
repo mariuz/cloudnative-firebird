@@ -351,6 +351,12 @@ export interface FirebirdClusterSpec {
   /** Monitoring configuration */
   monitoring?: MonitoringConfiguration;
   /** Replication configuration */
+  /**
+   * Segment TLS: the segment servers (replication: journal segments, seed copies; backup files)
+   * and their clients talk over mutual TLS with a CA the operator manages for the cluster, through
+   * a proxy from the operator image (native sidecars: Kubernetes 1.29 or later). Default off.
+   */
+  segmentTLS?: { enabled?: boolean };
   replication?: ReplicationConfiguration;
   /** AutoSweep configuration for periodic gfix database sweeping */
   autoSweep?: AutoSweepConfiguration;

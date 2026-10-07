@@ -72,6 +72,8 @@ interface CertificateOptions {
   notAfter: Date;
   ca: boolean;
   dnsNames?: string[];
+  /** Leaf only: also valid as a TLS client certificate (mutual TLS) */
+  clientAuth?: boolean;
 }
 
 function certificate(o: CertificateOptions): string {
@@ -85,7 +87,8 @@ function certificate(o: CertificateOptions): string {
     : [
         extension('2.5.29.19', true, sequence()),
         extension('2.5.29.15', true, bitString(Buffer.from([0x80]), 7)), // keyUsage: digitalSignature
-        extension('2.5.29.37', false, sequence(oid('1.3.6.1.5.5.7.3.1'))), // extKeyUsage: serverAuth
+        // extKeyUsage: serverAuth (and clientAuth)
+        extension('2.5.29.37', false, sequence(oid('1.3.6.1.5.5.7.3.1'), ...(o.clientAuth ? [oid('1.3.6.1.5.5.7.3.2')] : []))),
         // subjectAltName: dNSName entries ([2] IMPLICIT IA5String)
         extension('2.5.29.17', false, sequence(...(o.dnsNames ?? []).map((d) => tlv(0x82, Buffer.from(d, 'ascii'))))),
       ];
@@ -122,6 +125,19 @@ export const SERVING_VALIDITY_DAYS = 365;
  * valid), only the serving certificate is renewed, so the caBundle stays the same.
  */
 export function createWebhookCertificates(dnsNames: string[], now = new Date(), ca?: { cert: string; key: string }): WebhookCertificates {
+  return createTlsCertificates({ caName: 'cloudnative-firebird webhook CA', dnsNames }, now, ca);
+}
+
+/**
+ * A CA (unless an existing one is given) and a certificate it signs for the DNS names (wildcards
+ * allowed), also usable as a client certificate with clientAuth (mutual TLS between instances)
+ */
+export function createTlsCertificates(
+  options: { caName: string; dnsNames: string[]; clientAuth?: boolean },
+  now = new Date(),
+  ca?: { cert: string; key: string },
+): WebhookCertificates {
+  const { caName, dnsNames } = options;
   const notBefore = new Date(now.getTime() - 5 * 60_000); // clock skew
   let caCert = ca?.cert;
   let caKeyPem = ca?.key;
@@ -129,8 +145,8 @@ export function createWebhookCertificates(dnsNames: string[], now = new Date(), 
     const pair = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
     caKeyPem = pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
     caCert = certificate({
-      subject: 'cloudnative-firebird webhook CA',
-      issuer: 'cloudnative-firebird webhook CA',
+      subject: caName,
+      issuer: caName,
       publicKey: pair.publicKey,
       signingKey: pair.privateKey,
       notBefore,
@@ -141,13 +157,14 @@ export function createWebhookCertificates(dnsNames: string[], now = new Date(), 
   const leaf = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
   const tlsCert = certificate({
     subject: dnsNames[0],
-    issuer: 'cloudnative-firebird webhook CA',
+    issuer: caName,
     publicKey: leaf.publicKey,
     signingKey: createPrivateKey(caKeyPem),
     notBefore,
     notAfter: new Date(now.getTime() + SERVING_VALIDITY_DAYS * DAY_MS),
     ca: false,
     dnsNames,
+    clientAuth: options.clientAuth,
   });
   return {
     caCert,
@@ -172,6 +189,17 @@ export function servingCertificateMatches(tlsCert: string, caCert: string, dnsNa
     const leaf = new X509Certificate(tlsCert);
     const ca = new X509Certificate(caCert);
     return leaf.verify(ca.publicKey) && dnsNames.every((d) => leaf.checkHost(d) === d);
+  } catch {
+    return false;
+  }
+}
+
+/** Whether the certificate was issued by this CA and lists exactly these DNS names (wildcards included) */
+export function certificateNamesMatch(tlsCert: string, caCert: string, dnsNames: string[]): boolean {
+  try {
+    const leaf = new X509Certificate(tlsCert);
+    const names = (leaf.subjectAltName ?? '').split(', ').filter((n) => n.startsWith('DNS:')).map((n) => n.slice(4));
+    return leaf.verify(new X509Certificate(caCert).publicKey) && names.sort().join(' ') === [...dnsNames].sort().join(' ');
   } catch {
     return false;
   }

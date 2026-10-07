@@ -116,7 +116,7 @@ rules:
       - update
       - patch
       - delete
-  # Secrets (for superuser password)
+  # Secrets (superuser password; segment TLS certificates, <cluster>-segment-tls)
   - apiGroups:
       - ""
     resources:
@@ -125,6 +125,8 @@ rules:
       - get
       - list
       - watch
+      - create
+      - update
   # Events
   - apiGroups:
       - ""
