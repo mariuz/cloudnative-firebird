@@ -8,7 +8,8 @@ import { setOperatorImage } from '../src/utils/operator-image';
 import { createTlsCertificates } from '../src/utils/certificates';
 import { startServer } from '../src/segment-tls';
 import { setSegmentTlsResolver } from '../src/utils/replication-lag';
-import { createSegmentTlsResolver, ensureSegmentTlsSecret, parseInstanceHost } from '../src/utils/segment-tls-client';
+import { V1ConfigMap } from '@kubernetes/client-node';
+import { ACCEPT_PLAIN_GRACE_MS, createSegmentTlsResolver, ensureSegmentTlsSecret, parseInstanceHost, reconcileSegmentTlsPeers } from '../src/utils/segment-tls-client';
 
 const env = (c: V1Container | undefined) => Object.fromEntries((c?.env ?? []).map((e) => [e.name, e.value]));
 const podSpec = (cluster = makeCluster()) => buildStatefulSet(cluster).spec!.template.spec as V1PodSpec;
@@ -34,6 +35,10 @@ describe('segment TLS in the instance pods and Jobs', () => {
     const volume = spec.volumes!.find((v) => v.name === 'segment-tls')!;
     expect(volume.secret).toMatchObject({ secretName: 'test-cluster-segment-tls' });
     expect(volume.secret!.items!.map((i) => i.key)).toEqual(['ca.crt', 'tls.crt', 'tls.key']);
+    // and the instances' modes while segment TLS is switched (optional: TLS only without it)
+    expect(spec.volumes!.find((v) => v.name === 'segment-tls-peers')!.configMap).toEqual({ name: 'test-cluster-segment-tls-peers', optional: true });
+    expect(proxy.volumeMounts).toContainEqual({ name: 'segment-tls-peers', mountPath: '/etc/segment-tls-peers', readOnly: true });
+    expect(env(proxy).SEGMENT_TLS_PEERS_DIR).toBe('/etc/segment-tls-peers');
   });
 
   it('wraps the backup file server of an instance without replication the same way', () => {
@@ -148,5 +153,63 @@ describe('the operator side of segment TLS', () => {
       proxy.close();
       segmentServer.close();
     }
+  });
+
+  describe('the instances\' modes while segment TLS is switched', () => {
+    const pod = (name: string, proxy: boolean) => ({
+      metadata: { name },
+      spec: { initContainers: proxy ? [{ name: 'segment-tls' }] : [], containers: [] },
+    });
+    function api(pods: ReturnType<typeof pod>[], initial?: V1ConfigMap) {
+      let stored = initial;
+      const core = {
+        readNamespacedConfigMap: vi.fn().mockImplementation(async () => {
+          if (!stored) throw Object.assign(new Error('not found'), { code: 404 });
+          return stored;
+        }),
+        listNamespacedPod: vi.fn().mockImplementation(async () => ({ items: pods })),
+        createNamespacedConfigMap: vi.fn().mockImplementation(async ({ body }: { body: V1ConfigMap }) => (stored = { ...body, metadata: { ...body.metadata, resourceVersion: '1' } })),
+        replaceNamespacedConfigMap: vi.fn().mockImplementation(async ({ body }: { body: V1ConfigMap }) => (stored = body)),
+        deleteNamespacedConfigMap: vi.fn().mockImplementation(async () => (stored = undefined)),
+      };
+      return { core, stored: () => stored };
+    }
+
+    it('switching on: the instances not restarted yet are plain, then TLS only after a grace period', async () => {
+      const on = makeCluster({ instances: 3, replication: { enabled: true }, segmentTLS: { enabled: true } });
+      const pods = [pod('test-cluster-0', false), pod('test-cluster-1', true), pod('test-cluster-2', false)];
+      const { core, stored } = api(pods);
+      await reconcileSegmentTlsPeers(core as never, on, 1_000);
+      expect(stored()!.data).toEqual({ 'plain-peers': 'test-cluster-0\ntest-cluster-2\n', 'accept-plain-until': String(1_000 + ACCEPT_PLAIN_GRACE_MS) });
+      expect(stored()!.metadata!.ownerReferences![0]).toMatchObject({ kind: 'FirebirdCluster', name: 'test-cluster' });
+      // the primary restarts last; then nothing is plain, and plain connections are accepted
+      // until the grace period from the last reconcile that saw a plain instance runs out
+      pods[2] = pod('test-cluster-2', true);
+      await reconcileSegmentTlsPeers(core as never, on, 2_000);
+      pods[0] = pod('test-cluster-0', true);
+      await reconcileSegmentTlsPeers(core as never, on, 3_000);
+      expect(stored()!.data).toEqual({ 'plain-peers': '', 'accept-plain-until': String(2_000 + ACCEPT_PLAIN_GRACE_MS) });
+      // steady: not written again
+      core.replaceNamespacedConfigMap.mockClear();
+      await reconcileSegmentTlsPeers(core as never, on, 9_000_000);
+      expect(core.replaceNamespacedConfigMap).not.toHaveBeenCalled();
+    });
+
+    it('switching off: every instance is plain while a proxy runs, and the ConfigMap goes with the last one', async () => {
+      const off = makeCluster({ instances: 2, replication: { enabled: true } });
+      const pods = [pod('test-cluster-0', true), pod('test-cluster-1', false)];
+      const { core, stored } = api(pods, { metadata: { name: 'test-cluster-segment-tls-peers', resourceVersion: '4' }, data: { 'plain-peers': '', 'accept-plain-until': '0' } });
+      await reconcileSegmentTlsPeers(core as never, off, 5_000);
+      expect(stored()!.data).toEqual({ 'plain-peers': 'test-cluster-0\ntest-cluster-1\n', 'accept-plain-until': String(5_000 + ACCEPT_PLAIN_GRACE_MS) });
+      expect(core.replaceNamespacedConfigMap.mock.calls[0][0].body.metadata.resourceVersion).toBe('4');
+      pods[0] = pod('test-cluster-0', false);
+      await reconcileSegmentTlsPeers(core as never, off, 6_000);
+      expect(stored()).toBeUndefined();
+      // a cluster that never had segment TLS: one read, nothing else
+      const never = api([]);
+      await reconcileSegmentTlsPeers(never.core as never, off);
+      expect(never.core.listNamespacedPod).not.toHaveBeenCalled();
+      expect(never.core.createNamespacedConfigMap).not.toHaveBeenCalled();
+    });
   });
 });

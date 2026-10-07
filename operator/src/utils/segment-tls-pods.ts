@@ -19,6 +19,8 @@ import { operatorImage } from './operator-image';
 export const SEGMENT_TLS_CONTAINER = 'segment-tls';
 export const SEGMENT_TLS_VOLUME = 'segment-tls';
 export const SEGMENT_TLS_DIR = '/etc/segment-tls';
+export const SEGMENT_TLS_PEERS_VOLUME = 'segment-tls-peers';
+export const SEGMENT_TLS_PEERS_DIR = '/etc/segment-tls-peers';
 /** Where the segment server listens behind the proxy */
 export const SEGMENT_SERVER_LOCAL_PORT = 3061;
 /** The client side of the proxy, for the Perl clients of the pod */
@@ -34,6 +36,11 @@ export function segmentTlsSecretName(cluster: FirebirdCluster): string {
   return `${cluster.metadata.name}-segment-tls`;
 }
 
+/** The instances still serving in plain text while segment TLS is switched (segment-tls.ts) */
+export function segmentTlsPeersName(cluster: FirebirdCluster): string {
+  return `${cluster.metadata.name}-segment-tls-peers`;
+}
+
 /** Names in the certificate (informational: peers are authenticated by the cluster's CA) */
 export function segmentTlsDnsNames(cluster: FirebirdCluster): string[] {
   const headless = `${cluster.metadata.name}-headless`;
@@ -44,6 +51,7 @@ export function segmentTlsDnsNames(cluster: FirebirdCluster): string[] {
 function sidecar(server: boolean): V1Container {
   const env: V1EnvVar[] = [
     { name: 'SEGMENT_TLS_DIR', value: SEGMENT_TLS_DIR },
+    { name: 'SEGMENT_TLS_PEERS_DIR', value: SEGMENT_TLS_PEERS_DIR },
     { name: 'CLIENT_LISTEN', value: `127.0.0.1:${SEGMENT_PROXY_PORT}` },
     ...(server
       ? [
@@ -81,19 +89,26 @@ function sidecar(server: boolean): V1Container {
       readOnlyRootFilesystem: true,
       capabilities: { drop: ['ALL'] },
     },
-    volumeMounts: [{ name: SEGMENT_TLS_VOLUME, mountPath: SEGMENT_TLS_DIR, readOnly: true }],
+    volumeMounts: [
+      { name: SEGMENT_TLS_VOLUME, mountPath: SEGMENT_TLS_DIR, readOnly: true },
+      { name: SEGMENT_TLS_PEERS_VOLUME, mountPath: SEGMENT_TLS_PEERS_DIR, readOnly: true },
+    ],
   };
 }
 
-function volume(cluster: FirebirdCluster): V1Volume {
-  return {
-    name: SEGMENT_TLS_VOLUME,
-    secret: {
-      secretName: segmentTlsSecretName(cluster),
-      // not the CA's key, which only the operator uses (to renew the certificate)
-      items: ['ca.crt', 'tls.crt', 'tls.key'].map((key) => ({ key, path: key })),
+function volumes(cluster: FirebirdCluster): V1Volume[] {
+  return [
+    {
+      name: SEGMENT_TLS_VOLUME,
+      secret: {
+        secretName: segmentTlsSecretName(cluster),
+        // not the CA's key, which only the operator uses (to renew the certificate)
+        items: ['ca.crt', 'tls.crt', 'tls.key'].map((key) => ({ key, path: key })),
+      },
     },
-  };
+    // written by the operator while the instances switch modes; absent means TLS only
+    { name: SEGMENT_TLS_PEERS_VOLUME, configMap: { name: segmentTlsPeersName(cluster), optional: true } },
+  ];
 }
 
 const withEnv = (c: V1Container, env: V1EnvVar[]): V1Container => ({
@@ -122,6 +137,6 @@ export function withSegmentTls<T extends V1PodSpec>(cluster: FirebirdCluster, sp
     ...spec,
     initContainers: [sidecar(instance), ...(spec.initContainers ?? []).map(container)],
     containers: spec.containers.map(container),
-    volumes: [...(spec.volumes ?? []), volume(cluster)],
+    volumes: [...(spec.volumes ?? []), ...volumes(cluster)],
   };
 }

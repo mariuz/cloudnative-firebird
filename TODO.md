@@ -26,8 +26,10 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Segment TLS by default**: since v0.75.0 `segmentTLS.enabled` carries segment shipping,
   seed copies and backup files over mutual TLS (a proxy sidecar from the operator image, a CA per
   cluster). It is opt-in because it needs Kubernetes 1.29+ (native sidecars) and pulls the operator
-  image into every instance pod. Turning it on by default (and then refusing plain segment
-  connections) would need a rollout without the replica lag of a mixed-mode rolling update.
+  image into every instance pod. Since v0.76.0 switching an existing cluster no longer stalls
+  replication (the proxies follow the operator's list of plain instances), so what is left is the
+  default itself: on for new clusters where the Kubernetes version allows it, and how existing
+  clusters are moved over on upgrade.
 - [ ] **Stop accepting the plain password** on the segment server once no supported upgrade path
   starts from a version before v0.64.0 (clients of those versions send it; current clients send it
   only to servers that answer the signed probe like those versions).

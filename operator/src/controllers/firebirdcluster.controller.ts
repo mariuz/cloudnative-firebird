@@ -1,5 +1,5 @@
 import { segmentTlsEnabled } from '../utils/segment-tls-pods';
-import { ensureSegmentTlsSecret } from '../utils/segment-tls-client';
+import { ensureSegmentTlsSecret, reconcileSegmentTlsPeers } from '../utils/segment-tls-client';
 import { superuserPasswordFrom } from '../utils/restore-target';
 import { inPlaceResize, RESIZE_ANNOTATION, RESIZE_TIMEOUT_SECONDS, resizeApplied, resizeInfeasible } from '../utils/in-place';
 import crypto from 'crypto';
@@ -341,6 +341,8 @@ export class FirebirdClusterController {
       await this.reconcileService(cluster, log);
       // segment TLS: the certificates exist (and are renewed) before pods mount them
       if (segmentTlsEnabled(cluster)) await ensureSegmentTlsSecret(this.coreApi, cluster);
+      // before the StatefulSet: an instance restarted into the new mode reads it when it starts
+      await reconcileSegmentTlsPeers(this.coreApi, cluster);
       const { readyInstances, superuserSecretHash, statefulSetExisted, statefulSet } =
         await this.reconcileStatefulSet(cluster, log);
       const volumes = statefulSetExisted

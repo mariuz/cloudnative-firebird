@@ -311,7 +311,7 @@ answer a signed probe the way earlier versions do. See TODO.md.
 
 #### Segment TLS
 
-Full guide with diagrams, the reasons for it, the mixed-mode window and troubleshooting:
+Full guide with diagrams, the reasons for it, switching an existing cluster and troubleshooting:
 [docs/segment-tls.md](docs/segment-tls.md).
 
 ```yaml
@@ -336,9 +336,10 @@ certificate's chain to the cluster's CA, so only the cluster's own pods and Jobs
 are accepted; signed requests (above) still apply on top.
 
 Switching `segmentTLS` on or off is a template change: the rolling update restarts every instance,
-the primary last. Until the primary has restarted, replicas restarted in the other mode cannot pull
-from it and lag behind (they catch up from the archived segments afterwards), and Jobs reach only
-the instances in their own mode. The operator reaches each instance in the mode its pod runs.
+the primary last. Replication goes on meanwhile: the operator lists the instances still serving in
+plain text in the `<cluster>-segment-tls-peers` ConfigMap, the proxies connect to those in plain
+text, and they accept plain connections until 5 minutes after the last instance switched. Then
+only TLS is accepted. The operator reaches each instance in the mode its pod runs.
 Managing the Secret needs `create` and `update` on Secrets in the operator's ClusterRole
 (`config/deploy/rbac.yaml`). The sidecar uses the image of the running operator (`OPERATOR_IMAGE`
 overrides it), so instance and Job pods must be able to pull it.
