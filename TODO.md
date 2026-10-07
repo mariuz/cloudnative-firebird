@@ -49,8 +49,9 @@ Nothing open.
 
 ## Other roadmap items
 
-- [ ] **In-place configuration reloads**: every template change restarts the instances, even
-  settings Firebird could apply without a restart. CloudNativePG reloads PostgreSQL in place when
-  possible.
+- [ ] **In-place updates without replication**: resource changes are applied in place since
+  v0.70.0 when the operator rolls the pods (replication); a cluster without replication uses the
+  StatefulSet controller's rolling update, which restarts the pod for every change. Firebird
+  itself has nothing to reload: `firebird.conf` is read when the server starts.
 - [ ] **Admission webhook follow-up** (webhook since v0.65.0, served by every operator replica
   since v0.69.0): check restore targets that already exist (only the Job sees the file system).

@@ -207,7 +207,7 @@ describe('StatefulSet update strategy', () => {
   });
 });
 
-function setup(pods: V1Pod[], opts: { existing?: V1StatefulSet; patched?: V1StatefulSet } = {}) {
+function setup(pods: V1Pod[], opts: { existing?: V1StatefulSet; patched?: V1StatefulSet; revisions?: Record<string, object> } = {}) {
   const notFound = Object.assign(new Error('Not Found'), { code: 404 });
   const existing = opts.existing ?? { ...buildStatefulSet(makeCluster()), ...sts() };
   const api: Record<string, Mock> = {
@@ -216,6 +216,9 @@ function setup(pods: V1Pod[], opts: { existing?: V1StatefulSet; patched?: V1Stat
     readNamespacedConfigMap: vi.fn().mockResolvedValue({ data: {} }),
     readNamespacedStatefulSet: vi.fn().mockResolvedValue(existing),
     patchNamespacedStatefulSet: vi.fn().mockResolvedValue(opts.patched ?? existing),
+    readNamespacedControllerRevision: vi.fn().mockImplementation(({ name }: { name: string }) =>
+      opts.revisions?.[name] ? Promise.resolve({ data: { spec: { template: opts.revisions[name] } } }) : Promise.reject(notFound),
+    ),
   };
   const calls: Record<string, Mock> = {};
   const fn = (m: string): Mock =>
@@ -236,6 +239,67 @@ function setup(pods: V1Pod[], opts: { existing?: V1StatefulSet; patched?: V1Stat
   const segment = vi.fn().mockImplementation(async (_h: string, _p: number, line: string) => (line.endsWith(' VERSION') ? ['OK 5.0.4'] : []));
   return { controller: new FirebirdClusterController(kubeConfig, segment), fn, status };
 }
+
+describe('in-place resize during a rolling update', () => {
+  const template = (cpu: string) => ({
+    spec: { containers: [{ name: 'firebird', image: 'firebird:5', resources: { requests: { cpu: '250m' }, limits: { cpu } } }] },
+  });
+  // StatefulSet "db": revision db-old -> db-new changes only the CPU limit
+  const revisions = { 'db-db-old': template('1'), 'db-db-new': template('2') };
+  const withResources = (p: V1Pod, cpu: string, annotations: Record<string, string> = {}, conditions: object[] = []): V1Pod => ({
+    ...p,
+    metadata: { ...p.metadata, annotations },
+    status: {
+      ...p.status,
+      conditions: [...(p.status?.conditions ?? []), ...(conditions as never[])],
+      containerStatuses: [{ name: 'firebird', resources: { requests: { cpu: '250m' }, limits: { cpu } } } as never],
+    },
+  });
+
+  it('resizes every instance in place instead of restarting it, then marks it updated', async () => {
+    const pods = [pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-old')].map((p) => withResources(p, '1'));
+    const s = setup(pods, { revisions });
+    await s.controller.reconcile(makeCluster());
+    expect(s.fn('deleteNamespacedPod')).not.toHaveBeenCalled();
+    const resized = s.fn('patchNamespacedPodResize').mock.calls.map((c) => c[0]);
+    expect(resized.map((r) => r.name).sort()).toEqual(['db-0', 'db-1', 'db-2']);
+    expect(resized[0].body).toEqual({ spec: { containers: [{ name: 'firebird', resources: { requests: { cpu: '250m' }, limits: { cpu: '2' } } }] } });
+    expect(s.status().rollingUpdate.message).toContain('in place');
+
+    // applied by the kubelet: labelled with the new revision, nothing restarted
+    const since = String(Date.now());
+    const applied = [pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-old')].map((p) =>
+      withResources(p, '2', { 'firebird.cloudnative-firebird.io/resize-revision': `db-new ${since}` }),
+    );
+    const done = setup(applied, { revisions });
+    await done.controller.reconcile(makeCluster());
+    expect(done.fn('deleteNamespacedPod')).not.toHaveBeenCalled();
+    const labelled = done.fn('patchNamespacedPod').mock.calls.map((c) => c[0]).filter((c) => c.body.metadata?.labels?.[REVISION_LABEL]);
+    expect(labelled.map((c) => c.name).sort()).toEqual(['db-0', 'db-1', 'db-2']);
+    expect(labelled[0].body.metadata.annotations).toEqual({ 'firebird.cloudnative-firebird.io/resize-revision': null });
+  });
+
+  it('restarts the instance when the kubelet cannot resize it, or the change is more than resources', async () => {
+    const infeasible = [pod('db-0', 'db-new'), pod('db-1', 'db-new'), pod('db-2', 'db-old')].map((p) =>
+      withResources(p, '1', p.metadata?.name === 'db-2' ? { 'firebird.cloudnative-firebird.io/resize-revision': `db-new ${Date.now()}` } : {}, [
+        { type: 'PodResizePending', status: 'True', reason: 'Infeasible' },
+      ]),
+    );
+    const s = setup(infeasible, { revisions });
+    await s.controller.reconcile(makeCluster());
+    expect(s.fn('patchNamespacedPod').mock.calls.map((c) => c[0].body.metadata.annotations)).toContainEqual({
+      'firebird.cloudnative-firebird.io/resize-revision': 'failed db-new',
+    });
+    expect(s.fn('deleteNamespacedPod')).toHaveBeenCalledWith({ name: 'db-2', namespace: 'default' });
+
+    const otherChange = setup([pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-old')], {
+      revisions: { 'db-db-old': template('1'), 'db-db-new': { spec: { containers: [{ name: 'firebird', image: 'firebird:6' }] } } },
+    });
+    await otherChange.controller.reconcile(makeCluster());
+    expect(otherChange.fn('patchNamespacedPodResize')).not.toHaveBeenCalled();
+    expect(otherChange.fn('deleteNamespacedPod')).toHaveBeenCalledWith({ name: 'db-2', namespace: 'default' });
+  });
+});
 
 describe('rolling update reconciliation', () => {
   it('restarts one outdated replica and reports the update in status', async () => {

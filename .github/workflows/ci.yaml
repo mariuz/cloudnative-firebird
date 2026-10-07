@@ -742,7 +742,8 @@ jobs:
           before=$(count "$primary")
           last_failover=$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})
           # a template change; automatic failover is still enabled (20 s) from the previous step
-          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"env":[{"name":"ROLLING_UPDATE_TEST","value":"1"}]}}'
+          # (with CPU resources, so the next step can change them in place)
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"env":[{"name":"ROLLING_UPDATE_TEST","value":"1"}],"resources":{"requests":{"cpu":"100m"},"limits":{"cpu":"1"}}}}'
           timeout 120 bash -c 'until kubectl get statefulset repl -o jsonpath={.spec.template.spec.containers[0].env} | grep -q ROLLING_UPDATE_TEST &&
             [ "$(kubectl get statefulset repl -o jsonpath={.status.observedGeneration})" = "$(kubectl get statefulset repl -o jsonpath={.metadata.generation})" ]; do sleep 3; done'
           rev=$(kubectl get statefulset repl -o jsonpath={.status.updateRevision})
@@ -772,6 +773,34 @@ jobs:
           for i in $(seq 301 305); do sql "$primary" "insert into app values ($i, 'after update'); commit;" >/dev/null; done
           for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$primary" ] || wait_count "$pod" $((before + 5)); done
           echo "rolling update finished with the primary $primary last"
+
+      - name: Verify resources are resized in place
+        run: |
+          SEL=firebird.cloudnative-firebird.io/cluster=repl,app.kubernetes.io/component=database
+          uids() { kubectl get pods -l "$SEL" -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.uid} {end}'; }
+          before=$(uids); echo "pods: $before"
+          primary=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
+          # only the CPU limit changes: no restart, the pods are resized and run the new revision
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"resources":{"requests":{"cpu":"100m"},"limits":{"cpu":"2"}}}}'
+          timeout 120 bash -c 'until [ "$(kubectl get statefulset repl -o jsonpath={.spec.template.spec.containers[0].resources.limits.cpu})" = 2 ] &&
+            [ "$(kubectl get statefulset repl -o jsonpath={.status.observedGeneration})" = "$(kubectl get statefulset repl -o jsonpath={.metadata.generation})" ]; do sleep 3; done'
+          rev=$(kubectl get statefulset repl -o jsonpath={.status.updateRevision})
+          updated() {
+            kubectl get pods -l "$SEL" \
+              -o jsonpath='{range .items[*]}{.metadata.labels.controller-revision-hash} {.status.containerStatuses[?(@.name=="firebird")].resources.limits.cpu}{"\n"}{end}' \
+              | grep -c "^$rev 2$"
+          }
+          for n in $(seq 1 60); do [ "$(updated)" = 3 ] && break; sleep 5; done
+          [ "$(updated)" = 3 ] || {
+            kubectl get firebirdcluster repl -o jsonpath='{.status.rollingUpdate}'; echo
+            kubectl get pods -l "$SEL" -o yaml | grep -E 'name: repl-|resize|cpu|reason' ; exit 1
+          }
+          after=$(uids); echo "pods: $after"
+          [ "$after" = "$before" ] || { echo "instances were restarted"; exit 1; }
+          [ "$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})" = "$primary" ]
+          kubectl get events --field-selector involvedObject.name=repl -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' | grep -q 'resized in place'
+          timeout 120 bash -c 'until [ -z "$(kubectl get firebirdcluster repl -o jsonpath={.status.rollingUpdate})" ]; do sleep 5; done'
+          echo "CPU limit changed in place on every instance, nothing restarted"
 
       - name: Verify enabling replication on an existing cluster
         run: |

@@ -83,6 +83,13 @@ rules:
       - update
       - patch
       - delete
+  # StatefulSet revisions: what changed between a pod's revision and the new one (in-place resize)
+  - apiGroups:
+      - apps
+    resources:
+      - controllerrevisions
+    verbs:
+      - get
   # Services
   - apiGroups:
       - ""
@@ -138,6 +145,13 @@ rules:
       - patch
       # restarts a replica into its init container to re-seed it (reseed annotation)
       - delete
+  # rolling updates resize container resources without a restart when nothing else changed
+  - apiGroups:
+      - ""
+    resources:
+      - pods/resize
+    verbs:
+      - patch
   # ConfigMaps (firebird.conf, init.sql, Grafana dashboards)
   - apiGroups:
       - ""

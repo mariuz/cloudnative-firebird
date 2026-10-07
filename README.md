@@ -685,6 +685,21 @@ Nothing is restarted while a switchover, failover or re-seed is in progress. Fen
 not restarted; they are updated once unfenced. `status.phase` is `Updating` while instances run
 an older revision, and `status.rollingUpdate` lists them.
 
+**In place, without a restart:** when the only change between an instance's revision and the new
+one is container resources (`spec.resources`, the exporter's resources), the operator resizes the
+running pods (Kubernetes in-place pod resize, 1.33 and later) and marks them updated. It does
+this for all instances at once, the primary included. No pod restarts, the primary stays where
+it is, and a `RollingUpdate` event says `resized in place`. These cases still restart:
+- a lower memory limit, since the running server may use more;
+- a new memory limit where there was none;
+- a change of QoS class;
+- a resize the node refuses or doesn't apply within five minutes;
+- any other change.
+
+Firebird reads `firebird.conf` only when the server starts, so `config.settings` changes always
+restart the instances. Without replication the StatefulSet controller rolls the pods, and every
+change restarts them.
+
 ### Re-seeding a Replica
 
 To re-seed a broken or lagging replica (after CloudNativePG's `unrecoverable` annotation),

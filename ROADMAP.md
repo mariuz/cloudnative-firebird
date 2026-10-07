@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.69.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.70.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,14 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **In-Place Resource Changes** *(v0.70.0, CloudNativePG applies what it can without a restart)*
+  - Firebird has nothing to reload (`firebird.conf` is read when the server starts), but container resources can change without a restart, through Kubernetes in-place pod resize. The rolling update compares each outdated pod's StatefulSet revision with the new one (ControllerRevisions). When only container resources differ, it resizes the running pods (`pods/resize`) and labels them with the new revision once the kubelet has applied it. This covers all instances at once, the primary included.
+  - Restarted as before:
+    - a lower or newly set memory limit;
+    - a change of QoS class;
+    - a resize that is infeasible or not applied within five minutes;
+    - any other template change.
+  - The kind CI (Kubernetes 1.35) changes a replicated cluster's CPU limit and checks that every pod keeps its UID, runs the new revision with the new limit, and that the primary did not move.
 - [x] **Operator High Availability** *(v0.69.0, CloudNativePG's leader election)*
   - The operator ran a single replica: when it was down, nothing reconciled (failover decisions included) and the admission webhook was not served. It now runs two replicas with leader election on the Lease `cloudnative-firebird-operator`, following client-go's design:
     - expiry is measured on each replica's own clock, so skew between nodes does not matter;
