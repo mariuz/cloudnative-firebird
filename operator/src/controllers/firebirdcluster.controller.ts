@@ -1637,7 +1637,7 @@ export class FirebirdClusterController {
     }
 
     // pods whose only change is container resources are resized in place instead (in-place.ts)
-    const inPlace = busy ? new Set<string>() : await this.resizeInPlace(cluster, statefulSet, pods, plan.revision, log);
+    const inPlace = busy ? new Set<string>() : await this.resizeInPlace(cluster, pods, plan.revision, log);
     if (plan.restart && inPlace.has(plan.restart)) {
       return {
         revision: plan.revision,
@@ -1690,7 +1690,6 @@ export class FirebirdClusterController {
    */
   private async resizeInPlace(
     cluster: FirebirdCluster,
-    statefulSet: V1StatefulSet,
     pods: V1Pod[],
     revision: string,
     log: Logger,
@@ -1698,17 +1697,18 @@ export class FirebirdClusterController {
     const namespace = cluster.metadata.namespace ?? 'default';
     const handled = new Set<string>();
     const templates = new Map<string, V1PodTemplateSpec | undefined>();
-    const template = async (hash: string) => {
-      if (!templates.has(hash)) {
+    // the revision label (and the StatefulSet's updateRevision) is the ControllerRevision's name
+    const template = async (revisionName: string) => {
+      if (!templates.has(revisionName)) {
         try {
-          const rev = await this.appsApi.readNamespacedControllerRevision({ name: `${statefulSet.metadata?.name}-${hash}`, namespace });
-          templates.set(hash, (rev.data as { spec?: { template?: V1PodTemplateSpec } } | undefined)?.spec?.template);
+          const rev = await this.appsApi.readNamespacedControllerRevision({ name: revisionName, namespace });
+          templates.set(revisionName, (rev.data as { spec?: { template?: V1PodTemplateSpec } } | undefined)?.spec?.template);
         } catch (err) {
           if (!isNotFound(err)) throw err;
-          templates.set(hash, undefined);
+          templates.set(revisionName, undefined);
         }
       }
-      return templates.get(hash);
+      return templates.get(revisionName);
     };
     const target = await template(revision);
     if (!target) return handled;

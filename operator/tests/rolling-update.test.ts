@@ -244,8 +244,8 @@ describe('in-place resize during a rolling update', () => {
   const template = (cpu: string) => ({
     spec: { containers: [{ name: 'firebird', image: 'firebird:5', resources: { requests: { cpu: '250m' }, limits: { cpu } } }] },
   });
-  // StatefulSet "db": revision db-old -> db-new changes only the CPU limit
-  const revisions = { 'db-db-old': template('1'), 'db-db-new': template('2') };
+  // StatefulSet "db": revision db-old -> db-new (ControllerRevision names) changes only the CPU limit
+  const revisions = { 'db-old': template('1'), 'db-new': template('2') };
   const withResources = (p: V1Pod, cpu: string, annotations: Record<string, string> = {}, conditions: object[] = []): V1Pod => ({
     ...p,
     metadata: { ...p.metadata, annotations },
@@ -293,7 +293,7 @@ describe('in-place resize during a rolling update', () => {
     expect(s.fn('deleteNamespacedPod')).toHaveBeenCalledWith({ name: 'db-2', namespace: 'default' });
 
     const otherChange = setup([pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-old')], {
-      revisions: { 'db-db-old': template('1'), 'db-db-new': { spec: { containers: [{ name: 'firebird', image: 'firebird:6' }] } } },
+      revisions: { 'db-old': template('1'), 'db-new': { spec: { containers: [{ name: 'firebird', image: 'firebird:6' }] } } },
     });
     await otherChange.controller.reconcile(makeCluster());
     expect(otherChange.fn('patchNamespacedPodResize')).not.toHaveBeenCalled();
