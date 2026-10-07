@@ -20,8 +20,9 @@ async function main(): Promise<void> {
   // Graceful shutdown handlers
   const shutdown = (signal: string) => {
     logger.info({ signal }, 'Received shutdown signal');
-    operator.stop();
-    process.exit(0);
+    // the leader releases its Lease (bounded: the pod is killed after its grace period anyway)
+    setTimeout(() => process.exit(0), 5000).unref();
+    void operator.shutdown().finally(() => process.exit(0));
   };
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));

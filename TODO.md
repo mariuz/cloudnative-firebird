@@ -52,7 +52,5 @@ Nothing open.
 - [ ] **In-place configuration reloads**: every template change restarts the instances, even
   settings Firebird could apply without a restart. CloudNativePG reloads PostgreSQL in place when
   possible.
-- [ ] **Admission webhook follow-ups** (webhook since v0.65.0): run more than one operator replica
-  (the webhook would then need leader-independent serving and a shared certificate, which the
-  Secret already allows); check restore targets that already exist (only the Job sees the file
-  system).
+- [ ] **Admission webhook follow-up** (webhook since v0.65.0, served by every operator replica
+  since v0.69.0): check restore targets that already exist (only the Job sees the file system).

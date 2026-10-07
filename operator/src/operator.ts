@@ -1,3 +1,4 @@
+import { apiLease, LeaderElector, OPERATOR_LEASE } from './utils/leader-election';
 import { WebhookServer } from './utils/webhook';
 import { apiLookups, createAdmissionValidator } from './utils/admission';
 import { KubeConfig, Watch } from '@kubernetes/client-node';
@@ -97,6 +98,7 @@ export class Operator {
   private readonly watch: Watch;
   private readonly healthServer: HealthServer;
   private webhookServer?: WebhookServer;
+  private elector?: LeaderElector;
   private webhookRetry?: NodeJS.Timeout;
   private readonly watchRequests = new Map<string, { abort: () => void }>();
   private readonly watchTimers = new Map<string, NodeJS.Timeout>();
@@ -160,6 +162,40 @@ export class Operator {
   async start(): Promise<void> {
     logger.info('Starting cloudnative-firebird operator');
     this.healthServer.start();
+    // several replicas: only the one holding the Lease reconciles; all serve the webhook
+    const namespace = process.env.OPERATOR_NAMESPACE;
+    const identity = process.env.POD_NAME;
+    if (process.env.LEADER_ELECTION !== 'false' && namespace && identity) {
+      await this.startWebhook();
+      this.healthServer.setReady(true);
+      this.elector = new LeaderElector(
+        apiLease(this.kubeConfig, namespace),
+        identity,
+        {
+          onStartedLeading: () => this.startReconciling(),
+          onStoppedLeading: () => {
+            // another replica may be reconciling already: stop at once, the pod restarts as a standby
+            logger.error('Leadership lost; exiting');
+            this.stop();
+            process.exit(1);
+          },
+        },
+        {},
+        OPERATOR_LEASE,
+        namespace,
+      );
+      metrics.set('cloudnative_firebird_operator_leader', '1 on the operator replica that reconciles', {}, 0);
+      this.elector.start();
+      return;
+    }
+    await this.startReconciling();
+    await this.startWebhook();
+    this.healthServer.setReady(true);
+  }
+
+  /** Watches and periodic resync: what only the leader does */
+  private async startReconciling(): Promise<void> {
+    if (this.elector) metrics.set('cloudnative_firebird_operator_leader', '1 on the operator replica that reconciles', {}, 1);
     await this.watchPath(`/apis/${API_GROUP}/${API_VERSION}/${RESOURCE_PLURAL}`, (phase, obj) =>
       this.handleEvent(phase, obj as FirebirdCluster),
     );
@@ -178,8 +214,12 @@ export class Operator {
     if (this.resyncIntervalMs > 0) {
       this.resyncTimer = setInterval(() => this.resync(), this.resyncIntervalMs);
     }
-    await this.startWebhook();
-    this.healthServer.setReady(true);
+  }
+
+  /** Stops, releasing the leader Lease first so a standby replica takes over at once */
+  async shutdown(): Promise<void> {
+    await this.elector?.stop();
+    this.stop();
   }
 
   /**

@@ -1070,6 +1070,40 @@ jobs:
           expect FirebirdRestore from-logical RestoreCompleted
           expect FirebirdUser app-user UserApplied
 
+      - name: Verify operator leader election
+        run: |
+          NS=cloudnative-firebird-system
+          SEL=app.kubernetes.io/name=cloudnative-firebird,app.kubernetes.io/component=operator
+          holder() { kubectl get lease cloudnative-firebird-operator -n $NS -o jsonpath={.spec.holderIdentity}; }
+          # a reconcile only the leader does: the test cluster's StatefulSet follows spec.instances
+          reconciles() {
+            n=$1
+            kubectl patch firebirdcluster test-cluster --type merge -p "{\"spec\":{\"instances\":$n}}"
+            timeout 120 bash -c "until [ \"\$(kubectl get statefulset test-cluster -o jsonpath={.spec.replicas})\" = $n ]; do sleep 3; done"
+          }
+          kubectl get pods -n $NS -l "$SEL" -o wide
+          [ "$(kubectl get pods -n $NS -l "$SEL" --field-selector=status.phase=Running -o name | wc -l)" = 2 ]
+          leader=$(holder); echo "leader: $leader"
+          kubectl get pod "$leader" -n $NS
+          # only the leader reconciles
+          for p in $(kubectl get pods -n $NS -l "$SEL" -o jsonpath='{.items[*].metadata.name}'); do
+            n=$(kubectl logs -n $NS "$p" | grep -c '"msg":"Reconciling FirebirdCluster"' || true)
+            echo "$p: $n reconciles"
+            if [ "$p" = "$leader" ]; then [ "$n" -gt 0 ]; else [ "$n" = 0 ]; fi
+          done
+          # graceful: the leader releases the Lease on shutdown, the standby takes over at once
+          kubectl delete pod "$leader" -n $NS --wait=false
+          timeout 30 bash -c "until h=\$(kubectl get lease cloudnative-firebird-operator -n $NS -o jsonpath={.spec.holderIdentity}) && [ -n \"\$h\" ] && [ \"\$h\" != $leader ]; do sleep 1; done"
+          second=$(holder); echo "after a graceful shutdown: $second"
+          reconciles 3
+          # hard: the new leader is killed; the other replica takes over once the Lease expires (15 s)
+          kubectl delete pod "$second" -n $NS --grace-period=0 --force
+          timeout 90 bash -c "until h=\$(kubectl get lease cloudnative-firebird-operator -n $NS -o jsonpath={.spec.holderIdentity}) && [ -n \"\$h\" ] && [ \"\$h\" != $second ]; do sleep 2; done"
+          echo "after a forced kill: $(holder)"
+          reconciles 2
+          kubectl rollout status deployment/cloudnative-firebird-operator -n $NS --timeout=120s
+          [ "$(kubectl get lease cloudnative-firebird-operator -n $NS -o jsonpath={.spec.leaseTransitions})" -ge 2 ]
+
       - name: Verify operator reconciled without API errors
         run: |
           logs=$(kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1)

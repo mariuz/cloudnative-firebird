@@ -104,6 +104,20 @@ kubectl apply -f config/deploy/webhook.yaml
 kubectl apply -f config/deploy/deployment.yaml
 ```
 
+The operator runs **two replicas** with leader election, like CloudNativePG's operator:
+- **The leader:** only the replica holding the Lease `cloudnative-firebird-operator` in the
+  operator's namespace watches and reconciles. The metric `cloudnative_firebird_operator_leader`
+  is 1 on it.
+- **The webhook:** every replica serves the admission webhook, from the shared certificate Secret.
+- **Handover:** a leader that stops releases the Lease, so the other replica takes over at once.
+  A leader that crashes, or loses the API server, is replaced once the Lease expires: 15 seconds,
+  measured on each replica's own clock.
+- **Losing the Lease:** a leader that cannot renew it within 10 seconds exits instead of
+  reconciling alongside its successor.
+
+A PodDisruptionBudget keeps one replica through node drains, and the replicas prefer different
+nodes. `LEADER_ELECTION=false` runs a single replica without the Lease.
+
 ### Create a Firebird Cluster
 
 ```bash

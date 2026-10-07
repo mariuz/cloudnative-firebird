@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.68.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.69.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,14 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Operator High Availability** *(v0.69.0, CloudNativePG's leader election)*
+  - The operator ran a single replica: when it was down, nothing reconciled (failover decisions included) and the admission webhook was not served. It now runs two replicas with leader election on the Lease `cloudnative-firebird-operator`, following client-go's design:
+    - expiry is measured on each replica's own clock, so skew between nodes does not matter;
+    - the leader renews every 2 seconds and exits when it cannot renew within 10;
+    - a clean shutdown releases the Lease;
+    - a crashed leader is replaced after 15 seconds.
+  - Only the leader watches and reconciles. Every replica serves the admission webhook and is ready, so the webhook stays up while the leader changes. `cloudnative_firebird_operator_leader` shows the leader. A PodDisruptionBudget and preferred anti-affinity keep a replica through drains.
+  - The kind CI checks that only the leader reconciles, then deletes the leader (an immediate handover) and force-kills the next one (a takeover after expiry), and checks that the new leader reconciles each time.
 - [x] **Synchronous Standby Promoted in Place** *(v0.68.0)*
   - The failover to an attached synchronous standby was the last promotion that restarted its target. `PROMOTE` now accepts a standby. Its journal continues after the last segment it saw archived on the old primary (`sync-seen`), when that is higher than its control file position, as in the offline promotion. Its standby state is cleared.
   - Verified with operator-generated pods: a standby promoted after the primary died has every row committed on the primary, and it keeps running. The other replica re-seeds and follows, and it then becomes the new primary's standby. The kind CI checks `promotedInPlace` for the synchronous failover.
