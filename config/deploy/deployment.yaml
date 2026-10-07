@@ -7,7 +7,9 @@ metadata:
     app.kubernetes.io/name: cloudnative-firebird
     app.kubernetes.io/component: operator
 spec:
-  replicas: 1
+  # one replica reconciles (leader election, Lease cloudnative-firebird-operator), every replica
+  # serves the admission webhook; the other takes over within about 15 seconds
+  replicas: 2
   selector:
     matchLabels:
       app.kubernetes.io/name: cloudnative-firebird
@@ -19,6 +21,16 @@ spec:
         app.kubernetes.io/component: operator
     spec:
       serviceAccountName: cloudnative-firebird-operator
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: cloudnative-firebird
+                    app.kubernetes.io/component: operator
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -49,6 +61,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # leader election identity; LEADER_ELECTION=false runs a single replica without it
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           resources:
             requests:
               cpu: "50m"
@@ -75,3 +92,18 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
       terminationGracePeriodSeconds: 10
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cloudnative-firebird-operator
+  namespace: cloudnative-firebird-system
+  labels:
+    app.kubernetes.io/name: cloudnative-firebird
+    app.kubernetes.io/component: operator
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cloudnative-firebird
+      app.kubernetes.io/component: operator
