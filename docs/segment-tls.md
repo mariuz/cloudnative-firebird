@@ -7,6 +7,7 @@ lag, health and isolation checks. This page explains why it exists, how it works
 and off safely, and what it does and does not protect.
 
 - [Why it is needed](#why-it-is-needed)
+- [Doesn't Firebird's SRP already encrypt this?](#doesnt-firebirds-srp-already-encrypt-this)
 - [Why a proxy sidecar](#why-a-proxy-sidecar)
 - [Architecture](#architecture)
 - [Certificates](#certificates)
@@ -56,6 +57,43 @@ Segment TLS closes that gap. Everything that leaves an instance pod on the segme
 encrypted with TLS 1.3. Both ends must prove that they hold a certificate from the cluster's own
 CA.
 
+## Doesn't Firebird's SRP already encrypt this?
+
+No. SRP and WireCrypt protect only connections that use **Firebird's own network protocol**, and
+journal segment shipping does not use it.
+
+- **SRP** (Secure Remote Password, `AuthServer = Srp256`) lets a client prove that it knows the
+  password without sending it, and gives both sides a shared session key.
+- **WireCrypt** encrypts the connection with that key (ChaCha64, ChaCha or Arc4). Firebird 4 and
+  later require it on the server by default (`WireCrypt = Required`).
+
+Together they protect:
+
+- applications, `isql` and network `gbak` connecting to port 3050;
+- Firebird's own **synchronous** replication: with `sync_replica` the primary attaches to the
+  standby's database over the Firebird protocol, so that connection already gets SRP and WireCrypt.
+
+They do **not** protect the segment server. Firebird's **asynchronous** replication only writes
+journal segments to files in the primary's journal archive; Firebird itself does not move them to
+another machine. This operator ships them with its own segment server on port 3051, a separate plain
+TCP service that Firebird knows nothing about. It carries the journal segments (every committed row
+change), complete database copies when a replica is seeded, and backup files. None of that passes
+through a Firebird connection, so SRP and WireCrypt never apply to it. Before segment TLS this
+traffic was readable by anyone who could observe pod traffic, even with `WireCrypt = Required` and
+Srp256 on every instance.
+
+| Connection | Protocol | Authentication | Encryption |
+|---|---|---|---|
+| Client → Firebird (3050) | Firebird | SRP | WireCrypt (`tls.enabled` makes it strict) |
+| Primary → synchronous standby (`sync_replica`) | Firebird | SRP | WireCrypt |
+| Journal segments, seeds, backup files (3051) | segment server | signed requests (HMAC, since v0.64.0) | **none, unless `segmentTLS.enabled`** |
+| Operator, Jobs → segment server (3051) | segment server | signed requests | **none, unless `segmentTLS.enabled`** |
+
+Request signing borrows SRP's idea for the segment server: a request carries an HMAC instead of
+the SYSDBA password, so the password never crosses the network. But like SRP without WireCrypt, it
+only authenticates the request. The data coming back stays readable, and segment TLS is what
+encrypts it.
+
 ## Why a proxy sidecar
 
 The obvious approach, TLS inside the Perl segment server and its clients, is not possible with the
@@ -66,9 +104,19 @@ official `firebirdsql/firebird` images. Alternatives were measured or ruled out:
 | TLS in Perl (`IO::Socket::SSL`) | not installed; the images ship `perl-base` only, and the operator does not modify them |
 | `openssl s_client` / `stunnel` / `socat` | none are in the images (Debian trixie, only `libssl.so.3` is present) |
 | A cipher in pure Perl (ChaCha20) | 0.47 MB/s measured: a 1 GB seed would take more than half an hour |
-| Carrying the bytes over a Firebird connection (WireCrypt) | would need a Firebird client in every Job, and would tie replication to an authenticated database attachment |
+| Carrying the bytes over a Firebird connection (WireCrypt) | considered and rejected, see the note below |
 | A service mesh (Istio, Linkerd mTLS) or an encrypting CNI (WireGuard) | works, and can be combined with this feature, but is outside the operator's control and not present in most clusters |
 | **A proxy from the operator image** | Node.js with OpenSSL is already there, the image is already pulled by the cluster, and it runs as an unprivileged, read-only container |
+
+> **Note: why not ship the segments over a Firebird connection instead?**
+> It was considered, since it would reuse the SRP authentication and WireCrypt encryption that
+> Firebird already has. It was rejected because it would need a Firebird client in every Job and a
+> database attachment just to move files. Firebird has no API for transferring arbitrary files, so
+> the bytes would have to be packed into BLOBs and unpacked on the other side through SQL. Seeding
+> and physical backups copy raw database and journal files, which an attachment cannot read as
+> files. And replication would depend on the database accepting connections: it would stop during
+> a full shutdown or fencing, exactly when the segment server is needed. The TLS proxy is simpler,
+> moves the bytes unchanged at full speed, and does not depend on Firebird's protocol.
 
 The proxy (`operator/src/segment-tls.ts`, `dist/segment-tls.js` in the operator image) is about 150
 lines. It does not interpret the segment protocol. It relays bytes in both directions, so the Perl
