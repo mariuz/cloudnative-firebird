@@ -576,6 +576,13 @@ export interface SynchronousReplicationConfiguration {
   /** dataDurability preferred: how long the standby may be unavailable before it is detached (default 30) */
   standbyUnavailableSeconds?: number;
   /**
+   * dataDurability required: a rolling update may detach the standby before it restarts it when no
+   * other replica can take over (default false: it is restarted attached and writes wait until it
+   * is ready again). Commits during its restart are then asynchronous, as with preferred; it is
+   * attached again once ready.
+   */
+  detachForUpdates?: boolean;
+  /**
    * How many synchronous standbys (default 1, at most instances - 1; CloudNativePG's number):
    * every commit is applied on all of them before it completes
    */

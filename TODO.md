@@ -19,8 +19,10 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   it keeps accepting writes from clients on its side of the partition.
 - [ ] **Synchronous replication follow-ups** (one standby since v0.53.0, several since v0.61.0):
   attaching and detaching without the short write pause (Firebird reads `sync_replica` only when
-  the database is opened); a restart of the only replica without blocking writes in `required`
-  mode; an "any N of M" quorum (Firebird waits for every `sync_replica`).
+  the database is opened); an "any N of M" quorum (Firebird waits for every `sync_replica`).
+  A restart of the only replica in `required` mode blocks writes by definition; since v0.73.0
+  `detachForUpdates` lets rolling updates detach it first (asynchronous commits meanwhile), while
+  other restarts (crash, drain) still block writes until it is back.
 - [ ] **Encrypt segment shipping**: client connections are encrypted (WireCrypt, v0.54.0), but the
   segment server (journal segments, seed copies, backup files) transfers over plain TCP inside the
   cluster (restricted by the NetworkPolicy when enabled). Since v0.64.0 requests are signed

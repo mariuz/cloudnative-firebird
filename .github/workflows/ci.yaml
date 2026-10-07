@@ -1118,14 +1118,21 @@ jobs:
           [ "$(sql sync-0 'select count(*) from app where id = 100;' | awk '$1 ~ /^[0-9]+$/ { print $1 }')" = 1 ]
           [ "$(count sync-0)" = 14 ] || { echo "the new standby has $(count sync-0) rows, expected 14"; exit 1; }
           echo "sync-0 is the synchronous standby of sync-1"
-          # rolling update with dataDurability preferred: the standby is detached before its
-          # restart (writes continue meanwhile), then attached again; the primary goes last
+          # rolling update with dataDurability required and detachForUpdates: the only standby is
+          # detached before its restart (writes continue meanwhile, asynchronously), then attached
+          # again; the primary goes last
           kubectl patch firebirdcluster sync --type merge \
-            -p '{"spec":{"env":[{"name":"ROLLING_UPDATE_TEST","value":"1"}],"replication":{"synchronous":{"dataDurability":"preferred"}}}}'
+            -p '{"spec":{"env":[{"name":"ROLLING_UPDATE_TEST","value":"1"}],"replication":{"synchronous":{"detachForUpdates":true}}}}'
           timeout 120 bash -c 'until kubectl get statefulset sync -o jsonpath={.spec.template.spec.containers[0].env} | grep -q ROLLING_UPDATE_TEST &&
             [ "$(kubectl get statefulset sync -o jsonpath={.status.observedGeneration})" = "$(kubectl get statefulset sync -o jsonpath={.metadata.generation})" ]; do sleep 3; done'
           rev=$(kubectl get statefulset sync -o jsonpath={.status.updateRevision})
           SEL=firebird.cloudnative-firebird.io/cluster=sync,app.kubernetes.io/component=database
+          # while the standby restarts, a commit on the primary goes through (required alone would
+          # fail it with a replication error until the standby is back)
+          timeout 300 bash -c 'until [ "$(kubectl get pod sync-0 -o jsonpath="{.status.conditions[?(@.type==\"Ready\")].status}" 2>/dev/null)" != True ]; do sleep 1; done'
+          out=$(timeout 60 kubectl exec sync-1 -c firebird -- bash -c "echo \"insert into app values (150, 'during restart'); commit;\" | isql -q localhost:$DB" 2>&1) || true
+          echo "$out"
+          if echo "$out" | grep -qi 'error'; then echo "a commit failed while the standby restarted"; exit 1; fi
           updated() {
             kubectl get pods -l "$SEL" \
               -o jsonpath='{range .items[*]}{.metadata.labels.controller-revision-hash} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
@@ -1143,7 +1150,8 @@ jobs:
           [ "$(kubectl get lease sync-lease -o jsonpath={.spec.holderIdentity})" = "sync-1" ]
           sql sync-1 "insert into app values (101, 'after update'); commit;" >/dev/null
           [ "$(sql sync-0 'select count(*) from app where id = 101;' | awk '$1 ~ /^[0-9]+$/ { print $1 }')" = 1 ]
-          [ "$(count sync-0)" = 15 ] || { echo "the standby has $(count sync-0) rows, expected 15"; exit 1; }
+          # the commit made during the restart reached the standby too (journal, then attached)
+          [ "$(count sync-0)" = 16 ] || { echo "the standby has $(count sync-0) rows, expected 16"; exit 1; }
           echo "rolling update detached the synchronous standby before its restart and attached it again"
           # two synchronous standbys: a third instance, synchronous.number 2
           kubectl patch firebirdcluster sync --type merge -p '{"spec":{"instances":3,"replication":{"synchronous":{"number":2}}}}'
