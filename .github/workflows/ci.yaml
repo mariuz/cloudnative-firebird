@@ -1161,6 +1161,41 @@ jobs:
           fi
           echo "plain connections are refused"
 
+      - name: Verify moving a pinned cluster to segment TLS
+        run: |
+          # a cluster as an upgrade from before v0.77.0 leaves it: pinned to plain segment shipping
+          # by the operator (the annotation tells it from an owner's choice)
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: mig
+            annotations:
+              firebird.cloudnative-firebird.io/segment-tls-migration: pinned
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            segmentTLS:
+              enabled: false
+          EOF
+          timeout 300 bash -c 'until kubectl get pod mig-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/mig-0 --for=condition=Ready --timeout=300s
+          [ "$(kubectl get pod mig-0 -o jsonpath='{.spec.initContainers[*].name}')" != segment-tls ]
+          # the repl cluster (explicitly false before, true now) is never touched: it has no annotation
+          kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system SEGMENT_TLS_MIGRATE=pinned
+          kubectl rollout status deployment/cloudnative-firebird-operator -n cloudnative-firebird-system --timeout=180s
+          annotation() { kubectl get firebirdcluster mig -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/segment-tls-migration}'; }
+          timeout 600 bash -c "until [ \"\$(kubectl get firebirdcluster mig -o jsonpath='{.metadata.annotations.firebird\\.cloudnative-firebird\\.io/segment-tls-migration}')\" = done ]; do sleep 5; done" \
+            || { annotation; echo; kubectl get firebirdcluster mig -o jsonpath='{.status}'; echo; kubectl get pods -l firebird.cloudnative-firebird.io/cluster=mig; exit 1; }
+          [ "$(kubectl get firebirdcluster mig -o jsonpath={.spec.segmentTLS.enabled})" = true ]
+          [ "$(kubectl get pod mig-0 -o jsonpath='{.spec.initContainers[0].name}')" = segment-tls ]
+          kubectl wait pod/mig-0 --for=condition=Ready --timeout=300s
+          reasons=$(kubectl get events --field-selector involvedObject.name=mig -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}')
+          echo "$reasons" | grep -qx SegmentTLSMigrationStarted
+          echo "$reasons" | grep -qx SegmentTLSMigrated
+          kubectl delete firebirdcluster mig --wait=false
+
       - name: Verify synchronous replication
         run: |
           DB=/var/lib/firebird/data/mydb.fdb

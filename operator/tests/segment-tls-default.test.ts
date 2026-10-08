@@ -75,7 +75,10 @@ describe('the segment TLS default', () => {
     const cluster = undecided();
     cluster.status = { phase: 'Running' };
     await new FirebirdClusterController(kubeConfig).reconcile(cluster);
-    expect(specPatches(api)).toEqual([{ spec: { segmentTLS: { enabled: false } } }]);
+    // marked as pinned by the operator, so SEGMENT_TLS_MIGRATE=pinned can move it later
+    expect(specPatches(api)).toEqual([
+      { metadata: { annotations: { 'firebird.cloudnative-firebird.io/segment-tls-migration': 'pinned' } }, spec: { segmentTLS: { enabled: false } } },
+    ]);
   });
 
   it('leaves a cluster that has a value alone', async () => {

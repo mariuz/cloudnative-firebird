@@ -325,6 +325,10 @@ writes `segmentTLS.enabled` into a new cluster's spec on its first reconcile (`t
 on older Kubernetes) and records a `SegmentTLSDefaulted` event. Clusters created by an earlier
 version are pinned to `false`, so an upgrade changes nothing for them; set `enabled: true` to move
 one over. The operator's `SEGMENT_TLS_DEFAULT` (`auto`, `true`, `false`) changes the default.
+Since v0.79.0 the operator can move pinned clusters itself, one idle cluster at a time:
+`SEGMENT_TLS_MIGRATE=pinned` moves the clusters it pinned (annotation
+`firebird.cloudnative-firebird.io/segment-tls-migration: pinned`), `all` every cluster with
+`enabled: false`. Annotate a cluster with `skip` to keep it out (docs/segment-tls.md).
 
 With `segmentTLS.enabled`, every segment server connection (journal segments, seed copies, backup
 files, the operator's lag and health checks) is carried over mutual TLS 1.3. The Firebird images

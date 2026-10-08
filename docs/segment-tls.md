@@ -275,6 +275,36 @@ where its pods would not start.
 GitOps tools see the written field as set by a controller. Put `segmentTLS.enabled` in your
 manifests to keep the decision in Git.
 
+### Moving existing clusters
+
+Since v0.79.0 the operator can move the clusters it pinned to plain segment shipping over to
+segment TLS itself. When it pins an existing cluster, it marks it with the annotation
+`firebird.cloudnative-firebird.io/segment-tls-migration: pinned`, which tells its own choice from an
+owner's `enabled: false`. The operator's `SEGMENT_TLS_MIGRATE` setting decides what it moves:
+
+| `SEGMENT_TLS_MIGRATE` | Clusters moved |
+|---|---|
+| unset (default) | none |
+| `pinned` | those the operator pinned (annotation `pinned`) |
+| `all` | every cluster with `enabled: false`, including those pinned by v0.77.0 and v0.78.0 (before the annotation) and those whose owners chose `false` |
+
+A cluster is moved only when it is idle: phase `Running`, every instance ready, no rolling update,
+switchover, failover or fencing in progress, not hibernated or suspended, and on Kubernetes 1.29 or
+later. Only one cluster migrates at a time across the whole operator. The operator sets
+`enabled: true` and the annotation `in-progress` in one patch, then the usual switch follows (the
+instances restart one by one, the primary last, without replica lag). Once every instance runs the
+proxy, the annotation becomes `done`. Events record each step: `SegmentTLSMigrationStarted`,
+`SegmentTLSMigrated`, and `SegmentTLSMigrationSkipped`.
+
+To keep a cluster out of it, annotate it with `skip`:
+
+```sh
+kubectl annotate firebirdcluster <cluster> firebird.cloudnative-firebird.io/segment-tls-migration=skip --overwrite
+```
+
+An owner who turns segment TLS off again during the migration gets `skip` too. The operator does
+not switch it back.
+
 ### Requirements
 
 
