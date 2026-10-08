@@ -1,8 +1,9 @@
-import { CoreV1Api, V1Pod, V1Secret } from '@kubernetes/client-node';
+import { CoreV1Api, V1ConfigMap, V1Pod, V1Secret } from '@kubernetes/client-node';
 import { API_GROUP, FirebirdCluster, RESOURCE_KIND } from '../types';
 import { certificateNamesMatch, createTlsCertificates, daysUntilExpiry } from './certificates';
 import { SegmentTlsMaterial, SegmentTlsResolver } from './replication-lag';
-import { SEGMENT_TLS_CONTAINER, segmentTlsDnsNames, segmentTlsSecretName } from './segment-tls-pods';
+import { instancePods, instancePodSelector } from './resources';
+import { SEGMENT_TLS_CONTAINER, segmentTlsDnsNames, segmentTlsEnabled, segmentTlsPeersName, segmentTlsSecretName } from './segment-tls-pods';
 
 /**
  * The operator's side of segment TLS (segment-tls-pods.ts): the cluster's CA and certificate in
@@ -15,6 +16,12 @@ import { SEGMENT_TLS_CONTAINER, segmentTlsDnsNames, segmentTlsSecretName } from 
 /** Certificates are renewed this many days before they expire, the CA a year before */
 const RENEW_DAYS = 30;
 const CA_RENEW_DAYS = 365;
+/**
+ * How long after the last plain instance the proxies still accept plain connections: the
+ * kubelet updates a mounted ConfigMap within about two minutes, so a proxy may still see an
+ * instance as plain that much after it restarted with TLS
+ */
+export const ACCEPT_PLAIN_GRACE_MS = 5 * 60_000;
 
 function isNotFound(err: unknown): boolean {
   const e = err as { code?: number; statusCode?: number; response?: { statusCode?: number } };
@@ -139,4 +146,63 @@ export async function ensureSegmentTlsSecret(core: CoreV1Api, cluster: FirebirdC
       if (code !== 409 || attempt >= 3) throw err;
     }
   }
+}
+
+/**
+ * The instances' modes while segment TLS is switched on or off, for the proxies
+ * (<cluster>-segment-tls-peers, see segment-tls.ts): the instances that serve in plain text,
+ * and until when plain connections are accepted. The proxies' client sides reach those instances
+ * in plain text and their server sides accept plain connections from the others meanwhile, so
+ * replication goes on through the rolling update instead of stalling until the primary restarts.
+ *
+ * Switching on, the plain instances are those not running the proxy yet. Switching off, all of
+ * them: the proxies still running talk to every instance in plain text, as the restarted ones
+ * do. The ConfigMap is deleted once segment TLS is off and no proxy is left; while it is on and
+ * every instance runs the proxy, the list is empty and the grace period runs out: TLS only.
+ */
+export async function reconcileSegmentTlsPeers(core: CoreV1Api, cluster: FirebirdCluster, now = Date.now()): Promise<void> {
+  const namespace = cluster.metadata.namespace ?? 'default';
+  const name = segmentTlsPeersName(cluster);
+  const enabled = segmentTlsEnabled(cluster);
+  let existing: V1ConfigMap | undefined;
+  try {
+    existing = await core.readNamespacedConfigMap({ name, namespace });
+  } catch (err) {
+    if (!isNotFound(err)) throw err;
+  }
+  if (!enabled && !existing) return;
+  const pods = instancePods((await core.listNamespacedPod({ namespace, labelSelector: instancePodSelector(cluster.metadata.name) })).items, cluster.metadata.name);
+  if (!enabled && !pods.some(hasSegmentTlsProxy)) {
+    try {
+      await core.deleteNamespacedConfigMap({ name, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+    return;
+  }
+  const plain = pods
+    .filter((p) => !enabled || !hasSegmentTlsProxy(p))
+    .map((p) => p.metadata?.name ?? '')
+    .filter(Boolean)
+    .sort();
+  const previous = Number(existing?.data?.['accept-plain-until'] ?? 0) || 0;
+  const data = {
+    'plain-peers': plain.map((p) => `${p}\n`).join(''),
+    'accept-plain-until': String(plain.length > 0 ? now + ACCEPT_PLAIN_GRACE_MS : previous),
+  };
+  if (existing && existing.data?.['plain-peers'] === data['plain-peers'] && existing.data?.['accept-plain-until'] === data['accept-plain-until']) return;
+  const body: V1ConfigMap = {
+    metadata: {
+      name,
+      namespace,
+      labels: { 'app.kubernetes.io/name': 'cloudnative-firebird', [`${API_GROUP}/cluster`]: cluster.metadata.name },
+      ownerReferences: [
+        { apiVersion: `${API_GROUP}/v1`, kind: RESOURCE_KIND, name: cluster.metadata.name, uid: cluster.metadata.uid ?? '', controller: true },
+      ],
+      ...(existing ? { resourceVersion: existing.metadata?.resourceVersion } : {}),
+    },
+    data,
+  };
+  if (existing) await core.replaceNamespacedConfigMap({ name, namespace, body });
+  else await core.createNamespacedConfigMap({ namespace, body });
 }

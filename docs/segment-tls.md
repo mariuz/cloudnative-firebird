@@ -278,41 +278,78 @@ For a **new cluster** nothing else is needed: the Secret exists before the first
 
 For an **existing cluster**, the change is a pod template change, and the normal rolling update
 applies: replicas one at a time, the primary last. Between the first replica restart and the primary
-restart, the cluster runs in **mixed mode**:
+restart, the cluster runs in **mixed mode**: some instances run the proxy, the others do not yet.
+Since v0.76.0 replication goes on through it (before, the restarted replicas could not pull from the
+plain primary and lagged until it restarted).
+
+The operator publishes the instances' modes in a ConfigMap, `<cluster>-segment-tls-peers`, mounted
+by every proxy:
+
+| Key | Meaning |
+|---|---|
+| `plain-peers` | instance pods that serve in plain text: the client side of a proxy connects to them without TLS |
+| `accept-plain-until` | epoch milliseconds: until then, the server side of a proxy also accepts plain connections, from instances and Jobs that do not run the proxy |
+
+The server side tells the two apart by the first byte of a connection: a TLS handshake record
+starts with `0x16`, and a segment request starts with a letter. Plain connections still need a
+signed request, as before segment TLS.
 
 ```mermaid
 sequenceDiagram
   participant Op as Operator
+  participant CM as ConfigMap repl-segment-tls-peers
   participant R1 as replica repl-1
   participant R2 as replica repl-2
   participant P as primary repl-0
 
   Note over R1,P: all plain
-  Op->>R1: restart with the proxy (TLS)
-  Note over R1,P: repl-1 speaks TLS, repl-0 still plain:<br/>repl-1 cannot pull, its lag grows
-  Op->>R2: restart with the proxy (TLS)
-  Note over R2,P: repl-2 too
-  Op->>P: restart the primary last (TLS)
-  R1->>P: pull over TLS, catch up from the archived segments
-  R2->>P: pull over TLS, catch up
-  Note over R1,P: all TLS
+  Op->>CM: plain-peers: repl-0 repl-1 repl-2, accept plain for 5 min
+  Op->>R1: restart with the proxy
+  R1->>P: repl-0 is listed plain: pull in plain text (no lag)
+  Op->>CM: plain-peers: repl-0 repl-2
+  Op->>R2: restart with the proxy
+  R2->>P: pull in plain text
+  Op->>CM: plain-peers: repl-0
+  Op->>P: restart the primary last
+  Op->>CM: plain-peers: (none), accept plain for 5 more min
+  R1->>P: pull over TLS
+  R2->>P: pull over TLS
+  Note over R1,P: after the grace period: TLS only
 ```
+
+How the operator fills it (on every reconcile, before the StatefulSet, so a restarted instance reads
+the current state when it starts):
+
+- **Switching on:** `plain-peers` lists the instance pods that do not run the proxy yet. While any
+  is listed, `accept-plain-until` is moved to 5 minutes ahead.
+- **Switching off:** `plain-peers` lists every instance. The proxies still running then talk to all
+  instances in plain text, as the restarted ones do, and accept plain connections. The ConfigMap is
+  deleted once no instance runs the proxy any more.
+- **After the switch** (on, every instance running the proxy): the list is empty and
+  `accept-plain-until` is no longer moved. Once it has passed, the proxies accept TLS only, and the
+  steady state is the same as without the ConfigMap.
+
+The 5-minute grace period covers the kubelet's delay in updating a mounted ConfigMap (up to about
+two minutes). A proxy may still see the primary as plain for that long after it restarted with TLS,
+and its plain connections are accepted meanwhile.
 
 What to expect during the switch:
 
-- **Replicas lag** from their own restart until the primary has restarted, typically a few
-  minutes. They catch up from the primary's archived segments afterwards, since the retention floor
-  keeps what they still need. Nothing is lost, but a failover during the window would promote a
-  lagging replica, exactly as after any other replica outage.
+- **Replication goes on.** Each connection uses the mode of the instance it reaches, plain or TLS.
+  Expect at most a few seconds of extra lag around each restart, as with any rolling update.
 - **The operator keeps measuring** every instance in the mode its pod runs, so lag, cut-off
   detection and the isolation check stay accurate.
-- **Jobs** (backups, restores, failover helpers) created during the switch reach only instances in
-  their own mode. Schedule backups outside the window, or retry them.
-- **Synchronous replication** in `required` mode blocks writes while the standby cannot pull. Plan
-  the switch like a restart of the standby (`synchronous.detachForUpdates`).
+- **Jobs** (backups, restores, failover helpers) work during the switch as well: Jobs with the proxy
+  read the same ConfigMap, and Jobs without it are accepted by the proxies until the grace period
+  ends.
+- **The traffic is plain until the switch is over.** Connections to or from an instance that does
+  not run the proxy are not encrypted, which is what the cluster had before. Once every instance
+  runs the proxy and the grace period has passed, plain connections are refused.
+- **Synchronous replication** behaves as in any rolling update (`synchronous.detachForUpdates`).
 
-Disabling is the same rolling update in reverse. Switch it during a maintenance window on
-clusters where replica lag matters.
+Never edit the ConfigMap by hand: the operator rewrites it, and listing an instance that serves TLS
+as plain makes the proxies connect to it in plain text, which it refuses once the grace period is
+over.
 
 ## Verifying it
 
@@ -347,7 +384,9 @@ What segment TLS guarantees:
   only, with OpenSSL's TLS 1.3 cipher suites (AES-GCM, ChaCha20-Poly1305) and forward secrecy.
 - **Mutual authentication**: a connection is accepted only when both ends present a certificate
   from the cluster's CA. Other clusters' pods, other workloads and plain clients are refused at the
-  handshake, before the segment server sees a byte.
+  handshake, before the segment server sees a byte. The one exception is the switch itself: while segment TLS is
+  being turned on or off, and for 5 minutes after, plain connections with a signed request are
+  accepted (see *Enabling and disabling*).
 - **The segment server is unreachable from the network**: it listens on the loopback only.
 - **Request signing still applies** on top: even a holder of the cluster certificate needs the
   SYSDBA password to make the segment server do anything.
@@ -378,7 +417,8 @@ several hundred MB/s per core, so the segment stream, not the cipher, sets the p
 |---|---|
 | Pods stay in `Init` with the `segment-tls` container waiting | Kubernetes older than 1.29 (no native sidecars), or the operator image cannot be pulled: check `kubectl describe pod` events; set `OPERATOR_IMAGE` to a pullable image, or add the pull secret to the pods' ServiceAccount |
 | Pods stay in `ContainerCreating` with `FailedMount: secret "<cluster>-segment-tls" not found` | the operator could not create it: check the operator log for a 403 and apply `config/deploy/rbac.yaml` (Secrets `create`, `update`) |
-| Replica lag grows right after enabling | expected until the primary has restarted (mixed mode, above); it should catch up within minutes after that |
+| Replica lag grows while switching | check `kubectl get configmap <cluster>-segment-tls-peers -o yaml`: the instances without the proxy must be listed in `plain-peers` and `accept-plain-until` must be in the future; the operator log shows why it could not write it |
+| Plain requests are still answered after enabling | expected for 5 minutes after the last instance restarted with the proxy (`accept-plain-until`) |
 | Lag stays high after the rolling update | `kubectl logs <replica> -c segment-tls` for handshake errors; check that every pod runs the proxy and mounts the same Secret |
 | A backup Job fails during the switch | it reached an instance in the other mode: run it again once the rolling update is done |
 | `ERR expected CONNECT <host> <port>` in a client log | a client spoke to the proxy's client side without the `CONNECT` line: a custom script not using `segment_open` (`segment-auth.pl`) |
@@ -388,6 +428,7 @@ several hundred MB/s per core, so the segment stream, not the cipher, sets the p
 | Item | Value |
 |---|---|
 | Spec | `spec.segmentTLS.enabled` (boolean, default false) |
+| Switch state | ConfigMap `<cluster>-segment-tls-peers` (`plain-peers`, `accept-plain-until`), mounted at `/etc/segment-tls-peers`, written by the operator only while switching |
 | Secret | `<cluster>-segment-tls`, type `kubernetes.io/tls`, keys `ca.crt`, `ca.key`, `tls.crt`, `tls.key` |
 | Mount | `/etc/segment-tls` (`ca.crt`, `tls.crt`, `tls.key`), read-only |
 | Container | `segment-tls`, operator image, `node dist/segment-tls.js`, uid 65532, read-only root, no capabilities |

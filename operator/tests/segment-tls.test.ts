@@ -6,7 +6,7 @@ import { join } from 'path';
 import { REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { createServer, Server, Socket } from 'net';
 import { createTlsCertificates } from '../src/utils/certificates';
-import { SegmentTlsFiles, startClient, startServer } from '../src/segment-tls';
+import { parsePeers, peerName, SegmentTlsFiles, SegmentTlsPeers, startClient, startServer } from '../src/segment-tls';
 
 const certs = (caName: string): SegmentTlsFiles => {
   const c = createTlsCertificates({ caName, dnsNames: ['*.db-headless'], clientAuth: true });
@@ -76,6 +76,53 @@ describe('segment TLS proxy', () => {
     expect(await exchange(p.clientPort, `CONNECT 127.0.0.1 ${p.tlsPort}\nSTORE x.nbk 5\nhello`)).toBe('OK STORE x.nbk 5\n');
     expect(p.target.seen[0]).toMatch(/^STORE x\.nbk 5\n/);
     expect(await exchange(p.clientPort, `CONNECT 127.0.0.1 ${p.tlsPort}\nLIST\n`)).toBe('OK LIST\n');
+  });
+
+  it('accepts plain connections only while the operator allows them (switching segment TLS)', async () => {
+    const files = certs('cluster db CA');
+    const target = await segmentServer();
+    let peers: SegmentTlsPeers = { plain: new Set(), acceptPlainUntil: 2_000 };
+    let clock = 1_000;
+    const tlsServer = await startServer(() => files, 0, { host: '127.0.0.1', port: target.port }, '127.0.0.1', () => peers, () => clock);
+    servers.push(tlsServer);
+    const tlsPort = (tlsServer.address() as { port: number }).port;
+    // an instance or Job without the proxy yet: plain text, forwarded as it is
+    expect(await exchange(tlsPort, 'SIG1 1 2 3 PING\n')).toBe('OK SIG1 1 2 3 PING\n');
+    // TLS on the same port meanwhile
+    const client = await startClient(() => files, 0);
+    servers.push(client);
+    const clientPort = (client.address() as { port: number }).port;
+    expect(await exchange(clientPort, `CONNECT 127.0.0.1 ${tlsPort}\nLIST\n`)).toBe('OK LIST\n');
+    // the switch is over: TLS only
+    clock = 2_000;
+    expect(await exchange(tlsPort, 'SIG1 1 2 3 PING\n').catch(() => '')).toBe('');
+    peers = { plain: new Set(), acceptPlainUntil: 0 };
+    expect(await exchange(clientPort, `CONNECT 127.0.0.1 ${tlsPort}\nLIST\n`)).toBe('OK LIST\n');
+    expect(target.seen).toEqual(['SIG1 1 2 3 PING\n', 'LIST\n', 'LIST\n']);
+    // every connection was closed on both ends
+    await new Promise((r) => setTimeout(r, 50));
+    const open = await new Promise<number>((r) => tlsServer.getConnections((_e, n) => r(n)));
+    expect(open).toBe(0);
+  });
+
+  it('connects in plain text to the instances the operator lists as plain, and only to those', async () => {
+    const files = certs('cluster db CA');
+    const target = await segmentServer();
+    const peers: SegmentTlsPeers = { plain: new Set(['localhost']), acceptPlainUntil: 0 };
+    const client = await startClient(() => files, 0, '127.0.0.1', () => peers);
+    servers.push(client);
+    const clientPort = (client.address() as { port: number }).port;
+    // "localhost" is listed: plain, straight to the segment server
+    expect(await exchange(clientPort, `CONNECT localhost ${target.port}\nPING\n`)).toBe('OK PING\n');
+    // 127.0.0.1 is not: TLS, which a plain segment server does not answer with OK
+    expect(await exchange(clientPort, `CONNECT 127.0.0.1 ${target.port}\nPING\n`).catch(() => '')).not.toMatch(/^OK PING/);
+  });
+
+  it('reads the peers the operator publishes, ignoring anything that is not a pod name', () => {
+    expect(parsePeers('db-0\ndb-2\n', '1700000000000')).toEqual({ plain: new Set(['db-0', 'db-2']), acceptPlainUntil: 1700000000000 });
+    expect(parsePeers(undefined, undefined)).toEqual({ plain: new Set(), acceptPlainUntil: 0 });
+    expect(parsePeers('db-0 ../x DB-1', 'soon')).toEqual({ plain: new Set(['db-0']), acceptPlainUntil: 0 });
+    expect(peerName('db-1.db-headless.prod.svc')).toBe('db-1');
   });
 
   it('refuses plain connections and peers of another cluster', async () => {

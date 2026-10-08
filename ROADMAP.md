@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.75.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.76.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Switching Segment TLS Without Replica Lag** *(v0.76.0)*
+  - Turning `segmentTLS` on or off restarts the instances one by one, the primary last. Until the primary had restarted, replicas restarted in the new mode could not pull from it: they lagged through the whole rolling update, and Jobs reached only the instances in their own mode.
+  - The operator now publishes the instances' modes in the `<cluster>-segment-tls-peers` ConfigMap, written before the StatefulSet on every reconcile: `plain-peers` (the instances without the proxy when switching on, all of them when switching off) and `accept-plain-until` (5 minutes after the last plain instance, for the kubelet's ConfigMap update delay). The proxies' client sides connect to the listed instances in plain text; their server sides tell TLS from plain text by the first byte (0x16, a TLS handshake record) and accept plain connections until then. Afterwards TLS only, as before; a failed TLS handshake never falls back to plain text.
+  - Unit tests cover the proxy in both modes on one port, the client's routing and the ConfigMap in both directions; the kind CI holds the primary back (`primaryUpdateStrategy: supervised`) while the replicas already run the proxy, checks that they keep replicating from it and that it reaches them in plain text, then lets it restart and checks that plain requests are refused once the grace period is over.
 - [x] **Encrypted Segment Shipping** *(v0.75.0, CloudNativePG's TLS between instances)*
   - Journal segments, seed copies and backup files went over plain TCP between the segment servers (requests were signed since v0.64.0, replies and data were not). The Firebird images have no TLS tooling (no openssl CLI, stunnel or Perl TLS module) and a pure-Perl cipher was too slow (under 1 MB/s).
   - `segmentTLS.enabled: true` runs a proxy from the operator image (`dist/segment-tls.js`) as a native sidecar in every instance pod (Kubernetes 1.29+): mutual TLS 1.3 on the segment port, forwarded to the segment server on localhost, and a client side the Perl clients reach with `SEGMENT_PROXY` (`CONNECT <host> <port>`, then the request as before). Jobs get the client side; the operator connects over TLS itself.

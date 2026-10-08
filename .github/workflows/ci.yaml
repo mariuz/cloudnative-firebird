@@ -1046,47 +1046,61 @@ jobs:
             echo "$1 has $(count "$1") rows, expected $2"; return 1
           }
           SEL=firebird.cloudnative-firebird.io/cluster=repl,app.kubernetes.io/component=database
-          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"segmentTLS":{"enabled":true}}}'
+          primary=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
+          replicas=$(for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$primary" ] || echo "$pod"; done)
+          replica=$(echo "$replicas" | head -1)
+          # supervised: the rolling update restarts the replicas with the proxy and leaves the
+          # primary plain until it is let go below, so the mixed mode can be checked
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"segmentTLS":{"enabled":true},"primaryUpdateStrategy":"supervised"}}'
           # the operator creates the cluster's CA and certificate
           timeout 60 bash -c 'until kubectl get secret repl-segment-tls >/dev/null 2>&1; do sleep 2; done'
           [ "$(kubectl get secret repl-segment-tls -o jsonpath={.type})" = kubernetes.io/tls ]
           [ -n "$(kubectl get secret repl-segment-tls -o jsonpath='{.data.ca\.key}')" ]
-          # every instance restarts with the proxy (the primary last)
           tls_ready() {
             kubectl get pods -l "$SEL" \
               -o jsonpath='{range .items[*]}{.spec.initContainers[0].name} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
               | grep -c '^segment-tls True$'
           }
+          for n in $(seq 1 180); do [ "$(tls_ready)" = 2 ] && break; sleep 5; done
+          [ "$(tls_ready)" = 2 ] || { kubectl get firebirdcluster repl -o jsonpath='{.status.rollingUpdate}'; echo; kubectl get pods -l "$SEL"; exit 1; }
+          [ "$(kubectl get pod "$primary" -o jsonpath='{.spec.initContainers[0].name}')" != segment-tls ]
+          # the operator publishes the plain primary for the proxies
+          kubectl get configmap repl-segment-tls-peers -o jsonpath='{.data.plain-peers}' | tee /dev/stderr | grep -qx "$primary"
+
+          # mixed mode: the TLS replicas pull from the plain primary, without waiting for its restart
+          before=$(count "$primary")
+          for i in $(seq 401 405); do sql "$primary" "insert into app values ($i, 'mixed'); commit;" >/dev/null; done
+          for pod in $replicas; do wait_count "$pod" $((before + 5)); done
+          echo "replicas running the proxy kept replicating from the plain primary"
+          # ... and a plain client (the primary, no proxy yet) still reaches a replica's proxy
+          kubectl exec "$primary" -c segment-server -- perl /etc/firebird-operator/segment-request.pl "$replica.repl-headless" PING | tee /tmp/mixed-ping.txt
+          grep -q '^OK' /tmp/mixed-ping.txt
+
+          # the primary is let go and restarts last
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"primaryUpdateStrategy":"unsupervised"}}'
           for n in $(seq 1 180); do [ "$(tls_ready)" = 3 ] && break; sleep 5; done
-          [ "$(tls_ready)" = 3 ] || {
-            kubectl get firebirdcluster repl -o jsonpath='{.status.rollingUpdate}'; echo
-            kubectl get pods -l "$SEL"; exit 1
-          }
+          [ "$(tls_ready)" = 3 ] || { kubectl get firebirdcluster repl -o jsonpath='{.status.rollingUpdate}'; echo; kubectl get pods -l "$SEL"; exit 1; }
           timeout 180 bash -c 'until [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.phase})" = "Running" ] &&
             [ -z "$(kubectl get firebirdcluster repl -o jsonpath={.status.rollingUpdate})" ]; do sleep 5; done'
           primary=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
+          replicas=$(for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$primary" ] || echo "$pod"; done)
+          replica=$(echo "$replicas" | head -1)
           kubectl logs "$primary" -c segment-tls | grep -q 'accepting on 0.0.0.0:3051'
           # the segment server listens on localhost only, behind the proxy
           kubectl logs "$primary" -c segment-server | grep -q 'listening on 127.0.0.1:3061'
+          timeout 120 bash -c 'until [ -z "$(kubectl get configmap repl-segment-tls-peers -o jsonpath={.data.plain-peers})" ]; do sleep 5; done'
 
           # replication flows over TLS
           before=$(count "$primary")
-          for i in $(seq 401 410); do sql "$primary" "insert into app values ($i, 'over tls'); commit;" >/dev/null; done
-          for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$primary" ] || wait_count "$pod" $((before + 10)); done
+          for i in $(seq 406 410); do sql "$primary" "insert into app values ($i, 'over tls'); commit;" >/dev/null; done
+          for pod in $replicas; do wait_count "$pod" $((before + 5)); done
           echo "replicas applied the rows shipped over TLS"
           # the operator reaches the segment servers over TLS too: the lag is measured again
-          replica=$(for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$primary" ] || echo "$pod"; done | head -1)
           timeout 120 bash -c "until [ \"\$(kubectl get pod $replica -o jsonpath='{.metadata.annotations.firebird\\.cloudnative-firebird\\.io/replication-lag-seconds}')\" = 0 ]; do sleep 5; done" \
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.replicationStatus}'; exit 1; }
-
-          # a signed request through the proxy is answered; the same request in plain text is not
+          # a signed request through the proxy is answered
           kubectl exec "$replica" -c segment-server -- perl /etc/firebird-operator/segment-request.pl "$primary.repl-headless" PING | tee /tmp/tls-ping.txt
           grep -q '^OK' /tmp/tls-ping.txt
-          if kubectl exec "$replica" -c segment-server -- env -u SEGMENT_PROXY \
-              perl /etc/firebird-operator/segment-request.pl "$primary.repl-headless" PING 2>&1 | grep -q '^OK'; then
-            echo "the segment server answered a plain connection"; exit 1
-          fi
-          echo "plain connections are refused"
 
           # Jobs reach the instances through their own proxy, and still meet the restricted Pod Security Standard
           kubectl apply -f - <<'EOF'
@@ -1113,6 +1127,15 @@ jobs:
             | jq '{apiVersion: "v1", kind: "Pod", metadata: {name: "restricted-check", namespace: "pss-restricted-tls"}, spec: .spec.template.spec}' \
             | kubectl apply --dry-run=server -f -
           kubectl delete namespace pss-restricted-tls --wait=false
+
+          # once the switch's grace period is over, a request in plain text is refused
+          until_ms=$(kubectl get configmap repl-segment-tls-peers -o jsonpath='{.data.accept-plain-until}')
+          while [ "$(date +%s%3N)" -lt $((until_ms + 15000)) ]; do sleep 10; done
+          if kubectl exec "$replica" -c segment-server -- env -u SEGMENT_PROXY \
+              perl /etc/firebird-operator/segment-request.pl "$primary.repl-headless" PING 2>&1 | grep -q '^OK'; then
+            echo "the segment server answered a plain connection"; exit 1
+          fi
+          echo "plain connections are refused"
 
       - name: Verify synchronous replication
         run: |
