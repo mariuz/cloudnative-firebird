@@ -40,7 +40,6 @@ use IO::Select;
 use IO::Socket::INET;
 use POSIX ();
 use Socket qw(getaddrinfo getnameinfo AF_INET SOCK_STREAM NI_NUMERICHOST NIx_NOSERV EAI_NONAME);
-use Time::HiRes ();
 
 my $database     = $ENV{DATABASE_PATH} or die "DATABASE_PATH is required\n";
 my $primary_file = $ENV{PRIMARY_FILE} or die "PRIMARY_FILE is required\n";
@@ -107,8 +106,9 @@ sub resolve_peers {
     POSIX::_exit(0);
   }
   close $w;
-  my ($out, $select, $deadline) = ('', IO::Select->new($r), Time::HiRes::time() + $dns_timeout);
-  while ((my $left = $deadline - Time::HiRes::time()) > 0) {
+  # whole seconds: the image ships perl-base, without Time::HiRes
+  my ($out, $select, $deadline) = ('', IO::Select->new($r), time + $dns_timeout);
+  while ((my $left = $deadline - time) > 0) {
     last unless $select->can_read($left);
     my $n = sysread($r, my $buf, 4096);
     last unless $n;
