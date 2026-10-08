@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.77.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.78.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Fencing a Cut-Off Primary Without DNS** *(v0.78.0)*
+  - The isolation check fences a primary that neither the operator nor any replica has reached for `contactTimeoutSeconds` (v0.74.0), but only when the headless Service lists other instances. It found them through cluster DNS, so a primary that lost DNS with the partition (the DNS servers on the other side) concluded it had no replicas and kept taking writes until the operator's failover deleted its pod, and those writes were lost at the re-seed.
+  - The primary now looks its peers up on every check, in a child process with a 2-second limit (a DNS server that never answers made each lookup take tens of seconds over the search domains), and keeps the last answer on its volume. When DNS does not answer (not "no such name"), it uses those addresses, or the operator's ready replicas from the mounted cluster ConfigMap when it knew none, and fences itself only when none of the known addresses answers either (1-second probes). A DNS outage alone, in which it still reaches its peers, does not fence it: nothing fails it over then.
+  - Unit tests cover the cache, a DNS server that fails or never answers, a peer that still answers, the operator's list as fallback and "no such name"; the kind CI cuts the primary off from its peers, the operator and DNS (kube-dns and CoreDNS) and checks that it fences itself from the peers it knew before the operator replaces it.
 - [x] **Segment TLS by Default** *(v0.77.0)*
   - New clusters get `segmentTLS.enabled: true` when the API server is Kubernetes 1.29 or later (native sidecars), read at operator startup. The operator writes the value into the spec on a cluster's first reconcile, before any pod exists, and records a `SegmentTLSDefaulted` event, so the decision is visible and never changes afterwards.
   - Clusters that already have a StatefulSet (created by an earlier version) are pinned to `false`: upgrading the operator does not restart or change them. Values set by the user are kept. `SEGMENT_TLS_DEFAULT` (`auto`, `true`, `false`) changes the default; admission warns when segment TLS is asked for on Kubernetes without native sidecars.

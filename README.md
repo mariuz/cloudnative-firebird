@@ -609,6 +609,14 @@ Once the operator commits to the failover:
   the operator reaches it again and brings it back online. `fenceWhenUnreached: false` turns
   this off.
 
+  The other instances are found through cluster DNS, which can be lost in the same partition
+  (since v0.78.0). The primary looks them up on every check, with a 2-second limit, and keeps
+  the addresses of the last answer on its volume. When DNS does not answer, it goes by those
+  addresses, or by the operator's list of ready replicas in the cluster ConfigMap when it knew
+  none. It then fences itself only when none of the known addresses answers either. A DNS outage
+  alone, in which it still reaches the other instances, does not fence it: the operator and the
+  replicas cannot resolve it then either, and nothing fails it over.
+
 - **Cut-off primary**: a primary whose pod stays ready (the kubelet still sees it) but that the
   rest of the cluster has lost is failed over too. Each replica's segment puller records when it
   last reached the primary's segment server (`PRIMARYSEEN`); the primary counts as unavailable

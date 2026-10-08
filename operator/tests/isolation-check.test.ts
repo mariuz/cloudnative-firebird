@@ -198,6 +198,67 @@ describe('isolation-check.pl', () => {
       expect(ws.calls()).toEqual([]);
     });
 
+    describe('when cluster DNS fails', () => {
+      const cache = (ws: ReturnType<typeof workspace>) => join(ws.dir, 'self-fenced.peers');
+
+      it('remembers the peers of every answer', () => {
+        if (!hasPerl) return;
+        const ws = workspace();
+        contactedAt(ws, minutesAgo(0));
+        check(ws, env(ws));
+        expect(readFileSync(cache(ws), 'utf8')).toBe('127.0.0.1\n');
+      });
+
+      it('fences a primary nothing reaches when none of the peers it knew answers either', () => {
+        if (!hasPerl) return;
+        const ws = workspace();
+        writeFileSync(cache(ws), '127.0.0.1\n');
+        contactedAt(ws, minutesAgo(2));
+        // a DNS server that never answers: the lookup is given up after DNS_TIMEOUT
+        const started = Date.now();
+        const out = check(ws, env(ws, { TEST_DNS: 'hang', DNS_TIMEOUT: '1' }));
+        expect(Date.now() - started).toBeLessThan(5_000);
+        expect(out).toMatch(/cluster DNS did not answer for localhost: using the 1 peer address\(es\) known/);
+        expect(out).toMatch(/has reached this primary for 1[0-9]{2}s \(cluster DNS failing, and no known peer answers\); fencing/);
+        expect(existsSync(ws.marker)).toBe(true);
+        // the cache is kept for the next check
+        expect(readFileSync(cache(ws), 'utf8')).toBe('127.0.0.1\n');
+      });
+
+      it('leaves it alone while a peer it knew still answers: a DNS outage alone', () => {
+        if (!hasPerl) return;
+        const ws = workspace();
+        writeFileSync(cache(ws), '127.0.0.1\n');
+        contactedAt(ws, minutesAgo(2));
+        check(ws, env(ws, { TEST_DNS: 'fail', SEGMENT_PORT: port }));
+        expect(ws.calls()).toEqual([]);
+      });
+
+      it('without known peers, goes by the operator\'s list of ready replicas', () => {
+        if (!hasPerl) return;
+        const listed = workspace();
+        writeFileSync(join(listed.dir, 'seed-sources'), 'db-1.db-headless\n');
+        contactedAt(listed, minutesAgo(2));
+        check(listed, env(listed, { TEST_DNS: 'fail', SEED_SOURCES_FILE: join(listed.dir, 'seed-sources') }));
+        expect(existsSync(listed.marker)).toBe(true);
+        const none = workspace();
+        writeFileSync(join(none.dir, 'seed-sources'), '');
+        contactedAt(none, minutesAgo(2));
+        check(none, env(none, { TEST_DNS: 'fail', SEED_SOURCES_FILE: join(none.dir, 'seed-sources') }));
+        expect(none.calls()).toEqual([]);
+      });
+
+      it('trusts an answer of "no such name": no peers', () => {
+        if (!hasPerl) return;
+        const ws = workspace();
+        writeFileSync(cache(ws), '127.0.0.1\n');
+        contactedAt(ws, minutesAgo(2));
+        check(ws, env(ws, { PEERS_SERVICE: 'no-such-peers.invalid' }));
+        expect(ws.calls()).toEqual([]);
+        expect(readFileSync(cache(ws), 'utf8')).toBe('');
+      });
+    });
+
     it('leaves a primary without replicas alone, and does nothing when off', () => {
       if (!hasPerl) return;
       const alone = workspace();

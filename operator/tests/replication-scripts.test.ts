@@ -9,6 +9,8 @@ import { JOB_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
 const SCRIPTS: Record<string, string> = { ...REPLICATION_SCRIPTS, ...JOB_SCRIPTS };
 
 const hasPerl = spawnSync('perl', ['-v']).status === 0;
+/** Modules of the Firebird images' perl-base that the scripts use (checked in the image) */
+const PERL_BASE_MODULES = ['IO::Select', 'IO::Socket::INET', 'POSIX', 'Socket'];
 const dir = mkdtempSync(join(tmpdir(), 'fb-repl-scripts-'));
 
 describe('replication scripts shipped to instance pods', () => {
@@ -19,8 +21,10 @@ describe('replication scripts shipped to instance pods', () => {
       const file = join(dir, name);
       writeFileSync(file, SCRIPTS[name]);
       expect(() => execFileSync('perl', ['-c', file], { stdio: 'pipe' })).not.toThrow();
-      // the Firebird image ships perl-base only; HTTP::Tiny, File::Copy, Digest::* are absent
-      expect(SCRIPTS[name]).not.toMatch(/^use (HTTP::|File::Copy|Digest::|LWP)/m);
+      // the Firebird image ships perl-base only (no HTTP::Tiny, File::Copy, Digest::*, Time::HiRes):
+      // only modules checked in the image (perl -c in firebirdsql/firebird:5) are allowed
+      const modules = [...SCRIPTS[name].matchAll(/^\s*(?:use|require)\s+([A-Z][\w:]*)/gm)].map((m) => m[1]);
+      expect(modules.filter((m) => !PERL_BASE_MODULES.includes(m))).toEqual([]);
     },
   );
 
