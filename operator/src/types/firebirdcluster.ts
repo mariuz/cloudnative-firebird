@@ -354,7 +354,8 @@ export interface FirebirdClusterSpec {
   /**
    * Segment TLS: the segment servers (replication: journal segments, seed copies; backup files)
    * and their clients talk over mutual TLS with a CA the operator manages for the cluster, through
-   * a proxy from the operator image (native sidecars: Kubernetes 1.29 or later). Default off.
+   * a proxy from the operator image (native sidecars: Kubernetes 1.29 or later). Written on a new
+   * cluster's first reconcile when unset (utils/segment-tls-default.ts).
    */
   segmentTLS?: { enabled?: boolean };
   replication?: ReplicationConfiguration;

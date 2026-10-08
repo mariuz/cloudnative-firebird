@@ -48,7 +48,8 @@ vi.mock('@kubernetes/client-node', () => {
   class BatchV1Api {}
   class CustomObjectsApi {}
   class PolicyV1Api {}
-  return { KubeConfig, Watch, AppsV1Api, CoreV1Api, BatchV1Api, CustomObjectsApi, PolicyV1Api };
+  class VersionApi {}
+  return { KubeConfig, Watch, AppsV1Api, CoreV1Api, BatchV1Api, CustomObjectsApi, PolicyV1Api, VersionApi };
 });
 
 // Mock the controller so we can track reconcile() calls without real K8s

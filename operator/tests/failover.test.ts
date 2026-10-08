@@ -18,7 +18,7 @@ const makeCluster = (status?: FirebirdCluster['status'], failover: object = { en
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
   kind: 'FirebirdCluster',
   metadata: { name: 'db', namespace: 'default', uid: 'c' },
-  spec: { instances: 3, storage: { size: '1Gi' }, replication: { enabled: true, failover } },
+  spec: { instances: 3, storage: { size: '1Gi' }, segmentTLS: { enabled: false }, replication: { enabled: true, failover } },
   ...(status ? { status } : {}),
 });
 

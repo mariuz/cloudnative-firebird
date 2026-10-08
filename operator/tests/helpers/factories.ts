@@ -19,6 +19,8 @@ export const makeCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): F
   spec: {
     instances: 1,
     storage: { size: '1Gi' },
+    // as the controller's first reconcile defaults it (segment-tls-default.ts)
+    segmentTLS: { enabled: false },
     ...overrides,
   },
 });

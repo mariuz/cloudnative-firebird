@@ -250,7 +250,33 @@ only issues the certificate from it.
 
 ## Enabling and disabling
 
-Requirements:
+### The default
+
+Since v0.77.0 new clusters get segment TLS **on by default** when the API server is Kubernetes 1.29
+or later. The operator writes the default into the cluster's spec on its first reconcile, before
+it creates any pod, and records a `SegmentTLSDefaulted` event:
+
+| Cluster | `spec.segmentTLS.enabled` written |
+|---|---|
+| new, Kubernetes 1.29 or later | `true` |
+| new, older Kubernetes, or a version the operator could not read | `false` |
+| existing (it already has a StatefulSet: created by an earlier operator version) | `false`: an upgrade never changes how an existing cluster ships its segments |
+| a value set by you, `true` or `false` | left as it is |
+
+Because the decision is stored in the spec, it never changes later, whether the operator's setting
+changes or Kubernetes is upgraded. To move an existing cluster over, set `enabled: true` (the switch
+is described below and does not stall replication).
+
+The operator's `SEGMENT_TLS_DEFAULT` environment variable (`config/deploy/deployment.yaml`) changes
+the default for new clusters: `auto` (the default: on from Kubernetes 1.29), `true` or `false`.
+Admission warns when a cluster asks for segment TLS on a Kubernetes version without native sidecars,
+where its pods would not start.
+
+GitOps tools see the written field as set by a controller. Put `segmentTLS.enabled` in your
+manifests to keep the decision in Git.
+
+### Requirements
+
 
 - **Kubernetes 1.29 or later.** Native sidecar containers (beta and on by default since 1.29) are
   needed so the proxy runs before and beside the init containers.
@@ -274,7 +300,8 @@ spec:
     enabled: true
 ```
 
-For a **new cluster** nothing else is needed: the Secret exists before the first pod starts.
+For a **new cluster** nothing else is needed: the Secret exists before the first pod starts, and
+with the default above the setting is not even needed.
 
 For an **existing cluster**, the change is a pod template change, and the normal rolling update
 applies: replicas one at a time, the primary last. Between the first replica restart and the primary
@@ -405,8 +432,9 @@ What it does not cover:
 - **No certificate revocation.** Rotating the CA means deleting `ca.crt` and `ca.key` from the
   Secret. The operator then issues a new CA and certificate, and pods pick them up within about a
   minute. During that time some connections fail until both ends have the new files.
-- **Plain mode is still accepted** by clusters with `segmentTLS` off. There is no global switch that
-  forbids plain segment traffic yet (TODO.md, *Segment TLS by default*).
+- **Plain mode is still possible**: clusters created before v0.77.0, or on Kubernetes older than
+  1.29, or with `segmentTLS.enabled: false`, ship segments in plain text. There is no setting that
+  forbids it cluster-wide.
 
 Resource cost: the proxy requests 10m CPU and 32 MiB of memory per pod. TLS 1.3 with AES-GCM runs at
 several hundred MB/s per core, so the segment stream, not the cipher, sets the pace.
@@ -427,7 +455,8 @@ several hundred MB/s per core, so the segment stream, not the cipher, sets the p
 
 | Item | Value |
 |---|---|
-| Spec | `spec.segmentTLS.enabled` (boolean, default false) |
+| Spec | `spec.segmentTLS.enabled` (boolean; written on a new cluster's first reconcile: `true` from Kubernetes 1.29, `false` for clusters that existed before v0.77.0) |
+| Operator setting | `SEGMENT_TLS_DEFAULT`: `auto` (default), `true`, `false` |
 | Switch state | ConfigMap `<cluster>-segment-tls-peers` (`plain-peers`, `accept-plain-until`), mounted at `/etc/segment-tls-peers`, written by the operator only while switching |
 | Secret | `<cluster>-segment-tls`, type `kubernetes.io/tls`, keys `ca.crt`, `ca.key`, `tls.crt`, `tls.key` |
 | Mount | `/etc/segment-tls` (`ca.crt`, `tls.crt`, `tls.key`), read-only |
