@@ -1,6 +1,7 @@
 import { segmentTlsEnabled } from '../utils/segment-tls-pods';
 import { ensureSegmentTlsSecret, reconcileSegmentTlsPeers } from '../utils/segment-tls-client';
-import { segmentTlsDefault } from '../utils/segment-tls-default';
+import { nativeSidecarsSupported, segmentTlsDefault } from '../utils/segment-tls-default';
+import { MIGRATION_ANNOTATION, migrationInProgress, migrationMode, migrationStep, notMigrating } from '../utils/segment-tls-migration';
 import { superuserPasswordFrom } from '../utils/restore-target';
 import { inPlaceResize, RESIZE_ANNOTATION, RESIZE_TIMEOUT_SECONDS, resizeApplied, resizeInfeasible } from '../utils/in-place';
 import crypto from 'crypto';
@@ -299,6 +300,7 @@ export class FirebirdClusterController {
         return;
       }
       await this.defaultSegmentTls(cluster, log);
+      await this.reconcileSegmentTlsMigration(cluster, log);
 
       const switchover = await this.reconcileSwitchover(cluster, await this.resolvePrimaryPod(cluster, log), log);
       const primaryPod = switchover.primaryPod;
@@ -2597,14 +2599,69 @@ export class FirebirdClusterController {
       existing = false;
     }
     const enabled = !existing && segmentTlsDefault();
+    // pinned by the operator, not chosen by the owner: SEGMENT_TLS_MIGRATE=pinned may move it later
+    const annotations = existing ? { [MIGRATION_ANNOTATION]: 'pinned' } : undefined;
     await this.customApi.patchNamespacedCustomObject(
-      { group: API_GROUP, version: API_VERSION, namespace, plural: RESOURCE_PLURAL, name, body: { spec: { segmentTLS: { enabled } } } },
+      {
+        group: API_GROUP,
+        version: API_VERSION,
+        namespace,
+        plural: RESOURCE_PLURAL,
+        name,
+        body: { ...(annotations ? { metadata: { annotations } } : {}), spec: { segmentTLS: { enabled } } },
+      },
       MERGE_PATCH,
     );
     cluster.spec.segmentTLS = { ...cluster.spec.segmentTLS, enabled };
+    if (annotations) cluster.metadata.annotations = { ...cluster.metadata.annotations, ...annotations };
     const reason = existing ? 'an existing cluster keeps plain segment shipping' : 'the operator default for new clusters';
     log.info({ enabled }, `Defaulted spec.segmentTLS.enabled: ${reason}`);
     await this.event(cluster, 'Normal', 'SegmentTLSDefaulted', `spec.segmentTLS.enabled set to ${enabled} (${reason})`);
+  }
+
+  /**
+   * Moves a cluster pinned to plain segment shipping over to segment TLS when the operator is told
+   * to (SEGMENT_TLS_MIGRATE, segment-tls-migration.ts), one cluster at a time, and records when its
+   * instances all run the proxy
+   */
+  private async reconcileSegmentTlsMigration(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    const mode = migrationMode();
+    const inProgress = migrationInProgress(cluster);
+    if (!inProgress && notMigrating(cluster, mode, nativeSidecarsSupported())) return;
+    const { name, namespace = 'default' } = cluster.metadata;
+    const pods = inProgress
+      ? instancePods((await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items, name)
+      : [];
+    const others = inProgress
+      ? []
+      : ((await this.customApi.listClusterCustomObject({ group: API_GROUP, version: API_VERSION, plural: RESOURCE_PLURAL })) as { items?: FirebirdCluster[] })
+          .items ?? [];
+    const step = migrationStep(cluster, mode, nativeSidecarsSupported(), pods, others);
+    if (step.action === 'none') {
+      if (step.reason && !inProgress) log.debug({ reason: step.reason }, 'Segment TLS migration waits');
+      return;
+    }
+    const value = step.action === 'start' ? 'in-progress' : step.action === 'finish' ? 'done' : 'skip';
+    const body = {
+      metadata: { annotations: { [MIGRATION_ANNOTATION]: value } },
+      ...(step.action === 'start' ? { spec: { segmentTLS: { enabled: true } } } : {}),
+    };
+    await this.customApi.patchNamespacedCustomObject(
+      { group: API_GROUP, version: API_VERSION, namespace, plural: RESOURCE_PLURAL, name, body },
+      MERGE_PATCH,
+    );
+    cluster.metadata.annotations = { ...cluster.metadata.annotations, [MIGRATION_ANNOTATION]: value };
+    if (step.action === 'start') {
+      cluster.spec.segmentTLS = { ...cluster.spec.segmentTLS, enabled: true };
+      log.info('Moving the cluster to segment TLS (SEGMENT_TLS_MIGRATE)');
+      await this.event(cluster, 'Normal', 'SegmentTLSMigrationStarted', 'switching segment TLS on (operator setting SEGMENT_TLS_MIGRATE); the instances restart one by one');
+    } else if (step.action === 'finish') {
+      log.info('Segment TLS migration complete');
+      await this.event(cluster, 'Normal', 'SegmentTLSMigrated', 'every instance runs the segment TLS proxy');
+    } else {
+      log.info('Segment TLS was turned off during its migration: the cluster is skipped from now on');
+      await this.event(cluster, 'Normal', 'SegmentTLSMigrationSkipped', 'segment TLS was turned off during the migration; annotation set to skip');
+    }
   }
 
   /** Records a Kubernetes event on the cluster */

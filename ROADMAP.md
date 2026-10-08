@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.78.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.79.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Moving Existing Clusters to Segment TLS** *(v0.79.0, opt-in)*
+  - Clusters created before v0.77.0 stay pinned to plain segment shipping until their owners switch. The operator now marks the clusters it pins (annotation `firebird.cloudnative-firebird.io/segment-tls-migration: pinned`) and, with `SEGMENT_TLS_MIGRATE=pinned`, switches them on itself; `all` also moves clusters pinned before the annotation existed and those whose owners chose `false`; `skip` keeps a cluster out.
+  - Only an idle cluster is moved (running, every instance ready, no rolling update, switchover, failover or fencing, Kubernetes 1.29 or later), and one at a time across the operator: `enabled: true` and the annotation `in-progress` go in one patch, the usual lag-free switch follows, and the annotation becomes `done` once every instance runs the proxy. An owner who turns it off again during the migration gets `skip`. Events: `SegmentTLSMigrationStarted`, `SegmentTLSMigrated`, `SegmentTLSMigrationSkipped`.
+  - Unit tests cover the setting, pinned against owner-chosen clusters, every reason to wait, one cluster at a time, finishing and stepping back, and the controller's patch; the kind CI creates a pinned cluster, sets `SEGMENT_TLS_MIGRATE=pinned` on the operator and checks that it ends with the proxy, the annotation `done` and both events.
 - [x] **Fencing a Cut-Off Primary Without DNS** *(v0.78.0)*
   - The isolation check fences a primary that neither the operator nor any replica has reached for `contactTimeoutSeconds` (v0.74.0), but only when the headless Service lists other instances. It found them through cluster DNS, so a primary that lost DNS with the partition (the DNS servers on the other side) concluded it had no replicas and kept taking writes until the operator's failover deleted its pod, and those writes were lost at the re-seed.
   - The primary now looks its peers up on every check, in a child process with a 2-second limit (a DNS server that never answers made each lookup take tens of seconds over the search domains), and keeps the last answer on its volume. When DNS does not answer (not "no such name"), it uses those addresses, or the operator's ready replicas from the mounted cluster ConfigMap when it knew none, and fences itself only when none of the known addresses answers either (1-second probes). A DNS outage alone, in which it still reaches its peers, does not fence it: nothing fails it over then.

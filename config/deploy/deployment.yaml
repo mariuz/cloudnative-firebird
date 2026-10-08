@@ -60,6 +60,10 @@ spec:
             # segment TLS for new clusters (docs/segment-tls.md): auto = on from Kubernetes 1.29
             - name: SEGMENT_TLS_DEFAULT
               value: auto
+            # move clusters pinned to plain segment shipping on upgrade over to segment TLS, one at
+            # a time (docs/segment-tls.md): "pinned", "all", or unset (none)
+            # - name: SEGMENT_TLS_MIGRATE
+            #   value: pinned
             - name: OPERATOR_NAMESPACE
               valueFrom:
                 fieldRef:
