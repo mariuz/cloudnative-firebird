@@ -25,10 +25,22 @@
 # fails it over (a "cut-off primary"). It fences itself too, before the operator, which waits
 # longer before it promotes a replica. Only when the headless Service lists other instances: a
 # primary without replicas has nothing to be failed over to.
+#
+# The other instances are found through cluster DNS (the headless Service), which can fail too, for
+# example when the DNS servers are on the other side of the partition. The lookup runs in a child
+# process with a time limit (DNS_TIMEOUT), and every answer is kept in PEERS_CACHE_FILE. When a
+# lookup fails (not "no such name": no answer at all), the check uses the addresses it knew,
+# and the operator's list of ready replicas (SEED_SOURCES_FILE) tells whether there are any. A
+# primary that nothing has reached is then fenced only when none of the known addresses answers
+# either: during a DNS outage alone, the operator and the replicas cannot resolve this primary
+# either (so they do not reach it), while it still reaches them, and nothing fails it over.
 use strict;
 use warnings;
+use IO::Select;
 use IO::Socket::INET;
-use Socket qw(getaddrinfo getnameinfo AF_INET SOCK_STREAM NI_NUMERICHOST NIx_NOSERV);
+use POSIX ();
+use Socket qw(getaddrinfo getnameinfo AF_INET SOCK_STREAM NI_NUMERICHOST NIx_NOSERV EAI_NONAME);
+use Time::HiRes ();
 
 my $database     = $ENV{DATABASE_PATH} or die "DATABASE_PATH is required\n";
 my $primary_file = $ENV{PRIMARY_FILE} or die "PRIMARY_FILE is required\n";
@@ -44,6 +56,9 @@ my $peer_port    = $ENV{SEGMENT_PORT} // 3051;
 my $api_host     = $ENV{KUBERNETES_SERVICE_HOST} // '';
 my $api_port     = $ENV{KUBERNETES_SERVICE_PORT} // 443;
 my $connect_timeout = $ENV{CONNECT_TIMEOUT} // 3;
+my $dns_timeout  = $ENV{DNS_TIMEOUT} // 2;
+my $peers_cache  = $ENV{PEERS_CACHE_FILE} // "$marker.peers";
+my $seed_sources = $ENV{SEED_SOURCES_FILE} // '';
 my $once         = ($ENV{ONCE} // '') eq 'true';   # tests: one check, then exit
 exit 0 unless $timeout =~ /^\d+$/ && $timeout > 0;
 $| = 1;
@@ -58,31 +73,114 @@ sub is_primary {
 }
 
 sub reachable {
-  my ($host, $port) = @_;
-  my $sock = IO::Socket::INET->new(PeerHost => $host, PeerPort => $port, Proto => 'tcp', Timeout => $connect_timeout)
+  my ($host, $port, $timeout) = @_;
+  my $sock = IO::Socket::INET->new(PeerHost => $host, PeerPort => $port, Proto => 'tcp', Timeout => $timeout // $connect_timeout)
     or return 0;
   close $sock;
   return 1;
 }
 
-# The other instances: every address of the headless Service but this pod's
-sub peer_addresses {
-  return () if $peers eq '';
-  my ($err, @res) = getaddrinfo($peers, '', { family => AF_INET, socktype => SOCK_STREAM });
-  return () if $err;
-  my %seen;
-  for my $ai (@res) {
-    my ($e, $ip) = getnameinfo($ai->{addr}, NI_NUMERICHOST, NIx_NOSERV);
-    $seen{$ip} = 1 if !$e && $ip ne $self_ip;
+# Resolves the headless Service in a child process, so that a lookup DNS never answers (every
+# search domain timing out) cannot hold up the check: (1, addresses) when DNS answered, with no
+# addresses for "no such name", (0) when it did not answer within DNS_TIMEOUT
+sub resolve_peers {
+  return (1) if $peers eq '';
+  pipe(my $r, my $w) or return (0);
+  my $pid = fork;
+  return (0) unless defined $pid;
+  if ($pid == 0) {
+    close $r;
+    # tests: a DNS server that fails, or never answers
+    if (($ENV{TEST_DNS} // '') eq 'fail') { print $w "failed\n"; close $w; POSIX::_exit(0); }
+    sleep 60 if ($ENV{TEST_DNS} // '') eq 'hang';
+    my ($err, @res) = getaddrinfo($peers, '', { family => AF_INET, socktype => SOCK_STREAM });
+    if ($err) {
+      print $w ($err == EAI_NONAME ? "none\n" : "failed\n");
+    } else {
+      for my $ai (@res) {
+        my ($e, $ip) = getnameinfo($ai->{addr}, NI_NUMERICHOST, NIx_NOSERV);
+        print $w "$ip\n" unless $e;
+      }
+      print $w "ok\n";
+    }
+    close $w;
+    POSIX::_exit(0);
   }
-  return sort keys %seen;
+  close $w;
+  my ($out, $select, $deadline) = ('', IO::Select->new($r), Time::HiRes::time() + $dns_timeout);
+  while ((my $left = $deadline - Time::HiRes::time()) > 0) {
+    last unless $select->can_read($left);
+    my $n = sysread($r, my $buf, 4096);
+    last unless $n;
+    $out .= $buf;
+  }
+  close $r;
+  kill 'KILL', $pid;
+  waitpid($pid, 0);
+  my @lines = split /\n/, $out;
+  my $status = pop(@lines) // '';
+  return (1) if $status eq 'none';
+  return (0) unless $status eq 'ok';
+  my %seen = map { $_ => 1 } grep { $_ ne $self_ip } @lines;
+  return (1, sort keys %seen);
 }
 
-sub has_peers { my @peers = peer_addresses(); return scalar @peers; }
+sub known_peers {
+  open(my $fh, '<', $peers_cache) or return ();
+  my @ips = grep { /^[0-9.]+$/ } map { s/\s+$//r } <$fh>;
+  close $fh;
+  return @ips;
+}
+
+sub remember_peers {
+  my @ips = @_;
+  return if join(',', known_peers()) eq join(',', @ips);
+  open(my $fh, '>', "$peers_cache.tmp") or return;
+  print $fh map { "$_\n" } @ips;
+  close $fh;
+  rename "$peers_cache.tmp", $peers_cache;
+}
+
+# Whether the operator lists ready replicas (the cluster ConfigMap, mounted: no DNS involved)
+sub seed_sources_listed { return slurp($seed_sources) =~ /\S/ ? 1 : 0 if $seed_sources ne ''; return 0; }
+
+# The other instances, once per check: (1, addresses) from DNS, or (0, addresses known from the
+# last answer) when DNS failed
+my ($view, $dns_failing);
+sub peer_view {
+  return @$view if $view;
+  my ($answered, @ips) = resolve_peers();
+  if ($answered) {
+    print "cluster DNS answers again\n" if $dns_failing;
+    $dns_failing = 0;
+    remember_peers(@ips);
+    $view = [1, @ips];
+  } else {
+    my @known = known_peers();
+    print "cluster DNS did not answer for $peers: using the " . scalar(@known) . " peer address(es) known from the last answer\n" unless $dns_failing;
+    $dns_failing = 1;
+    $view = [0, @known];
+  }
+  return @$view;
+}
+
+# Whether other instances could be failed over to while nothing reaches this primary
+sub cut_off_from_peers {
+  my ($answered, @ips) = peer_view();
+  return scalar @ips if $answered;
+  # DNS failed: only when none of the known peers answers either (not a DNS outage alone); with
+  # a short timeout each, as the fence must come before the operator's failover of this primary
+  if (@ips) {
+    for my $ip (@ips) { return 0 if reachable($ip, $peer_port, 1); }
+    return 1;
+  }
+  return seed_sources_listed();
+}
 
 sub connected {
   return 1 if $api_host ne '' && reachable($api_host, $api_port);
-  for my $ip (peer_addresses()) { return 1 if reachable($ip, $peer_port); }
+  my (undef, @ips) = peer_view();
+  for my $ip (@ips) { return 1 if reachable($ip, $peer_port); }
   return 0;
 }
 
@@ -126,6 +224,9 @@ my $last_ok = ($ENV{LAST_CONNECTED} // '') =~ /^\d+$/ ? $ENV{LAST_CONNECTED} : t
 # LAST_CONTACT_BASE (epoch seconds; tests) backdates when this instance became the primary
 $primary_since = $ENV{LAST_CONTACT_BASE} if ($ENV{LAST_CONTACT_BASE} // '') =~ /^\d+$/;
 while (1) {
+  undef $view;
+  # the primary looks its peers up on every check, so that they are known when DNS fails
+  peer_view() if is_primary() && !-f $marker;
   my $unreached = unreached_for();
   if (!is_primary()) {
     $last_ok = time;
@@ -137,8 +238,9 @@ while (1) {
       unlink $marker;
       print "database online again: isolation fence lifted\n";
     }
-  } elsif (defined $unreached && $unreached >= $contact_timeout && has_peers()) {
-    fence(time - $unreached, "neither the operator nor any replica has reached this primary for ${unreached}s");
+  } elsif (defined $unreached && $unreached >= $contact_timeout && cut_off_from_peers()) {
+    fence(time - $unreached, "neither the operator nor any replica has reached this primary for ${unreached}s"
+      . ($dns_failing ? ' (cluster DNS failing, and no known peer answers)' : ''));
   } elsif (connected()) {
     $last_ok = time;
   } elsif (time - $last_ok >= $timeout) {

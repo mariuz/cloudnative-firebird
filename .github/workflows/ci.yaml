@@ -755,10 +755,11 @@ jobs:
           old=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
           before=$(count "$old")
           last_failover=$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})
-          # the primary's pod loses every peer (the other instances and the operator) but keeps the
-          # API server, DNS and the kubelet: it stays ready until its isolation check fences it
-          # (nothing has reached it for contactTimeoutSeconds, 60), before the operator promotes a
-          # replica (45s after every replica lost it). The rules go into the pod's network namespace
+          # the primary's pod loses every peer (the other instances and the operator) and cluster
+          # DNS, but keeps the API server and the kubelet: it stays ready until its isolation check
+          # fences it (nothing has reached it for contactTimeoutSeconds, 60, and none of the peers it
+          # knew from DNS answers), before the operator promotes a replica (45s after every replica
+          # lost it). Without DNS it could not tell it has replicas before v0.78.0. The rules go into the pod's network namespace
           # from the kind node (the namespace's PodSecurity level does not allow NET_ADMIN in a
           # debug container).
           old_uid=$(kubectl get pod "$old" -o jsonpath={.metadata.uid})
@@ -766,11 +767,13 @@ jobs:
           peers=$(for ns in default cloudnative-firebird-system; do
               kubectl get pods -n "$ns" -o jsonpath='{range .items[*]}{.status.podIP} {.status.hostIP}{"\n"}{end}'
             done | awk -v own="$own" '$1 != "" && $1 != $2 && $1 != own { print $1 }' | sort -u)
-          echo "cutting $old ($own) off from: $peers"
+          dns=$( (kubectl get service kube-dns -n kube-system -o jsonpath='{.spec.clusterIP}'; echo
+              kubectl get pods -n kube-system -l k8s-app=kube-dns -o jsonpath='{range .items[*]}{.status.podIP}{"\n"}{end}') | grep .)
+          echo "cutting $old ($own) off from: $peers and DNS: $dns"
           node=firebird-test-control-plane
           sandbox=$(docker exec "$node" crictl pods --namespace default --name "^$old\$" --state ready -q | head -1)
           pid=$(docker exec "$node" crictl inspectp -o go-template --template '{{.info.pid}}' "$sandbox")
-          for ip in $peers; do
+          for ip in $peers $dns; do
             docker exec "$node" nsenter -t "$pid" -n iptables -I INPUT -s "$ip" -j DROP
             docker exec "$node" nsenter -t "$pid" -n iptables -I OUTPUT -d "$ip" -j DROP
           done
@@ -778,7 +781,7 @@ jobs:
           self_fenced=no
           for n in $(seq 1 120); do
             if [ "$self_fenced" = no ] && [ "$(kubectl get pod "$old" -o jsonpath={.metadata.uid} 2>/dev/null)" = "$old_uid" ] &&
-              kubectl logs "$old" -c segment-server 2>/dev/null | grep 'neither the operator nor any replica has reached this primary'; then
+              kubectl logs "$old" -c segment-server 2>/dev/null | tee /tmp/cut-off-primary.log | grep 'neither the operator nor any replica has reached this primary'; then
               self_fenced=yes
             fi
             kubectl get firebirdcluster repl -o jsonpath='{.status.switchover.kind} {.status.switchover.phase}' | grep -q 'failover Completed' &&
@@ -788,6 +791,9 @@ jobs:
           kubectl get firebirdcluster repl -o jsonpath='{.status.switchover.kind} {.status.switchover.phase}' | grep -q 'failover Completed' \
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo; kubectl get pods -o wide; exit 1; }
           [ "$self_fenced" = yes ] || { echo "the cut-off primary did not fence itself before it was replaced"; exit 1; }
+          # it fenced itself without DNS, from the peers it knew
+          grep -q 'cluster DNS did not answer' /tmp/cut-off-primary.log
+          grep -q 'cluster DNS failing, and no known peer answers' /tmp/cut-off-primary.log
           kubectl get events --field-selector involvedObject.name=repl -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' \
             | grep "cut off" | tee /dev/stderr | grep -q "the operator cannot reach it"
           new=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
