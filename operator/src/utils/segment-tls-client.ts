@@ -203,6 +203,11 @@ export async function reconcileSegmentTlsPeers(core: CoreV1Api, cluster: Firebir
     },
     data,
   };
-  if (existing) await core.replaceNamespacedConfigMap({ name, namespace, body });
-  else await core.createNamespacedConfigMap({ namespace, body });
+  try {
+    if (existing) await core.replaceNamespacedConfigMap({ name, namespace, body });
+    else await core.createNamespacedConfigMap({ namespace, body });
+  } catch (err) {
+    // another writer got there first: the next reconcile (30 seconds at most) writes it again
+    if ((err as { code?: number }).code !== 409) throw err;
+  }
 }

@@ -1,5 +1,6 @@
 import { segmentTlsEnabled } from '../utils/segment-tls-pods';
 import { ensureSegmentTlsSecret, reconcileSegmentTlsPeers } from '../utils/segment-tls-client';
+import { segmentTlsDefault } from '../utils/segment-tls-default';
 import { superuserPasswordFrom } from '../utils/restore-target';
 import { inPlaceResize, RESIZE_ANNOTATION, RESIZE_TIMEOUT_SECONDS, resizeApplied, resizeInfeasible } from '../utils/in-place';
 import crypto from 'crypto';
@@ -297,6 +298,7 @@ export class FirebirdClusterController {
         log.info('Cluster no longer exists; nothing to reconcile');
         return;
       }
+      await this.defaultSegmentTls(cluster, log);
 
       const switchover = await this.reconcileSwitchover(cluster, await this.resolvePrimaryPod(cluster, log), log);
       const primaryPod = switchover.primaryPod;
@@ -2577,6 +2579,32 @@ export class FirebirdClusterController {
         log.debug('Grafana Dashboard ConfigMap does not exist, skipping deletion');
       }
     }
+  }
+
+  /**
+   * Writes the segment TLS default into a cluster's spec when it has none (segment-tls-default.ts):
+   * a new cluster gets the operator's default, one that already has a StatefulSet (created by an
+   * earlier version) keeps plain segment shipping. Written once, so it never changes later.
+   */
+  private async defaultSegmentTls(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    if (typeof cluster.spec.segmentTLS?.enabled === 'boolean') return;
+    const { name, namespace = 'default' } = cluster.metadata;
+    let existing = true;
+    try {
+      await this.appsApi.readNamespacedStatefulSet({ name, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+      existing = false;
+    }
+    const enabled = !existing && segmentTlsDefault();
+    await this.customApi.patchNamespacedCustomObject(
+      { group: API_GROUP, version: API_VERSION, namespace, plural: RESOURCE_PLURAL, name, body: { spec: { segmentTLS: { enabled } } } },
+      MERGE_PATCH,
+    );
+    cluster.spec.segmentTLS = { ...cluster.spec.segmentTLS, enabled };
+    const reason = existing ? 'an existing cluster keeps plain segment shipping' : 'the operator default for new clusters';
+    log.info({ enabled }, `Defaulted spec.segmentTLS.enabled: ${reason}`);
+    await this.event(cluster, 'Normal', 'SegmentTLSDefaulted', `spec.segmentTLS.enabled set to ${enabled} (${reason})`);
   }
 
   /** Records a Kubernetes event on the cluster */

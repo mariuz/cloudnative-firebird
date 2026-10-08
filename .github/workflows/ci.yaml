@@ -141,6 +141,21 @@ jobs:
             'until [ -n "$(kubectl get firebirdcluster test-cluster -o jsonpath={.status.phase})" ]; do sleep 3; done'
           kubectl get firebirdcluster test-cluster -o jsonpath='{.status}'; echo
 
+      - name: Verify segment TLS is on by default for new clusters
+        run: |
+          # kind runs Kubernetes 1.29 or later: the operator defaults new clusters to segment TLS
+          kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1 \
+            | grep 'Segment TLS default for new clusters' | tee /dev/stderr | grep -q '"segmentTlsDefault":true'
+          timeout 60 bash -c 'until [ -n "$(kubectl get firebirdcluster test-cluster -o jsonpath={.spec.segmentTLS.enabled})" ]; do sleep 2; done'
+          [ "$(kubectl get firebirdcluster test-cluster -o jsonpath={.spec.segmentTLS.enabled})" = true ]
+          kubectl get events --field-selector reason=SegmentTLSDefaulted,involvedObject.name=test-cluster -o name | grep -q .
+          kubectl get secret test-cluster-segment-tls >/dev/null
+          timeout 120 bash -c 'until kubectl get pod test-cluster-0 >/dev/null 2>&1; do sleep 3; done'
+          [ "$(kubectl get pod test-cluster-0 -o jsonpath='{.spec.initContainers[0].name}')" = segment-tls ]
+          # the backup file server behind it listens on localhost only
+          kubectl wait pod/test-cluster-0 --for=condition=Ready --timeout=300s
+          kubectl logs test-cluster-0 -c backup-files | grep -q 'listening on 127.0.0.1:3061'
+
       - name: Verify the admission webhook
         run: |
           # the operator writes its certificates and fills in the caBundle
@@ -252,6 +267,9 @@ jobs:
             replication:
               enabled: true
               archiveTimeoutSeconds: 3
+            # plain until the segment TLS step switches it on (new clusters default to TLS)
+            segmentTLS:
+              enabled: false
           EOF
           ready() {
             timeout 300 bash -c "until kubectl get pod $1 -n default >/dev/null 2>&1; do sleep 3; done"

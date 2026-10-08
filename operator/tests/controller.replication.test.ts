@@ -20,6 +20,7 @@ const makeCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): Firebird
   spec: {
     instances: 1,
     storage: { size: '1Gi' },
+    segmentTLS: { enabled: false },
     ...overrides,
   },
 });

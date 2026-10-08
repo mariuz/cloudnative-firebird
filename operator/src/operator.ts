@@ -3,6 +3,7 @@ import { WebhookServer } from './utils/webhook';
 import { apiLookups, createAdmissionValidator } from './utils/admission';
 import { CoreV1Api, KubeConfig, Watch } from '@kubernetes/client-node';
 import { discoverOperatorImage } from './utils/operator-image';
+import { discoverServerVersion, segmentTlsDefault } from './utils/segment-tls-default';
 import { setSegmentTlsResolver } from './utils/replication-lag';
 import { createSegmentTlsResolver } from './utils/segment-tls-client';
 import { logger } from './utils/logger';
@@ -168,6 +169,8 @@ export class Operator {
     // segment TLS: the proxy image for instance pods and Jobs, and TLS per instance for the
     // operator's own segment server requests
     logger.info({ image: await discoverOperatorImage(this.kubeConfig) }, 'Segment TLS proxy image');
+    const kubernetes = await discoverServerVersion(this.kubeConfig);
+    logger.info({ kubernetes, segmentTlsDefault: segmentTlsDefault() }, 'Segment TLS default for new clusters');
     setSegmentTlsResolver(createSegmentTlsResolver(this.kubeConfig.makeApiClient(CoreV1Api)));
     // several replicas: only the one holding the Lease reconciles; all serve the webhook
     const namespace = process.env.OPERATOR_NAMESPACE;

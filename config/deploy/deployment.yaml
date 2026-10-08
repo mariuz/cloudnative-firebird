@@ -57,6 +57,9 @@ spec:
             # the admission webhook (config/deploy/webhook.yaml); "false" turns it off
             - name: WEBHOOK_ENABLED
               value: "true"
+            # segment TLS for new clusters (docs/segment-tls.md): auto = on from Kubernetes 1.29
+            - name: SEGMENT_TLS_DEFAULT
+              value: auto
             - name: OPERATOR_NAMESPACE
               valueFrom:
                 fieldRef:

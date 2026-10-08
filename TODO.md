@@ -23,13 +23,11 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   A restart of the only replica in `required` mode blocks writes by definition; since v0.73.0
   `detachForUpdates` lets rolling updates detach it first (asynchronous commits meanwhile), while
   other restarts (crash, drain) still block writes until it is back.
-- [ ] **Segment TLS by default**: since v0.75.0 `segmentTLS.enabled` carries segment shipping,
-  seed copies and backup files over mutual TLS (a proxy sidecar from the operator image, a CA per
-  cluster). It is opt-in because it needs Kubernetes 1.29+ (native sidecars) and pulls the operator
-  image into every instance pod. Since v0.76.0 switching an existing cluster no longer stalls
-  replication (the proxies follow the operator's list of plain instances), so what is left is the
-  default itself: on for new clusters where the Kubernetes version allows it, and how existing
-  clusters are moved over on upgrade.
+- [ ] **Move existing clusters to segment TLS**: since v0.77.0 new clusters get it by default
+  (Kubernetes 1.29+), while clusters created earlier stay pinned to plain segment shipping until
+  their owners set `segmentTLS.enabled: true`. A later release could offer an opt-in operator
+  setting that moves them over (the switch no longer stalls replication, v0.76.0), and then a way
+  to refuse plain segment connections altogether.
 - [ ] **Stop accepting the plain password** on the segment server once no supported upgrade path
   starts from a version before v0.64.0 (clients of those versions send it; current clients send it
   only to servers that answer the signed probe like those versions).
