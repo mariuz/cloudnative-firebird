@@ -92,6 +92,7 @@ export function recordClusterMetrics(cluster: FirebirdCluster, status: Partial<F
   metrics.set('firebird_cluster_ready_instances', 'Instances whose pod is ready', base, status.readyInstances ?? 0);
   metrics.set('firebird_cluster_fenced_instances', 'Instances fenced by the fencedInstances annotation', base, status.fencedInstances?.length ?? 0);
   metrics.set('firebird_cluster_ready', '1 when the cluster phase is Running', base, status.phase === 'Running' ? 1 : 0);
+  metrics.set('firebird_cluster_segment_tls', '1 when segment shipping is encrypted (spec.segmentTLS.enabled)', base, cluster.spec.segmentTLS?.enabled === true ? 1 : 0);
   const repl = status.replicationStatus;
   if (repl?.lastArchivedSequence !== undefined) {
     metrics.set('firebird_replication_last_archived_sequence', 'Last journal segment archived on the primary', base, repl.lastArchivedSequence);

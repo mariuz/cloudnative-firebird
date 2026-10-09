@@ -3,7 +3,7 @@ import { WebhookServer } from './utils/webhook';
 import { apiLookups, createAdmissionValidator } from './utils/admission';
 import { CoreV1Api, KubeConfig, Watch } from '@kubernetes/client-node';
 import { discoverOperatorImage } from './utils/operator-image';
-import { discoverServerVersion, segmentTlsDefault } from './utils/segment-tls-default';
+import { discoverServerVersion, nativeSidecarsSupported, segmentTlsDefault, segmentTlsRequired } from './utils/segment-tls-default';
 import { setSegmentTlsResolver } from './utils/replication-lag';
 import { createSegmentTlsResolver } from './utils/segment-tls-client';
 import { logger } from './utils/logger';
@@ -170,7 +170,10 @@ export class Operator {
     // operator's own segment server requests
     logger.info({ image: await discoverOperatorImage(this.kubeConfig) }, 'Segment TLS proxy image');
     const kubernetes = await discoverServerVersion(this.kubeConfig);
-    logger.info({ kubernetes, segmentTlsDefault: segmentTlsDefault() }, 'Segment TLS default for new clusters');
+    logger.info({ kubernetes, segmentTlsDefault: segmentTlsDefault(), segmentTlsRequired: segmentTlsRequired() }, 'Segment TLS default for new clusters');
+    if (segmentTlsRequired() && nativeSidecarsSupported() !== true) {
+      logger.warn('SEGMENT_TLS_REQUIRED is set, but the API server does not support native sidecars (Kubernetes 1.29 or later): new clusters cannot start');
+    }
     setSegmentTlsResolver(createSegmentTlsResolver(this.kubeConfig.makeApiClient(CoreV1Api)));
     // several replicas: only the one holding the Lease reconciles; all serve the webhook
     const namespace = process.env.OPERATOR_NAMESPACE;

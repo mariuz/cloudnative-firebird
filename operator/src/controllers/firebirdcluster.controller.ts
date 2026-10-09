@@ -1,6 +1,6 @@
 import { segmentTlsEnabled } from '../utils/segment-tls-pods';
 import { ensureSegmentTlsSecret, reconcileSegmentTlsPeers } from '../utils/segment-tls-client';
-import { nativeSidecarsSupported, segmentTlsDefault } from '../utils/segment-tls-default';
+import { nativeSidecarsSupported, segmentTlsDefault, segmentTlsRequired } from '../utils/segment-tls-default';
 import { MIGRATION_ANNOTATION, migrationInProgress, migrationMode, migrationStep, notMigrating } from '../utils/segment-tls-migration';
 import { superuserPasswordFrom } from '../utils/restore-target';
 import { inPlaceResize, RESIZE_ANNOTATION, RESIZE_TIMEOUT_SECONDS, resizeApplied, resizeInfeasible } from '../utils/in-place';
@@ -471,6 +471,7 @@ export class FirebirdClusterController {
             isReady ? 'Cluster is ready' : `${readyInstances}/${expectedReady} ready`,
           ),
           this.fencingCondition(fencing),
+          ...(await this.segmentTlsCondition(cluster)),
           this.makeCondition(
             'Progressing',
             isReady ? 'False' : 'True',
@@ -2626,6 +2627,18 @@ export class FirebirdClusterController {
     const reason = existing ? 'an existing cluster keeps plain segment shipping' : 'the operator default for new clusters';
     log.info({ enabled }, `Defaulted spec.segmentTLS.enabled: ${reason}`);
     await this.event(cluster, 'Normal', 'SegmentTLSDefaulted', `spec.segmentTLS.enabled set to ${enabled} (${reason})`);
+  }
+
+  /**
+   * With SEGMENT_TLS_REQUIRED, a cluster still shipping segments in plain text (pinned on upgrade,
+   * or chosen before the setting) is reported, not restarted: a SegmentTLS condition and a warning
+   * event, until its owner or SEGMENT_TLS_MIGRATE moves it over
+   */
+  private async segmentTlsCondition(cluster: FirebirdCluster): Promise<FirebirdClusterCondition[]> {
+    if (!segmentTlsRequired() || segmentTlsEnabled(cluster)) return [];
+    const message = 'segment shipping is plain text, which this operator refuses for new clusters (SEGMENT_TLS_REQUIRED): set spec.segmentTLS.enabled to true, or SEGMENT_TLS_MIGRATE on the operator';
+    await this.event(cluster, 'Warning', 'SegmentTLSRequired', message);
+    return [this.makeCondition('SegmentTLS', 'False', 'PlainSegmentShipping', message)];
   }
 
   /**

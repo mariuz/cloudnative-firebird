@@ -305,6 +305,29 @@ kubectl annotate firebirdcluster <cluster> firebird.cloudnative-firebird.io/segm
 An owner who turns segment TLS off again during the migration gets `skip` too. The operator does
 not switch it back.
 
+### Requiring segment TLS
+
+Since v0.84.0 the operator can refuse plain segment shipping altogether. With
+`SEGMENT_TLS_REQUIRED=true` on the operator (`config/deploy/deployment.yaml`):
+
+- admission denies a `FirebirdCluster` created with `segmentTLS.enabled: false`, and an update that
+  turns segment TLS off; a cluster that is already plain may still be changed otherwise (scaled,
+  reconfigured), so nothing an owner runs breaks;
+- new clusters default to `enabled: true` whatever the Kubernetes version (the operator warns at
+  startup when the API server has no native sidecars, since their pods would not start);
+- a cluster still on plain segment shipping (pinned on upgrade, or chosen before the setting) gets
+  the condition `SegmentTLS: False` (reason `PlainSegmentShipping`), a `SegmentTLSRequired`
+  warning event, and `firebird_cluster_segment_tls 0` on the metrics endpoint. The operator never
+  restarts a cluster for this: move it with `SEGMENT_TLS_MIGRATE` or `enabled: true`.
+
+```sh
+kubectl get firebirdclusters -A -o custom-columns=NAME:.metadata.name,TLS:.spec.segmentTLS.enabled
+# or alert on firebird_cluster_segment_tls == 0
+```
+
+The switch itself (the ConfigMap above, with its plain window while the instances restart) is
+unchanged: it is how a plain cluster becomes a TLS one.
+
 ### Requirements
 
 

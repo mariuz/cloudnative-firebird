@@ -23,10 +23,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   A restart of the only replica in `required` mode blocks writes by definition; since v0.73.0
   `detachForUpdates` lets rolling updates detach it first (asynchronous commits meanwhile), while
   other restarts (crash, drain) still block writes until it is back.
-- [ ] **Refuse plain segment connections**: new clusters get segment TLS by default (v0.77.0)
-  and pinned clusters can be moved over by the operator (`SEGMENT_TLS_MIGRATE`, v0.79.0). Still
-  open: an operator setting that refuses plain segment shipping altogether (no new cluster with
-  `enabled: false`), once no supported Kubernetes version lacks native sidecars.
 - [ ] **Firebird internal formats**: seeding writes the replica control file
   (`ControlFile::DataV1` in `src/remote/server/ReplServer.cpp`) and switchover writes the
   `HDR_repl_seq` header clump (`src/jrd/ods.h`). Verified for Firebird 4.0.7 (ODS 13.0), 5.0.4

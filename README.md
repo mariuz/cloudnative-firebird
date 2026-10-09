@@ -340,6 +340,9 @@ Since v0.79.0 the operator can move pinned clusters itself, one idle cluster at 
 `SEGMENT_TLS_MIGRATE=pinned` moves the clusters it pinned (annotation
 `firebird.cloudnative-firebird.io/segment-tls-migration: pinned`), `all` every cluster with
 `enabled: false`. Annotate a cluster with `skip` to keep it out (docs/segment-tls.md).
+`SEGMENT_TLS_REQUIRED=true` (v0.84.0) refuses plain segment shipping: admission denies a cluster
+created with `enabled: false` or switched to it, and a cluster still plain gets a `SegmentTLS: False`
+condition, a `SegmentTLSRequired` event and `firebird_cluster_segment_tls 0` until it is moved.
 
 With `segmentTLS.enabled`, every segment server connection (journal segments, seed copies, backup
 files, the operator's lag and health checks) is carried over mutual TLS 1.3. The Firebird images
@@ -503,6 +506,7 @@ alerting on it needs no exporter sidecar:
 | `firebird_cluster_ready_instances` | `namespace`, `cluster` | Instances whose pod is ready |
 | `firebird_cluster_fenced_instances` | `namespace`, `cluster` | Fenced instances |
 | `firebird_cluster_ready` | `namespace`, `cluster` | 1 when the phase is `Running` |
+| `firebird_cluster_segment_tls` | `namespace`, `cluster` | 1 when segment shipping is encrypted (`spec.segmentTLS.enabled`) |
 | `firebird_replication_last_archived_sequence` | `namespace`, `cluster` | Last segment archived on the primary |
 | `firebird_replication_lag_seconds` | `namespace`, `cluster`, `pod` | Age of the oldest archived segment the replica has not applied |
 | `firebird_replication_lag_segments` | `namespace`, `cluster`, `pod` | Archived segments the replica has not applied |
