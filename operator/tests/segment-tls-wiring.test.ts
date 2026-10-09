@@ -132,7 +132,7 @@ describe('the operator side of segment TLS', () => {
     const segmentServer: Server = createServer((s) =>
       s.once('data', (d) => {
         lines.push(d.toString().trim());
-        s.end(lines.length === 1 ? 'OK\n' : 'OK 5.0.4\n');
+        s.end('OK 5.0.4\n');
       }),
     );
     await new Promise<void>((r) => segmentServer.listen(0, '127.0.0.1', r));
@@ -145,9 +145,9 @@ describe('the operator side of segment TLS', () => {
     try {
       const reply = await segmentRequest('127.0.0.1', (proxy.address() as { port: number }).port, 'tok VERSION');
       expect(reply).toEqual(['OK 5.0.4']);
-      // the signed PING probe, then the signed request
-      expect(lines[0]).toMatch(/^SIG1 \d+ [0-9a-f]+ [0-9a-f]{64} PING$/);
-      expect(lines[1]).toMatch(/ VERSION$/);
+      // the signed request, over TLS, with no probe before it
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/^SIG1 \d+ [0-9a-f]+ [0-9a-f]{64} VERSION$/);
     } finally {
       setActualResolver(undefined);
       proxy.close();

@@ -1,6 +1,7 @@
 #!/usr/bin/perl
 # Replication sidecar running on every instance. It serves the local journal archive to
-# replicas and seed copies to new replicas, over a minimal line protocol:
+# replicas and seed copies to new replicas, over a minimal line protocol (each request signed with
+# the token, see below; "<token> <command>" stands for the signed command):
 #
 #   "<token> LIST\n"           -> archived segment names, one per line, then ".\n"
 #   "<token> GET <name>\n"     -> "OK <size>\n" + file bytes, or "ERR <reason>\n"
@@ -89,11 +90,10 @@
 #
 # keyed with the password (segment-auth.pl, included in this script). The server accepts it within AUTH_WINDOW_SECONDS of
 # its own clock and only once per nonce (replays are refused), and answers a bad or replayed
-# signature with "ERR unauthorized (<reason>)". "PING" answers "OK": clients send it signed once
-# per server to tell this server from one of an earlier version, which answers a signed request
-# with "ERR unauthorized" and gets the legacy form "<password> <command>" instead (rolling update).
-# The legacy form is still accepted from clients of earlier versions. Replies and transferred
-# bytes are neither encrypted nor signed.
+# signature with "ERR unauthorized (<reason>)". "PING" answers "OK". Any other line, such as the
+# plain "<password> <command>" form of versions before v0.64.0, is refused with "ERR unauthorized
+# (unsigned)" since v0.83.0. Replies and transferred bytes are not signed; segment TLS
+# (spec.segmentTLS) encrypts them.
 #
 # The live database is only ever accessed through the local server (isql localhost:): opening
 # the file with an independent embedded engine and lock table (gstat or nbackup from this
@@ -185,8 +185,9 @@ sub same_string {
   return $diff == 0;
 }
 
-# The command and argument of a request line, or (undef, undef, reason) when it is not authorized
-# (reason '' for a legacy request with a wrong password)
+# The command and argument of a request line, or (undef, undef, reason) when it is not authorized.
+# Only signed requests: the plain "<password> <request>" form of versions before v0.64.0 is refused
+# since v0.83.0 (upgrades start from v0.64.0 or later, whose clients all sign).
 sub authorize {
   my ($line) = @_;
   if ($line =~ /^SIG1 (\d+) ([0-9a-f]{16,64}) ([0-9a-f]{64}) (.+)$/) {
@@ -201,9 +202,7 @@ sub authorize {
     my ($cmd, $arg) = split / /, $request, 2;
     return ($cmd, $arg, undef);
   }
-  my ($given, $cmd, $arg) = split / /, $line, 3;
-  return (undef, undef, '') if !defined $cmd || $given ne $token;
-  return ($cmd, $arg, undef);
+  return (undef, undef, 'unsigned');
 }
 
 # segment TLS: the TLS proxy accepts on the segment port, this server on SEGMENT_LISTEN (localhost)
@@ -773,7 +772,7 @@ while (1) {
   my ($cmd, $arg, $denied) = authorize($line);
   contacted() if defined $cmd;
   if (defined $denied) {
-    print $client $denied eq '' ? "ERR unauthorized\n" : "ERR unauthorized ($denied)\n";
+    print $client "ERR unauthorized ($denied)\n";
   } elsif ($cmd eq 'PING') {
     print $client "OK\n";
   } elsif ($files_only && $cmd !~ /^(?:FILE|STORE|REMOVE|FILES|EXISTS)$/) {

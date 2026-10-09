@@ -27,9 +27,6 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   and pinned clusters can be moved over by the operator (`SEGMENT_TLS_MIGRATE`, v0.79.0). Still
   open: an operator setting that refuses plain segment shipping altogether (no new cluster with
   `enabled: false`), once no supported Kubernetes version lacks native sidecars.
-- [ ] **Stop accepting the plain password** on the segment server once no supported upgrade path
-  starts from a version before v0.64.0 (clients of those versions send it; current clients send it
-  only to servers that answer the signed probe like those versions).
 - [ ] **Firebird internal formats**: seeding writes the replica control file
   (`ControlFile::DataV1` in `src/remote/server/ReplServer.cpp`) and switchover writes the
   `HDR_repl_seq` header clump (`src/jrd/ods.h`). Verified for Firebird 4.0.7 (ODS 13.0), 5.0.4

@@ -6,7 +6,7 @@ import { join } from 'path';
 import { AddressInfo, createServer, Server, Socket } from 'net';
 import { createHmac, randomBytes } from 'crypto';
 import { JOB_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
-import { fakeSegmentServer } from './helpers/segment-auth';
+import { fakeSegmentServer, signLine } from './helpers/segment-auth';
 
 const hasPerl = spawnSync('perl', ['-v']).status === 0;
 
@@ -22,7 +22,7 @@ const freePort = (): Promise<number> =>
   });
 
 /** One request to a segment server (the shared client is mocked in unit tests) */
-const request = (port: number, line: string): Promise<string[]> =>
+const rawRequest = (port: number, line: string): Promise<string[]> =>
   new Promise((resolve, reject) => {
     const socket = new Socket();
     let data = '';
@@ -31,6 +31,8 @@ const request = (port: number, line: string): Promise<string[]> =>
     socket.once('end', () => resolve(data.split('\n').filter((l) => l !== '')));
     socket.connect(port, '127.0.0.1', () => socket.write(`${line}\n`));
   });
+/** "<token> <request>", signed with the token as the clients send it */
+const request = (port: number, line: string): Promise<string[]> => rawRequest(port, signLine(line));
 
 /** A directory with the scripts and a fake fbsvcmgr logging its arguments ("<dir>/fail" makes it fail) */
 function workspace() {
@@ -299,7 +301,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
     expect(await ask('VERSION')).toEqual(['OK 4.0.7']);
   });
 
-  it('accepts requests signed with the password once, and the legacy form', async () => {
+  it('accepts requests signed with the password once, never the plain form', async () => {
     if (!hasPerl) return;
     const { ws, ask, port } = await start('db-0', 'db-0');
     writeFileSync(join(ws.dir, 'bin', 'isql'), '#!/bin/sh\necho "V                               5.0.4"\n');
@@ -315,9 +317,10 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
     expect(await request(port, signed('VERSION', 'tok', Math.floor(Date.now() / 1000) - 3600))).toEqual(['ERR unauthorized (clock)']);
     // a tampered request
     expect(await request(port, line.replace(/VERSION$/, 'SYNC none'))).toEqual(['ERR unauthorized (signature)']);
-    // clients of earlier versions
-    expect(await request(port, 'tok VERSION')).toEqual(['OK 5.0.4']);
-    expect(await request(port, 'wrong VERSION')).toEqual(['ERR unauthorized']);
+    // the plain "<password> <request>" form of clients before v0.64.0: refused since v0.83.0, with
+    // the right password too
+    expect(await rawRequest(port, 'tok VERSION')).toEqual(['ERR unauthorized (unsigned)']);
+    expect(await rawRequest(port, 'wrong VERSION')).toEqual(['ERR unauthorized (unsigned)']);
 
     // segment-request.pl (shell scripts) signs too: the server answers it
     writeFileSync(join(ws.dir, 'segment-request.pl'), REPLICATION_SCRIPTS['segment-request.pl']);
@@ -327,13 +330,13 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
     expect(out.stdout.toString()).toBe('OK 5.0.4\n');
   });
 
-  it('segment-request.pl sends the legacy form to a server of an earlier version', async () => {
+  it('segment-request.pl sends one signed request, never the password', async () => {
     if (!hasPerl) return;
     const received: string[] = [];
     const old: Server = createServer((sock) =>
       sock.once('data', (d) => {
         received.push(d.toString());
-        sock.end(d.toString().startsWith('tok ') ? 'OK none\n' : 'ERR unauthorized\n');
+        sock.end('OK none\n');
       }),
     );
     await new Promise<void>((r) => old.listen(0, '127.0.0.1', r));
@@ -348,8 +351,10 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
       child.stdout.on('data', (d) => (stdout += d.toString()));
       await new Promise((r) => child.once('exit', r));
       expect(stdout).toBe('OK none\n');
-      expect(received[0]).toMatch(/^SIG1 \d+ [0-9a-f]{32} [0-9a-f]{64} PING\n$/);
-      expect(received[1]).toBe('tok SYNCTO\n');
+      // no probe first: one connection, signed
+      expect(received).toHaveLength(1);
+      expect(received[0]).toMatch(/^SIG1 \d+ [0-9a-f]{32} [0-9a-f]{64} SYNCTO\n$/);
+      expect(received[0]).not.toContain('tok');
     } finally {
       old.close();
     }

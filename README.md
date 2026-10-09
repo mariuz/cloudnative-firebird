@@ -118,6 +118,16 @@ The operator runs **two replicas** with leader election, like CloudNativePG's op
 A PodDisruptionBudget keeps one replica through node drains, and the replicas prefer different
 nodes. `LEADER_ELECTION=false` runs a single replica without the Lease.
 
+#### Upgrading the operator
+
+Apply the manifests of the new version, CRDs and RBAC first. The operator then rolls each
+cluster's instances (replicas first, the primary last) onto the new scripts. While they roll,
+instances of the old and new version talk to each other, so each release keeps talking to the one
+before. Releases also keep the earlier ones they still have to: since v0.83.0 that means v0.64.0
+and later. An operator from before v0.64.0 has to be upgraded to v0.82.0 first, and its clusters
+rolled. Its instances send the SYSDBA password in plain text, which current segment servers refuse,
+so replicas would stop pulling from an upgraded primary until they had restarted themselves.
+
 ### Create a Firebird Cluster
 
 ```bash
@@ -305,9 +315,10 @@ segment server travel as plain TCP inside the cluster unless `segmentTLS` is ena
 restricts the segment port to the cluster's own pods and Jobs, and the operator. Requests to the segment server are signed with
 the SYSDBA password (HMAC-SHA256 over the request, its time and a nonce) instead of carrying it,
 so the password never crosses the network and a captured request cannot be replayed or altered.
-Replies and transferred bytes are not signed. Segment servers still accept the plain password
-from clients of earlier versions (during an upgrade), and clients send it only to servers that
-answer a signed probe the way earlier versions do. See TODO.md.
+Replies and transferred bytes are not signed; segment TLS (below) encrypts them. Since v0.83.0
+segment servers accept signed requests only: the plain password that clients before v0.64.0 sent
+is refused (`ERR unauthorized (unsigned)`), so upgrades must start from v0.64.0 or later (see
+*Upgrading the operator*).
 
 #### Segment TLS
 

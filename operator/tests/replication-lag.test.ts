@@ -92,27 +92,28 @@ describe('replication lag computation', () => {
     }
   });
 
-  it('segmentRequest sends the legacy form to a segment server of an earlier version', async () => {
+  it('segmentRequest signs every request, without a probe, and never sends the password', async () => {
     const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
       '../src/utils/replication-lag',
     );
     const received: string[] = [];
-    // an earlier server: "<password> <command>" only
     const server = createServer((sock) =>
       sock.once('data', (d) => {
         received.push(d.toString());
-        sock.end(d.toString().startsWith('tok ') ? 'OK primary\n' : 'ERR unauthorized\n');
+        sock.end('OK primary\n');
       }),
     );
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const port = (server.address() as { port: number }).port;
     try {
       expect(await segmentRequest('127.0.0.1', port, 'tok POSITION')).toEqual(['OK primary']);
-      expect(received[0]).toMatch(/^SIG1 \d+ [0-9a-f]{32} [0-9a-f]{64} PING\n$/);
-      expect(received[1]).toBe('tok POSITION\n');
-      // known for a minute: no second probe
       expect(await segmentRequest('127.0.0.1', port, 'tok POSITION')).toEqual(['OK primary']);
-      expect(received).toHaveLength(3);
+      // one connection per request, each signed
+      expect(received).toHaveLength(2);
+      for (const line of received) {
+        expect(line).toMatch(/^SIG1 \d+ [0-9a-f]{32} [0-9a-f]{64} POSITION\n$/);
+        expect(line).not.toContain('tok');
+      }
     } finally {
       server.close();
     }

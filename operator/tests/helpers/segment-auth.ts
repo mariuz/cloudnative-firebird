@@ -1,4 +1,4 @@
-import { createHmac } from 'crypto';
+import { createHmac, randomBytes } from 'crypto';
 import { createServer, Server, Socket } from 'net';
 
 /**
@@ -31,4 +31,16 @@ export function fakeSegmentServer(handler: (request: string, sock: Socket, raw: 
       else handler(request, sock, raw);
     }),
   );
+}
+
+/**
+ * A "<token> <request>" line signed with its token, as every client sends it since v0.83.0 (lines
+ * already signed are left as they are)
+ */
+export function signLine(line: string, at = Math.floor(Date.now() / 1000)): string {
+  if (line.startsWith('SIG1 ')) return line;
+  const space = line.indexOf(' ');
+  const [secret, request] = space < 0 ? ['', line] : [line.slice(0, space), line.slice(space + 1)];
+  const nonce = randomBytes(16).toString('hex');
+  return `SIG1 ${at} ${nonce} ${createHmac('sha256', secret).update(`${at} ${nonce} ${request}`).digest('hex')} ${request}`;
 }

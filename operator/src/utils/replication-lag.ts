@@ -80,35 +80,17 @@ export function signSegmentRequest(secret: string, request: string, now = Date.n
   return `SIG1 ${at} ${nonce} ${mac} ${request}`;
 }
 
-/** Segment servers of an earlier version (legacy plain password), by "host:port", with when they said so */
-const legacySegmentServers = new Map<string, number>();
-const signedSegmentServers = new Set<string>();
-const LEGACY_RECHECK_MS = 60_000;
-
 /**
- * The line is "<password> <request>". It is sent signed to segment servers that support it; a
- * server of an earlier version (during a rolling update) answers the signed PING probe with
- * "ERR unauthorized" and gets the line as it is.
+ * The line is "<password> <request>": the request is sent signed with the password, which never
+ * crosses the network. Every segment server since v0.64.0 verifies signatures, and since v0.83.0
+ * none accepts the plain form.
  */
 export const segmentRequest: SegmentClient = async (host, port, line, timeoutMs = SEGMENT_REQUEST_TIMEOUT_MS) => {
   const space = line.indexOf(' ');
   const [secret, request] = space < 0 ? ['', line] : [line.slice(0, space), line.slice(space + 1)];
-  const key = `${host}:${port}`;
   // segment TLS when the instance runs the TLS proxy (segment-tls-client.ts)
   const tls = segmentTlsResolver ? await segmentTlsResolver(host).catch(() => undefined) : undefined;
-  if (!signedSegmentServers.has(key)) {
-    const legacySince = legacySegmentServers.get(key);
-    if (legacySince === undefined || Date.now() - legacySince > LEGACY_RECHECK_MS) {
-      const [reply] = await rawSegmentRequest(host, port, signSegmentRequest(secret, 'PING'), timeoutMs, tls);
-      if (reply === undefined) throw new Error(`segment server ${host}:${port}: no answer`);
-      if (reply === 'ERR unauthorized') legacySegmentServers.set(key, Date.now());
-      else {
-        legacySegmentServers.delete(key);
-        signedSegmentServers.add(key);
-      }
-    }
-  }
-  return rawSegmentRequest(host, port, signedSegmentServers.has(key) ? signSegmentRequest(secret, request) : line, timeoutMs, tls);
+  return rawSegmentRequest(host, port, signSegmentRequest(secret, request), timeoutMs, tls);
 };
 
 export interface ArchivedSegment {
