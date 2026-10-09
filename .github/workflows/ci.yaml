@@ -1237,16 +1237,32 @@ jobs:
           kubectl wait pod/plain-0 --for=condition=Ready --timeout=300s
           kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system SEGMENT_TLS_REQUIRED=true
           kubectl rollout status deployment/cloudnative-firebird-operator -n cloudnative-firebird-system --timeout=180s
-          # the plain cluster is reported, not restarted
+          # the plain cluster is reported, not restarted (the new leader reconciles it after the rollout)
+          echo "waiting for the SegmentTLS condition"
           timeout 180 bash -c 'until [ "$(kubectl get firebirdcluster plain -o jsonpath="{.status.conditions[?(@.type==\"SegmentTLS\")].reason}")" = PlainSegmentShipping ]; do sleep 5; done' \
             || { kubectl get firebirdcluster plain -o jsonpath='{.status.conditions}'; exit 1; }
-          kubectl get events --field-selector reason=SegmentTLSRequired,involvedObject.name=plain -o name | grep -q .
+          echo "waiting for the SegmentTLSRequired event"
+          timeout 120 bash -c 'until kubectl get events --field-selector reason=SegmentTLSRequired,involvedObject.name=plain -o name | grep -q .; do sleep 5; done' \
+            || { kubectl get events --field-selector involvedObject.name=plain; exit 1; }
           [ "$(kubectl get pod plain-0 -o jsonpath='{.spec.initContainers[*].name}')" != segment-tls ]
           [ "$(kubectl get firebirdcluster plain -o jsonpath={.spec.segmentTLS.enabled})" = false ]
-          OP=$(kubectl get lease cloudnative-firebird-operator -n cloudnative-firebird-system -o jsonpath={.spec.holderIdentity})
-          kubectl get --raw "/api/v1/namespaces/cloudnative-firebird-system/pods/$OP:8080/proxy/metrics" | tee /tmp/metrics-tls.txt \
-            | grep -q '^firebird_cluster_segment_tls{namespace="default",cluster="plain"} 0$'
+          # the metric, on the leader once it has reconciled both clusters (the Lease may still name
+          # the old leader for a moment after the rollout)
+          echo "waiting for firebird_cluster_segment_tls on the leader"
+          leader_metrics() {
+            OP=$(kubectl get lease cloudnative-firebird-operator -n cloudnative-firebird-system -o jsonpath={.spec.holderIdentity})
+            kubectl get --raw "/api/v1/namespaces/cloudnative-firebird-system/pods/$OP:8080/proxy/metrics" 2>/dev/null
+          }
+          for n in $(seq 1 36); do
+            leader_metrics > /tmp/metrics-tls.txt || true
+            grep -q '^firebird_cluster_segment_tls{namespace="default",cluster="plain"} 0$' /tmp/metrics-tls.txt &&
+              grep -q '^firebird_cluster_segment_tls{namespace="default",cluster="repl"} 1$' /tmp/metrics-tls.txt && break
+            sleep 5
+          done
+          grep '^firebird_cluster_segment_tls' /tmp/metrics-tls.txt
+          grep -q '^firebird_cluster_segment_tls{namespace="default",cluster="plain"} 0$' /tmp/metrics-tls.txt
           grep -q '^firebird_cluster_segment_tls{namespace="default",cluster="repl"} 1$' /tmp/metrics-tls.txt
+          echo "checking admission"
           # admission: no new plain cluster, no switching one off; the plain one may still change
           if kubectl apply -f - <<'EOF' 2>/tmp/denied.txt
           apiVersion: firebird.cloudnative-firebird.io/v1
