@@ -33,6 +33,7 @@ import {
   PROMOTE_KEY,
   DEMOTE_KEY,
   SEED_SOURCES_KEY,
+  PEER_ADDRESSES_KEY,
   SEGMENT_PORT,
   OPERATOR_CONFIG_DIR,
   buildReplicationConf,
@@ -963,6 +964,8 @@ export function buildConfigMap(
   options?: {
     primaryPod?: string;
     seedSourcePods?: string[];
+    /** IP addresses of the instance pods (isolation-check.pl, when cluster DNS fails) */
+    peerAddresses?: string[];
     reseed?: Record<string, string>;
     promote?: Record<string, string>;
     demote?: Record<string, string>;
@@ -991,6 +994,9 @@ export function buildConfigMap(
     data[PRIMARY_KEY] = instanceHost(cluster, options?.primaryPod ?? `${name}-0`);
     // Ready replicas that can serve seed copies without locking the primary
     data[SEED_SOURCES_KEY] = (options?.seedSourcePods ?? []).map((pod) => `${instanceHost(cluster, pod)}\n`).join('');
+    // read by the isolation check without DNS: the current addresses of the instances, so a peer
+    // that restarted with a new address while DNS was down still counts
+    data[PEER_ADDRESSES_KEY] = (options?.peerAddresses ?? []).map((ip) => `${ip}\n`).join('');
     // Replicas to re-seed; always present so that a merge patch clears finished requests
     const directives = (entries: Record<string, string> = {}) =>
       Object.keys(entries)

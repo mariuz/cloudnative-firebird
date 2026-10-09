@@ -311,10 +311,11 @@ export class FirebirdClusterController {
       const recreatingVolumes = volumeRecreation.recreating;
       const reseed = await this.resolveReseeds(cluster, primaryPod, log, syncHold);
       Object.assign(reseed.requests, switchover.reseed);
-      const seedSourcePods = (await this.resolveSeedSources(cluster, primaryPod)).filter(
+      const instances = await this.resolveSeedSources(cluster, primaryPod);
+      const seedSourcePods = instances.seedSources.filter(
         (pod) => !(pod in reseed.requests) && !(pod in switchover.promote) && !(pod in switchover.demote),
       );
-      await this.reconcileConfigMap(cluster, primaryPod, seedSourcePods, reseed.requests, log, switchover);
+      await this.reconcileConfigMap(cluster, primaryPod, seedSourcePods, reseed.requests, log, switchover, instances.peerAddresses);
       // the ConfigMap lists the requests before the pods restart into their init containers
       for (const pod of [...new Set([...reseed.restart, ...switchover.restart])]) {
         log.info({ pod }, 'Restarting instance into its init container');
@@ -1248,8 +1249,8 @@ export class FirebirdClusterController {
    * Ready replicas that can serve seed copies to new replicas, so seeding does not lock or
    * load the primary (see ISSUES.md, issue 2).
    */
-  private async resolveSeedSources(cluster: FirebirdCluster, primaryPod: string): Promise<string[]> {
-    if (!replicationEnabled(cluster) || cluster.spec.hibernated) return [];
+  private async resolveSeedSources(cluster: FirebirdCluster, primaryPod: string): Promise<{ seedSources: string[]; peerAddresses: string[] }> {
+    if (!replicationEnabled(cluster) || cluster.spec.hibernated) return { seedSources: [], peerAddresses: [] };
     const { name, namespace = 'default' } = cluster.metadata;
     const pods = {
       items: instancePods(
@@ -1257,10 +1258,16 @@ export class FirebirdClusterController {
         name,
       ),
     };
-    return pods.items
-      .filter((pod) => pod.metadata?.name && pod.metadata.name !== primaryPod && isPodReady(pod))
-      .map((pod) => pod.metadata!.name!)
-      .sort();
+    return {
+      seedSources: pods.items
+        .filter((pod) => pod.metadata?.name && pod.metadata.name !== primaryPod && isPodReady(pod))
+        .map((pod) => pod.metadata!.name!)
+        .sort(),
+      // every instance with an address, ready or not: the isolation check's peers without DNS
+      peerAddresses: [
+        ...new Set(pods.items.filter((pod) => !pod.metadata?.deletionTimestamp).map((pod) => pod.status?.podIP).filter((ip): ip is string => !!ip)),
+      ].sort(),
+    };
   }
 
   /**
@@ -2087,12 +2094,14 @@ export class FirebirdClusterController {
     reseed: Record<string, string>,
     log: Logger,
     switchover?: { promote: Record<string, string>; demote: Record<string, string> },
+    peerAddresses?: string[],
   ): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const configName = `${name}-config`;
     const desired = buildConfigMap(cluster, {
       primaryPod,
       seedSourcePods,
+      peerAddresses,
       reseed,
       promote: switchover?.promote,
       demote: switchover?.demote,

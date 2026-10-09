@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.79.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.80.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Current Peer Addresses for the Isolation Check** *(v0.80.0)*
+  - Without DNS, the isolation check (v0.78.0) went by the peer addresses of its last DNS answer. A replica that restarted with a new pod IP while DNS was down then counted as unreachable, so a DNS outage combined with replica restarts could fence a primary that nothing would fail over.
+  - The operator now publishes every instance's current pod IP in the cluster ConfigMap (`peer-addresses`; instances being deleted or without an address yet are left out). The pods mount it, so the kubelet keeps it current while the node reaches the API server, without DNS. When DNS does not answer, the check uses those addresses together with its cache (its own address excluded), and fences only when none of them answers.
+  - Unit tests cover the published list (ready or not, no address, being deleted) and a stale cache with a current published address; the kind CI checks that the primary's mounted file lists every instance's address before it is cut off.
 - [x] **Moving Existing Clusters to Segment TLS** *(v0.79.0, opt-in)*
   - Clusters created before v0.77.0 stay pinned to plain segment shipping until their owners switch. The operator now marks the clusters it pins (annotation `firebird.cloudnative-firebird.io/segment-tls-migration: pinned`) and, with `SEGMENT_TLS_MIGRATE=pinned`, switches them on itself; `all` also moves clusters pinned before the annotation existed and those whose owners chose `false`; `skip` keeps a cluster out.
   - Only an idle cluster is moved (running, every instance ready, no rolling update, switchover, failover or fencing, Kubernetes 1.29 or later), and one at a time across the operator: `enabled: true` and the annotation `in-progress` go in one patch, the usual lag-free switch follows, and the annotation becomes `done` once every instance runs the proxy. An owner who turns it off again during the migration gets `skip`. Events: `SegmentTLSMigrationStarted`, `SegmentTLSMigrated`, `SegmentTLSMigrationSkipped`.

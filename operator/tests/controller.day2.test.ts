@@ -467,6 +467,27 @@ describe('FirebirdClusterController – replication seed sources', () => {
     expect(configMap.data.primary).toBe('test-cluster-0.test-cluster-headless');
   });
 
+  it('publishes the address of every instance, ready or not, for the isolation check without DNS', async () => {
+    const withIp = (p: V1Pod, ip?: string): V1Pod => ({ ...p, status: { ...p.status, ...(ip ? { podIP: ip } : {}) } });
+    const leaving = withIp(pod('test-cluster-3', true), '10.0.0.13');
+    leaving.metadata = { ...leaving.metadata, deletionTimestamp: new Date() };
+    const { kubeConfig, api } = makeMockKubeConfig({
+      listNamespacedPod: vi.fn().mockResolvedValue({
+        items: [
+          withIp(pod('test-cluster-0', true), '10.0.0.10'),
+          withIp(pod('test-cluster-2', false), '10.0.0.12'),
+          withIp(pod('test-cluster-1', true)), // no address yet
+          leaving, // being deleted
+        ],
+      }),
+    });
+
+    await new FirebirdClusterController(kubeConfig).reconcile(makeCluster({ instances: 3, replication: { enabled: true } }));
+
+    const configMap = api('createNamespacedConfigMap').mock.calls[0][0].body;
+    expect(configMap.data['peer-addresses']).toBe('10.0.0.10\n10.0.0.12\n');
+  });
+
   it('follows the leader lease when choosing which pod is the primary', async () => {
     const { kubeConfig, api } = makeMockKubeConfig({
       readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: 'test-cluster-1' } }),

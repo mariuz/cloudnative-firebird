@@ -764,6 +764,12 @@ jobs:
           # debug container).
           old_uid=$(kubectl get pod "$old" -o jsonpath={.metadata.uid})
           own=$(kubectl get pod "$old" -o jsonpath={.status.podIP})
+          # the operator publishes every instance's current address in the cluster ConfigMap, which
+          # the primary reads without DNS (the kubelet updates the mounted file within ~2 minutes)
+          for ip in $(kubectl get pods -l "$SEL" -o jsonpath='{.items[*].status.podIP}'); do
+            timeout 180 bash -c "until kubectl exec $old -c segment-server -- cat /etc/firebird-operator/peer-addresses | grep -qx $ip; do sleep 5; done" \
+              || { kubectl exec "$old" -c segment-server -- cat /etc/firebird-operator/peer-addresses; exit 1; }
+          done
           peers=$(for ns in default cloudnative-firebird-system; do
               kubectl get pods -n "$ns" -o jsonpath='{range .items[*]}{.status.podIP} {.status.hostIP}{"\n"}{end}'
             done | awk -v own="$own" '$1 != "" && $1 != $2 && $1 != own { print $1 }' | sort -u)
