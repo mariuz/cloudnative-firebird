@@ -29,6 +29,8 @@ export const PRIMARY_KEY = 'primary';
 
 /** ConfigMap key listing ready replicas that can serve seed copies, one host per line */
 export const SEED_SOURCES_KEY = 'seed-sources';
+/** The instance pods' IP addresses, for the isolation check when cluster DNS fails */
+export const PEER_ADDRESSES_KEY = 'peer-addresses';
 /** ConfigMap key listing replicas to re-seed: "<pod> <token>" per line (token: the pod UID at request time) */
 export const RESEED_KEY = 'reseed';
 /** ConfigMap keys with planned switchover directives: "<pod> <token>" (see init-instance.sh) */
@@ -156,6 +158,7 @@ function replicationEnv(
     { name: 'STATE_FILE', value: dirs.state },
     { name: 'PRIMARY_FILE', value: `${OPERATOR_CONFIG_DIR}/${PRIMARY_KEY}` },
     { name: 'SEED_SOURCES_FILE', value: `${OPERATOR_CONFIG_DIR}/${SEED_SOURCES_KEY}` },
+    { name: 'PEER_ADDRESSES_FILE', value: `${OPERATOR_CONFIG_DIR}/${PEER_ADDRESSES_KEY}` },
     { name: 'RESEED_FILE', value: `${OPERATOR_CONFIG_DIR}/${RESEED_KEY}` },
     { name: 'PROMOTE_FILE', value: `${OPERATOR_CONFIG_DIR}/${PROMOTE_KEY}` },
     { name: 'DEMOTE_FILE', value: `${OPERATOR_CONFIG_DIR}/${DEMOTE_KEY}` },

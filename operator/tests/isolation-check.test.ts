@@ -234,6 +234,26 @@ describe('isolation-check.pl', () => {
         expect(ws.calls()).toEqual([]);
       });
 
+      it('also goes by the addresses the operator publishes: a peer that restarted with a new address', () => {
+        if (!hasPerl) return;
+        const ws = workspace();
+        // the last answer is stale (an address nothing answers on any more) ...
+        writeFileSync(cache(ws), '192.0.2.1\n');
+        // ... the operator publishes the current ones, this pod's own among them
+        writeFileSync(join(ws.dir, 'peer-addresses'), '127.0.0.1\n');
+        contactedAt(ws, minutesAgo(2));
+        const out = check(ws, env(ws, { TEST_DNS: 'fail', SEGMENT_PORT: port, PEER_ADDRESSES_FILE: join(ws.dir, 'peer-addresses') }));
+        expect(out).toMatch(/using the 2 peer address\(es\) known from the last answer and the operator/);
+        expect(ws.calls()).toEqual([]);
+        // its own address does not count
+        const own = workspace();
+        writeFileSync(cache(own), '192.0.2.1\n');
+        writeFileSync(join(own.dir, 'peer-addresses'), '127.0.0.1\n');
+        contactedAt(own, minutesAgo(2));
+        check(own, env(own, { TEST_DNS: 'fail', SEGMENT_PORT: port, POD_IP: '127.0.0.1', PEER_ADDRESSES_FILE: join(own.dir, 'peer-addresses') }));
+        expect(existsSync(own.marker)).toBe(true);
+      });
+
       it('without known peers, goes by the operator\'s list of ready replicas', () => {
         if (!hasPerl) return;
         const listed = workspace();

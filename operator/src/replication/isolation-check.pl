@@ -29,8 +29,10 @@
 # The other instances are found through cluster DNS (the headless Service), which can fail too, for
 # example when the DNS servers are on the other side of the partition. The lookup runs in a child
 # process with a time limit (DNS_TIMEOUT), and every answer is kept in PEERS_CACHE_FILE. When a
-# lookup fails (not "no such name": no answer at all), the check uses the addresses it knew,
-# and the operator's list of ready replicas (SEED_SOURCES_FILE) tells whether there are any. A
+# lookup fails (not "no such name": no answer at all), the check uses the addresses it knew and
+# those the operator publishes (PEER_ADDRESSES_FILE, the current pod IPs: a peer that restarted with
+# a new address while DNS was down), and the operator's list of ready replicas (SEED_SOURCES_FILE)
+# tells whether there are any. A
 # primary that nothing has reached is then fenced only when none of the known addresses answers
 # either: during a DNS outage alone, the operator and the replicas cannot resolve this primary
 # either (so they do not reach it), while it still reaches them, and nothing fails it over.
@@ -58,6 +60,7 @@ my $connect_timeout = $ENV{CONNECT_TIMEOUT} // 3;
 my $dns_timeout  = $ENV{DNS_TIMEOUT} // 2;
 my $peers_cache  = $ENV{PEERS_CACHE_FILE} // "$marker.peers";
 my $seed_sources = $ENV{SEED_SOURCES_FILE} // '';
+my $peer_addresses = $ENV{PEER_ADDRESSES_FILE} // '';
 my $once         = ($ENV{ONCE} // '') eq 'true';   # tests: one check, then exit
 exit 0 unless $timeout =~ /^\d+$/ && $timeout > 0;
 $| = 1;
@@ -132,6 +135,11 @@ sub known_peers {
   return @ips;
 }
 
+sub published_peers {
+  return () if $peer_addresses eq '';
+  return grep { /^[0-9.]+$/ } split /\s+/, slurp($peer_addresses);
+}
+
 sub remember_peers {
   my @ips = @_;
   return if join(',', known_peers()) eq join(',', @ips);
@@ -156,8 +164,11 @@ sub peer_view {
     remember_peers(@ips);
     $view = [1, @ips];
   } else {
-    my @known = known_peers();
-    print "cluster DNS did not answer for $peers: using the " . scalar(@known) . " peer address(es) known from the last answer\n" unless $dns_failing;
+    # the last answer, and the addresses the operator publishes in the cluster ConfigMap (mounted:
+    # no DNS involved), which follow peers that restarted with a new address meanwhile
+    my %known = map { $_ => 1 } grep { $_ ne $self_ip } (known_peers(), published_peers());
+    my @known = sort keys %known;
+    print "cluster DNS did not answer for $peers: using the " . scalar(@known) . " peer address(es) known from the last answer and the operator\n" unless $dns_failing;
     $dns_failing = 1;
     $view = [0, @known];
   }

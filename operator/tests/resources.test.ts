@@ -288,6 +288,7 @@ describe('buildStatefulSet (replication)', () => {
       )?.env;
     const env = envOf(undefined);
     expect(env).toContainEqual({ name: 'SEED_SOURCES_FILE', value: '/etc/firebird-operator/seed-sources' });
+    expect(env).toContainEqual({ name: 'PEER_ADDRESSES_FILE', value: '/etc/firebird-operator/peer-addresses' });
     expect(env).toContainEqual({ name: 'ALLOW_LIVE_SEED', value: 'true' });
     expect(env).toContainEqual({ name: 'REPLICATION_DIR', value: '/var/lib/firebird/data/replication' });
     expect(envOf(true)).toContainEqual({ name: 'ALLOW_LIVE_SEED', value: 'true' });
@@ -911,6 +912,7 @@ describe('buildConfigMap (replication)', () => {
       'fetch-segments.pl',
       'init-instance.sh',
       'isolation-check.pl',
+      'peer-addresses',
       'pitr-plan.pl',
       'pitr-restore.sh',
       'primary',

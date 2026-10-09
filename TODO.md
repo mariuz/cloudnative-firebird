@@ -16,9 +16,7 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   from both the API server and every replica (v0.52.0), and since v0.74.0 also one that neither
   the operator nor any replica has reached for `contactTimeoutSeconds`, before a cut-off primary
   is failed over (v0.63.0), since v0.78.0 also when cluster DNS fails with the partition (the
-  peers known from the last answer, or the operator's ready replicas). Still open: a peer whose
-  pod IP changed while DNS was down counts as unreachable, so a DNS outage combined with replica
-  restarts can fence a primary that nothing would fail over.
+  peers known from the last answer and the addresses the operator publishes, v0.80.0).
 - [ ] **Synchronous replication follow-ups** (one standby since v0.53.0, several since v0.61.0):
   attaching and detaching without the short write pause (Firebird reads `sync_replica` only when
   the database is opened); an "any N of M" quorum (Firebird waits for every `sync_replica`).
