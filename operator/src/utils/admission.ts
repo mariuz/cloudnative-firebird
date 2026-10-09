@@ -1,4 +1,4 @@
-import { nativeSidecarsSupported } from './segment-tls-default';
+import { nativeSidecarsSupported, segmentTlsRequired } from './segment-tls-default';
 import { CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Secret } from '@kubernetes/client-node';
 import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdRestore, FirebirdRole, FirebirdUser, RESOURCE_PLURAL } from '../types';
 import { validateBackupSpec, validateClusterSpec, validateRestoreSpec, validateScheduledBackupSpec } from './validation';
@@ -148,6 +148,17 @@ export function createAdmissionValidator(lookups: AdmissionLookups): AdmissionVa
           await secretWarnings(
             [...new Set([...(superuser ? [superuser] : []), ...(clone?.superuserSecret?.name ? [clone.superuserSecret.name] : []), ...secretRefNames(cluster.spec)])].sort(),
           );
+          if (segmentTlsRequired() && cluster.spec.segmentTLS?.enabled === false) {
+            // an existing plain cluster may still be updated; only creating one, or turning
+            // segment TLS off, is refused
+            const before = (old?.spec as FirebirdCluster['spec'] | undefined)?.segmentTLS?.enabled;
+            if (request.operation === 'CREATE' || before !== false) {
+              return {
+                denied: 'spec.segmentTLS.enabled: false is refused: this operator requires segment TLS (SEGMENT_TLS_REQUIRED); leave it unset or set it to true',
+                warnings,
+              };
+            }
+          }
           if (cluster.spec.segmentTLS?.enabled === true && nativeSidecarsSupported() === false) {
             warnings.push('segmentTLS needs Kubernetes 1.29 or later (native sidecar containers): the instance pods will not start on this cluster');
           }

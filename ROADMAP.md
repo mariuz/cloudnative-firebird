@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.83.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.84.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Refusing Plain Segment Shipping** *(v0.84.0, opt-in)*
+  - Segment TLS is the default for new clusters (v0.77.0) and pinned clusters can be moved over (v0.79.0), but nothing stopped a cluster from being created plain, or switched back. `SEGMENT_TLS_REQUIRED=true` closes that: admission denies a cluster created with `segmentTLS.enabled: false` or updated to it (an already plain cluster may still be scaled or reconfigured), new clusters default to `true` whatever the Kubernetes version (with a startup warning when native sidecars are missing), and a cluster still plain gets the condition `SegmentTLS: False` (`PlainSegmentShipping`), a `SegmentTLSRequired` warning event and the new metric `firebird_cluster_segment_tls` at 0, until `SEGMENT_TLS_MIGRATE` or its owner moves it. The operator never restarts a cluster for it.
+  - Unit tests cover the setting and the default, the admission rules for create and update, and the condition, event and metric of a plain cluster against a TLS one; the kind CI sets the variable on the operator, checks a plain cluster's condition and event, a denied creation and a denied switch-off, an allowed change of the plain cluster, and the metric, then unsets it.
 - [x] **Signed Segment Requests Only** *(v0.83.0)*
   - Since v0.64.0 every client signs its segment server requests (HMAC-SHA256 with the SYSDBA password, a time and a nonce), but servers still accepted the plain `<password> <request>` form for clients of earlier versions, and clients first sent a signed `PING` to every server to tell an earlier one, which got the plain form.
   - Servers now refuse anything but a signed request (`ERR unauthorized (unsigned)`, even with the right password), and clients (`segment-auth.pl` for every Perl script and Job, the operator's `segmentRequest`) always sign, without the probe: one connection less per new server, and no code path that sends the password.

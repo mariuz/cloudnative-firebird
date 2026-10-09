@@ -64,6 +64,10 @@ spec:
             # a time (docs/segment-tls.md): "pinned", "all", or unset (none)
             # - name: SEGMENT_TLS_MIGRATE
             #   value: pinned
+            # refuse plain segment shipping: admission denies clusters with segmentTLS.enabled: false,
+            # existing plain clusters get a SegmentTLS condition and a warning (docs/segment-tls.md)
+            # - name: SEGMENT_TLS_REQUIRED
+            #   value: "true"
             - name: OPERATOR_NAMESPACE
               valueFrom:
                 fieldRef:

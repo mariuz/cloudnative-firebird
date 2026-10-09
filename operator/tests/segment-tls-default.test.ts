@@ -2,7 +2,8 @@ import { describe, it, expect, vi, afterEach, type Mock } from 'vitest';
 import { KubeConfig } from '@kubernetes/client-node';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
 import { createAdmissionValidator } from '../src/utils/admission';
-import { nativeSidecarsSupported, parseServerVersion, segmentTlsDefault, setServerVersion } from '../src/utils/segment-tls-default';
+import { nativeSidecarsSupported, parseServerVersion, segmentTlsDefault, segmentTlsRequired, setServerVersion } from '../src/utils/segment-tls-default';
+import { metrics } from '../src/utils/metrics';
 import { makeCluster, notFoundError } from './helpers/factories';
 
 /** API clients whose calls default to: read/get → 404, list → empty, others → {} */
@@ -31,7 +32,10 @@ const undecided = () => {
 const specPatches = (api: (m: string) => Mock) =>
   api('patchNamespacedCustomObject').mock.calls.map((c) => c[0].body).filter((b) => b.spec);
 
-afterEach(() => setServerVersion(undefined));
+afterEach(() => {
+  setServerVersion(undefined);
+  vi.unstubAllEnvs();
+});
 
 describe('the segment TLS default', () => {
   it('follows the Kubernetes version (native sidecars from 1.29) unless the operator is told otherwise', () => {
@@ -102,5 +106,58 @@ describe('the segment TLS default', () => {
     expect((await validate(request(false) as never)).warnings ?? []).not.toContainEqual(expect.stringMatching(/Kubernetes 1\.29/));
     setServerVersion({ major: 1, minor: 30 });
     expect((await validate(request(true) as never)).warnings ?? []).not.toContainEqual(expect.stringMatching(/Kubernetes 1\.29/));
+  });
+
+  describe('with SEGMENT_TLS_REQUIRED', () => {
+    const validate = createAdmissionValidator({ secret: async () => undefined, cluster: async () => undefined } as never);
+    const request = (operation: 'CREATE' | 'UPDATE', enabled: boolean | undefined, before?: boolean) => ({
+      uid: '1',
+      kind: { group: 'firebird.cloudnative-firebird.io', version: 'v1', kind: 'FirebirdCluster' },
+      operation,
+      namespace: 'default',
+      object: enabled === undefined ? undecided() : makeCluster({ segmentTLS: { enabled } }),
+      ...(operation === 'UPDATE' ? { oldObject: makeCluster({ segmentTLS: { enabled: before ?? true }, instances: 2 }) } : {}),
+    });
+
+    it('reads the setting and makes segment TLS the default whatever the Kubernetes version', () => {
+      expect(segmentTlsRequired({})).toBe(false);
+      expect(segmentTlsRequired({ SEGMENT_TLS_REQUIRED: 'true' })).toBe(true);
+      setServerVersion({ major: 1, minor: 28 });
+      expect(segmentTlsDefault({ SEGMENT_TLS_REQUIRED: 'true', SEGMENT_TLS_DEFAULT: 'false' })).toBe(true);
+    });
+
+    it('refuses a cluster created with segment TLS off, or switched off; existing plain clusters may still change', async () => {
+      vi.stubEnv('SEGMENT_TLS_REQUIRED', 'true');
+      setServerVersion({ major: 1, minor: 31 });
+      expect((await validate(request('CREATE', false) as never)).denied).toMatch(/requires segment TLS/);
+      expect((await validate(request('CREATE', true) as never)).denied).toBeUndefined();
+      expect((await validate(request('CREATE', undefined) as never)).denied).toBeUndefined();
+      // turning it off
+      expect((await validate(request('UPDATE', false, true) as never)).denied).toMatch(/requires segment TLS/);
+      // a plain cluster (pinned on upgrade) scaled: not refused
+      expect((await validate(request('UPDATE', false, false) as never)).denied).toBeUndefined();
+      // without the setting nothing is refused
+      vi.stubEnv('SEGMENT_TLS_REQUIRED', '');
+      expect((await validate(request('CREATE', false) as never)).denied).toBeUndefined();
+    });
+
+    it('reports a plain cluster with a condition, an event and the metric, without restarting it', async () => {
+      vi.stubEnv('SEGMENT_TLS_REQUIRED', 'true');
+      setServerVersion({ major: 1, minor: 31 });
+      const { kubeConfig, api } = mockApi({ getNamespacedCustomObject: vi.fn().mockResolvedValue({}) });
+      await new FirebirdClusterController(kubeConfig).reconcile(makeCluster({ segmentTLS: { enabled: false } }));
+      expect(specPatches(api)).toEqual([]);
+      const statuses = api('patchNamespacedCustomObjectStatus').mock.calls.map((c) => c[0].body[0].value);
+      const condition = statuses.at(-1).conditions.find((c: { type: string }) => c.type === 'SegmentTLS');
+      expect(condition).toMatchObject({ status: 'False', reason: 'PlainSegmentShipping' });
+      expect(api('createNamespacedEvent').mock.calls.map((c) => c[0].body.reason)).toContain('SegmentTLSRequired');
+      expect(metrics.render()).toContain('firebird_cluster_segment_tls{namespace="default",cluster="test-cluster"} 0');
+      // a cluster on segment TLS: no condition
+      const on = mockApi({ getNamespacedCustomObject: vi.fn().mockResolvedValue({}) });
+      await new FirebirdClusterController(on.kubeConfig).reconcile(makeCluster({ segmentTLS: { enabled: true } }));
+      const last = on.api('patchNamespacedCustomObjectStatus').mock.calls.map((c) => c[0].body[0].value).at(-1);
+      expect(last.conditions.some((c: { type: string }) => c.type === 'SegmentTLS')).toBe(false);
+      expect(metrics.render()).toContain('firebird_cluster_segment_tls{namespace="default",cluster="test-cluster"} 1');
+    });
   });
 });

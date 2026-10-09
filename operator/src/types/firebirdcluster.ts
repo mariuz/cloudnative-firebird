@@ -428,7 +428,7 @@ export interface FirebirdClusterSpec {
 /**
  * Condition types for the FirebirdCluster status.
  */
-export type ConditionType = 'Ready' | 'Progressing' | 'Degraded' | 'Paused' | 'Hibernated' | 'Fenced';
+export type ConditionType = 'Ready' | 'Progressing' | 'Degraded' | 'Paused' | 'Hibernated' | 'Fenced' | 'SegmentTLS';
 export type ConditionStatus = 'True' | 'False' | 'Unknown';
 
 /**

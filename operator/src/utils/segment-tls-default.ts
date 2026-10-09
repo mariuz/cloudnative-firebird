@@ -9,6 +9,12 @@ import { logger } from './logger';
  * - SEGMENT_TLS_DEFAULT=auto (default): on when the API server is Kubernetes 1.29 or later
  * - SEGMENT_TLS_DEFAULT=true / false: always on / off
  *
+ * SEGMENT_TLS_REQUIRED=true refuses plain segment shipping altogether: admission denies a cluster
+ * created with `enabled: false` or switched to it, new clusters default to true whatever the
+ * version, and an existing plain cluster (pinned on upgrade, or chosen before the setting) gets
+ * a SegmentTLS condition, a warning event and firebird_cluster_segment_tls 0 until it is moved
+ * (SEGMENT_TLS_MIGRATE, or its owner). The operator never restarts a cluster for it.
+ *
  * The default is written into a cluster's spec when it is first reconciled (the controller's
  * defaultSegmentTls), so it never changes for an existing cluster: clusters that already have a
  * StatefulSet (created by an earlier version) are pinned to false, and changing the operator's
@@ -49,8 +55,14 @@ export async function discoverServerVersion(kubeConfig: KubeConfig): Promise<{ m
   return serverVersion;
 }
 
+/** Whether the operator refuses plain segment shipping (SEGMENT_TLS_REQUIRED) */
+export function segmentTlsRequired(env = process.env): boolean {
+  return (env.SEGMENT_TLS_REQUIRED ?? '').trim().toLowerCase() === 'true';
+}
+
 /** The default for a new cluster's spec.segmentTLS.enabled */
 export function segmentTlsDefault(env = process.env): boolean {
+  if (segmentTlsRequired(env)) return true;
   const setting = (env.SEGMENT_TLS_DEFAULT ?? 'auto').trim().toLowerCase();
   if (setting === 'true') return true;
   if (setting === 'false') return false;
