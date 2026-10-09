@@ -1,0 +1,47 @@
+name: Firebird formats
+
+# The operator writes two Firebird-internal formats itself: the replica control file
+# (replica-control.pl) and the HDR_repl_seq header clump (set-repl-seq.pl). This checks them
+# against each image's own engine and replica server (hack/firebird-formats): on changes to them,
+# weekly (a new Firebird 6 snapshot may change a format), and on demand for any image.
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "operator/src/replication/replica-control.pl"
+      - "operator/src/replication/set-repl-seq.pl"
+      - "operator/src/replication/segment-auth.pl"
+      - "hack/firebird-formats/**"
+      - ".github/workflows/firebird-formats.yaml"
+  push:
+    branches: ["main"]
+    paths:
+      - "operator/src/replication/replica-control.pl"
+      - "operator/src/replication/set-repl-seq.pl"
+      - "hack/firebird-formats/**"
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Firebird image to check (e.g. firebirdsql/firebird:6)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  formats:
+    name: Firebird formats (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', github.event.inputs.image)) || fromJSON('["firebirdsql/firebird:4", "firebirdsql/firebird:5", "firebirdsql/firebird:6-snapshot"]') }}
+    # a development build: on pull requests its failures are reported without failing the workflow
+    continue-on-error: ${{ github.event_name == 'pull_request' && contains(matrix.image, 'snapshot') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the formats against ${{ matrix.image }}
+        run: hack/firebird-formats/verify.sh "${{ matrix.image }}"

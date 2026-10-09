@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.80.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.81.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Checking Firebird's Internal Formats per Image** *(v0.81.0)*
+  - Seeding writes the replica control file (`ControlFile::DataV1`) and switchover the `HDR_repl_seq` header clump: formats Firebird does not document, verified by hand for 4.0.7, 5.0.4 and the 6.0 snapshot, and otherwise only covered indirectly by the long kind runs.
+  - `hack/firebird-formats/verify.sh [image ...]` checks both in one container per image, with that image's own engine and replica server: the sequence `set-repl-seq.pl` writes (added and replaced) is the one the engine reports; and a replica whose control file (written by `replica-control.pl`) records one segment more than the copy has skips the primary's next segment and applies the one after, then the server moves the position on in the same format. The check was confirmed to fail with a wrong position (without a control file Firebird starts from the database's own sequence, which is why the file records one more).
+  - The "Firebird formats" workflow runs it for Firebird 4, 5 and the 6 snapshot when those scripts change, weekly (a new snapshot may change a format), and on demand for any image, e.g. the Firebird 6 release.
 - [x] **Current Peer Addresses for the Isolation Check** *(v0.80.0)*
   - Without DNS, the isolation check (v0.78.0) went by the peer addresses of its last DNS answer. A replica that restarted with a new pod IP while DNS was down then counted as unreachable, so a DNS outage combined with replica restarts could fence a primary that nothing would fail over.
   - The operator now publishes every instance's current pod IP in the cluster ConfigMap (`peer-addresses`; instances being deleted or without an address yet are left out). The pods mount it, so the kubelet keeps it current while the node reaches the API server, without DNS. When DNS does not answer, the check uses those addresses together with its cache (its own address excluded), and fences only when none of them answers.

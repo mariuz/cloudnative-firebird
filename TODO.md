@@ -33,8 +33,10 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Firebird internal formats**: seeding writes the replica control file
   (`ControlFile::DataV1` in `src/remote/server/ReplServer.cpp`) and switchover writes the
   `HDR_repl_seq` header clump (`src/jrd/ods.h`). Verified for Firebird 4.0.7 (ODS 13.0), 5.0.4
-  (ODS 13.1) and the 6.0 snapshot (ODS 14.0, new header page layout, handled). Re-verify for
-  the Firebird 6 release and every later major version (an unknown ODS is refused, not
+  (ODS 13.1) and the 6.0 snapshot (ODS 14.0, new header page layout, handled). Since v0.81.0
+  `hack/firebird-formats/verify.sh` checks both against an image's own engine and replica
+  server, weekly for the 6 snapshot ("Firebird formats" workflow): run it (`workflow_dispatch`)
+  for the Firebird 6 release and every later major version (an unknown ODS is refused, not
   guessed), or replace them with supported mechanisms if Firebird adds any.
 
 ## Backups and restore

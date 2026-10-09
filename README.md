@@ -1229,6 +1229,13 @@ cd operator
 npm test
 ```
 
+The operator writes two Firebird-internal formats itself: the replica control file and the
+`HDR_repl_seq` header clump. `hack/firebird-formats/verify.sh [image ...]` (Docker) checks them
+against each image's own engine and replica server: the sequence the engine reports, and that the
+replica server skips and applies segments exactly at the position the control file records. The
+"Firebird formats" workflow runs it for Firebird 4, 5 and the 6 snapshot when those scripts
+change, every week, and on demand for any image (`workflow_dispatch`).
+
 ### Run Locally (against a cluster)
 
 ```bash
