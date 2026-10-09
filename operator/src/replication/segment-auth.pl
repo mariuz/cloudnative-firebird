@@ -1,7 +1,7 @@
 # Segment server client authentication, included by the scripts that talk to segment servers
 # (not shipped on its own). Requests are signed with the SYSDBA password (segment-server.pl):
-# the password itself never crosses the network. A server of an earlier version (during a
-# rolling update) answers a signed PING with "ERR unauthorized" and gets the legacy form.
+# the password itself never crosses the network. Every segment server since v0.64.0 verifies
+# signatures, and since v0.83.0 none accepts anything else.
 # The Firebird image ships perl-base only (no Digest::SHA), so SHA-256 (FIPS 180-4) and HMAC
 # (RFC 2104) are implemented here; they only ever hash short request lines.
 use IO::Socket::INET;
@@ -55,8 +55,6 @@ sub hmac_sha256_hex {
   return unpack('H*', sha256(($key ^ ("\x5c" x 64)) . $inner));
 }
 
-my %segment_auth_signed;   # "host:port" => 1 (signed) or the time it answered as a legacy server
-
 sub segment_auth_nonce {
   my $bytes = '';
   if (open(my $random, '<:raw', '/dev/urandom')) { read($random, $bytes, 16); close $random; }
@@ -74,8 +72,6 @@ sub segment_auth_line {
 sub segment_open {
   my ($host, $port, $secret, $request, $connect_timeout) = @_;
   $connect_timeout //= 10;
-  my $key = "$host:$port";
-  my $known = $segment_auth_signed{$key};
   # segment TLS (spec.replication.segmentTLS): through the local proxy, which opens mutual TLS to
   # the host named on the first line (segment-tls in the operator image)
   my $proxy = $ENV{SEGMENT_PROXY} // '';
@@ -89,17 +85,7 @@ sub segment_open {
     IO::Socket::INET->new(PeerHost => $host, PeerPort => $port, Proto => 'tcp', Timeout => $connect_timeout)
       or die "connect $host:$port: $!\n";
   };
-  # tell a current server from one of an earlier version (asked again a minute later)
-  if (!defined $known || ($known != 1 && time - $known > 60)) {
-    my $probe = $connect->();
-    print $probe segment_auth_line($secret, 'PING') . "\n";
-    my $reply = <$probe> // '';
-    close $probe;
-    $reply =~ s/\r?\n$//;
-    die "segment server $host:$port: no answer\n" if $reply eq '';
-    $known = $segment_auth_signed{$key} = $reply eq 'ERR unauthorized' ? time : 1;
-  }
   my $sock = $connect->();
-  print $sock ($known == 1 ? segment_auth_line($secret, $request) : "$secret $request") . "\n";
+  print $sock segment_auth_line($secret, $request) . "\n";
   return $sock;
 }

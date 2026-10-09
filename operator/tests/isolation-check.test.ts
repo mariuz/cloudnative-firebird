@@ -4,10 +4,11 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createServer, Server, Socket } from 'net';
+import { signLine } from './helpers/segment-auth';
 import { REPLICATION_SCRIPTS } from '../src/utils/replication';
 
 /** One request to a segment server (the shared client is mocked in unit tests) */
-const segmentRequest = (port: number, line: string): Promise<string[]> =>
+const rawRequest = (port: number, line: string): Promise<string[]> =>
   new Promise((resolve, reject) => {
     const socket = new Socket();
     let data = '';
@@ -16,6 +17,8 @@ const segmentRequest = (port: number, line: string): Promise<string[]> =>
     socket.once('end', () => resolve(data.split('\n').filter((l) => l !== '')));
     socket.connect(port, '127.0.0.1', () => socket.write(`${line}\n`));
   });
+/** "<token> <request>", signed with the token as the clients send it */
+const segmentRequest = (port: number, line: string): Promise<string[]> => rawRequest(port, signLine(line));
 
 const hasPerl = spawnSync('perl', ['-v']).status === 0;
 
