@@ -564,6 +564,22 @@ jobs:
           timeout 120 bash -c 'while kubectl get firebirdcluster repl -o jsonpath={.status.fencedInstances} | grep -q repl-2; do sleep 3; done'
           echo "user dropped from every instance"
 
+          # a user created with plain SQL (as before v0.12.0, or by an application) exists on one
+          # instance only: hack/users/unmanaged-users.sh finds it and writes a FirebirdUser for it,
+          # keeping its role (a FirebirdUser revokes the roles it does not list)
+          primary=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
+          kubectl exec "$primary" -c firebird -- bash -c \
+            "echo \"create user legacy_app password 'l3gacy'; grant reader to user legacy_app; commit;\" | isql -q localhost:$DB"
+          hack/users/unmanaged-users.sh repl | tee /tmp/unmanaged.txt
+          [ "$(awk 'NR > 1' /tmp/unmanaged.txt | wc -l)" = 1 ]
+          grep -Eq "^LEGACY_APP +yes +no +$primary\$" /tmp/unmanaged.txt
+          hack/users/unmanaged-users.sh repl --yaml | tee /tmp/adopt.yaml
+          grep -q 'username: LEGACY_APP' /tmp/adopt.yaml
+          grep -q 'roles: \[READER\]' /tmp/adopt.yaml
+          kubectl apply --dry-run=server -f /tmp/adopt.yaml
+          kubectl exec "$primary" -c firebird -- bash -c "echo 'drop user legacy_app; commit;' | isql -q localhost:$DB"
+          hack/users/unmanaged-users.sh repl 2>&1 | grep -q 'every user of cluster repl is managed'
+
       - name: Verify declarative roles
         run: |
           DB=/var/lib/firebird/data/mydb.fdb

@@ -45,9 +45,7 @@ Nothing open.
 
 ## Users
 
-- [ ] **Existing users on upgrade**: clusters created before v0.12.0 start with a fresh security
-  database seeded from the image (only SYSDBA); users created by applications before the upgrade
-  were already lost on every pod restart and must be re-created (ideally as `FirebirdUser`).
+Nothing open.
 
 ## Other roadmap items
 
