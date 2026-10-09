@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.81.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.82.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Adopting Users Created with SQL** *(v0.82.0)*
+  - Users created with plain SQL exist only in the security database of the instance they were created on (replication does not ship it), and clusters upgraded from before v0.12.0 start with SYSDBA only (the security database was on the container filesystem). TODO.md asked for them to be re-created as `FirebirdUser`.
+  - `hack/users/unmanaged-users.sh <cluster> [-n ns] [--yaml]` lists the users of every ready instance's security database that no `FirebirdUser` of the cluster manages (by its Firebird user name), with the instances that have them, and prints `FirebirdUser` resources to adopt them: active and admin flags as they are, the roles they hold in the cluster database (delimited names quoted; a `FirebirdUser` revokes the roles it does not list), and a Secret reference for the password, which Firebird cannot give back (verifiers only).
+  - The kind CI creates a user with SQL on the primary and grants it a role, checks that the script lists exactly that user on that instance, that the generated resource keeps the role and passes server-side validation, and that nothing is listed once the user is dropped.
 - [x] **Checking Firebird's Internal Formats per Image** *(v0.81.0)*
   - Seeding writes the replica control file (`ControlFile::DataV1`) and switchover the `HDR_repl_seq` header clump: formats Firebird does not document, verified by hand for 4.0.7, 5.0.4 and the 6.0 snapshot, and otherwise only covered indirectly by the long kind runs.
   - `hack/firebird-formats/verify.sh [image ...]` checks both in one container per image, with that image's own engine and replica server: the sequence `set-repl-seq.pl` writes (added and replaced) is the one the engine reports; and a replica whose control file (written by `replica-control.pl`) records one segment more than the copy has skips the primary's next segment and applies the one after, then the server moves the position on in the same format. The check was confirmed to fail with a wrong position (without a control file Firebird starts from the database's own sequence, which is why the file records one more).

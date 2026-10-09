@@ -1093,6 +1093,31 @@ with Firebird 5), and it would also put the password on the Job's command line. 
 of `gbak` backups; keep the `FirebirdUser` objects (for example in Git) to re-create them on a
 restored or cloned cluster.
 
+
+#### Users created with SQL, and upgrades from before v0.12.0
+
+A user created with plain SQL (`CREATE USER`, by an application or an administrator) exists only in
+the security database of the instance it was created on: replication does not ship security
+databases. Before v0.12.0 the security database was on the container filesystem, so such users were
+lost on every pod restart, and a cluster upgraded from then starts with SYSDBA only.
+
+`hack/users/unmanaged-users.sh <cluster> [-n <namespace>]` lists the users of a cluster that no
+`FirebirdUser` manages, with the instances that have them. `--yaml` prints a `FirebirdUser` for each,
+with its current active and admin flags and the roles it holds in the cluster database. They are
+listed because a `FirebirdUser` revokes the roles it does not list. Firebird keeps password
+verifiers, not passwords, so each resource refers to a Secret `<name>-password` you create with
+the password the application uses. Applying the resource sets the user's password to the Secret's
+value on every instance.
+
+```sh
+hack/users/unmanaged-users.sh my-cluster
+# USER          ACTIVE   ADMIN  INSTANCES
+# LEGACY_APP    yes      no     my-cluster-0
+hack/users/unmanaged-users.sh my-cluster --yaml > users.yaml
+kubectl create secret generic legacy-app-password --from-literal=password='...'
+kubectl apply -f users.yaml
+```
+
 ### Roles
 
 A `FirebirdRole` declares a role of the cluster database and exactly the privileges it holds;
