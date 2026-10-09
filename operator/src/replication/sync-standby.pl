@@ -24,7 +24,15 @@
 #
 # On failure the primary is brought back online, synchronous replication off (detach), or as it
 # was (attach). The outcome goes to the termination message: "attached", "detached",
-# "detached unreachable", "failed clean" (nothing changed on the standby) or "failed".
+# "detached unreachable", "failed clean" (nothing changed on the standby) or "failed", with a
+# second line "paused <seconds>s", how long writes were stopped (the operator reports it).
+#
+# The pause cannot be avoided: Firebird reads replication.conf, the included file with it, when
+# the database is opened (its first attachment after the last one closed; Firebird 5 and 6 keep
+# the configuration in the database's global objects, src/jrd/Database.h) and has nothing to
+# reload it, so a change takes effect only once every attachment is closed. With clients attached
+# only a shutdown creates that moment, and it is also the point where the journal and the
+# synchronous stream agree (hack/repro/sync-replica.sh, ISSUES.md issue 9).
 #
 # With several synchronous standbys (synchronous.number), OTHERS lists the ones that stay
 # attached: every SYNC names them too, so only STANDBY changes.
@@ -83,25 +91,37 @@ sub header {
   die "cannot read the header of $primary: $out";
 }
 
+my $paused_at;   # when writes stopped (this Job's shutdown, or its start when already shut down)
+my $paused;      # how long they were stopped, once the primary is back online
+
 sub online {
-  system('fbsvcmgr', "$primary:service_mgr", 'action_properties', 'dbname', $db,
-    'prp_online_mode', 'prp_sm_normal') == 0 or print "could not bring $primary back online\n";
+  if (system('fbsvcmgr', "$primary:service_mgr", 'action_properties', 'dbname', $db,
+      'prp_online_mode', 'prp_sm_normal') == 0) {
+    $paused = time - $paused_at if defined $paused_at;
+    print "writes were paused for ${paused}s\n" if defined $paused;
+  } else {
+    print "could not bring $primary back online\n";
+  }
 }
 
 sub report {
   my ($outcome) = @_;
   print "$outcome\n";
-  if (open(my $fh, '>', $result)) { print $fh $outcome; close $fh; }
+  my $message = $outcome . (defined $paused ? "\npaused ${paused}s" : '');
+  if (open(my $fh, '>', $result)) { print $fh $message; close $fh; }
 }
 
 # 1. stop writes
+my $started = time;
 my $before = header();
 if (!defined $before || $before =~ /full shutdown/) {
   print "$primary already shut down\n";
+  $paused_at = $started;
 } else {
   system('fbsvcmgr', "$primary:service_mgr", 'action_properties', 'dbname', $db,
     'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') == 0
     or die "cannot shut down $primary\n";
+  $paused_at = time;
   print "writes stopped: $primary is in full shutdown\n";
 }
 

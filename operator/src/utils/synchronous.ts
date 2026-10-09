@@ -36,6 +36,17 @@ import { REPLICATION_LAG_ANNOTATION, isPodReady } from './routing';
 export const SYNC_MIN_FIREBIRD_MAJOR = 5;
 
 /** The unsupported reason for an engine version ("4.0.7"), undefined when it is supported or unknown */
+/**
+ * The sync-standby Job's termination message: the outcome on its first line ("attached",
+ * "detached", "detached unreachable", "failed clean", "failed") and, from v0.85.0, how long
+ * writes were stopped on a second line ("paused 3s"), rendered for the status message
+ */
+export function parseJobOutcome(message: string | undefined): { outcome: string; paused: string } {
+  const [first = '', ...rest] = (message ?? '').trim().split('\n');
+  const seconds = rest.join('\n').match(/^paused (\d+)s$/m)?.[1];
+  return { outcome: first.trim(), paused: seconds === undefined ? '' : ` (writes paused ${seconds}s)` };
+}
+
 export function syncUnsupportedReason(engineVersion?: string): string | undefined {
   const major = Number(engineVersion?.split('.')[0]);
   if (!Number.isFinite(major) || major >= SYNC_MIN_FIREBIRD_MAJOR) return undefined;
@@ -284,7 +295,7 @@ export function planSynchronous(input: SyncPlanInput): SyncStep {
     if (conditionTrue(job, 'Failed')) {
       // an attach that may have stopped the standby's journal shipping, or left it with
       // synchronous changes beyond its position, is not undone: the standby is re-seeded
-      const reseed = status.phase === 'Attaching' && (input.jobOutcome ?? '').trim() !== 'failed clean';
+      const reseed = status.phase === 'Attaching' && parseJobOutcome(input.jobOutcome).outcome !== 'failed clean';
       return {
         kind: 'finished',
         status: {
@@ -300,7 +311,7 @@ export function planSynchronous(input: SyncPlanInput): SyncStep {
       };
     }
     if (!conditionTrue(job, 'Complete')) return { kind: 'none', status };
-    const outcome = (input.jobOutcome ?? '').trim();
+    const { outcome, paused } = parseJobOutcome(input.jobOutcome);
     if (status.phase === 'Attaching' && outcome === 'attached') {
       return {
         kind: 'finished',
@@ -308,7 +319,7 @@ export function planSynchronous(input: SyncPlanInput): SyncStep {
           ...withoutRetry(status),
           standbys: [...without(status.standby), status.standby],
           phase: 'Attached',
-          message: `${status.standby} is a synchronous standby of ${status.primary}`,
+          message: `${status.standby} is a synchronous standby of ${status.primary}${paused}`,
           time: at,
         },
         event: 'SyncStandbyAttached',
@@ -323,9 +334,9 @@ export function planSynchronous(input: SyncPlanInput): SyncStep {
           ...status,
           standbys: rest,
           phase: rest.length > 0 ? 'Attached' : 'Detached',
-          message: unreachable
+          message: (unreachable
             ? `${status.standby} detached while unreachable: it is re-seeded`
-            : `${status.standby} detached; it continues from the journal`,
+            : `${status.standby} detached; it continues from the journal`) + paused,
           time: at,
         },
         reseed: unreachable ? status.standby : undefined,

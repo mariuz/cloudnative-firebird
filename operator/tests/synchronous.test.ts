@@ -79,6 +79,11 @@ describe('planSynchronous: attaching', () => {
       status: { phase: 'Attached', standby: 'db-1', primary: 'db-0' },
       event: 'SyncStandbyAttached',
     });
+    // since v0.85.0 the Job reports how long writes were stopped on a second line
+    expect(plan({ status: attaching, job: done('Complete'), jobOutcome: 'attached\npaused 3s\n' }).status.message).toBe(
+      'db-1 is a synchronous standby of db-0 (writes paused 3s)',
+    );
+    expect(plan({ status: attaching, job: done('Failed'), jobOutcome: 'failed clean\npaused 2s' })).toMatchObject({ reseed: undefined });
     // undone cleanly: nothing to re-seed; otherwise (or unknown) the standby is re-seeded
     expect(plan({ status: attaching, job: done('Failed'), jobOutcome: 'failed clean' })).toMatchObject({
       kind: 'finished',

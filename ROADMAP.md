@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.84.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.85.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Synchronous Attach Without the Write Pause: Not Possible** *(v0.85.0, investigated)*
+  - Firebird 5.0.3 and the 6.0 snapshot read `replication.conf`, and the file it includes, when a database is opened (its first attachment after the last one closed) and keep it with the database's global objects; nothing reloads it. A changed `sync_replica` is ignored while any attachment stays open and takes effect once every attachment is closed, without a shutdown (`hack/repro/sync-replica.sh`, [ISSUES.md](ISSUES.md) issue 9). With clients attached only a shutdown creates that moment, and it is also where the journal and the synchronous stream agree, so the pause stays.
+  - The sync-standby Job now reports how long writes were stopped (`paused 3s` on the second line of its termination message); `status.synchronous.message` and the attach and detach events carry it.
 - [x] **Refusing Plain Segment Shipping** *(v0.84.0, opt-in)*
   - Segment TLS is the default for new clusters (v0.77.0) and pinned clusters can be moved over (v0.79.0), but nothing stopped a cluster from being created plain, or switched back. `SEGMENT_TLS_REQUIRED=true` closes that: admission denies a cluster created with `segmentTLS.enabled: false` or updated to it (an already plain cluster may still be scaled or reconfigured), new clusters default to `true` whatever the Kubernetes version (with a startup warning when native sidecars are missing), and a cluster still plain gets the condition `SegmentTLS: False` (`PlainSegmentShipping`), a `SegmentTLSRequired` warning event and the new metric `firebird_cluster_segment_tls` at 0, until `SEGMENT_TLS_MIGRATE` or its owner moves it. The operator never restarts a cluster for it.
   - Unit tests cover the setting and the default, the admission rules for create and update, and the condition, event and metric of a plain cluster against a TLS one; the kind CI sets the variable on the operator, checks a plain cluster's condition and event, a denied creation and a denied switch-off, an allowed change of the plain cluster, and the metric, then unsets it.
