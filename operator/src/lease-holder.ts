@@ -232,14 +232,14 @@ export function segmentServer(env: NodeJS.ProcessEnv): {
   return {
     async state() {
       try {
+        // online, shut down by something else (a Job), by this holder's fence ("fenced lease"), or
+        // by the isolation check ("fenced": the operator lifts that once it reaches this primary)
         const [reply] = await ask('STATE');
         if (reply === 'OK online') return 'online';
-        if (reply !== 'OK shutdown') return undefined;
-        // shut down: by this holder's fence (the marker says "lease"), by the isolation check (the
-        // operator lifts that once it reaches this primary again), or something else (a Job)
-        const [isolation] = await ask('ISOLATION');
-        if (!isolation?.startsWith('OK fenced')) return 'shutdown';
-        return isolation.endsWith(' lease') ? 'fenced' : 'isolated';
+        if (reply === 'OK shutdown') return 'shutdown';
+        if (reply === 'OK fenced lease') return 'fenced';
+        if (reply === 'OK fenced') return 'isolated';
+        return undefined;
       } catch {
         return undefined;
       }
