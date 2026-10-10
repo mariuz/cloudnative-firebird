@@ -1184,6 +1184,8 @@ jobs:
           timeout 90 bash -c 'while kubectl get networkpolicy test-cluster-networkpolicy >/dev/null 2>&1; do sleep 3; done'
 
       - name: Verify security contexts
+        # the backup Job of the core track
+        if: matrix.track.id == 'core'
         run: |
           [ "$(kubectl get pod repl-0 -o jsonpath='{.spec.securityContext.seccompProfile.type}')" = RuntimeDefault ]
           kubectl get pod repl-0 -o jsonpath='{.spec.containers[0].securityContext}' | tee /dev/stderr | grep -q '"drop":\["ALL"\]'
