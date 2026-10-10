@@ -1,4 +1,5 @@
 import { withSegmentTls } from './segment-tls-pods';
+import { withPrimaryLease } from './primary-lease';
 import { createHash } from 'crypto';
 import {
   V1StatefulSet,
@@ -450,8 +451,9 @@ export function buildStatefulSet(
               : { [BACKUP_FILES_HASH_ANNOTATION]: backupFilesHash() }),
           },
         },
-        // segment TLS: the proxy sidecar, the certificates, the segment server on localhost
-        spec: withSegmentTls(cluster, {
+        // segment TLS: the proxy sidecar, the certificates, the segment server on localhost;
+        // the primary Lease: its holder sidecar and token
+        spec: withSegmentTls(cluster, withPrimaryLease(cluster, {
           ...serviceAccount(cluster),
           securityContext: instancePodSecurityContext(cluster),
           ...(initContainers.length > 0 ? { initContainers: initContainers.map(secured) } : {}),
@@ -460,7 +462,7 @@ export function buildStatefulSet(
           ...(spec.tolerations ? { tolerations: spec.tolerations } : {}),
           containers: containers.map(secured),
           ...(volumes.length > 0 ? { volumes } : {}),
-        }, true),
+        }, superuserClientEnv(cluster)), true),
       },
       volumeClaimTemplates: [
         {

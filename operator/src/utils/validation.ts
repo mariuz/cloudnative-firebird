@@ -154,6 +154,12 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
         `Invalid replication failover.isolationCheck.contactTimeoutSeconds: ${contactTimeout}. Must be an integer from 45 to 3600.`,
       );
     }
+    const leaseDuration = spec.replication.failover?.primaryLease?.durationSeconds;
+    if (leaseDuration !== undefined && (!Number.isInteger(leaseDuration) || leaseDuration < 5 || leaseDuration > 120)) {
+      throw new ValidationError(
+        `Invalid replication failover.primaryLease.durationSeconds: ${leaseDuration}. Must be an integer from 5 to 120.`,
+      );
+    }
     const routing = spec.replication.readOnlyRouting;
     if (
       routing?.maxLagSeconds !== undefined &&

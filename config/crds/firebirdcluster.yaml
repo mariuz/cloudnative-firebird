@@ -442,6 +442,21 @@ spec:
                               type: integer
                               minimum: 45
                               maximum: 3600
+                        primaryLease:
+                          description: >-
+                            The primary holds the cluster Lease itself (a promotion mutex): a sidecar
+                            renews it while the primary's database is online and fences the database
+                            when the Lease names another instance or cannot be renewed for its duration;
+                            the operator promotes a replica only once the Lease has expired. Default false.
+                          type: object
+                          properties:
+                            enabled:
+                              type: boolean
+                            durationSeconds:
+                              description: Seconds a renewal keeps the Lease valid (default 15); renewed every third of it
+                              type: integer
+                              minimum: 5
+                              maximum: 120
                     allowLiveSeedFromPrimary:
                       description: >
                         Allow seeding a replica with a locked copy of the live primary when no ready

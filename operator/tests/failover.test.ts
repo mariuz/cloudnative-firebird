@@ -13,6 +13,7 @@ import {
 import { buildReplicationContainers } from '../src/utils/replication';
 import { validateClusterSpec } from '../src/utils/validation';
 import { FirebirdCluster, SwitchoverStatus } from '../src/types';
+import { metrics } from '../src/utils/metrics';
 
 const makeCluster = (status?: FirebirdCluster['status'], failover: object = { enabled: true, delaySeconds: 30 }): FirebirdCluster => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
@@ -29,7 +30,7 @@ const pod = (name: string, uid: string, ready = true) => ({
 
 const longAgo = new Date(Date.now() - 120_000).toISOString();
 
-function setup(opts: { pods?: object[]; job?: V1Job; jobs?: Record<string, V1Job>; jobPods?: object[]; archivePods?: object[]; segment?: Mock } = {}) {
+function setup(opts: { pods?: object[]; job?: V1Job; jobs?: Record<string, V1Job>; jobPods?: object[]; archivePods?: object[]; segment?: Mock; lease?: object } = {}) {
   const notFound = Object.assign(new Error('Not Found'), { code: 404 });
   const api: Record<string, Mock> = {
     listNamespacedPod: vi.fn().mockImplementation(({ labelSelector }: { labelSelector: string }) =>
@@ -41,7 +42,7 @@ function setup(opts: { pods?: object[]; job?: V1Job; jobs?: Record<string, V1Job
           : (opts.pods ?? [pod('db-0', 'u0', false), pod('db-1', 'u1'), pod('db-2', 'u2')]),
       }),
     ),
-    readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: 'db-0' } }),
+    readNamespacedLease: vi.fn().mockResolvedValue(opts.lease ?? { spec: { holderIdentity: 'db-0' } }),
     readNamespacedJob: opts.jobs
       ? vi.fn().mockImplementation(({ name }: { name: string }) => (opts.jobs![name] ? Promise.resolve(opts.jobs![name]) : Promise.reject(notFound)))
       : opts.job
@@ -228,6 +229,64 @@ describe('automatic failover', () => {
     expect(() => validateClusterSpec(makeCluster(undefined, { enabled: true, delaySeconds: 0 }))).toThrow(/delaySeconds/);
     const job = buildFailoverJob(makeCluster(), ['db-1']);
     expect(job.spec?.template.spec?.containers[0].command).toEqual(['perl', '/etc/firebird-operator/failover.pl']);
+  });
+});
+
+describe('the primary Lease as a promotion mutex', () => {
+  const withLease = { enabled: true, delaySeconds: 30, primaryLease: { enabled: true } };
+  const electing: SwitchoverStatus = { kind: 'failover', target: '', from: 'db-0', phase: 'Electing' };
+  const elected = () => ({
+    jobs: { 'db-failover': done('Complete') },
+    jobPods: [electionPod('target=db-2.db-headless sequence=41 positions=db-1.db-headless:40,db-2.db-headless:41')],
+  });
+  const renewed = (secondsAgo: number) => ({
+    spec: { holderIdentity: 'db-0', leaseDurationSeconds: 15, renewTime: new Date(Date.now() - secondsAgo * 1000).toISOString() },
+  });
+
+  it('does not promote the elected replica while the old primary still renews its Lease', async () => {
+    const s = setup({ ...elected(), lease: renewed(3) });
+    await s.controller.reconcile(makeCluster({ switchover: electing }, withLease));
+    expect(s.fn('patchNamespacedLease')).not.toHaveBeenCalled();
+    expect(s.created().some((j) => j.metadata?.name === 'db-promote')).toBe(false);
+    expect(s.status().switchover).toMatchObject({ phase: 'Electing', message: expect.stringMatching(/waiting for the Lease of db-0 to expire/) });
+    expect(s.fn('createNamespacedEvent').mock.calls.map((c) => c[0].body.reason)).toContain('PrimaryLeaseHeld');
+  });
+
+  it('promotes once the Lease expired, or without the primary Lease', async () => {
+    const s = setup({ ...elected(), lease: renewed(16) });
+    await s.controller.reconcile(makeCluster({ switchover: electing }, withLease));
+    expect(s.fn('patchNamespacedLease').mock.calls[0][0].body[0].value).toBe('db-2');
+    expect(s.status().switchover).toMatchObject({ kind: 'failover', target: 'db-2', phase: 'Promoting' });
+    // without it a fresh renewal time (the operator's, when it created the Lease) never waits
+    const off = setup({ ...elected(), lease: renewed(3) });
+    await off.controller.reconcile(makeCluster({ switchover: electing }));
+    expect(off.status().switchover).toMatchObject({ phase: 'Promoting' });
+  });
+
+  it('manages the Role and RoleBinding that let the instances renew the Lease', async () => {
+    const s = setup();
+    await s.controller.reconcile(makeCluster(undefined, withLease));
+    const role = s.fn('createNamespacedRole').mock.calls[0][0].body;
+    expect(role.metadata.name).toBe('db-primary-lease');
+    expect(role.rules).toEqual([{ apiGroups: ['coordination.k8s.io'], resources: ['leases'], resourceNames: ['db-lease'], verbs: ['get', 'update', 'patch'] }]);
+    const binding = s.fn('createNamespacedRoleBinding').mock.calls[0][0].body;
+    expect(binding.subjects).toEqual([{ kind: 'ServiceAccount', name: 'default', namespace: 'default' }]);
+    expect(binding.roleRef).toMatchObject({ kind: 'Role', name: 'db-primary-lease' });
+    // removed again once the primary Lease is off and the Role still exists
+    const off = setup();
+    off.fn('readNamespacedRole').mockResolvedValue({ metadata: { name: 'db-primary-lease' } });
+    await off.controller.reconcile(makeCluster());
+    expect(off.fn('deleteNamespacedRole')).toHaveBeenCalled();
+    expect(off.fn('deleteNamespacedRoleBinding')).toHaveBeenCalled();
+    const never = setup();
+    await never.controller.reconcile(makeCluster());
+    expect(never.fn('deleteNamespacedRole')).not.toHaveBeenCalled();
+  });
+
+  it('exposes the age of the Lease', async () => {
+    const s = setup({ lease: renewed(4) });
+    await s.controller.reconcile(makeCluster(undefined, withLease));
+    expect(metrics.render()).toMatch(/firebird_cluster_primary_lease_age_seconds\{namespace="default",cluster="db"\} 4/);
   });
 });
 

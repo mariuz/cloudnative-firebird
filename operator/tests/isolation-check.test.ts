@@ -364,5 +364,25 @@ describe('segment server ISOLATION and REJOIN', () => {
     expect(ws.calls().pop()).toBe('localhost:service_mgr action_properties dbname /data/db.fdb prp_online_mode prp_sm_normal');
     expect(existsSync(join(base, 'self-fenced'))).toBe(false);
     expect(await ask('ISOLATION')).toEqual(['OK online']);
+
+    // the primary Lease holder (lease-holder.ts): the database's state, and the same fence
+    writeFileSync(join(ws.dir, 'state'), 'online');
+    expect(await ask('STATE')).toEqual(['OK online']);
+    expect(await ask('FENCE the Lease is held by db-1')).toEqual(['OK']);
+    expect(ws.calls().pop()).toBe('localhost:service_mgr action_properties dbname /data/db.fdb prp_shutdown_mode prp_sm_full prp_force_shutdown 0');
+    expect(Number(readFileSync(join(base, 'self-fenced'), 'utf8'))).toBeGreaterThan(Date.now() / 1000 - 30);
+    writeFileSync(join(ws.dir, 'state'), 'shutdown');
+    expect(await ask('STATE')).toEqual(['OK shutdown']);
+    expect((await ask('ISOLATION'))[0]).toMatch(/^OK fenced \d+$/);
+    // repeated: nothing to do
+    const calls = ws.calls().length;
+    expect(await ask('FENCE again')).toEqual(['OK fenced']);
+    expect(ws.calls().length).toBe(calls);
+    expect(await ask('REJOIN')).toEqual(['OK']);
+    writeFileSync(join(ws.dir, 'fail'), '');
+    expect((await ask('STATE'))[0]).toMatch(/^ERR cannot read the state/);
+    expect((await ask('FENCE lost'))[0]).toMatch(/^ERR cannot shut/);
+    expect(existsSync(join(base, 'self-fenced'))).toBe(false);
+    spawnSync('rm', [join(ws.dir, 'fail')]);
   });
 });

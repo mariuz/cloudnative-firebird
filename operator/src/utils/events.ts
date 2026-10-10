@@ -38,6 +38,7 @@ export const EventReason = {
   PrimaryNotReady: 'PrimaryNotReady',
   FailoverStarted: 'FailoverStarted',
   PrimaryRejoined: 'PrimaryRejoined',
+  PrimaryLeaseHeld: 'PrimaryLeaseHeld',
   TLSCertificateIgnored: 'TLSCertificateIgnored',
   SyncStandbyAttaching: 'SyncStandbyAttaching',
   SyncStandbyAttached: 'SyncStandbyAttached',

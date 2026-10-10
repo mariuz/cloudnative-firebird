@@ -9,6 +9,7 @@ import {
   KubeConfig,
   NetworkingV1Api,
   PolicyV1Api,
+  RbacAuthorizationV1Api,
 } from '@kubernetes/client-node';
 import {
   makeCluster,
@@ -138,6 +139,10 @@ function makeMockKubeConfig({
     readNamespacedLease: vi.fn().mockRejectedValue(notFoundError),
     createNamespacedLease: vi.fn().mockResolvedValue({}),
   };
+  // the primary Lease's Role (none: nothing to remove)
+  const mockRbacApi = {
+    readNamespacedRole: vi.fn().mockRejectedValue(notFoundError),
+  };
 
   const mockKubeConfig = new KubeConfig();
   vi.spyOn(mockKubeConfig, 'makeApiClient').mockImplementation((ApiType: unknown) => {
@@ -148,6 +153,7 @@ function makeMockKubeConfig({
     if (ApiType === PolicyV1Api) return mockPolicyApi as unknown as PolicyV1Api;
     if (ApiType === NetworkingV1Api) return mockNetworkingApi as unknown as NetworkingV1Api;
     if (ApiType === CoordinationV1Api) return mockCoordinationApi as unknown as CoordinationV1Api;
+    if (ApiType === RbacAuthorizationV1Api) return mockRbacApi as unknown as RbacAuthorizationV1Api;
     return {} as unknown as CoreV1Api;
   });
 
