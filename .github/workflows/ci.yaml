@@ -971,7 +971,8 @@ jobs:
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo; cat /tmp/lease-holder.log 2>/dev/null; kubectl get pods -o wide; exit 1; }
           [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})" != "$last_failover" ]
           [ "$fenced" = yes ] || { echo "the primary did not fence itself when it could not renew its Lease"; cat /tmp/lease-holder.log 2>/dev/null; exit 1; }
-          grep 'cannot renew the Lease' /tmp/lease-holder.log
+          grep -E 'cannot (read|renew) the Lease' /tmp/lease-holder.log
+          grep 'cannot renew the Lease: the API server has not answered' /tmp/lease-segment-server.log
           grep -q 'fencing the primary (database in full shutdown)' /tmp/lease-segment-server.log
           new=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
           [ "$new" != "$primary" ]
