@@ -282,6 +282,7 @@ describe('major version upgrades', () => {
       api('patchNamespacedStatefulSet').mockClear();
       await controller.reconcile(cluster);
       expect(cluster.status?.majorUpgrade?.phase).toBe('Starting');
+      expect(statusPatches(api).at(-1).majorUpgrade.phase).toBe('Starting');
       expect(reasons(api)).toContain('MajorUpgradeStarting');
       const sts = api('patchNamespacedStatefulSet').mock.calls.at(-1)?.[0].body;
       expect(sts.spec.replicas).toBe(2);
@@ -303,7 +304,9 @@ describe('major version upgrades', () => {
       await new FirebirdClusterController(kubeConfig).reconcile(cluster);
       expect(cluster.status?.majorUpgrade?.phase).toBe('Completed');
       expect(reasons(api)).toContain('MajorUpgradeCompleted');
+      // the reconcile's last status write keeps it completed
       expect(statusPatches(api).at(-1).phase).not.toBe('Upgrading');
+      expect(statusPatches(api).at(-1).majorUpgrade.phase).toBe('Completed');
     });
 
     it('stays stopped when a conversion fails, and is abandoned when the image is set back', async () => {

@@ -585,7 +585,8 @@ export class FirebirdClusterController {
   /** Stores status fields now, and in the reconcile's copy (the final status write starts from it) */
   private async persistStatus(cluster: FirebirdCluster, patch: Partial<FirebirdClusterStatus>): Promise<void> {
     await this.updateStatus(cluster, patch);
-    cluster.status = { ...cluster.status, ...patch };
+    // in place: the reconcile's copies of the cluster (withEffectiveImage) share the status object
+    Object.assign((cluster.status ??= {}), patch);
   }
 
   /**
