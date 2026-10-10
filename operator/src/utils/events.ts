@@ -39,6 +39,7 @@ export const EventReason = {
   FailoverStarted: 'FailoverStarted',
   PrimaryRejoined: 'PrimaryRejoined',
   PrimaryLeaseHeld: 'PrimaryLeaseHeld',
+  PrimaryLeaseDefaulted: 'PrimaryLeaseDefaulted',
   TLSCertificateIgnored: 'TLSCertificateIgnored',
   SyncStandbyAttaching: 'SyncStandbyAttaching',
   SyncStandbyAttached: 'SyncStandbyAttached',

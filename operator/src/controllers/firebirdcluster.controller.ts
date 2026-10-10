@@ -7,6 +7,8 @@ import {
   buildPrimaryLeaseRoleBinding,
   leaseAgeSeconds,
   leaseExpired,
+  PRIMARY_LEASE_ANNOTATION,
+  primaryLeaseDefault,
   primaryLeaseDurationSeconds,
   primaryLeaseEnabled,
   primaryLeaseRoleName,
@@ -312,6 +314,7 @@ export class FirebirdClusterController {
         return;
       }
       await this.defaultSegmentTls(cluster, log);
+      await this.defaultPrimaryLease(cluster, log);
       await this.reconcileSegmentTlsMigration(cluster, log);
 
       const switchover = await this.reconcileSwitchover(cluster, await this.resolvePrimaryPod(cluster, log), log);
@@ -714,8 +717,8 @@ export class FirebirdClusterController {
 
     // A primary that fenced itself while cut off from the cluster (isolation check) and still
     // holds the Lease: nothing was promoted meanwhile, so it is brought back online
-    // (with the primary Lease the primary rejoins itself once it holds the Lease again, utils/primary-lease.ts)
-    if (!inFlight && failover?.enabled && !primaryReady && !fenced.includes(primaryPod) && podOf(primaryPod) && !primaryLeaseEnabled(cluster)) {
+    // (a primary that fenced itself over its Lease rejoins itself once it holds the Lease again, utils/primary-lease.ts)
+    if (!inFlight && failover?.enabled && !primaryReady && !fenced.includes(primaryPod) && podOf(primaryPod)) {
       if (await this.rejoinIsolatedPrimary(cluster, primaryPod, log)) return result;
     }
 
@@ -2343,6 +2346,9 @@ export class FirebirdClusterController {
     try {
       const reply = await this.segmentClient(host, SEGMENT_PORT, `${token} ISOLATION`);
       if (!reply[0]?.startsWith('OK fenced')) return false;
+      // fenced by its Lease holder (the Lease could not be renewed, or names another instance): the
+      // holder lifts it once it holds the Lease again, or the failover replaces the primary
+      if (reply[0].endsWith(' lease')) return false;
       const answer = await this.segmentClient(host, SEGMENT_PORT, `${token} REJOIN`);
       if (answer[0] !== 'OK') throw new Error(answer[0] ?? 'no answer');
     } catch (err) {
@@ -2721,6 +2727,46 @@ export class FirebirdClusterController {
     const reason = existing ? 'an existing cluster keeps plain segment shipping' : 'the operator default for new clusters';
     log.info({ enabled }, `Defaulted spec.segmentTLS.enabled: ${reason}`);
     await this.event(cluster, 'Normal', 'SegmentTLSDefaulted', `spec.segmentTLS.enabled set to ${enabled} (${reason})`);
+  }
+
+  /**
+   * Records whether a cluster gets the primary Lease by default (utils/primary-lease.ts) when it
+   * is first reconciled: new clusters as PRIMARY_LEASE_DEFAULT says, clusters that already have a
+   * StatefulSet (created by an earlier version) pinned to off, since the sidecar would restart
+   * their instances. The owner's failover.primaryLease.enabled always wins over it.
+   */
+  private async defaultPrimaryLease(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    if (cluster.metadata.annotations?.[PRIMARY_LEASE_ANNOTATION]) return;
+    const { name, namespace = 'default' } = cluster.metadata;
+    let existing = true;
+    try {
+      await this.appsApi.readNamespacedStatefulSet({ name, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+      existing = false;
+    }
+    const enabled = !existing && primaryLeaseDefault();
+    const value = enabled ? 'enabled' : 'pinned';
+    await this.customApi.patchNamespacedCustomObject(
+      {
+        group: API_GROUP,
+        version: API_VERSION,
+        namespace,
+        plural: RESOURCE_PLURAL,
+        name,
+        body: { metadata: { annotations: { [PRIMARY_LEASE_ANNOTATION]: value } } },
+      },
+      MERGE_PATCH,
+    );
+    cluster.metadata.annotations = { ...cluster.metadata.annotations, [PRIMARY_LEASE_ANNOTATION]: value };
+    const reason = existing ? 'an existing cluster keeps its Lease with the operator' : 'the operator default for new clusters';
+    log.info({ enabled }, `Recorded the primary Lease default: ${reason}`);
+    await this.event(
+      cluster,
+      'Normal',
+      EventReason.PrimaryLeaseDefaulted,
+      `the primary holds its Lease with automatic failover: ${enabled} (${reason}; failover.primaryLease.enabled overrides it)`,
+    );
   }
 
   /**

@@ -1,9 +1,14 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
-import { V1Container, V1PodSpec } from '@kubernetes/client-node';
 import { makeCluster } from './helpers/factories';
 import { buildStatefulSet } from '../src/utils/resources';
 import { setOperatorImage } from '../src/utils/operator-image';
-import { leaseExpired, leaseAgeSeconds, primaryLeaseEnabled, primaryLeaseDurationSeconds } from '../src/utils/primary-lease';
+import { leaseExpired, leaseAgeSeconds, primaryLeaseEnabled, primaryLeaseDurationSeconds, primaryLeaseDefault, PRIMARY_LEASE_ANNOTATION } from '../src/utils/primary-lease';
+import { setServerVersion } from '../src/utils/segment-tls-default';
+import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
+import { KubeConfig, type V1Container, type V1PodSpec } from '@kubernetes/client-node';
+import { notFoundError } from './helpers/factories';
+import type { FirebirdCluster } from '../src/types';
+import { afterEach, type Mock } from 'vitest';
 import { validateClusterSpec } from '../src/utils/validation';
 import { LeaseHolder, renewIntervalSeconds, isPrimary, type DatabaseState } from '../src/lease-holder';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'fs';
@@ -19,11 +24,24 @@ const withLease = (more: object = {}) =>
 describe('the primary Lease', () => {
   beforeAll(() => setOperatorImage('registry.example/cloudnative-firebird:1.2.3'));
 
-  it('is held only with automatic failover and primaryLease.enabled', () => {
+  it('is held only with automatic failover and primaryLease.enabled, or the recorded default', () => {
     expect(primaryLeaseEnabled(makeCluster())).toBe(false);
     expect(primaryLeaseEnabled(makeCluster({ replication: { enabled: true, failover: { enabled: true } } }))).toBe(false);
     expect(primaryLeaseEnabled(makeCluster({ replication: { enabled: true, failover: { enabled: false, primaryLease: { enabled: true } } } }))).toBe(false);
     expect(primaryLeaseEnabled(withLease())).toBe(true);
+    // the default recorded on the first reconcile (v0.87.0), unless the owner decided
+    const recorded = (value: string, primaryLease?: object) => {
+      const c = makeCluster({ replication: { enabled: true, failover: { enabled: true, ...(primaryLease ? { primaryLease } : {}) } } });
+      c.metadata.annotations = { [PRIMARY_LEASE_ANNOTATION]: value };
+      return c;
+    };
+    expect(primaryLeaseEnabled(recorded('enabled'))).toBe(true);
+    expect(primaryLeaseEnabled(recorded('pinned'))).toBe(false);
+    expect(primaryLeaseEnabled(recorded('enabled', { enabled: false }))).toBe(false);
+    expect(primaryLeaseEnabled(recorded('pinned', { enabled: true }))).toBe(true);
+    const noFailover = makeCluster({ replication: { enabled: true } });
+    noFailover.metadata.annotations = { [PRIMARY_LEASE_ANNOTATION]: 'enabled' };
+    expect(primaryLeaseEnabled(noFailover)).toBe(false);
     expect(primaryLeaseDurationSeconds(withLease())).toBe(15);
     expect(() => validateClusterSpec(makeCluster({ replication: { enabled: true, failover: { enabled: true, primaryLease: { enabled: true, durationSeconds: 3 } } } }))).toThrow(/durationSeconds/);
     expect(() => validateClusterSpec(withLease())).not.toThrow();
@@ -160,6 +178,11 @@ describe('the lease holder', () => {
     const job = holder({ state: 'shutdown' });
     expect(await job.h.tick()).toBe('database shutdown: not renewing the Lease');
     expect(job.rejoin).not.toHaveBeenCalled();
+    // one the isolation check fenced (nothing reached this primary) is the operator's to lift
+    const isolated = holder({ state: 'isolated' });
+    expect(await isolated.h.tick()).toBe('database isolated: not renewing the Lease');
+    expect(isolated.rejoin).not.toHaveBeenCalled();
+    expect(isolated.renew).not.toHaveBeenCalled();
     // a failed rejoin is retried on the next tick
     const r = holder({ state: 'fenced' });
     r.rejoin.mockRejectedValueOnce(new Error('ERR cannot bring online'));
@@ -209,5 +232,85 @@ describe('the lease holder', () => {
     mkdirSync(join(dir, 'repl'));
     writeFileSync(join(dir, 'repl', 'promoted'), '1\n');
     expect(isPrimary(e)).toBe(true);
+  });
+});
+
+/** API clients whose calls default to: read/get → 404, list → empty, others → {} */
+function mockApi(overrides: Record<string, Mock> = {}) {
+  const calls: Record<string, Mock> = {};
+  const fn = (method: string): Mock =>
+    (calls[method] ??=
+      overrides[method] ??
+      (method.startsWith('read') || method.startsWith('get')
+        ? vi.fn().mockRejectedValue(notFoundError)
+        : method.startsWith('list')
+          ? vi.fn().mockResolvedValue({ items: [] })
+          : vi.fn().mockResolvedValue({})));
+  const kubeConfig = new KubeConfig();
+  vi.spyOn(kubeConfig, 'makeApiClient').mockReturnValue(new Proxy({}, { get: (_t, p: string) => fn(p) }) as never);
+  return { kubeConfig, api: fn };
+}
+
+describe('the primary Lease default', () => {
+  afterEach(() => {
+    setServerVersion(undefined);
+    vi.unstubAllEnvs();
+  });
+  const annotationPatches = (api: (m: string) => Mock) =>
+    api('patchNamespacedCustomObject')
+      .mock.calls.map((c) => c[0].body?.metadata?.annotations?.[PRIMARY_LEASE_ANNOTATION])
+      .filter(Boolean);
+
+  it('follows PRIMARY_LEASE_DEFAULT: auto means native sidecars', () => {
+    setServerVersion(undefined);
+    expect(primaryLeaseDefault({})).toBe(false);
+    setServerVersion({ major: 1, minor: 28 });
+    expect(primaryLeaseDefault({})).toBe(false);
+    expect(primaryLeaseDefault({ PRIMARY_LEASE_DEFAULT: 'true' })).toBe(true);
+    setServerVersion({ major: 1, minor: 31 });
+    expect(primaryLeaseDefault({})).toBe(true);
+    expect(primaryLeaseDefault({ PRIMARY_LEASE_DEFAULT: 'false' })).toBe(false);
+  });
+
+  /** A cluster as the user created it: nothing recorded yet */
+  const undecided = (spec: Partial<FirebirdCluster['spec']>) => {
+    const cluster = makeCluster(spec);
+    delete cluster.metadata.annotations;
+    return cluster;
+  };
+
+  it('is recorded on a new cluster\'s first reconcile, with an event, and applies once failover is on', async () => {
+    setServerVersion({ major: 1, minor: 31 });
+    const { kubeConfig, api } = mockApi({ getNamespacedCustomObject: vi.fn().mockResolvedValue({}) });
+    const cluster = undecided({ instances: 3, replication: { enabled: true, failover: { enabled: true } } });
+    await new FirebirdClusterController(kubeConfig).reconcile(cluster);
+    expect(annotationPatches(api)).toEqual(['enabled']);
+    expect(cluster.metadata.annotations?.[PRIMARY_LEASE_ANNOTATION]).toBe('enabled');
+    expect(api('createNamespacedEvent').mock.calls.map((c) => c[0].body.reason)).toContain('PrimaryLeaseDefaulted');
+    // the StatefulSet created in the same reconcile runs the sidecar, and the Role exists
+    const sts = api('createNamespacedStatefulSet').mock.calls[0][0].body;
+    expect(sts.spec.template.spec.initContainers.map((c: V1Container) => c.name)).toContain('lease-holder');
+    expect(api('createNamespacedRole')).toHaveBeenCalled();
+    // recorded once: a second reconcile leaves it alone
+    await new FirebirdClusterController(kubeConfig).reconcile(cluster);
+    expect(annotationPatches(api)).toEqual(['enabled']);
+  });
+
+  it('pins a cluster that already has a StatefulSet, and records "pinned" when the default is off', async () => {
+    setServerVersion({ major: 1, minor: 31 });
+    const { kubeConfig, api } = mockApi({
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+      readNamespacedStatefulSet: vi.fn().mockResolvedValue({ metadata: { name: 'test-cluster' }, spec: { replicas: 3, podManagementPolicy: 'Parallel' }, status: {} }),
+    });
+    const cluster = undecided({ instances: 3, replication: { enabled: true, failover: { enabled: true } } });
+    await new FirebirdClusterController(kubeConfig).reconcile(cluster);
+    expect(annotationPatches(api)).toEqual(['pinned']);
+    expect(primaryLeaseEnabled(cluster)).toBe(false);
+    expect(api('createNamespacedRole')).not.toHaveBeenCalled();
+    vi.stubEnv('PRIMARY_LEASE_DEFAULT', 'false');
+    const off = mockApi({ getNamespacedCustomObject: vi.fn().mockResolvedValue({}) });
+    const fresh = undecided({ instances: 3, replication: { enabled: true, failover: { enabled: true } } });
+    await new FirebirdClusterController(off.kubeConfig).reconcile(fresh);
+    expect(annotationPatches(off.api)).toEqual(['pinned']);
   });
 });

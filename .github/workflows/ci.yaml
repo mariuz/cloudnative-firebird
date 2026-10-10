@@ -161,6 +161,11 @@ jobs:
           # the backup file server behind it listens on localhost only
           kubectl wait pod/test-cluster-0 --for=condition=Ready --timeout=300s
           kubectl logs test-cluster-0 -c backup-files | grep -q 'listening on 127.0.0.1:3061'
+          # and records that the primary will hold its Lease once automatic failover is on (v0.87.0)
+          kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1 \
+            | grep 'Primary Lease default' | tee /dev/stderr | grep -q '"primaryLeaseDefault":true'
+          [ "$(kubectl get firebirdcluster test-cluster -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/primary-lease}')" = enabled ]
+          kubectl get events --field-selector reason=PrimaryLeaseDefaulted,involvedObject.name=test-cluster -o name | grep -q .
 
       - name: Verify the admission webhook
         run: |
@@ -915,10 +920,13 @@ jobs:
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
           count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
           SEL=firebird.cloudnative-firebird.io/cluster=repl,app.kubernetes.io/component=database
-          # the primary holds its Lease (replication.failover.primaryLease): the lease-holder
-          # sidecar reaches every instance through a rolling update
+          # the primary holds its Lease by default since automatic failover was enabled on this
+          # cluster (v0.87.0: recorded on its first reconcile): the lease-holder sidecar is already
+          # in every instance; setting it explicitly changes nothing
+          [ "$(kubectl get firebirdcluster repl -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/primary-lease}')" = enabled ]
+          kubectl get statefulset repl -o jsonpath="{.spec.template.spec.initContainers[*].name}" | grep -q lease-holder
           kubectl patch firebirdcluster repl --type merge -p '{"spec":{"replication":{"failover":{"primaryLease":{"enabled":true}}}}}'
-          timeout 120 bash -c 'until kubectl get statefulset repl -o jsonpath="{.spec.template.spec.initContainers[*].name}" | grep -q lease-holder; do sleep 3; done'
+          sleep 5
           rev=$(kubectl get statefulset repl -o jsonpath={.status.updateRevision})
           updated() {
             kubectl get pods -l "$SEL" \
@@ -1532,6 +1540,7 @@ jobs:
           expect FirebirdCluster repl RollingUpdate
           expect FirebirdCluster repl RollingUpdateCompleted
           expect FirebirdCluster test-cluster InstanceFenced
+          expect FirebirdCluster repl PrimaryLeaseDefaulted
           expect FirebirdCluster test-cluster InstanceUnfenced
           expect FirebirdBackup repl-logical BackupCompleted
           expect FirebirdRestore from-logical RestoreCompleted

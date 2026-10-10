@@ -14,8 +14,9 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Failover safety**: since v0.86.0 the primary can hold and renew the Lease itself
   (`failover.primaryLease`, CloudNativePG 1.30's promotion mutex): it fences itself when the
   Lease names another instance or cannot be renewed, and the operator promotes only once the
-  Lease expired. Opt-in for now (it adds a sidecar and a Role per cluster); making it the default
-  for new clusters, as segment TLS is, is the remaining step. The isolation check fences a primary
+  Lease expired, and since v0.87.0 new clusters get it by default (`PRIMARY_LEASE_DEFAULT`);
+  clusters from before are pinned to the operator-moved Lease. Remaining: an opt-in migration of
+  pinned clusters (as `SEGMENT_TLS_MIGRATE`), one at a time. The isolation check fences a primary
   cut off from both the API server and every replica (v0.52.0), and since v0.74.0 also one that
   neither the operator nor any replica has reached for `contactTimeoutSeconds`, before a cut-off
   primary is failed over (v0.63.0), since v0.78.0 also when cluster DNS fails with the partition

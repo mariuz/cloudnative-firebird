@@ -370,10 +370,10 @@ describe('segment server ISOLATION and REJOIN', () => {
     expect(await ask('STATE')).toEqual(['OK online']);
     expect(await ask('FENCE the Lease is held by db-1')).toEqual(['OK']);
     expect(ws.calls().pop()).toBe('localhost:service_mgr action_properties dbname /data/db.fdb prp_shutdown_mode prp_sm_full prp_force_shutdown 0');
-    expect(Number(readFileSync(join(base, 'self-fenced'), 'utf8'))).toBeGreaterThan(Date.now() / 1000 - 30);
+    expect(readFileSync(join(base, 'self-fenced'), 'utf8')).toMatch(/^\d+ lease\n$/);
     writeFileSync(join(ws.dir, 'state'), 'shutdown');
     expect(await ask('STATE')).toEqual(['OK shutdown']);
-    expect((await ask('ISOLATION'))[0]).toMatch(/^OK fenced \d+$/);
+    expect((await ask('ISOLATION'))[0]).toMatch(/^OK fenced \d+ lease$/);
     // repeated: nothing to do
     const calls = ws.calls().length;
     expect(await ask('FENCE again')).toEqual(['OK fenced']);

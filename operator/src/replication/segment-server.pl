@@ -80,7 +80,8 @@
 #                                 Lease holder, lease-holder.ts, renews the Lease only while online)
 #   "<token> FENCE <reason>\n"  -> "OK": fences the primary like the isolation check does (marker
 #                                 and full shutdown; "OK fenced" when it is already), when the
-#                                 Lease holder lost the primary Lease or cannot renew it
+#                                 Lease holder lost the primary Lease or cannot renew it; ISOLATION
+#                                 then answers "OK fenced <epoch> lease"
 #   "<token> REJOIN\n"          -> "OK": brings a database fenced by the isolation check back
 #                                 online, sent by the operator once it checked that this instance
 #                                 still holds the leader Lease ("OK" too when it is not fenced)
@@ -236,11 +237,13 @@ sub database_state {
 
 # Fences the primary as the isolation check does (isolation-check.pl): the marker first, so that a
 # restarted sidecar never takes the fenced database for an online one, then the full shutdown.
-# Lifted (REJOIN) by the Lease holder once it holds the Lease again, or by the operator.
+# The marker says "lease" (ISOLATION reports "OK fenced <epoch> lease"): lifted (REJOIN) by the
+# Lease holder once it holds the Lease again, not by the operator, which lifts the isolation
+# check's fences (its marker has no "lease") as before.
 sub fence_database {
   my ($reason) = @_;
   open(my $fh, '>', "$self_fenced.tmp") or do { print "cannot write $self_fenced: $!\n"; return 0 };
-  print $fh time, "\n";
+  print $fh time, " lease\n";
   close $fh;
   rename "$self_fenced.tmp", $self_fenced;
   print "$reason: fencing the primary (database in full shutdown)\n";

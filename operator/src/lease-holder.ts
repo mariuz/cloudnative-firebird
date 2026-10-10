@@ -18,11 +18,13 @@ import { segmentRequest } from './utils/replication-lag';
  * by the operator with REJOIN once it has checked that this instance still holds the Lease) when
  * the Lease names another instance (the operator promoted a replica) or when it could not renew
  * it for the Lease's duration (it cannot reach the API server: the operator may be promoting a
- * replica on the other side). A fenced database comes back online once this pod holds the Lease
- * again: the holder re-acquires it (with the version it read, so a failover that took the Lease
- * over meanwhile wins) and asks the segment server to bring the database back (REJOIN); the
- * operator, which rejoins an isolated primary itself without the primary Lease, leaves it to
- * the holder with it, and promotes a replica only once the Lease expired.
+ * replica on the other side). A database fenced this way comes back online once this pod holds
+ * the Lease again: the holder re-acquires it (with the version it read, so a failover that took
+ * the Lease over meanwhile wins) and asks the segment server to bring the database back
+ * (REJOIN). A database the isolation check fenced (nothing reached this primary, or neither the
+ * API server nor a peer did) is left to the operator, which lifts it once it reaches the primary
+ * again while it still holds the Lease, as without the primary Lease: a primary that still
+ * reaches the API server but nothing else must not take writes again on its own.
  *
  * Environment: POD_NAME, POD_NAMESPACE, LEASE_NAME, LEASE_DURATION_SECONDS, PRIMARY_FILE,
  * REPLICATION_DIR, TOKEN_DIR (the projected ServiceAccount token and the API server's CA),
@@ -30,8 +32,8 @@ import { segmentRequest } from './utils/replication-lag';
  * ISC_PASSWORD (the requests to it are signed with it).
  */
 
-/** online, shut down, fenced (the isolation check's marker: by this holder or the check), or not answering */
-export type DatabaseState = 'online' | 'shutdown' | 'fenced' | undefined;
+/** online, shut down, fenced by this holder, isolated (fenced by the isolation check: the operator lifts that), or not answering */
+export type DatabaseState = 'online' | 'shutdown' | 'fenced' | 'isolated' | undefined;
 
 export interface LeaseApi {
   /** The Lease, or undefined when it does not exist */
@@ -233,9 +235,11 @@ export function segmentServer(env: NodeJS.ProcessEnv): {
         const [reply] = await ask('STATE');
         if (reply === 'OK online') return 'online';
         if (reply !== 'OK shutdown') return undefined;
-        // shut down: by a fence (the marker), or something else (a Job, an administrator)
+        // shut down: by this holder's fence (the marker says "lease"), by the isolation check (the
+        // operator lifts that once it reaches this primary again), or something else (a Job)
         const [isolation] = await ask('ISOLATION');
-        return isolation?.startsWith('OK fenced') ? 'fenced' : 'shutdown';
+        if (!isolation?.startsWith('OK fenced')) return 'shutdown';
+        return isolation.endsWith(' lease') ? 'fenced' : 'isolated';
       } catch {
         return undefined;
       }
