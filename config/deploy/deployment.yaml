@@ -72,6 +72,10 @@ spec:
             # failover: auto = on from Kubernetes 1.29 (native sidecars), true, false
             - name: PRIMARY_LEASE_DEFAULT
               value: auto
+            # move clusters pinned to the operator-moved Lease at an upgrade over to the primary
+            # Lease, one at a time: "pinned", or unset (none)
+            # - name: PRIMARY_LEASE_MIGRATE
+            #   value: pinned
             - name: OPERATOR_NAMESPACE
               valueFrom:
                 fieldRef:

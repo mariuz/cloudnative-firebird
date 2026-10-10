@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.87.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.88.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Moving Pinned Clusters to the Primary Lease** *(v0.88.0, opt-in)*
+  - `PRIMARY_LEASE_MIGRATE=pinned` moves the clusters pinned at the upgrade (annotation `pinned`) over to the primary Lease one at a time, when idle, as `SEGMENT_TLS_MIGRATE` does: the annotation goes `in-progress` (the sidecar is added through the usual rolling update when automatic failover is on; nothing restarts without it) and `done` once every instance runs what it needs; an owner who sets `failover.primaryLease.enabled` meanwhile gets `skip`. Events `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`.
+  - Unit tests cover the setting, the candidates, the idle conditions, one cluster at a time, the finish and the abandon; the kind CI moves a pinned two-instance cluster with failover and checks the sidecar, the Role, the renewals and the events.
 - [x] **Primary Lease by Default** *(v0.87.0)*
   - New clusters hold their Lease once automatic failover is on, as `PRIMARY_LEASE_DEFAULT` says (`auto`: on from Kubernetes 1.29, native sidecars; `true`; `false`). The decision is recorded in the `primary-lease` annotation on the cluster's first reconcile (`enabled` or `pinned`, a `PrimaryLeaseDefaulted` event) so that it never changes for an existing cluster, and clusters that already have a StatefulSet when the operator first sees them are pinned: the sidecar would restart their instances. `failover.primaryLease.enabled` always wins.
   - Unit tests cover the setting, the recording on new and existing clusters, and the effective value; the kind CI checks the annotation and the event on a new cluster, and that the replicated cluster got the sidecar with failover, without a switch.

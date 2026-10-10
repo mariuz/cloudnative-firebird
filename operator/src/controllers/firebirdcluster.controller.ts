@@ -3,6 +3,12 @@ import { ensureSegmentTlsSecret, reconcileSegmentTlsPeers } from '../utils/segme
 import { nativeSidecarsSupported, segmentTlsDefault, segmentTlsRequired } from '../utils/segment-tls-default';
 import { MIGRATION_ANNOTATION, migrationInProgress, migrationMode, migrationStep, notMigrating } from '../utils/segment-tls-migration';
 import {
+  notMigratingToPrimaryLease,
+  primaryLeaseMigrationInProgress,
+  primaryLeaseMigrationMode,
+  primaryLeaseMigrationStep,
+} from '../utils/primary-lease-migration';
+import {
   buildPrimaryLeaseRole,
   buildPrimaryLeaseRoleBinding,
   leaseAgeSeconds,
@@ -316,6 +322,7 @@ export class FirebirdClusterController {
       await this.defaultSegmentTls(cluster, log);
       await this.defaultPrimaryLease(cluster, log);
       await this.reconcileSegmentTlsMigration(cluster, log);
+      await this.reconcilePrimaryLeaseMigration(cluster, log);
 
       const switchover = await this.reconcileSwitchover(cluster, await this.resolvePrimaryPod(cluster, log), log);
       const primaryPod = switchover.primaryPod;
@@ -2823,6 +2830,54 @@ export class FirebirdClusterController {
     } else {
       log.info('Segment TLS was turned off during its migration: the cluster is skipped from now on');
       await this.event(cluster, 'Normal', 'SegmentTLSMigrationSkipped', 'segment TLS was turned off during the migration; annotation set to skip');
+    }
+  }
+
+  /**
+   * Moves a cluster pinned to the operator-moved Lease over to the primary Lease when the operator
+   * is told to (PRIMARY_LEASE_MIGRATE, primary-lease-migration.ts), one cluster at a time, and
+   * records when its instances run the sidecar
+   */
+  private async reconcilePrimaryLeaseMigration(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    const mode = primaryLeaseMigrationMode();
+    const inProgress = primaryLeaseMigrationInProgress(cluster);
+    if (!inProgress && notMigratingToPrimaryLease(cluster, mode, nativeSidecarsSupported())) return;
+    const { name, namespace = 'default' } = cluster.metadata;
+    const pods = inProgress
+      ? instancePods((await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items, name)
+      : [];
+    const others = inProgress
+      ? []
+      : ((await this.customApi.listClusterCustomObject({ group: API_GROUP, version: API_VERSION, plural: RESOURCE_PLURAL })) as { items?: FirebirdCluster[] })
+          .items ?? [];
+    const step = primaryLeaseMigrationStep(cluster, mode, nativeSidecarsSupported(), pods, others);
+    if (step.action === 'none') {
+      if (step.reason && !inProgress) log.debug({ reason: step.reason }, 'Primary Lease migration waits');
+      return;
+    }
+    const value = step.action === 'start' ? 'in-progress' : step.action === 'finish' ? 'done' : 'skip';
+    await this.customApi.patchNamespacedCustomObject(
+      { group: API_GROUP, version: API_VERSION, namespace, plural: RESOURCE_PLURAL, name, body: { metadata: { annotations: { [PRIMARY_LEASE_ANNOTATION]: value } } } },
+      MERGE_PATCH,
+    );
+    cluster.metadata.annotations = { ...cluster.metadata.annotations, [PRIMARY_LEASE_ANNOTATION]: value };
+    if (step.action === 'start') {
+      const restart = primaryLeaseEnabled(cluster);
+      log.info({ restart }, 'Moving the cluster to the primary Lease (PRIMARY_LEASE_MIGRATE)');
+      await this.event(
+        cluster,
+        'Normal',
+        'PrimaryLeaseMigrationStarted',
+        restart
+          ? 'the primary holds its Lease from now on (operator setting PRIMARY_LEASE_MIGRATE); the instances restart one by one to add the lease-holder sidecar'
+          : 'the primary holds its Lease once automatic failover is enabled (operator setting PRIMARY_LEASE_MIGRATE); nothing restarts now',
+      );
+    } else if (step.action === 'finish') {
+      log.info('Primary Lease migration complete');
+      await this.event(cluster, 'Normal', 'PrimaryLeaseMigrated', 'the cluster holds its Lease: every instance runs what it needs');
+    } else {
+      log.info('failover.primaryLease.enabled was set during the migration: the owner decides from now on');
+      await this.event(cluster, 'Normal', 'PrimaryLeaseMigrationSkipped', 'failover.primaryLease.enabled was set during the migration; annotation set to skip');
     }
   }
 

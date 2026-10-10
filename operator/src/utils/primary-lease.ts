@@ -47,8 +47,14 @@ export function leaseName(cluster: FirebirdCluster): string {
   return `${cluster.metadata.name}-lease`;
 }
 
-/** The decision recorded on the cluster's first reconcile: "enabled" (the default applied) or "pinned" (off) */
+/**
+ * The decision recorded on the cluster's first reconcile: "enabled" (the default applied) or
+ * "pinned" (off); a pinned cluster moved by PRIMARY_LEASE_MIGRATE (primary-lease-migration.ts)
+ * goes through "in-progress" to "done", or "skip" when its owner decided meanwhile
+ */
 export const PRIMARY_LEASE_ANNOTATION = `${API_GROUP}/primary-lease`;
+/** Annotation values under which the primary holds its Lease (the owner's spec value aside) */
+export const PRIMARY_LEASE_ON = ['enabled', 'in-progress', 'done'];
 
 /** The default for new clusters: PRIMARY_LEASE_DEFAULT auto (native sidecars) / true / false */
 export function primaryLeaseDefault(env = process.env): boolean {
@@ -62,7 +68,7 @@ export function primaryLeaseDefault(env = process.env): boolean {
 export function primaryLeaseEnabled(cluster: FirebirdCluster): boolean {
   const failover = cluster.spec.replication?.failover;
   if (failover?.enabled !== true) return false;
-  return failover.primaryLease?.enabled ?? cluster.metadata.annotations?.[PRIMARY_LEASE_ANNOTATION] === 'enabled';
+  return failover.primaryLease?.enabled ?? PRIMARY_LEASE_ON.includes(cluster.metadata.annotations?.[PRIMARY_LEASE_ANNOTATION] ?? '');
 }
 
 /** How long the Lease stays valid after a renewal */
