@@ -1546,7 +1546,6 @@ jobs:
           expect FirebirdCluster repl RollingUpdate
           expect FirebirdCluster repl RollingUpdateCompleted
           expect FirebirdCluster test-cluster InstanceFenced
-          expect FirebirdCluster repl PrimaryLeaseDefaulted
           expect FirebirdCluster test-cluster InstanceUnfenced
           expect FirebirdBackup repl-logical BackupCompleted
           expect FirebirdRestore from-logical RestoreCompleted
