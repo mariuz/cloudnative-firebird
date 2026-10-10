@@ -81,7 +81,11 @@ recovery (into a running cluster or as a bootstrap) were verified end to end wit
 
 CI runs the kind integration tests on each of these images (the operator's
 `FIREBIRD_DEFAULT_IMAGE`; failures on the Firebird 6 snapshot are reported without failing the
-workflow). Firebird 6 is not released yet: a snapshot is a development build, and its on-disk structure can
+workflow), in two parallel tracks per image, each on its own kind cluster: "core" (the replicated
+cluster's lifecycle: backups, users, switchover, failover, rolling updates, the primary Lease) and
+"extended" (segment TLS, synchronous replication, enabling replication later, paused
+reconciliation). The operator runs with `RESYNC_INTERVAL_SECONDS=10` there (default 30), so
+the tests move on at the next reconcile. Firebird 6 is not released yet: a snapshot is a development build, and its on-disk structure can
 still change before the release. Two Firebird 6 changes matter to the operator, both handled:
 the header page layout of ODS 14 (switchover writes the replication sequence there), and header
 statistics through the service manager, which Firebird 6 refuses for a database in full shutdown

@@ -361,7 +361,9 @@ export function buildStatefulSet(
         exec: {
           command: ['/bin/sh', '-c', databaseOnlineCheck(`${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`)],
         },
-        initialDelaySeconds: 15,
+        // a short delay: the first checks may fail while the server starts, which only delays
+        // readiness, never a restart (the liveness probe starts later)
+        initialDelaySeconds: 5,
         periodSeconds: 5,
         timeoutSeconds: 5,
         failureThreshold: 3,
