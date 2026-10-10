@@ -439,7 +439,7 @@ describe('rolling update reconciliation', () => {
   it('restarts nothing while the StatefulSet controller catches up with a template change', async () => {
     const s = setup([pod('db-0', 'db-old'), pod('db-1', 'db-old'), pod('db-2', 'db-old')], {
       patched: { ...buildStatefulSet(makeCluster()), ...sts('db-old', 1) },
-      existing: { ...buildStatefulSet(makeCluster({ imageName: 'firebirdsql/firebird:5.0.3' })), ...sts('db-old', 1) },
+      existing: { ...buildStatefulSet(makeCluster({ env: [{ name: 'OLD_SETTING', value: '1' }] })), ...sts('db-old', 1) },
     });
     await s.controller.reconcile(makeCluster());
     expect(s.fn('patchNamespacedStatefulSet')).toHaveBeenCalled();

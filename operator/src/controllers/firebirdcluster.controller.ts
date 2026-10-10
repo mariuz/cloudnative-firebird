@@ -20,6 +20,18 @@ import {
   primaryLeaseRoleName,
 } from '../utils/primary-lease';
 import { superuserPasswordFrom } from '../utils/restore-target';
+import {
+  buildImageCheckJob,
+  buildMajorUpgradeJob,
+  imageChangeKind,
+  imageCheckJobName,
+  imageCheckMessage,
+  imageCheckResults,
+  instancesStartedOn,
+  majorUpgradeInProgress,
+  majorUpgradeJobName,
+  withEffectiveImage,
+} from '../utils/major-upgrade';
 import { inPlaceResize, RESIZE_ANNOTATION, RESIZE_TIMEOUT_SECONDS, resizeApplied, resizeInfeasible } from '../utils/in-place';
 import crypto from 'crypto';
 import {
@@ -154,6 +166,9 @@ import {
   FirebirdClusterCondition,
   FirebirdClusterStatus,
   FirebirdUser,
+  DEFAULT_FIREBIRD_IMAGE,
+  ImageCheckStatus,
+  MajorUpgradeStatus,
   ReplicaLagStatus,
   VolumeRecreationStatus,
   SegmentRetentionStatus,
@@ -323,6 +338,10 @@ export class FirebirdClusterController {
       await this.defaultPrimaryLease(cluster, log);
       await this.reconcileSegmentTlsMigration(cluster, log);
       await this.reconcilePrimaryLeaseMigration(cluster, log);
+      // a new image is checked first (major version upgrades): the rest of the reconcile sees the
+      // image the instances may run, and a cluster stopped while its databases are converted
+      const image = await this.reconcileImage(cluster, log);
+      cluster = image.cluster;
 
       const switchover = await this.reconcileSwitchover(cluster, await this.resolvePrimaryPod(cluster, log), log);
       const primaryPod = switchover.primaryPod;
@@ -417,6 +436,29 @@ export class FirebirdClusterController {
       await this.reconcilePodMonitor(cluster, log);
       await this.reconcileGrafanaDashboard(cluster, log);
 
+      if (cluster.spec.hibernated && image.upgrading) {
+        const upgrading: Partial<FirebirdClusterStatus> = {
+          phase: 'Upgrading',
+          phaseReason: image.upgrading,
+          instances: cluster.spec.instances,
+          readyInstances,
+          superuserSecretHash,
+          fencedInstances: fencing.fenced,
+          selector: podSelector(cluster),
+          ...(volumes ? { volumes } : {}),
+          conditions: [
+            this.makeCondition('Ready', 'False', 'MajorUpgrade', image.upgrading),
+            this.makeCondition('Progressing', 'True', 'MajorUpgrade', image.upgrading),
+          ],
+        };
+        if (await this.updateStatus(cluster, upgrading)) {
+          recordClusterMetrics(cluster, upgrading);
+          recordReconcile(cluster, 'success');
+        }
+        log.info(image.upgrading);
+        return;
+      }
+
       if (cluster.spec.hibernated) {
         const hibernated: Partial<FirebirdClusterStatus> = {
           phase: 'Hibernated',
@@ -464,8 +506,10 @@ export class FirebirdClusterController {
         : undefined;
 
       const status: Partial<FirebirdClusterStatus> = {
-        phase: isReady ? (rollingUpdate ? 'Updating' : 'Running') : 'Creating',
-        phaseReason: isReady
+        phase: image.upgrading ? 'Upgrading' : isReady ? (rollingUpdate ? 'Updating' : 'Running') : 'Creating',
+        phaseReason: image.upgrading
+          ? image.upgrading
+          : isReady
           ? rollingUpdate
             ? `Rolling update: ${rollingUpdate.message}`
             : fencedCount > 0
@@ -495,6 +539,7 @@ export class FirebirdClusterController {
           ),
           this.fencingCondition(fencing),
           ...(await this.segmentTlsCondition(cluster)),
+          ...image.conditions,
           this.makeCondition(
             'Progressing',
             isReady ? 'False' : 'True',
@@ -535,6 +580,293 @@ export class FirebirdClusterController {
 
       throw err;
     }
+  }
+
+  /** Stores status fields now, and in the reconcile's copy (the final status write starts from it) */
+  private async persistStatus(cluster: FirebirdCluster, patch: Partial<FirebirdClusterStatus>): Promise<void> {
+    await this.updateStatus(cluster, patch);
+    // in place: the reconcile's copies of the cluster (withEffectiveImage) share the status object
+    Object.assign((cluster.status ??= {}), patch);
+  }
+
+  /**
+   * A new spec.imageName (utils/major-upgrade.ts): checked against the image the instances run
+   * before they get it; a newer major on-disk structure starts a major upgrade, an older one is
+   * refused. Returns the cluster the rest of the reconcile works with (the image the instances may
+   * run, stopped while a major upgrade converts the databases), the phase message of an upgrade in
+   * progress, and conditions for the status.
+   */
+  private async reconcileImage(
+    cluster: FirebirdCluster,
+    log: Logger,
+  ): Promise<{ cluster: FirebirdCluster; upgrading?: string; conditions: FirebirdClusterCondition[] }> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    const desired = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+    const upgrade = cluster.status?.majorUpgrade;
+    if (majorUpgradeInProgress(upgrade)) return this.reconcileMajorUpgrade(cluster, upgrade!, desired, log);
+
+    // what the instances run: the StatefulSet's image (none yet: a new cluster starts on spec)
+    let running: string | undefined;
+    try {
+      const statefulSet = await this.appsApi.readNamespacedStatefulSet({ name, namespace });
+      running = statefulSet.spec?.template?.spec?.containers?.find((c) => c.name === 'firebird')?.image;
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+    if (!running || running === desired) {
+      if (cluster.status?.imageCheck) await this.persistStatus(cluster, { imageCheck: undefined });
+      return { cluster, conditions: [] };
+    }
+
+    let check = cluster.status?.imageCheck;
+    if (!check || check.from !== running || check.to !== desired) {
+      check = { from: running, to: desired, phase: 'Checking' };
+      log.info({ from: running, to: desired }, 'Checking the new image before the instances run it');
+      await this.event(cluster, 'Normal', EventReason.ImageCheckStarted, imageCheckMessage(check));
+      await this.persistStatus(cluster, { imageCheck: check });
+    }
+    if (check.phase === 'Failed') {
+      // the failed Job deleted: check again
+      try {
+        await this.batchApi.readNamespacedJob({ name: imageCheckJobName(cluster, check.from, check.to), namespace });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+        check = { from: check.from, to: check.to, phase: 'Checking' };
+        await this.persistStatus(cluster, { imageCheck: check });
+      }
+    }
+    if (check.phase === 'Checking') {
+      const decided = await this.imageCheck(cluster, check, log);
+      if (decided) {
+        check = decided;
+        await this.persistStatus(cluster, { imageCheck: check });
+        const warning = check.phase === 'Refused' || check.phase === 'Failed';
+        await this.event(
+          cluster,
+          warning ? 'Warning' : 'Normal',
+          warning ? EventReason.ImageRefused : EventReason.ImageChecked,
+          imageCheckMessage(check),
+        );
+      }
+    }
+
+    const held = (message: string, reason: string) => ({
+      cluster: withEffectiveImage(cluster, running!),
+      conditions: [this.makeCondition('ImageChange', 'False', reason, message)],
+    });
+    switch (check.phase) {
+      case 'Compatible':
+        return { cluster, conditions: [] };
+      case 'Upgrade': {
+        // the upgrade stops every instance: not in the middle of a switchover or with the primary fenced
+        const primary = replicationEnabled(cluster) ? await this.resolvePrimaryPod(cluster, log) : undefined;
+        const switchover = cluster.status?.switchover;
+        if (switchover && switchover.phase !== 'Completed' && switchover.phase !== 'Failed') {
+          return held(`major upgrade to ${desired} waits for the ${switchover.kind ?? 'switchover'} in progress`, 'MajorUpgradeWaiting');
+        }
+        if (primary && (cluster.status?.fencedInstances ?? []).includes(primary)) {
+          return held(`major upgrade to ${desired} waits for the primary ${primary} to be unfenced`, 'MajorUpgradeWaiting');
+        }
+        const started: MajorUpgradeStatus = {
+          from: check.from,
+          to: check.to,
+          fromOds: check.fromOds!,
+          toOds: check.toOds!,
+          ...(check.fromVersion ? { fromVersion: check.fromVersion } : {}),
+          ...(check.toVersion ? { toVersion: check.toVersion } : {}),
+          ...(primary ? { primary } : {}),
+          phase: 'Stopping',
+          message: 'stopping every instance',
+          startTime: new Date().toISOString(),
+        };
+        log.info({ from: started.from, to: started.to }, 'Major upgrade: stopping every instance');
+        await this.event(
+          cluster,
+          'Normal',
+          EventReason.MajorUpgradeStarted,
+          `major upgrade from ${started.from} (ODS ${started.fromOds}) to ${started.to} (ODS ${started.toOds}): stopping every instance to convert the databases`,
+        );
+        await this.persistStatus(cluster, { imageCheck: undefined, majorUpgrade: started });
+        return this.reconcileMajorUpgrade(cluster, started, desired, log);
+      }
+      case 'Refused':
+        return held(imageCheckMessage(check), 'ImageRefused');
+      case 'Failed':
+        return held(imageCheckMessage(check), 'ImageCheckFailed');
+      default:
+        return held(imageCheckMessage(check), 'ImageChecking');
+    }
+  }
+
+  /** Runs the image check Job of `check`; the decided check once it finished, else undefined */
+  private async imageCheck(cluster: FirebirdCluster, check: ImageCheckStatus, log: Logger): Promise<ImageCheckStatus | undefined> {
+    const namespace = cluster.metadata.namespace ?? 'default';
+    const jobName = imageCheckJobName(cluster, check.from, check.to);
+    let job;
+    try {
+      job = await this.batchApi.readNamespacedJob({ name: jobName, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+    if (!job) {
+      log.info({ job: jobName }, 'Starting the image check Job');
+      await this.batchApi.createNamespacedJob({ namespace, body: buildImageCheckJob(cluster, check.from, check.to) });
+      return undefined;
+    }
+    const outcome = jobOutcome(job);
+    if (outcome === 'Running') return undefined;
+    const pods = await this.coreApi.listNamespacedPod({ namespace, labelSelector: `job-name=${jobName}` });
+    const results = imageCheckResults(pods.items);
+    if (!results.from || !results.to) {
+      // kept for its logs and events: deleting it checks again
+      const missing = [!results.from ? check.from : undefined, !results.to ? check.to : undefined].filter(Boolean).join(' and ');
+      return { ...check, phase: 'Failed', message: `no result from ${missing} (see Job ${jobName}; delete it to check again)` };
+    }
+    await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
+    const decided: ImageCheckStatus = {
+      ...check,
+      fromOds: results.from.ods,
+      toOds: results.to.ods,
+      fromVersion: results.from.version,
+      toVersion: results.to.version,
+      phase: imageChangeKind(results.from, results.to),
+    };
+    return decided;
+  }
+
+  /**
+   * A major upgrade in progress: stops the instances, converts every instance volume with a Job,
+   * starts the instances on the new image, and records each step
+   */
+  private async reconcileMajorUpgrade(
+    cluster: FirebirdCluster,
+    upgrade: MajorUpgradeStatus,
+    desired: string,
+    log: Logger,
+  ): Promise<{ cluster: FirebirdCluster; upgrading?: string; conditions: FirebirdClusterCondition[] }> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    const persist = async (next: MajorUpgradeStatus) => {
+      await this.persistStatus(cluster, { majorUpgrade: next });
+      upgrade = next;
+    };
+    const jobs = async () => {
+      const found = new Map<number, V1Job>();
+      for (let ordinal = 0; ordinal < cluster.spec.instances; ordinal++) {
+        try {
+          found.set(ordinal, await this.batchApi.readNamespacedJob({ name: majorUpgradeJobName(cluster, ordinal), namespace }));
+        } catch (err) {
+          if (!isNotFound(err)) throw err;
+        }
+      }
+      return found;
+    };
+
+    // spec.imageName set back to the old image: abandoned while no volume was converted
+    if (desired === upgrade.from && upgrade.phase !== 'Starting' && (upgrade.converted ?? []).length === 0) {
+      for (const ordinal of (await jobs()).keys()) {
+        await this.batchApi.deleteNamespacedJob({ name: majorUpgradeJobName(cluster, ordinal), namespace, propagationPolicy: 'Background' });
+      }
+      const message = `major upgrade to ${upgrade.to} abandoned: spec.imageName is ${upgrade.from} again and no volume was converted`;
+      log.info(message);
+      await this.event(cluster, 'Normal', EventReason.MajorUpgradeAbandoned, message);
+      await persist({ ...upgrade, phase: 'Failed', message, completionTime: new Date().toISOString() });
+      // recorded as finished: the cluster starts on its image again
+      await this.persistStatus(cluster, { majorUpgrade: undefined });
+      return { cluster, conditions: [] };
+    }
+    const pending = desired !== upgrade.to ? ` (spec.imageName ${desired} is checked once it completes)` : '';
+
+    if (upgrade.phase === 'Stopping') {
+      const pods = instancePods((await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items, name);
+      if (pods.length > 0) {
+        return {
+          cluster: withEffectiveImage(cluster, upgrade.from, true),
+          upgrading: `Major upgrade to ${upgrade.to}: waiting for ${pods.length} instance(s) to stop${pending}`,
+          conditions: [],
+        };
+      }
+      log.info('Major upgrade: every instance stopped; converting the volumes');
+      await this.event(cluster, 'Normal', EventReason.MajorUpgradeConverting, `every instance stopped: converting the databases to ${upgrade.to}`);
+      await persist({ ...upgrade, phase: 'Converting', message: 'converting the instance volumes' });
+    }
+
+    if (upgrade.phase === 'Converting' || upgrade.phase === 'Failed') {
+      const found = await jobs();
+      const converted: string[] = [];
+      const failed: string[] = [];
+      let running = 0;
+      for (let ordinal = 0; ordinal < cluster.spec.instances; ordinal++) {
+        const pod = `${name}-${ordinal}`;
+        const job = found.get(ordinal);
+        if (!job) {
+          const claimName = instanceDataClaimName(cluster, ordinal);
+          try {
+            await this.coreApi.readNamespacedPersistentVolumeClaim({ name: claimName, namespace });
+          } catch (err) {
+            if (!isNotFound(err)) throw err;
+            // no volume yet: the instance starts on the new image with a new one
+            converted.push(pod);
+            continue;
+          }
+          log.info({ pod, job: majorUpgradeJobName(cluster, ordinal) }, 'Major upgrade: converting the instance volume');
+          await this.batchApi.createNamespacedJob({ namespace, body: buildMajorUpgradeJob(cluster, upgrade, ordinal, claimName) });
+          running++;
+          continue;
+        }
+        const outcome = jobOutcome(job);
+        if (outcome === 'Completed') converted.push(pod);
+        else if (outcome === 'Failed') failed.push(majorUpgradeJobName(cluster, ordinal));
+        else running++;
+      }
+      if (failed.length > 0) {
+        const message =
+          `conversion failed: ${failed.join(', ')} (kubectl logs job/<name> -c backup / -c restore); ` +
+          `the cluster stays stopped: delete the Job to retry, or set spec.imageName back to ${upgrade.from} while no volume was converted`;
+        if (upgrade.phase !== 'Failed' || upgrade.message !== message) {
+          log.warn({ failed }, 'Major upgrade: a conversion Job failed');
+          await this.event(cluster, 'Warning', EventReason.MajorUpgradeFailed, message);
+          await persist({ ...upgrade, phase: 'Failed', converted, message });
+        }
+        return {
+          cluster: withEffectiveImage(cluster, upgrade.from, true),
+          upgrading: `Major upgrade to ${upgrade.to}: ${message}`,
+          conditions: [],
+        };
+      }
+      if (running > 0 || converted.length < cluster.spec.instances) {
+        const message = `converting the instance volumes (${converted.length}/${cluster.spec.instances} done)`;
+        if (upgrade.phase !== 'Converting' || upgrade.message !== message || (upgrade.converted ?? []).length !== converted.length) {
+          await persist({ ...upgrade, phase: 'Converting', converted, message });
+        }
+        return {
+          cluster: withEffectiveImage(cluster, upgrade.from, true),
+          upgrading: `Major upgrade to ${upgrade.to}: ${message}${pending}`,
+          conditions: [],
+        };
+      }
+      log.info('Major upgrade: every volume converted; starting the instances on the new image');
+      await this.event(cluster, 'Normal', EventReason.MajorUpgradeStarting, `every volume converted: starting the instances on ${upgrade.to}`);
+      await persist({ ...upgrade, phase: 'Starting', converted, message: `starting the instances on ${upgrade.to}` });
+      for (const ordinal of found.keys()) {
+        await this.batchApi.deleteNamespacedJob({ name: majorUpgradeJobName(cluster, ordinal), namespace, propagationPolicy: 'Background' });
+      }
+    }
+
+    // Starting: the instances run the new image; the replicas are seeded again from the primary
+    const effective = withEffectiveImage(cluster, upgrade.to);
+    const pods = instancePods((await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items, name);
+    if (cluster.spec.hibernated || instancesStartedOn(cluster, pods, upgrade.to, cluster.status?.fencedInstances ?? [])) {
+      const message = `major upgrade from ${upgrade.from} to ${upgrade.to} completed`;
+      log.info(message);
+      await this.event(cluster, 'Normal', EventReason.MajorUpgradeCompleted, message);
+      await persist({ ...upgrade, phase: 'Completed', message, completionTime: new Date().toISOString() });
+      return { cluster: effective, conditions: [] };
+    }
+    return {
+      cluster: effective,
+      upgrading: `Major upgrade to ${upgrade.to}: starting the instances on the new image (replicas are seeded again)${pending}`,
+      conditions: [],
+    };
   }
 
   /** Reconcile the headless service used by the StatefulSet */

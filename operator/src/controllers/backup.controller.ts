@@ -1,3 +1,4 @@
+import { clusterStoppedReason } from '../utils/major-upgrade';
 import {
   BatchV1Api,
   CoordinationV1Api,
@@ -176,8 +177,8 @@ export class FirebirdBackupController {
 
       let job = await this.readJob(jobName, namespace);
       if (!job) {
-        if (cluster.spec.hibernated) {
-          await this.updateBackupStatus(backup, { phase: 'Pending', error: 'cluster is hibernated' });
+        if (clusterStoppedReason(cluster)) {
+          await this.updateBackupStatus(backup, { phase: 'Pending', error: clusterStoppedReason(cluster) });
           return;
         }
         const instance = await this.backupInstance(cluster, backup.spec);
@@ -347,8 +348,8 @@ export class FirebirdBackupController {
         }
         const pitrError = pointInTimeSourceError(restore, cluster, source);
         if (pitrError) throw new ValidationError(pitrError);
-        if (cluster.spec.hibernated) {
-          await this.updateRestoreStatus(restore, { ...base, phase: 'Pending', error: 'cluster is hibernated' });
+        if (clusterStoppedReason(cluster)) {
+          await this.updateRestoreStatus(restore, { ...base, phase: 'Pending', error: clusterStoppedReason(cluster) });
           return;
         }
         const primary = await this.primaryPod(cluster);

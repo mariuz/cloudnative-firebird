@@ -84,13 +84,52 @@ CI runs the kind integration tests on each of these images (the operator's
 workflow), in two parallel tracks per image, each on its own kind cluster: "core" (the replicated
 cluster's lifecycle: backups, users, switchover, failover, rolling updates, the primary Lease) and
 "extended" (segment TLS, synchronous replication, enabling replication later, paused
-reconciliation). The operator runs with `RESYNC_INTERVAL_SECONDS=10` there (default 30), so
+reconciliation; on the Firebird 6 snapshot, a major upgrade from Firebird 5). The operator runs with `RESYNC_INTERVAL_SECONDS=10` there (default 30), so
 the tests move on at the next reconcile. Firebird 6 is not released yet: a snapshot is a development build, and its on-disk structure can
 still change before the release. Two Firebird 6 changes matter to the operator, both handled:
 the header page layout of ODS 14 (switchover writes the replication sequence there), and header
 statistics through the service manager, which Firebird 6 refuses for a database in full shutdown
 ([ISSUES.md](ISSUES.md), issue 7). Firebird 6 also names journal segments
 `<database>_<guid>.journal-<n>`.
+
+#### Changing the Firebird version (major upgrades, v0.89.0)
+
+A Firebird server opens databases of its own major on-disk structure (ODS) only: Firebird 6
+(ODS 14) refuses the ODS 13 of Firebird 4 and 5, while Firebird 5 opens Firebird 4's ODS 13.0 as
+it is. So a new `spec.imageName` (or, for clusters without one, a new `FIREBIRD_DEFAULT_IMAGE` on
+the operator) is checked before the instances get it: an image check Job runs
+the current and the new image, creates a scratch database with each and reports its ODS and the
+server version (`status.imageCheck`, events `ImageCheckStarted` and `ImageChecked`). The instances
+keep their image meanwhile. A check that fails (an image that cannot be pulled, for example) is
+reported with an `ImageRefused` warning and its Job is kept: deleting it checks again.
+
+- **Same major ODS** (Firebird 4 to 5, or a patch release): rolled out as usual, the primary last.
+- **Newer major ODS** (Firebird 5 to 6): a major upgrade, offline like CloudNativePG's. Every
+  instance stops (no failover, no rolling update, scheduled backups suspended; backups, restores,
+  users and roles wait), then a Job per instance volume converts it with `gbak`: an init container
+  backs up the databases with the old image, the container restores them with the new one, both
+  embedded. The security database (users) is converted on every instance; the database on the
+  primary (on every instance without replication). Its replication sequence carries over, so the
+  journal's segment names continue after the old ones; the replicas' databases are discarded and
+  seeded again from the converted primary when the instances start on the new image. Each new file
+  replaces the old one only once it is complete, and the old files stay in
+  `/var/lib/firebird/data/.major-upgrade/` (`database.ods13.fdb`, `security.ods13.fdb`): delete
+  them once the upgrade is verified. Expect free space for the old file, its backup and the new
+  file during the conversion.
+- **Older major ODS** (Firebird 6 back to 5): refused (`ImageRefused` warning, an `ImageChange`
+  condition); the instances keep their image. A database cannot move back to an older ODS: restore
+  a logical backup into a new cluster instead.
+
+`status.majorUpgrade` follows the steps (`Stopping`, `Converting`, `Starting`, `Completed`) and the
+cluster's phase reads `Upgrading`, with events `MajorUpgradeStarted`, `MajorUpgradeConverting`,
+`MajorUpgradeStarting` and `MajorUpgradeCompleted`. A failed conversion (`MajorUpgradeFailed`)
+leaves the cluster stopped: `kubectl logs job/<cluster>-major-upgrade-<n> -c backup` (or
+`-c restore`) shows why, deleting the Job retries it, and setting `spec.imageName` back to the old
+image abandons the upgrade (`MajorUpgradeAbandoned`) as long as no volume was converted. Take a
+new base backup after a major upgrade: the journal archive's segments from before it cannot be
+replayed onto a database in the new ODS. The kind CI upgrades a replicated cluster with automatic
+failover from Firebird 5 to the 6 snapshot and checks the data, a user, replication and the
+refusal to go back.
 
 ### Install the CRDs
 
@@ -1285,7 +1324,7 @@ The operator records Kubernetes events on its resources (CloudNativePG 1.29 / 1.
 
 | Resource | Reasons |
 |---|---|
-| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`, `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReconcileFailed` (warning) |
+| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`, `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ImageCheckStarted`, `ImageChecked`, `ImageRefused` (warning); `MajorUpgradeStarted`, `MajorUpgradeConverting`, `MajorUpgradeStarting`, `MajorUpgradeCompleted`, `MajorUpgradeFailed` (warning), `MajorUpgradeAbandoned`; `ReconcileFailed` (warning) |
 | `FirebirdBackup` | `BackupStarted`, `BackupCompleted`, `BackupFailed` (warning) |
 | `FirebirdRestore` | `RestoreStarted`, `RestoreCompleted`, `RestoreFailed` (warning) |
 | `FirebirdUser` | `UserApplied`, `UserFailed` (warning), `UserDropped` |
