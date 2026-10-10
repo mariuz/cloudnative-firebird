@@ -91,6 +91,16 @@ export function planRollingUpdate(options: {
     plan.message = `waiting: ${busy}`;
     return plan;
   }
+  // an outdated pod no node took (e.g. a required anti-affinity no node can meet) never ran: it is
+  // recreated from the new revision at once, instead of being waited for
+  const unscheduled = pods.find(
+    (p) => outdated.includes(name(p)) && !p.metadata?.deletionTimestamp && p.status?.phase === 'Pending' && !p.spec?.nodeName,
+  );
+  if (unscheduled) {
+    plan.restart = name(unscheduled);
+    plan.message = `recreating ${name(unscheduled)} on revision ${revision}: it was never scheduled`;
+    return plan;
+  }
   const notReady = pods.filter((p) => !fenced.includes(name(p)) && (p.metadata?.deletionTimestamp || !isPodReady(p)));
   if (notReady.length > 0 || pods.length < cluster.spec.instances) {
     plan.message = `waiting for all instances to be ready before restarting the next one (${outdated.join(', ')} outdated)`;

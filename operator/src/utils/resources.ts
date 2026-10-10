@@ -1,3 +1,4 @@
+import { instanceAffinity, instanceTopologySpreadConstraints } from './scheduling';
 import { withSegmentTls } from './segment-tls-pods';
 import { withPrimaryLease } from './primary-lease';
 import { createHash } from 'crypto';
@@ -460,8 +461,11 @@ export function buildStatefulSet(
           securityContext: instancePodSecurityContext(cluster),
           ...(initContainers.length > 0 ? { initContainers: initContainers.map(secured) } : {}),
           ...(spec.nodeSelector ? { nodeSelector: spec.nodeSelector } : {}),
-          ...(spec.affinity ? { affinity: spec.affinity } : {}),
+          ...(instanceAffinity(cluster) ? { affinity: instanceAffinity(cluster) } : {}),
           ...(spec.tolerations ? { tolerations: spec.tolerations } : {}),
+          ...(instanceTopologySpreadConstraints(cluster)
+            ? { topologySpreadConstraints: instanceTopologySpreadConstraints(cluster) }
+            : {}),
           containers: containers.map(secured),
           ...(volumes.length > 0 ? { volumes } : {}),
         }, superuserClientEnv(cluster)), true),
@@ -663,9 +667,11 @@ export function statefulSetNeedsUpdate(
   const securityContexts = (spec: V1PodSpec) =>
     JSON.stringify([...(spec.initContainers ?? []), ...(spec.containers ?? [])].map((c) => c.securityContext ?? {}));
   if (securityContexts(existingPodSpec) !== securityContexts(desiredPodSpec)) return true;
-  if (JSON.stringify(existingPodSpec.nodeSelector) !== JSON.stringify(desiredPodSpec.nodeSelector)) return true;
-  if (JSON.stringify(existingPodSpec.affinity) !== JSON.stringify(desiredPodSpec.affinity)) return true;
-  if (JSON.stringify(existingPodSpec.tolerations) !== JSON.stringify(desiredPodSpec.tolerations)) return true;
+  // scheduling: the API server returns objects with its own key order
+  if (canonicalJson(existingPodSpec.nodeSelector) !== canonicalJson(desiredPodSpec.nodeSelector)) return true;
+  if (canonicalJson(existingPodSpec.affinity) !== canonicalJson(desiredPodSpec.affinity)) return true;
+  if (canonicalJson(existingPodSpec.tolerations) !== canonicalJson(desiredPodSpec.tolerations)) return true;
+  if (canonicalJson(existingPodSpec.topologySpreadConstraints) !== canonicalJson(desiredPodSpec.topologySpreadConstraints)) return true;
 
   const names = (list?: Array<{ name: string }>) => (list ?? []).map((c) => c.name).join(',');
   if (names(existingPodSpec.containers) !== names(desiredPodSpec.containers)) return true;
@@ -703,6 +709,15 @@ export const FIREBIRD_UID = 84;
  * FOWNER). Everything else is dropped.
  */
 export const INSTANCE_CAPABILITIES = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER'];
+
+/** JSON with object keys sorted at every level, to compare objects whatever their key order */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)))
+      : v,
+  );
+}
 
 /** Pod security context of the instance pods: defaults, overridden by spec.podSecurityContext */
 export function instancePodSecurityContext(cluster: FirebirdCluster): V1PodSecurityContext {

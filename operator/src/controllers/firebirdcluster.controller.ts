@@ -20,6 +20,7 @@ import {
   primaryLeaseRoleName,
 } from '../utils/primary-lease';
 import { superuserPasswordFrom } from '../utils/restore-target';
+import { POD_ANTI_AFFINITY_ANNOTATION } from '../utils/scheduling';
 import {
   buildImageCheckJob,
   buildMajorUpgradeJob,
@@ -336,6 +337,7 @@ export class FirebirdClusterController {
       }
       await this.defaultSegmentTls(cluster, log);
       await this.defaultPrimaryLease(cluster, log);
+      await this.defaultPodAntiAffinity(cluster, log);
       await this.reconcileSegmentTlsMigration(cluster, log);
       await this.reconcilePrimaryLeaseMigration(cluster, log);
       // a new image is checked first (major version upgrades): the rest of the reconcile sees the
@@ -3074,6 +3076,44 @@ export class FirebirdClusterController {
    * StatefulSet (created by an earlier version) pinned to off, since the sidecar would restart
    * their instances. The owner's failover.primaryLease.enabled always wins over it.
    */
+  /**
+   * Records whether the instances repel each other by default (utils/scheduling.ts): on for a new
+   * cluster, pinned off for one that already has a StatefulSet (adding it would restart its
+   * instances). spec.podAntiAffinity.enabled overrides it.
+   */
+  private async defaultPodAntiAffinity(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    if (cluster.metadata.annotations?.[POD_ANTI_AFFINITY_ANNOTATION]) return;
+    const { name, namespace = 'default' } = cluster.metadata;
+    let existing = true;
+    try {
+      await this.appsApi.readNamespacedStatefulSet({ name, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+      existing = false;
+    }
+    const value = existing ? 'pinned' : 'enabled';
+    await this.customApi.patchNamespacedCustomObject(
+      {
+        group: API_GROUP,
+        version: API_VERSION,
+        namespace,
+        plural: RESOURCE_PLURAL,
+        name,
+        body: { metadata: { annotations: { [POD_ANTI_AFFINITY_ANNOTATION]: value } } },
+      },
+      MERGE_PATCH,
+    );
+    cluster.metadata.annotations = { ...cluster.metadata.annotations, [POD_ANTI_AFFINITY_ANNOTATION]: value };
+    const reason = existing ? 'an existing cluster keeps its scheduling' : 'the default for new clusters';
+    log.info({ enabled: !existing }, `Recorded the pod anti-affinity default: ${reason}`);
+    await this.event(
+      cluster,
+      'Normal',
+      EventReason.PodAntiAffinityDefaulted,
+      `the instances repel each other (pod anti-affinity): ${!existing} (${reason}; spec.podAntiAffinity.enabled overrides it)`,
+    );
+  }
+
   private async defaultPrimaryLease(cluster: FirebirdCluster, log: Logger): Promise<void> {
     if (cluster.metadata.annotations?.[PRIMARY_LEASE_ANNOTATION]) return;
     const { name, namespace = 'default' } = cluster.metadata;

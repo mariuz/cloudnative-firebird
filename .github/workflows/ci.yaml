@@ -1437,6 +1437,42 @@ jobs:
           [ "$(kubectl get statefulset mup -o jsonpath='{.spec.template.spec.containers[?(@.name=="firebird")].image}')" = firebirdsql/firebird:6-snapshot ]
           kubectl delete firebirdcluster mup --wait=false
 
+      - name: Verify spreading the instances
+        if: matrix.track.id == 'extended'
+        run: |
+          # clusters created by this operator repel their instances: preferred, on the hostname
+          [ "$(kubectl get firebirdcluster test-cluster -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/pod-anti-affinity}')" = enabled ]
+          [ "$(kubectl get statefulset test-cluster -o jsonpath='{.spec.template.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].podAffinityTerm.topologyKey}')" = kubernetes.io/hostname ]
+          # required, with a spread constraint: kind has one node, so the second instance stays pending
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: spread
+          spec:
+            instances: 2
+            storage:
+              size: 1Gi
+            podAntiAffinity:
+              type: required
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+          EOF
+          timeout 300 bash -c 'until kubectl get pod spread-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/spread-0 --for=condition=Ready --timeout=300s
+          timeout 180 bash -c 'until [ "$(kubectl get pod spread-1 -o jsonpath="{.status.conditions[?(@.type==\"PodScheduled\")].reason}" 2>/dev/null)" = Unschedulable ]; do sleep 3; done' \
+            || { kubectl get pod spread-1 -o yaml; exit 1; }
+          kubectl get statefulset spread -o jsonpath='{.spec.template.spec.topologySpreadConstraints[0].labelSelector.matchLabels}' | grep -q '"firebird.cloudnative-firebird.io/cluster":"spread"'
+          kubectl get statefulset spread -o jsonpath='{.spec.template.spec.affinity.podAntiAffinity.requiredDuringSchedulingIgnoredDuringExecution[0].topologyKey}' | grep -qx kubernetes.io/hostname
+          # back to preferred: the rolling update recreates the pod no node took, which then starts
+          kubectl patch firebirdcluster spread --type merge -p '{"spec":{"podAntiAffinity":{"type":"preferred"}}}'
+          timeout 300 bash -c 'until [ "$(kubectl get pod spread-1 -o jsonpath="{.status.conditions[?(@.type==\"Ready\")].status}" 2>/dev/null)" = True ]; do sleep 5; done' \
+            || { kubectl get pods -l firebird.cloudnative-firebird.io/cluster=spread; kubectl get firebirdcluster spread -o jsonpath='{.status}'; exit 1; }
+          kubectl get statefulset spread -o jsonpath='{.spec.template.spec.affinity.podAntiAffinity}' | grep -q preferredDuringScheduling
+          kubectl delete firebirdcluster spread --wait=false
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |

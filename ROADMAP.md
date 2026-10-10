@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.89.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.90.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Scheduling: Spreading the Instances** *(v0.90.0; CloudNativePG's enablePodAntiAffinity, podAntiAffinityType, topologyKey, topologySpreadConstraints)*
+  - New clusters get a pod anti-affinity among their instance pods (`podAntiAffinity`: `preferred` by default, or `required`, on `kubernetes.io/hostname` or another `topologyKey`), added to the owner's `affinity`; the default is recorded in the `pod-anti-affinity` annotation (`PodAntiAffinityDefaulted`), and clusters that existed before are pinned without it so an operator upgrade restarts nothing. `topologySpreadConstraints` are passed to the instance pods, a constraint without `labelSelector` getting the instance pods' one.
+  - A rolling update recreates an outdated pod that was never scheduled right away (a `required` rule no node can meet) instead of waiting for it; the StatefulSet comparison of scheduling fields ignores the API server's key order.
+  - Unit tests cover the default and its recording, the affinity merge, the spread constraints, the comparison, the validation and the unscheduled pod; the kind CI checks the default on a new cluster, a `required` rule leaving the second instance pending on one node, and relaxing it.
 - [x] **Major Version Upgrades** *(v0.89.0; CloudNativePG's offline major upgrade)*
   - A new `spec.imageName` is checked before the instances run it: an image check Job runs both images and reports the on-disk structure (ODS) of a database each creates and its server version (`status.imageCheck`). The same major ODS (Firebird 4 to 5) rolls out as usual; an older one is refused (`ImageRefused`), the instances keeping their image.
   - A newer major ODS (Firebird 5 to 6) is a major upgrade (`status.majorUpgrade`, phase `Upgrading`): every instance stops, a Job per instance volume converts its databases with `gbak` (backup with the old image, restore with the new one, embedded; the old files kept), the security database on every instance and the database on the primary (with its replication sequence, so segment names continue), and the instances start on the new image, the replicas seeded again. A failed Job leaves the cluster stopped (delete it to retry; setting the image back abandons the upgrade while no volume was converted). Backups, restores, users and roles wait meanwhile.
@@ -446,6 +450,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Volume Expansion** | PVC Resize | In-place PVC Expansion | **v0.6.0 (Done)** |
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | `targetPrimary` annotation | **v0.13.0 (Done)** |
+| **Pod Anti-Affinity / Spread** | `affinity.enablePodAntiAffinity`, `topologySpreadConstraints` | `podAntiAffinity` (on for new clusters), `topologySpreadConstraints` | **v0.90.0 (Done)** |
 | **Major Version Upgrade** | Offline `pg_upgrade` | Image check, offline `gbak` conversion per volume | **v0.89.0 (Done)** |
 | **Rolling Updates** | Primary last, `primaryUpdateStrategy` / `primaryUpdateMethod` | Same settings, `OnDelete` StatefulSet | **v0.15.0 (Done)** |
 | **Declarative Roles** | `DatabaseRole` / `managed.roles` | `FirebirdUser` | **v0.12.0 (Done)** |
