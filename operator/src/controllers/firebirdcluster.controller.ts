@@ -77,7 +77,7 @@ import { firebirdUsername } from '../utils/users';
 import { metrics, recordClusterMetrics, recordReconcile } from '../utils/metrics';
 import { RESEED_VOLUME, dataClaimName, planVolumeRecreation } from '../utils/volume-recreation';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
-import { PRIMARY_RESTART_GRACE_SECONDS, REVISION_LABEL, planRollingUpdate, rollingUpdateTarget } from '../utils/rolling-update';
+import { PRIMARY_RESTART_GRACE_SECONDS, REVISION_LABEL, planRollingUpdate, rollingUpdateTarget, staleUnschedulablePod } from '../utils/rolling-update';
 import {
   SyncPlanInput,
   attachedStandbys,
@@ -2045,6 +2045,15 @@ export class FirebirdClusterController {
       primaryRestart = undefined;
     }
     if (plan.outdated.length === 0) {
+      const stale = busy ? undefined : staleUnschedulablePod(pods);
+      if (stale) {
+        log.info({ pod: stale }, 'Recreating an unschedulable instance pod: the other instances changed since it was found unschedulable');
+        try {
+          await this.coreApi.deleteNamespacedPod({ name: stale, namespace });
+        } catch (err) {
+          if (!isNotFound(err)) throw err;
+        }
+      }
       if (stored && !primaryRestart) {
         await this.event(cluster, 'Normal', EventReason.RollingUpdateCompleted, `all instances run revision ${plan.revision}`);
       }

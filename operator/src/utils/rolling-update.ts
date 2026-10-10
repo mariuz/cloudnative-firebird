@@ -185,6 +185,27 @@ export function planRollingUpdate(options: {
 }
 
 /**
+ * An instance pod no node took, found unschedulable before another instance pod was (re)created:
+ * the new pod may lift what kept it off the nodes (a required anti-affinity of the pod it replaced),
+ * but the scheduler may not look at it again for minutes. Recreating it has it scheduled at once;
+ * the new pod's own finding is later than every other pod, so this happens once per change.
+ */
+export function staleUnschedulablePod(pods: V1Pod[]): string | undefined {
+  const time = (t: Date | string | undefined) => (t ? new Date(t).getTime() : NaN);
+  for (const pod of pods) {
+    if (pod.metadata?.deletionTimestamp || pod.status?.phase !== 'Pending' || pod.spec?.nodeName) continue;
+    const scheduled = (pod.status?.conditions ?? []).find((c) => c.type === 'PodScheduled');
+    if (scheduled?.status !== 'False' || scheduled.reason !== 'Unschedulable') continue;
+    const foundAt = time(scheduled.lastTransitionTime);
+    const later = pods.some(
+      (other) => other !== pod && !other.metadata?.deletionTimestamp && time(other.metadata?.creationTimestamp) > foundAt,
+    );
+    if (later) return pod.metadata?.name;
+  }
+  return undefined;
+}
+
+/**
  * The synchronous standby a rolling update restarts next: once only synchronous standbys
  * (syncStandbys) are outdated, the highest ordinal of them; without synchronous standbys, the only
  * outdated replica left (fenced instances aside). Undefined for a hibernated cluster, or when

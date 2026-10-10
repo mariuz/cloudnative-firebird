@@ -9,7 +9,7 @@ import {
   podAntiAffinityEnabled,
 } from '../src/utils/scheduling';
 import { buildStatefulSet, canonicalJson, statefulSetNeedsUpdate, statefulSetPatchBody, withRemovals } from '../src/utils/resources';
-import { planRollingUpdate, REVISION_LABEL } from '../src/utils/rolling-update';
+import { planRollingUpdate, REVISION_LABEL, staleUnschedulablePod } from '../src/utils/rolling-update';
 import { validateClusterSpec } from '../src/utils/validation';
 import { FirebirdCluster } from '../src/types';
 import { makeCluster, notFoundError } from './helpers/factories';
@@ -161,6 +161,28 @@ describe('spreading the instances', () => {
       fenced: [],
     });
     expect(waiting?.restart).toBeUndefined();
+  });
+
+  it('has a pod found unschedulable before the other instances changed scheduled again', () => {
+    const pending = (found: string): V1Pod => ({
+      metadata: { name: 'test-cluster-1', creationTimestamp: new Date('2026-10-10T10:00:00Z') },
+      spec: { containers: [] },
+      status: { phase: 'Pending', conditions: [{ type: 'PodScheduled', status: 'False', reason: 'Unschedulable', lastTransitionTime: new Date(found) }] },
+    });
+    const running = (created: string): V1Pod => ({
+      metadata: { name: 'test-cluster-0', creationTimestamp: new Date(created) },
+      spec: { containers: [], nodeName: 'node-1' },
+      status: { phase: 'Running' },
+    });
+    // the other instance was recreated after the finding (its old rule may be gone)
+    expect(staleUnschedulablePod([running('2026-10-10T10:01:00Z'), pending('2026-10-10T10:00:05Z')])).toBe('test-cluster-1');
+    // found after every other pod was created: nothing changed since, left to the scheduler
+    expect(staleUnschedulablePod([running('2026-10-10T09:00:00Z'), pending('2026-10-10T10:00:05Z')])).toBeUndefined();
+    // a pod still being scheduled, or one a node took
+    const fresh = pending('2026-10-10T10:00:05Z');
+    fresh.status!.conditions = [];
+    expect(staleUnschedulablePod([running('2026-10-10T10:01:00Z'), fresh])).toBeUndefined();
+    expect(staleUnschedulablePod([running('2026-10-10T10:01:00Z'), running('2026-10-10T10:02:00Z')])).toBeUndefined();
   });
 
   describe('in the controller', () => {
