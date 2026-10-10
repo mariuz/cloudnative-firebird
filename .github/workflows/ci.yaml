@@ -930,7 +930,7 @@ jobs:
             sleep 5
           done
           [ "$(updated)" = 3 ] || { kubectl get pods -l "$SEL" -L controller-revision-hash; kubectl get firebirdcluster repl -o jsonpath='{.status.rollingUpdate}'; exit 1; }
-          kubectl get role repl-primary-lease rolebinding repl-primary-lease
+          kubectl get role/repl-primary-lease rolebinding/repl-primary-lease
           primary=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
           # renewed by the primary's sidecar through its own ServiceAccount: the renewal time moves on
           t1=$(kubectl get lease repl-lease -o jsonpath={.spec.renewTime}); sleep 12
