@@ -1433,8 +1433,10 @@ jobs:
           kubectl patch firebirdcluster mup --type merge -p '{"spec":{"imageName":"firebirdsql/firebird:5"}}'
           timeout 300 bash -c "until [ \"\$(kubectl get firebirdcluster mup -o jsonpath='{.status.imageCheck.phase}')\" = Refused ]; do sleep 5; done" \
             || { kubectl get firebirdcluster mup -o jsonpath='{.status}'; exit 1; }
-          kubectl get events --field-selector reason=ImageRefused,involvedObject.name=mup -o name | grep -q .
-          [ "$(kubectl get statefulset mup -o jsonpath='{.spec.template.spec.containers[?(@.name=="firebird")].image}')" = firebirdsql/firebird:6-snapshot ]
+          kubectl get events --field-selector reason=ImageRefused,involvedObject.name=mup -o name | grep -q . \
+            || { echo "no ImageRefused event"; kubectl get events --field-selector involvedObject.name=mup; exit 1; }
+          image=$(kubectl get statefulset mup -o jsonpath='{.spec.template.spec.containers[?(@.name=="firebird")].image}')
+          [ "$image" = firebirdsql/firebird:6-snapshot ] || { echo "the StatefulSet runs $image"; exit 1; }
           kubectl delete firebirdcluster mup --wait=false
 
       - name: Verify spreading the instances

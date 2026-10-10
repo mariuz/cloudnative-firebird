@@ -642,7 +642,7 @@ export class FirebirdClusterController {
       const decided = await this.imageCheck(cluster, check, log);
       if (decided) {
         check = decided;
-        await this.persistStatus(cluster, { imageCheck: check });
+        // the event first: once the status shows the outcome, its event is there too
         const warning = check.phase === 'Refused' || check.phase === 'Failed';
         await this.event(
           cluster,
@@ -650,6 +650,7 @@ export class FirebirdClusterController {
           warning ? EventReason.ImageRefused : EventReason.ImageChecked,
           imageCheckMessage(check),
         );
+        await this.persistStatus(cluster, { imageCheck: check });
       }
     }
 
