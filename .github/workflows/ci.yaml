@@ -1329,6 +1329,9 @@ jobs:
           kubectl wait pod/plain-0 --for=condition=Ready --timeout=300s
           kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system SEGMENT_TLS_REQUIRED=true
           kubectl rollout status deployment/cloudnative-firebird-operator -n cloudnative-firebird-system --timeout=180s
+          # the admission webhook is served by every replica: wait until the old ones, without the
+          # new setting, are gone too (a terminating pod can still answer for a few seconds)
+          timeout 120 bash -c 'until [ -z "$(kubectl get pods -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird -o jsonpath="{range .items[*]}{.metadata.deletionTimestamp}{end}")" ]; do sleep 3; done'
           # the plain cluster is reported, not restarted (the new leader reconciles it after the rollout)
           echo "waiting for the SegmentTLS condition"
           timeout 180 bash -c 'until [ "$(kubectl get firebirdcluster plain -o jsonpath="{.status.conditions[?(@.type==\"SegmentTLS\")].reason}")" = PlainSegmentShipping ]; do sleep 5; done' \
@@ -1377,6 +1380,9 @@ jobs:
           kubectl patch firebirdcluster plain --type merge -p '{"spec":{"env":[{"name":"STILL_PLAIN","value":"1"}]}}'
           kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system SEGMENT_TLS_REQUIRED-
           kubectl rollout status deployment/cloudnative-firebird-operator -n cloudnative-firebird-system --timeout=180s
+          # the admission webhook is served by every replica: wait until the old ones, without the
+          # new setting, are gone too (a terminating pod can still answer for a few seconds)
+          timeout 120 bash -c 'until [ -z "$(kubectl get pods -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird -o jsonpath="{range .items[*]}{.metadata.deletionTimestamp}{end}")" ]; do sleep 3; done'
           kubectl delete firebirdcluster plain --wait=false
 
       - name: Verify synchronous replication
