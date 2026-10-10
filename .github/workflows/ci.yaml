@@ -72,7 +72,13 @@ jobs:
         run: |
           cd operator
           npm ci
-          docker build -t cloudnative-firebird:ci .
+          # Docker Hub rate limits and outages (429, 504 on the base image) fail the build before
+          # any test runs: try again a few times
+          for attempt in 1 2 3 4; do
+            docker build -t cloudnative-firebird:ci . && break
+            [ "$attempt" = 4 ] && exit 1
+            echo "build attempt $attempt failed; retrying in 30s"; sleep 30
+          done
 
       - name: Load operator image into kind
         run: kind load docker-image cloudnative-firebird:ci --name firebird-test

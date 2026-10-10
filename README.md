@@ -689,6 +689,15 @@ highest ordinal down, each handed over as below.
   change twice), and the primary's segment server writes the `sync_replica` entry to the file
   `replication.conf` includes; Firebird reads it when the database is opened again. Writes pause
   for these few seconds and clients are disconnected, as at the start of a switchover.
+  `status.synchronous.message` and the `SyncStandbyAttached` event say how long (`writes paused
+  3s`, v0.85.0).
+- **Why writes pause**: Firebird reads `replication.conf` (with the included file) only when the
+  database is opened, at its first attachment after the last one closed, and has nothing to
+  reload it (verified on Firebird 5 and the 6 snapshot; [ISSUES.md](ISSUES.md) issue 9,
+  `hack/repro/sync-replica.sh`). With clients attached only a shutdown creates that moment. It
+  is also the point where the journal and the synchronous stream agree, so a standby switches
+  between them without missing or repeating a change. The pause is the attach itself, not a
+  wait: the standby is attached only once it has caught up.
 - **Commits**: Firebird applies each transaction on the standby before the commit returns.
   `replication.conf` sets `report_errors = true` and `disable_on_error = false`, so when the
   standby cannot be reached the write fails on the primary (`Replication error`) and is not

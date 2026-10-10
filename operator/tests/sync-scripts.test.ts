@@ -506,8 +506,10 @@ describe('sync-standby.pl', () => {
     child.stderr.on('data', (d) => (out += d));
     const code = await new Promise<number>((resolve) => child.on('exit', (c) => resolve(c ?? -1)));
     servers.forEach((s) => s.close());
-    const result = existsSync(join(ws.dir, 'result')) ? readFileSync(join(ws.dir, 'result'), 'utf8') : undefined;
-    return { code, out, log, result, calls: ws.calls() };
+    // the outcome, with how long writes were paused on a second line once the primary is back online
+    const message = existsSync(join(ws.dir, 'result')) ? readFileSync(join(ws.dir, 'result'), 'utf8') : undefined;
+    const [result, paused] = message?.split('\n') ?? [];
+    return { code, out, log, result, paused, calls: ws.calls() };
   }
 
   it('attaches: primary shut down, standby caught up, SYNC before STANDBY on, primary back online', async () => {
@@ -518,6 +520,8 @@ describe('sync-standby.pl', () => {
     });
     expect(r.code).toBe(0);
     expect(r.result).toBe('attached');
+    expect(r.paused).toMatch(/^paused \d+s$/);
+    expect(r.out).toMatch(/writes were paused for \d+s/);
     expect(r.log).toEqual(['primary HEADER', 'standby POSITION', 'primary SYNC 127.0.0.2', 'standby STANDBY on']);
     expect(r.calls[1]).toContain('prp_shutdown_mode prp_sm_full prp_force_shutdown 0');
     expect(r.calls[r.calls.length - 1]).toContain('prp_online_mode prp_sm_normal');

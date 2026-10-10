@@ -246,6 +246,30 @@ advanced replica instead of promoting a standby that may lack commits.
 
 ---
 
+## 9. `replication.conf` is read only when a database is opened: no reload
+
+**What happens.** Firebird reads `replication.conf`, and the file a `database` section
+includes, when a database is opened: at its first attachment after the last one closed
+(Firebird 5.0.3 and the 6.0 snapshot keep the parsed `Replication::Config` in the database's
+global objects, `GlobalObjectHolder` in `src/jrd/Database.h`, created with them and never
+replaced). There is no way to reload it: a changed or added `sync_replica` is ignored while any
+attachment stays open, and takes effect as soon as every attachment is closed, without a
+shutdown.
+
+```sh
+hack/repro/sync-replica.sh   # "--- 4." shows the three cases
+```
+
+**Handling.** With clients attached, only a shutdown closes every attachment and keeps new ones
+out, so the operator attaches and detaches a synchronous standby with the primary briefly in
+full shutdown (`sync-standby.pl`). That moment is also the point where the journal and the
+synchronous stream agree, so the pause would stay even with a reload. The sync-standby Job
+reports how long writes were stopped (`status.synchronous.message`, v0.85.0). A reload (a
+service action, or re-reading the configuration at each attachment) would be a Firebird
+feature request; it would not remove the pause by itself.
+
+---
+
 ## Implementation notes
 
 - **No embedded access to live databases.** The replication sidecars run in their own

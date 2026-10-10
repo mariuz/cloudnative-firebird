@@ -18,8 +18,10 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   is failed over (v0.63.0), since v0.78.0 also when cluster DNS fails with the partition (the
   peers known from the last answer and the addresses the operator publishes, v0.80.0).
 - [ ] **Synchronous replication follow-ups** (one standby since v0.53.0, several since v0.61.0):
-  attaching and detaching without the short write pause (Firebird reads `sync_replica` only when
-  the database is opened); an "any N of M" quorum (Firebird waits for every `sync_replica`).
+  an "any N of M" quorum (Firebird waits for every `sync_replica`). Attaching and detaching
+  without the short write pause is not possible with Firebird 5 or 6: `sync_replica` is read
+  only when the database is opened, after every attachment closed, and nothing reloads it
+  (verified v0.85.0, [ISSUES.md](ISSUES.md) issue 9); the Job now reports the pause's length.
   A restart of the only replica in `required` mode blocks writes by definition; since v0.73.0
   `detachForUpdates` lets rolling updates detach it first (asynchronous commits meanwhile), while
   other restarts (crash, drain) still block writes until it is back.

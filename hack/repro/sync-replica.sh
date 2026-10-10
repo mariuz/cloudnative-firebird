@@ -8,7 +8,11 @@
 #      replica and logs the error only: ISSUES.md, issue 8);
 #   2. a replica that also applies the journal gets every change twice;
 #   3. sync_replica can live in a file replication.conf includes, and Firebird reads it again when
-#      the database is opened after a full shutdown (no server restart).
+#      the database is opened after a full shutdown (no server restart);
+#   4. it is read only when the database is opened (the first attachment after the last one
+#      closed): a change is ignored while any attachment stays open, and it takes effect once
+#      every attachment is closed, without a shutdown. With clients attached only a shutdown
+#      creates that moment, so the operator's attach and detach pause writes (ISSUES.md, issue 9).
 #
 #   hack/repro/sync-replica.sh
 #   IMAGE=firebirdsql/firebird:4 hack/repro/sync-replica.sh
@@ -77,6 +81,20 @@ docker exec syncp sh -c 'export ISC_USER=SYSDBA ISC_PASSWORD=masterkey
   fbsvcmgr localhost:service_mgr action_properties dbname /data/db.fdb prp_online_mode prp_sm_normal'
 q syncp "insert into t values (3); commit;" >/dev/null
 echo "after full shutdown and online: primary $(cnt syncp), replica $(cnt syncr) (row 3 only: replicated synchronously)"
+
+echo "--- 4. read when the database is opened: once every attachment is closed, not while one stays open"
+docker exec -d syncp sh -c '(echo "select 1 from rdb\$database;"; sleep 600) | ISC_USER=SYSDBA ISC_PASSWORD=masterkey /opt/firebird/bin/isql -q localhost:/data/db.fdb'
+sleep 2
+docker exec syncp sh -c ': > /data/sync.conf'
+q syncp "insert into t values (31); commit;" >/dev/null
+echo "sync_replica removed, an attachment still open: primary $(cnt syncp), replica $(cnt syncr) (row 31 still replicated)"
+docker exec syncp sh -c 'pkill -9 -x isql; pkill -9 -x sleep' >/dev/null 2>&1 || true
+sleep 3
+q syncp "insert into t values (32); commit;" >/dev/null
+echo "every attachment closed, no shutdown: primary $(cnt syncp), replica $(cnt syncr) (row 32 not replicated: the change was read)"
+docker exec syncp sh -c 'printf "sync_replica = syncr:/data/db.fdb\n{\n  username = SYSDBA\n  password_env = ISC_PASSWORD\n}\n" > /data/sync.conf'
+q syncp "insert into t values (33); commit;" >/dev/null
+echo "sync_replica back while nothing was attached: primary $(cnt syncp), replica $(cnt syncr) (row 33 replicated again)"
 
 echo "--- 1. strict synchronous replication"
 q syncp "insert into t values (4); commit;" >/dev/null
