@@ -8,7 +8,7 @@ import {
   POD_ANTI_AFFINITY_ANNOTATION,
   podAntiAffinityEnabled,
 } from '../src/utils/scheduling';
-import { buildStatefulSet, canonicalJson, statefulSetNeedsUpdate } from '../src/utils/resources';
+import { buildStatefulSet, canonicalJson, statefulSetNeedsUpdate, statefulSetPatchBody, withRemovals } from '../src/utils/resources';
 import { planRollingUpdate, REVISION_LABEL } from '../src/utils/rolling-update';
 import { validateClusterSpec } from '../src/utils/validation';
 import { FirebirdCluster } from '../src/types';
@@ -96,6 +96,23 @@ describe('spreading the instances', () => {
     expect(statefulSetNeedsUpdate(reordered, desired)).toBe(false);
     expect(statefulSetNeedsUpdate(buildStatefulSet(recorded('pinned')), desired)).toBe(true);
     expect(canonicalJson({ b: 1, a: { d: [{ y: 1, x: 2 }], c: 3 } })).toBe('{"a":{"c":3,"d":[{"x":2,"y":1}]},"b":1}');
+  });
+
+  it('removes the scheduling keys a merge patch would keep (required turned preferred, a node selector dropped)', () => {
+    expect(withRemovals({ a: { b: 1, c: 2 }, d: [1] }, { a: { b: 3 } })).toEqual({ a: { b: 3, c: null }, d: null });
+    expect(withRemovals({ a: 1 }, [2])).toEqual([2]);
+    const existing = buildStatefulSet(recorded('enabled', { podAntiAffinity: { type: 'required' }, nodeSelector: { disk: 'ssd' } }));
+    const desired = buildStatefulSet(recorded('enabled'));
+    const pod = statefulSetPatchBody(existing, desired).spec!.template.spec! as unknown as Record<string, unknown>;
+    expect(pod.nodeSelector).toBeNull();
+    expect(pod.affinity).toEqual({
+      podAntiAffinity: {
+        preferredDuringSchedulingIgnoredDuringExecution: desired.spec!.template.spec!.affinity!.podAntiAffinity!.preferredDuringSchedulingIgnoredDuringExecution,
+        requiredDuringSchedulingIgnoredDuringExecution: null,
+      },
+    });
+    // nothing to remove: the desired object as it is
+    expect(statefulSetPatchBody(desired, desired).spec!.template.spec!.affinity).toEqual(desired.spec!.template.spec!.affinity);
   });
 
   it('rejects an unknown anti-affinity type or an empty topology key', () => {

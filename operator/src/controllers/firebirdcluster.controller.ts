@@ -135,6 +135,7 @@ import {
   readOnlyRoutingEnabled,
   replicaServiceSelector,
   statefulSetNeedsUpdate,
+  statefulSetPatchBody,
   withHibernation,
   CLUSTER_LABEL,
   clusterLabels,
@@ -1900,10 +1901,12 @@ export class FirebirdClusterController {
         desired.spec.volumeClaimTemplates = existing.spec.volumeClaimTemplates;
       }
       // a merge patch keeps the existing rollingUpdate settings, which OnDelete rejects
+      // and keeps scheduling keys the desired template no longer has: they are sent as null
+      const patched = statefulSetPatchBody(existing, desired);
       const body =
-        desired.spec?.updateStrategy?.type === 'OnDelete'
-          ? { ...desired, spec: { ...desired.spec, updateStrategy: { type: 'OnDelete', rollingUpdate: null } } }
-          : desired;
+        patched.spec?.updateStrategy?.type === 'OnDelete'
+          ? { ...patched, spec: { ...patched.spec, updateStrategy: { type: 'OnDelete', rollingUpdate: null } } }
+          : patched;
       current = await this.appsApi.patchNamespacedStatefulSet({
         name,
         namespace,

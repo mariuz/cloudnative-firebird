@@ -710,6 +710,42 @@ export const FIREBIRD_UID = 84;
  */
 export const INSTANCE_CAPABILITIES = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER'];
 
+const plainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/**
+ * `desired` with null for every key `existing` has and `desired` lacks, at every object level
+ * (arrays are replaced whole): a JSON merge patch only removes keys sent as null
+ */
+export function withRemovals(existing: unknown, desired: unknown): unknown {
+  if (!plainObject(existing) || !plainObject(desired)) return desired;
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(desired)) result[key] = withRemovals(existing[key], value);
+  for (const key of Object.keys(existing)) if (!(key in desired)) result[key] = null;
+  return result;
+}
+
+/** Scheduling fields of the instance pod template a StatefulSet update replaces rather than merges */
+const SCHEDULING_FIELDS = ['affinity', 'nodeSelector', 'tolerations', 'topologySpreadConstraints'] as const;
+
+/**
+ * The StatefulSet merge patch body: the scheduling fields of the pod template as desired, with what
+ * the existing template has beyond them removed (e.g. a required anti-affinity turned preferred)
+ */
+export function statefulSetPatchBody(existing: V1StatefulSet, desired: V1StatefulSet): V1StatefulSet {
+  const existingPod = existing.spec?.template?.spec;
+  const desiredPod = desired.spec?.template?.spec;
+  if (!existingPod || !desiredPod || !desired.spec) return desired;
+  const pod: Record<string, unknown> = { ...desiredPod };
+  for (const field of SCHEDULING_FIELDS) {
+    if (desiredPod[field] === undefined) {
+      if (existingPod[field] !== undefined) pod[field] = null;
+    } else {
+      pod[field] = withRemovals(existingPod[field], desiredPod[field]);
+    }
+  }
+  return { ...desired, spec: { ...desired.spec, template: { ...desired.spec.template, spec: pod as unknown as V1PodSpec } } };
+}
+
 /** JSON with object keys sorted at every level, to compare objects whatever their key order */
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(value, (_key, v: unknown) =>
