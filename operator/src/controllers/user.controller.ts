@@ -1,3 +1,4 @@
+import { clusterStoppedReason } from '../utils/major-upgrade';
 import {
   BatchV1Api,
   CoordinationV1Api,
@@ -116,8 +117,8 @@ export class FirebirdUserController {
       await this.updateStatus(user, { phase: 'Pending', message: `FirebirdCluster ${user.spec.clusterName} not found` });
       return;
     }
-    if (cluster.spec.hibernated) {
-      await this.updateStatus(user, { phase: 'Pending', message: 'cluster is hibernated' });
+    if (clusterStoppedReason(cluster)) {
+      await this.updateStatus(user, { phase: 'Pending', message: clusterStoppedReason(cluster) });
       return;
     }
 

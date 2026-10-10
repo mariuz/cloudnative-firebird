@@ -428,7 +428,7 @@ export interface FirebirdClusterSpec {
 /**
  * Condition types for the FirebirdCluster status.
  */
-export type ConditionType = 'Ready' | 'Progressing' | 'Degraded' | 'Paused' | 'Hibernated' | 'Fenced' | 'SegmentTLS';
+export type ConditionType = 'Ready' | 'Progressing' | 'Degraded' | 'Paused' | 'Hibernated' | 'Fenced' | 'SegmentTLS' | 'ImageChange';
 export type ConditionStatus = 'True' | 'False' | 'Unknown';
 
 /**
@@ -523,7 +523,7 @@ export interface FirebirdClusterStatus {
   /** Number of ready instances */
   readyInstances?: number;
   /** Current phase of the cluster */
-  phase?: 'Creating' | 'Running' | 'Updating' | 'Degraded' | 'Deleting' | 'Paused' | 'Hibernated';
+  phase?: 'Creating' | 'Running' | 'Updating' | 'Upgrading' | 'Degraded' | 'Deleting' | 'Paused' | 'Hibernated';
   /** Human-readable message about current status */
   phaseReason?: string;
   /** List of status conditions */
@@ -558,6 +558,10 @@ export interface FirebirdClusterStatus {
   selector?: string;
   /** Rolling update in progress (replication clusters, primary last) */
   rollingUpdate?: RollingUpdateStatus;
+  /** Check of a new spec.imageName before the instances run it (utils/major-upgrade.ts) */
+  imageCheck?: ImageCheckStatus;
+  /** Major version upgrade in progress, or the last one (utils/major-upgrade.ts) */
+  majorUpgrade?: MajorUpgradeStatus;
 }
 
 /** Progress of a rolling update of the instance pods */
@@ -720,6 +724,54 @@ export interface FirebirdClusterList {
  * environment variable (e.g. a mirror in a private registry, or another Firebird version), or
  * firebirdsql/firebird:latest. Changing it updates those clusters like any image change.
  */
+/**
+ * Check of a new image (spec.imageName) against the one the instances run: the on-disk structure
+ * (ODS, "major.minor") of a database each image creates, and its server version
+ */
+export interface ImageCheckStatus {
+  /** Image the instances run */
+  from: string;
+  /** Image of spec.imageName */
+  to: string;
+  /**
+   * Checking: the image check Job runs; Compatible: same major ODS, rolled out as usual;
+   * Upgrade: newer major ODS, the databases are converted (majorUpgrade); Refused: older major
+   * ODS (Firebird cannot open a newer one); Failed: the check failed
+   */
+  phase: 'Checking' | 'Compatible' | 'Upgrade' | 'Refused' | 'Failed';
+  fromOds?: string;
+  toOds?: string;
+  fromVersion?: string;
+  toVersion?: string;
+  message?: string;
+}
+
+/**
+ * Major version upgrade (CloudNativePG's offline major upgrade): every instance stops, Jobs
+ * convert the databases on the instance volumes with gbak (backup with the old image, restore with
+ * the new one), and the instances start on the new image, the replicas seeded again
+ */
+export interface MajorUpgradeStatus {
+  from: string;
+  to: string;
+  fromOds: string;
+  toOds: string;
+  fromVersion?: string;
+  toVersion?: string;
+  /** The primary when the upgrade started: its database is converted, the replicas' discarded */
+  primary?: string;
+  /**
+   * Stopping: the instances stop; Converting: the conversion Jobs run; Starting: the instances
+   * start on the new image; Completed; Failed: a conversion Job failed (the cluster stays stopped)
+   */
+  phase: 'Stopping' | 'Converting' | 'Starting' | 'Completed' | 'Failed';
+  /** Instance volumes converted */
+  converted?: string[];
+  message?: string;
+  startTime?: string;
+  completionTime?: string;
+}
+
 export const DEFAULT_FIREBIRD_IMAGE = process.env.FIREBIRD_DEFAULT_IMAGE?.trim() || 'firebirdsql/firebird:latest';
 
 /** API group for the FirebirdCluster CRD */

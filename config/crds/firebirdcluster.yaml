@@ -806,6 +806,7 @@ spec:
                     - Creating
                     - Running
                     - Updating
+                    - Upgrading
                     - Degraded
                     - Deleting
                     - Paused
@@ -872,6 +873,68 @@ spec:
                     (journalArchiveS3); a promoted replica's journal continues after it
                   type: integer
                   format: int64
+                imageCheck:
+                  description: Check of a new spec.imageName against the image the instances run (on-disk structure and server version of each)
+                  type: object
+                  properties:
+                    from:
+                      type: string
+                    to:
+                      type: string
+                    phase:
+                      type: string
+                      enum:
+                        - Checking
+                        - Compatible
+                        - Upgrade
+                        - Refused
+                        - Failed
+                    fromOds:
+                      type: string
+                    toOds:
+                      type: string
+                    fromVersion:
+                      type: string
+                    toVersion:
+                      type: string
+                    message:
+                      type: string
+                majorUpgrade:
+                  description: Major version upgrade in progress, or the last one (the databases converted offline with gbak)
+                  type: object
+                  properties:
+                    from:
+                      type: string
+                    to:
+                      type: string
+                    fromOds:
+                      type: string
+                    toOds:
+                      type: string
+                    fromVersion:
+                      type: string
+                    toVersion:
+                      type: string
+                    primary:
+                      type: string
+                    phase:
+                      type: string
+                      enum:
+                        - Stopping
+                        - Converting
+                        - Starting
+                        - Completed
+                        - Failed
+                    converted:
+                      type: array
+                      items:
+                        type: string
+                    message:
+                      type: string
+                    startTime:
+                      type: string
+                    completionTime:
+                      type: string
                 switchover:
                   description: Planned switchover or automatic failover in progress, or the last one
                   type: object

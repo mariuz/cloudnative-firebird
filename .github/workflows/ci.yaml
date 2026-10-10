@@ -40,7 +40,7 @@ jobs:
 
   integration-tests:
     # one run per Firebird version: the operator's FIREBIRD_DEFAULT_IMAGE (unset: latest, Firebird 5)
-    # applies to every cluster below, none sets spec.imageName
+    # applies to every cluster below; only the major upgrade check sets spec.imageName
     name: Integration Tests (kind${{ matrix.firebird.suffix }}${{ matrix.track.suffix }})
     runs-on: ubuntu-latest
     needs: unit-tests
@@ -1377,6 +1377,65 @@ jobs:
           kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system PRIMARY_LEASE_MIGRATE-
           kubectl rollout status deployment/cloudnative-firebird-operator -n cloudnative-firebird-system --timeout=180s
           kubectl delete firebirdcluster lmig --wait=false
+
+      - name: Verify a major version upgrade (Firebird 5 to 6)
+        # the Firebird 6 snapshot run only: an upgrade to a development build stays experimental
+        if: matrix.track.id == 'extended' && matrix.firebird.image == 'firebirdsql/firebird:6-snapshot'
+        run: |
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: mup
+          spec:
+            instances: 2
+            imageName: firebirdsql/firebird:5
+            storage:
+              size: 1Gi
+            replication:
+              enabled: true
+              failover:
+                enabled: true
+          EOF
+          timeout 300 bash -c 'until kubectl get pod mup-1 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/mup-0 pod/mup-1 --for=condition=Ready --timeout=600s
+          DB=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB"; }
+          primary=$(kubectl get lease mup-lease -o jsonpath={.spec.holderIdentity})
+          sql "$primary" "create table upgraded (id int primary key, s varchar(20)); commit; insert into upgraded values (1, 'before'); commit; create user upgrader password 'Upgr4de'; commit;"
+          ods() { kubectl exec "$1" -c firebird -- gstat -h "$DB" | sed -n 's/^[[:space:]]*ODS version[[:space:]]*\([0-9.]*\).*/\1/p'; }
+          [ "$(ods "$primary")" = 13.1 ]
+          # the new image goes through the check first, then a major upgrade: every instance stops,
+          # a Job per volume converts the databases, the instances start on Firebird 6
+          kubectl patch firebirdcluster mup --type merge -p '{"spec":{"imageName":"firebirdsql/firebird:6-snapshot"}}'
+          phase() { kubectl get firebirdcluster mup -o jsonpath='{.status.majorUpgrade.phase}'; }
+          timeout 900 bash -c "until [ \"\$(kubectl get firebirdcluster mup -o jsonpath='{.status.majorUpgrade.phase}')\" = Completed ]; do sleep 5; done" \
+            || { phase; echo; kubectl get firebirdcluster mup -o jsonpath='{.status}'; echo; kubectl get pods,jobs -l firebird.cloudnative-firebird.io/cluster=mup
+                 for j in $(kubectl get jobs -l app.kubernetes.io/component=major-upgrade -o name); do kubectl logs "$j" --all-containers; done; exit 1; }
+          kubectl get firebirdcluster mup -o jsonpath='{.status.majorUpgrade}'; echo
+          reasons=$(kubectl get events --field-selector involvedObject.name=mup -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}')
+          for reason in ImageCheckStarted ImageChecked MajorUpgradeStarted MajorUpgradeConverting MajorUpgradeStarting MajorUpgradeCompleted; do
+            echo "$reasons" | grep -qx "$reason" || { echo "no $reason event"; echo "$reasons"; exit 1; }
+          done
+          kubectl wait pod/mup-0 pod/mup-1 --for=condition=Ready --timeout=300s
+          for pod in mup-0 mup-1; do
+            [ "$(kubectl get pod $pod -o jsonpath='{.spec.containers[?(@.name=="firebird")].image}')" = firebirdsql/firebird:6-snapshot ]
+            [ "$(ods $pod)" = 14.0 ]
+          done
+          primary=$(kubectl get lease mup-lease -o jsonpath={.spec.holderIdentity})
+          replica=mup-0; [ "$primary" = mup-0 ] && replica=mup-1
+          # the data, the user and replication all came through
+          sql "$primary" "select 'rows=' || count(*) from upgraded;" | grep -q 'rows=1'
+          kubectl exec "$primary" -c firebird -- bash -c "echo 'select current_user from rdb\$database;' | isql -q -u upgrader -p Upgr4de localhost:$DB" | grep -q UPGRADER
+          sql "$primary" "insert into upgraded values (2, 'after'); commit;"
+          timeout 180 bash -c "until kubectl exec $replica -c firebird -- bash -c \"echo \\\"select 'rows=' || count(*) from upgraded;\\\" | isql -q localhost:$DB\" | grep -q 'rows=2'; do sleep 5; done"
+          # back to Firebird 5 is refused: the instances keep Firebird 6
+          kubectl patch firebirdcluster mup --type merge -p '{"spec":{"imageName":"firebirdsql/firebird:5"}}'
+          timeout 300 bash -c "until [ \"\$(kubectl get firebirdcluster mup -o jsonpath='{.status.imageCheck.phase}')\" = Refused ]; do sleep 5; done" \
+            || { kubectl get firebirdcluster mup -o jsonpath='{.status}'; exit 1; }
+          kubectl get events --field-selector reason=ImageRefused,involvedObject.name=mup -o name | grep -q .
+          [ "$(kubectl get statefulset mup -o jsonpath='{.spec.template.spec.containers[?(@.name=="firebird")].image}')" = firebirdsql/firebird:6-snapshot ]
+          kubectl delete firebirdcluster mup --wait=false
 
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'

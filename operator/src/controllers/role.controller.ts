@@ -1,3 +1,4 @@
+import { clusterStoppedReason } from '../utils/major-upgrade';
 import { BatchV1Api, CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Job } from '@kubernetes/client-node';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { logger } from '../utils/logger';
@@ -99,8 +100,8 @@ export class FirebirdRoleController {
       await this.updateStatus(role, { phase: 'Pending', message: `FirebirdCluster ${role.spec.clusterName} not found` });
       return;
     }
-    if (cluster.spec.hibernated) {
-      await this.updateStatus(role, { phase: 'Pending', message: 'cluster is hibernated' });
+    if (clusterStoppedReason(cluster)) {
+      await this.updateStatus(role, { phase: 'Pending', message: clusterStoppedReason(cluster) });
       return;
     }
 

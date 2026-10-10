@@ -68,6 +68,11 @@ export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.from
   ),
 );
 
+/** Scripts of the image check and major upgrade Jobs (utils/major-upgrade.ts), inlined into the Jobs */
+export const UPGRADE_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
+  ['image-check.sh', 'major-upgrade.sh'].map((name) => [name, readScript(name)]),
+);
+
 /**
  * Scripts only Jobs run (journal archive, point-in-time recovery), shipped in every cluster's
  * ConfigMap. Not part of any pod template hash: changing them restarts no instance.
