@@ -676,13 +676,18 @@ token projected into the sidecar alone):
   another instance (the operator promoted a replica) or when it could not renew the Lease for
   `durationSeconds` (it cannot reach the API server: the operator may be promoting a replica on
   the other side). Clients that still reach it cannot write to a database that may no longer be
-  the primary. The operator brings it back online (`PrimaryRejoined`) if it still holds the Lease
-  once it reaches it again, as for the isolation check, otherwise it is re-seeded;
+  the primary. The sidecar brings it back online itself once it can re-acquire the Lease (the
+  Lease still names it, or nobody: with the version it read, so a failover that took the Lease
+  over meanwhile wins), which also covers a fence by the isolation check; the operator does not
+  rejoin an isolated primary itself with the primary Lease on. A primary replaced meanwhile is
+  re-seeded;
 - a primary whose database is down stops renewing, so the Lease expires on its own;
 - the operator **promotes a replica only once the Lease has expired**: a primary that still
   renews it is alive, online and reaching the API server, and is never replaced. A failover that
   has elected its target waits (`status.switchover.message`, a `PrimaryLeaseHeld` event) until
-  then. A planned switchover stops the primary first, as before.
+  then, and takes the Lease over with the version it read: a renewal by the old primary that
+  lands first wins, and the failover looks again. A planned switchover stops the primary first,
+  as before.
 
 `firebird_cluster_primary_lease_age_seconds` shows how long ago the primary renewed the Lease.
 Enabling it restarts the instances (a rolling update, the primary last) to add the sidecar; the

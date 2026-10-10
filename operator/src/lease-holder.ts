@@ -18,7 +18,11 @@ import { segmentRequest } from './utils/replication-lag';
  * by the operator with REJOIN once it has checked that this instance still holds the Lease) when
  * the Lease names another instance (the operator promoted a replica) or when it could not renew
  * it for the Lease's duration (it cannot reach the API server: the operator may be promoting a
- * replica on the other side). Both leave the database down until the operator decides.
+ * replica on the other side). A fenced database comes back online once this pod holds the Lease
+ * again: the holder re-acquires it (with the version it read, so a failover that took the Lease
+ * over meanwhile wins) and asks the segment server to bring the database back (REJOIN); the
+ * operator, which rejoins an isolated primary itself without the primary Lease, leaves it to
+ * the holder with it, and promotes a replica only once the Lease expired.
  *
  * Environment: POD_NAME, POD_NAMESPACE, LEASE_NAME, LEASE_DURATION_SECONDS, PRIMARY_FILE,
  * REPLICATION_DIR, TOKEN_DIR (the projected ServiceAccount token and the API server's CA),
@@ -26,13 +30,17 @@ import { segmentRequest } from './utils/replication-lag';
  * ISC_PASSWORD (the requests to it are signed with it).
  */
 
-export type DatabaseState = 'online' | 'shutdown' | undefined;
+/** online, shut down, fenced (the isolation check's marker: by this holder or the check), or not answering */
+export type DatabaseState = 'online' | 'shutdown' | 'fenced' | undefined;
 
 export interface LeaseApi {
   /** The Lease, or undefined when it does not exist */
   read(): Promise<V1Lease | undefined>;
-  /** Renews it for this holder */
-  renew(holder: string, durationSeconds: number): Promise<void>;
+  /**
+   * Renews the Lease that was read, for this holder, with the version that was read: a write that
+   * landed meanwhile (the operator moving it) makes it fail
+   */
+  renew(lease: V1Lease, holder: string, durationSeconds: number): Promise<void>;
 }
 
 export interface LeaseHolderOptions {
@@ -42,6 +50,8 @@ export interface LeaseHolderOptions {
   databaseState: () => Promise<DatabaseState>;
   api: LeaseApi;
   fence: (reason: string) => Promise<void>;
+  /** Brings a fenced database back online (the segment server's REJOIN) */
+  rejoin: () => Promise<void>;
   now?: () => number;
   log?: (message: string) => void;
 }
@@ -73,8 +83,33 @@ export class LeaseHolder {
       return this.say('not the primary: not holding the Lease');
     }
     const state = await this.options.databaseState();
+    if (state === 'fenced') {
+      // fenced (by this holder, or the isolation check): back online once this pod holds the
+      // Lease again, which the operator leaves to it unless a failover took the Lease over
+      this.lastRenewed = undefined;
+      let lease: V1Lease | undefined;
+      try {
+        lease = await api.read();
+      } catch (err) {
+        return this.say(`fenced; cannot read the Lease (${(err as Error).message})`);
+      }
+      const holder = lease?.spec?.holderIdentity ?? '';
+      if (!lease || (holder && holder !== self)) return this.say(`fenced; the Lease is held by ${holder || 'nobody'}`);
+      try {
+        await api.renew(lease, self, durationSeconds);
+      } catch (err) {
+        return this.say(`fenced; cannot re-acquire the Lease (${(err as Error).message})`);
+      }
+      try {
+        await this.options.rejoin();
+      } catch (err) {
+        return this.say(`re-acquired the Lease; cannot bring the database back online (${(err as Error).message}); retrying`);
+      }
+      this.lastRenewed = this.now;
+      return this.say('re-acquired the Lease: database back online');
+    }
     if (state !== 'online') {
-      // down (fenced, shut down by a Job, or not answering yet): the Lease expires on its own
+      // down (shut down by a Job, or not answering yet): the Lease expires on its own
       this.lastRenewed = undefined;
       return this.say(`database ${state ?? 'not answering'}: not renewing the Lease`);
     }
@@ -98,7 +133,7 @@ export class LeaseHolder {
       return this.say(`fenced: the Lease is held by ${holder}`);
     }
     try {
-      await api.renew(self, durationSeconds);
+      await api.renew(lease, self, durationSeconds);
       this.lastRenewed = this.now;
       return this.say(`holding the Lease ${this.options.self === holder ? '' : '(acquired) '}as the primary, renewed every ${renewIntervalSeconds(durationSeconds)}s`);
     } catch (err) {
@@ -125,6 +160,17 @@ export function renewIntervalSeconds(durationSeconds: number): number {
   return Math.max(1, Math.floor(durationSeconds / 3));
 }
 
+/** How long an API request may take: a primary cut off from the API server must notice within the Lease's duration */
+export const API_TIMEOUT_MS = 5_000;
+
+function withTimeout<T>(promise: Promise<T>, what: string, ms = API_TIMEOUT_MS): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms / 1000}s`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /** The Lease API through the pod's projected ServiceAccount token (re-read: it rotates) */
 export function kubernetesLeaseApi(env: NodeJS.ProcessEnv, name: string, namespace: string): LeaseApi {
   const dir = env.TOKEN_DIR ?? '/var/run/primary-lease';
@@ -141,22 +187,22 @@ export function kubernetesLeaseApi(env: NodeJS.ProcessEnv, name: string, namespa
   return {
     async read() {
       try {
-        return await client().readNamespacedLease({ name, namespace });
+        return await withTimeout(client().readNamespacedLease({ name, namespace }), 'reading the Lease');
       } catch (err) {
         if ((err as { code?: number })?.code === 404) return undefined;
         throw err;
       }
     },
-    async renew(holder, durationSeconds) {
-      await client().patchNamespacedLease({
-        name,
-        namespace,
-        body: [
-          { op: 'add', path: '/spec/holderIdentity', value: holder },
-          { op: 'add', path: '/spec/leaseDurationSeconds', value: durationSeconds },
-          { op: 'add', path: '/spec/renewTime', value: new V1MicroTime() },
-        ],
-      });
+    async renew(lease, holder, durationSeconds) {
+      // with the resourceVersion that was read: a conflict (409) means the operator moved it meanwhile
+      await withTimeout(
+        client().replaceNamespacedLease({
+          name,
+          namespace,
+          body: { ...lease, spec: { ...lease.spec, holderIdentity: holder, leaseDurationSeconds: durationSeconds, renewTime: new V1MicroTime() } },
+        }),
+        'renewing the Lease',
+      );
     },
   };
 }
@@ -174,14 +220,22 @@ export function isPrimary(env: NodeJS.ProcessEnv): boolean {
 }
 
 /** The segment server of this pod, with requests signed by the SYSDBA password */
-export function segmentServer(env: NodeJS.ProcessEnv): { state: () => Promise<DatabaseState>; fence: (reason: string) => Promise<void> } {
+export function segmentServer(env: NodeJS.ProcessEnv): {
+  state: () => Promise<DatabaseState>;
+  fence: (reason: string) => Promise<void>;
+  rejoin: () => Promise<void>;
+} {
   const [host, port] = (env.SEGMENT_SERVER ?? '127.0.0.1:3051').split(':');
   const ask = (request: string) => segmentRequest(host, Number(port), `${env.ISC_PASSWORD ?? ''} ${request}`, 10_000);
   return {
     async state() {
       try {
         const [reply] = await ask('STATE');
-        return reply === 'OK online' ? 'online' : reply === 'OK shutdown' ? 'shutdown' : undefined;
+        if (reply === 'OK online') return 'online';
+        if (reply !== 'OK shutdown') return undefined;
+        // shut down: by a fence (the marker), or something else (a Job, an administrator)
+        const [isolation] = await ask('ISOLATION');
+        return isolation?.startsWith('OK fenced') ? 'fenced' : 'shutdown';
       } catch {
         return undefined;
       }
@@ -189,6 +243,10 @@ export function segmentServer(env: NodeJS.ProcessEnv): { state: () => Promise<Da
     async fence(reason) {
       const [reply] = await ask(`FENCE ${reason.replace(/[^\w .:,()/-]/g, ' ').slice(0, 200)}`);
       if (!reply?.startsWith('OK')) throw new Error(reply ?? 'no reply');
+    },
+    async rejoin() {
+      const [reply] = await ask('REJOIN');
+      if (reply !== 'OK') throw new Error(reply ?? 'no reply');
     },
   };
 }
@@ -207,6 +265,7 @@ export async function main(env = process.env): Promise<never> {
     databaseState: server.state,
     api: kubernetesLeaseApi(env, name, namespace),
     fence: server.fence,
+    rejoin: server.rejoin,
     log: (message) => console.log(`lease holder: ${message}`),
   });
   console.log(`lease holder: ${self} watching Lease ${namespace}/${name} (duration ${durationSeconds}s)`);

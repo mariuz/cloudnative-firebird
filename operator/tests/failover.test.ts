@@ -252,15 +252,33 @@ describe('the primary Lease as a promotion mutex', () => {
     expect(s.fn('createNamespacedEvent').mock.calls.map((c) => c[0].body.reason)).toContain('PrimaryLeaseHeld');
   });
 
-  it('promotes once the Lease expired, or without the primary Lease', async () => {
-    const s = setup({ ...elected(), lease: renewed(16) });
+  it('promotes once the Lease expired, taking the Lease over with the version it read, or without the primary Lease', async () => {
+    const s = setup({ ...elected(), lease: { metadata: { resourceVersion: '41' }, ...renewed(16) } });
     await s.controller.reconcile(makeCluster({ switchover: electing }, withLease));
-    expect(s.fn('patchNamespacedLease').mock.calls[0][0].body[0].value).toBe('db-2');
+    const taken = s.fn('replaceNamespacedLease').mock.calls[0][0].body;
+    expect(taken.metadata.resourceVersion).toBe('41');
+    expect(taken.spec.holderIdentity).toBe('db-2');
     expect(s.status().switchover).toMatchObject({ kind: 'failover', target: 'db-2', phase: 'Promoting' });
+    // the old primary renewed it between the read and the take-over (a conflict): looked at again
+    const conflict = setup({ ...elected(), lease: renewed(16) });
+    conflict.fn('replaceNamespacedLease').mockRejectedValue(Object.assign(new Error('Conflict'), { code: 409 }));
+    await conflict.controller.reconcile(makeCluster({ switchover: electing }, withLease));
+    expect(conflict.status().switchover).toMatchObject({ phase: 'Electing' });
     // without it a fresh renewal time (the operator's, when it created the Lease) never waits
     const off = setup({ ...elected(), lease: renewed(3) });
     await off.controller.reconcile(makeCluster({ switchover: electing }));
     expect(off.status().switchover).toMatchObject({ phase: 'Promoting' });
+  });
+
+  it('leaves a fenced primary to its holder: no rejoin by the operator', async () => {
+    const segment = vi.fn().mockImplementation((_host: string, _port: number, line: string) =>
+      Promise.resolve(line.endsWith(' ISOLATION') ? ['OK fenced 1700000000'] : line.endsWith(' REJOIN') ? ['OK'] : ['ERR bad request']),
+    );
+    const s = setup({ segment, lease: renewed(60) });
+    await s.controller.reconcile(makeCluster({ primaryNotReadySince: longAgo }, withLease));
+    expect(segment.mock.calls.map((c) => c[2])).not.toContain('masterkey REJOIN');
+    // it fails over instead
+    expect(s.created().some((j) => j.metadata?.name === 'db-failover')).toBe(true);
   });
 
   it('manages the Role and RoleBinding that let the instances renew the Lease', async () => {

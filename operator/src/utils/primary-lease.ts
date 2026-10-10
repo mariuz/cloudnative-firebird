@@ -13,12 +13,13 @@ import { SEGMENT_SERVER_LOCAL_PORT, segmentTlsEnabled } from './segment-tls-pods
  * operator moves it when it promotes a replica, and nothing renews it. With it the primary holds
  * the Lease itself: a lease-holder sidecar (lease-holder.ts, from the operator image) in every
  * instance pod renews the Lease while its pod is the primary and its database is online, and
- * fences the database (the isolation check's fence: full shutdown, lifted by the operator with
- * REJOIN once it has checked that the instance still holds the Lease) when the Lease names
- * another instance or cannot be renewed for the Lease's duration. The operator promotes a
- * replica only once the Lease has expired, so a primary that still renews it (alive, online and
- * reaching the API server) is never replaced, and one the operator replaces has stopped taking
- * writes before: either its database is down (it stopped renewing) or it fenced itself.
+ * fences the database (the isolation check's fence: full shutdown) when the Lease names another
+ * instance or cannot be renewed for the Lease's duration; it brings a fenced database back
+ * (REJOIN) once it re-acquires the Lease. The operator promotes a replica only once the Lease
+ * has expired, taking it over with the version it read, so a primary that still renews it
+ * (alive, online and reaching the API server) is never replaced, and one the operator replaces
+ * has stopped taking writes before: either its database is down (it stopped renewing) or it
+ * fenced itself. The operator's own rejoin of an isolated primary is off with the primary Lease.
  *
  * The sidecar renews the Lease with the pod's ServiceAccount, through a Role on that one Lease
  * and a RoleBinding the operator manages, and a projected token mounted into it alone.

@@ -714,7 +714,8 @@ export class FirebirdClusterController {
 
     // A primary that fenced itself while cut off from the cluster (isolation check) and still
     // holds the Lease: nothing was promoted meanwhile, so it is brought back online
-    if (!inFlight && failover?.enabled && !primaryReady && !fenced.includes(primaryPod) && podOf(primaryPod)) {
+    // (with the primary Lease the primary rejoins itself once it holds the Lease again, utils/primary-lease.ts)
+    if (!inFlight && failover?.enabled && !primaryReady && !fenced.includes(primaryPod) && podOf(primaryPod) && !primaryLeaseEnabled(cluster)) {
       if (await this.rejoinIsolatedPrimary(cluster, primaryPod, log)) return result;
     }
 
@@ -923,6 +924,22 @@ export class FirebirdClusterController {
           log.warn({ primary: phase.from, target, ageSeconds: leaseAgeSeconds(lease) }, 'Failover waits for the primary Lease to expire');
           if (phase.message !== message) await persist({ ...phase, message }, EventReason.PrimaryLeaseHeld);
           return result;
+        }
+        // the Lease is taken over with the version that was read: a renewal by the old primary
+        // that lands first (it reached the API server again and re-acquired it) wins, and the
+        // failover looks again
+        if (lease) {
+          try {
+            await this.coordinationApi.replaceNamespacedLease({
+              name: `${name}-lease`,
+              namespace,
+              body: { ...lease, spec: { ...lease.spec, holderIdentity: target, renewTime: new V1MicroTime() } },
+            });
+          } catch (err) {
+            if ((err as { code?: number })?.code !== 409) throw err;
+            log.warn({ primary: phase.from, target }, 'The primary renewed its Lease while the failover took it over; looking again');
+            return result;
+          }
         }
       }
 

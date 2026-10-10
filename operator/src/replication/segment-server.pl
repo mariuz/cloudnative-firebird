@@ -235,8 +235,8 @@ sub database_state {
 }
 
 # Fences the primary as the isolation check does (isolation-check.pl): the marker first, so that a
-# restarted sidecar never takes the fenced database for an online one, then the full shutdown. The
-# operator lifts it (REJOIN) once it has checked that this instance still holds the Lease.
+# restarted sidecar never takes the fenced database for an online one, then the full shutdown.
+# Lifted (REJOIN) by the Lease holder once it holds the Lease again, or by the operator.
 sub fence_database {
   my ($reason) = @_;
   open(my $fh, '>', "$self_fenced.tmp") or do { print "cannot write $self_fenced: $!\n"; return 0 };

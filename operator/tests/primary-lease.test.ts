@@ -86,6 +86,7 @@ describe('the lease holder', () => {
     let now = 1_000_000;
     const log: string[] = [];
     const fence = vi.fn().mockResolvedValue(undefined);
+    const rejoin = vi.fn().mockResolvedValue(undefined);
     const renew = vi.fn().mockResolvedValue(undefined);
     const state = { primary: overrides.primary ?? true, db: (overrides.state ?? 'online') as DatabaseState, lease: overrides.lease ?? { spec: { holderIdentity: 'db-0' } } };
     const h = new LeaseHolder({
@@ -95,16 +96,17 @@ describe('the lease holder', () => {
       databaseState: async () => state.db,
       api: { read: async () => (typeof state.lease === 'function' ? state.lease() : state.lease), renew },
       fence,
+      rejoin,
       now: () => now,
       log: (m) => log.push(m),
     });
-    return { h, state, fence, renew, log, advance: (s: number) => (now += s * 1000) };
+    return { h, state, fence, rejoin, renew, log, advance: (s: number) => (now += s * 1000) };
   }
 
   it('renews the Lease while the pod is the primary and its database online, and never otherwise', async () => {
     const t = holder();
     expect(await t.h.tick()).toMatch(/^holding the Lease as the primary/);
-    expect(t.renew).toHaveBeenCalledWith('db-0', 15);
+    expect(t.renew).toHaveBeenCalledWith({ spec: { holderIdentity: 'db-0' } }, 'db-0', 15);
     t.state.db = 'shutdown';
     expect(await t.h.tick()).toBe('database shutdown: not renewing the Lease');
     t.state.db = undefined;
@@ -128,10 +130,41 @@ describe('the lease holder', () => {
     expect(await t.h.tick()).toBe('fenced: the Lease is held by db-2');
     expect(t.fence).toHaveBeenCalledWith('the Lease is held by db-2');
     expect(t.renew).not.toHaveBeenCalled();
-    // fenced: the database is down, nothing more until the operator brings it back
-    t.state.db = 'shutdown';
-    expect(await t.h.tick()).toBe('database shutdown: not renewing the Lease');
+    // fenced: nothing more while another instance holds the Lease
+    t.state.db = 'fenced';
+    expect(await t.h.tick()).toBe('fenced; the Lease is held by db-2');
     expect(t.fence).toHaveBeenCalledTimes(1);
+    expect(t.rejoin).not.toHaveBeenCalled();
+  });
+
+  it('re-acquires its Lease and brings a fenced database back online, unless a failover took the Lease over', async () => {
+    const t = holder({ state: 'fenced', lease: { metadata: { resourceVersion: '7' }, spec: { holderIdentity: 'db-0' } } });
+    expect(await t.h.tick()).toBe('re-acquired the Lease: database back online');
+    expect(t.renew).toHaveBeenCalledWith({ metadata: { resourceVersion: '7' }, spec: { holderIdentity: 'db-0' } }, 'db-0', 15);
+    expect(t.rejoin).toHaveBeenCalledTimes(1);
+    t.state.db = 'online';
+    expect(await t.h.tick()).toMatch(/^holding the Lease/);
+    // the API server still unreachable: it stays fenced
+    const cut = holder({ state: 'fenced', lease: async () => { throw new Error('timed out'); } });
+    expect(await cut.h.tick()).toBe('fenced; cannot read the Lease (timed out)');
+    expect(cut.rejoin).not.toHaveBeenCalled();
+    // the operator took the Lease over between the read and the renewal (a conflict): it stays fenced
+    const taken = holder({ state: 'fenced' });
+    taken.renew.mockRejectedValueOnce(new Error('409 conflict'));
+    expect(await taken.h.tick()).toBe('fenced; cannot re-acquire the Lease (409 conflict)');
+    expect(taken.rejoin).not.toHaveBeenCalled();
+    // an expired Lease nobody holds is acquired too; one held by a replica promoted meanwhile is not
+    const free = holder({ state: 'fenced', lease: { spec: {} } });
+    expect(await free.h.tick()).toBe('re-acquired the Lease: database back online');
+    // a database shut down for another reason (a Job) is left alone
+    const job = holder({ state: 'shutdown' });
+    expect(await job.h.tick()).toBe('database shutdown: not renewing the Lease');
+    expect(job.rejoin).not.toHaveBeenCalled();
+    // a failed rejoin is retried on the next tick
+    const r = holder({ state: 'fenced' });
+    r.rejoin.mockRejectedValueOnce(new Error('ERR cannot bring online'));
+    expect(await r.h.tick()).toMatch(/cannot bring the database back online/);
+    expect(await r.h.tick()).toBe('re-acquired the Lease: database back online');
   });
 
   it('fences the database once the Lease could not be renewed for its duration', async () => {
