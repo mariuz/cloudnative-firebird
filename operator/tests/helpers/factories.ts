@@ -16,7 +16,7 @@ export const makeCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): F
     namespace: 'default',
     uid: 'test-uid-1234',
     // as the controller's first reconcile records it (primary-lease.ts)
-    annotations: { 'firebird.cloudnative-firebird.io/primary-lease': 'pinned' },
+    annotations: { 'firebird.cloudnative-firebird.io/primary-lease': 'pinned', 'firebird.cloudnative-firebird.io/pod-anti-affinity': 'pinned' },
   },
   spec: {
     instances: 1,

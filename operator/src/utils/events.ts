@@ -40,6 +40,7 @@ export const EventReason = {
   PrimaryRejoined: 'PrimaryRejoined',
   PrimaryLeaseHeld: 'PrimaryLeaseHeld',
   PrimaryLeaseDefaulted: 'PrimaryLeaseDefaulted',
+  PodAntiAffinityDefaulted: 'PodAntiAffinityDefaulted',
   TLSCertificateIgnored: 'TLSCertificateIgnored',
   ImageCheckStarted: 'ImageCheckStarted',
   ImageChecked: 'ImageChecked',

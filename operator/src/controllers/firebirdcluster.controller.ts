@@ -20,6 +20,7 @@ import {
   primaryLeaseRoleName,
 } from '../utils/primary-lease';
 import { superuserPasswordFrom } from '../utils/restore-target';
+import { POD_ANTI_AFFINITY_ANNOTATION } from '../utils/scheduling';
 import {
   buildImageCheckJob,
   buildMajorUpgradeJob,
@@ -76,7 +77,7 @@ import { firebirdUsername } from '../utils/users';
 import { metrics, recordClusterMetrics, recordReconcile } from '../utils/metrics';
 import { RESEED_VOLUME, dataClaimName, planVolumeRecreation } from '../utils/volume-recreation';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
-import { PRIMARY_RESTART_GRACE_SECONDS, REVISION_LABEL, planRollingUpdate, rollingUpdateTarget } from '../utils/rolling-update';
+import { PRIMARY_RESTART_GRACE_SECONDS, REVISION_LABEL, planRollingUpdate, rollingUpdateTarget, staleUnschedulablePod } from '../utils/rolling-update';
 import {
   SyncPlanInput,
   attachedStandbys,
@@ -134,6 +135,7 @@ import {
   readOnlyRoutingEnabled,
   replicaServiceSelector,
   statefulSetNeedsUpdate,
+  statefulSetPatchBody,
   withHibernation,
   CLUSTER_LABEL,
   clusterLabels,
@@ -336,6 +338,7 @@ export class FirebirdClusterController {
       }
       await this.defaultSegmentTls(cluster, log);
       await this.defaultPrimaryLease(cluster, log);
+      await this.defaultPodAntiAffinity(cluster, log);
       await this.reconcileSegmentTlsMigration(cluster, log);
       await this.reconcilePrimaryLeaseMigration(cluster, log);
       // a new image is checked first (major version upgrades): the rest of the reconcile sees the
@@ -639,7 +642,7 @@ export class FirebirdClusterController {
       const decided = await this.imageCheck(cluster, check, log);
       if (decided) {
         check = decided;
-        await this.persistStatus(cluster, { imageCheck: check });
+        // the event first: once the status shows the outcome, its event is there too
         const warning = check.phase === 'Refused' || check.phase === 'Failed';
         await this.event(
           cluster,
@@ -647,6 +650,7 @@ export class FirebirdClusterController {
           warning ? EventReason.ImageRefused : EventReason.ImageChecked,
           imageCheckMessage(check),
         );
+        await this.persistStatus(cluster, { imageCheck: check });
       }
     }
 
@@ -1898,10 +1902,12 @@ export class FirebirdClusterController {
         desired.spec.volumeClaimTemplates = existing.spec.volumeClaimTemplates;
       }
       // a merge patch keeps the existing rollingUpdate settings, which OnDelete rejects
+      // and keeps scheduling keys the desired template no longer has: they are sent as null
+      const patched = statefulSetPatchBody(existing, desired);
       const body =
-        desired.spec?.updateStrategy?.type === 'OnDelete'
-          ? { ...desired, spec: { ...desired.spec, updateStrategy: { type: 'OnDelete', rollingUpdate: null } } }
-          : desired;
+        patched.spec?.updateStrategy?.type === 'OnDelete'
+          ? { ...patched, spec: { ...patched.spec, updateStrategy: { type: 'OnDelete', rollingUpdate: null } } }
+          : patched;
       current = await this.appsApi.patchNamespacedStatefulSet({
         name,
         namespace,
@@ -2040,6 +2046,15 @@ export class FirebirdClusterController {
       primaryRestart = undefined;
     }
     if (plan.outdated.length === 0) {
+      const stale = busy ? undefined : staleUnschedulablePod(pods);
+      if (stale) {
+        log.info({ pod: stale }, 'Recreating an unschedulable instance pod: the other instances changed since it was found unschedulable');
+        try {
+          await this.coreApi.deleteNamespacedPod({ name: stale, namespace });
+        } catch (err) {
+          if (!isNotFound(err)) throw err;
+        }
+      }
       if (stored && !primaryRestart) {
         await this.event(cluster, 'Normal', EventReason.RollingUpdateCompleted, `all instances run revision ${plan.revision}`);
       }
@@ -3074,6 +3089,44 @@ export class FirebirdClusterController {
    * StatefulSet (created by an earlier version) pinned to off, since the sidecar would restart
    * their instances. The owner's failover.primaryLease.enabled always wins over it.
    */
+  /**
+   * Records whether the instances repel each other by default (utils/scheduling.ts): on for a new
+   * cluster, pinned off for one that already has a StatefulSet (adding it would restart its
+   * instances). spec.podAntiAffinity.enabled overrides it.
+   */
+  private async defaultPodAntiAffinity(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    if (cluster.metadata.annotations?.[POD_ANTI_AFFINITY_ANNOTATION]) return;
+    const { name, namespace = 'default' } = cluster.metadata;
+    let existing = true;
+    try {
+      await this.appsApi.readNamespacedStatefulSet({ name, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+      existing = false;
+    }
+    const value = existing ? 'pinned' : 'enabled';
+    await this.customApi.patchNamespacedCustomObject(
+      {
+        group: API_GROUP,
+        version: API_VERSION,
+        namespace,
+        plural: RESOURCE_PLURAL,
+        name,
+        body: { metadata: { annotations: { [POD_ANTI_AFFINITY_ANNOTATION]: value } } },
+      },
+      MERGE_PATCH,
+    );
+    cluster.metadata.annotations = { ...cluster.metadata.annotations, [POD_ANTI_AFFINITY_ANNOTATION]: value };
+    const reason = existing ? 'an existing cluster keeps its scheduling' : 'the default for new clusters';
+    log.info({ enabled: !existing }, `Recorded the pod anti-affinity default: ${reason}`);
+    await this.event(
+      cluster,
+      'Normal',
+      EventReason.PodAntiAffinityDefaulted,
+      `the instances repel each other (pod anti-affinity): ${!existing} (${reason}; spec.podAntiAffinity.enabled overrides it)`,
+    );
+  }
+
   private async defaultPrimaryLease(cluster: FirebirdCluster, log: Logger): Promise<void> {
     if (cluster.metadata.annotations?.[PRIMARY_LEASE_ANNOTATION]) return;
     const { name, namespace = 'default' } = cluster.metadata;

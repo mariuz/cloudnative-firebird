@@ -91,7 +91,22 @@ export function planRollingUpdate(options: {
     plan.message = `waiting: ${busy}`;
     return plan;
   }
-  const notReady = pods.filter((p) => !fenced.includes(name(p)) && (p.metadata?.deletionTimestamp || !isPodReady(p)));
+  // an outdated pod no node took (e.g. a required anti-affinity no node can meet) never ran: it is
+  // recreated from the new revision at once, instead of being waited for
+  const unscheduled = pods.find(
+    (p) => outdated.includes(name(p)) && !p.metadata?.deletionTimestamp && p.status?.phase === 'Pending' && !p.spec?.nodeName,
+  );
+  if (unscheduled) {
+    plan.restart = name(unscheduled);
+    plan.message = `recreating ${name(unscheduled)} on revision ${revision}: it was never scheduled`;
+    return plan;
+  }
+  // a pod of the new revision no node took does not hold the others back: it may be waiting for
+  // them (a required anti-affinity applies to the pods already running, which keep the old rule)
+  const neverScheduled = (p: V1Pod) => p.status?.phase === 'Pending' && !p.spec?.nodeName && !outdated.includes(name(p));
+  const notReady = pods.filter(
+    (p) => !fenced.includes(name(p)) && !neverScheduled(p) && (p.metadata?.deletionTimestamp || !isPodReady(p)),
+  );
   if (notReady.length > 0 || pods.length < cluster.spec.instances) {
     plan.message = `waiting for all instances to be ready before restarting the next one (${outdated.join(', ')} outdated)`;
     return plan;
@@ -167,6 +182,27 @@ export function planRollingUpdate(options: {
   plan.restart = primaryPod;
   plan.message = `restarting the primary ${primaryPod} on revision ${revision}`;
   return plan;
+}
+
+/**
+ * An instance pod no node took, found unschedulable before another instance pod was (re)created:
+ * the new pod may lift what kept it off the nodes (a required anti-affinity of the pod it replaced),
+ * but the scheduler may not look at it again for minutes. Recreating it has it scheduled at once;
+ * the new pod's own finding is later than every other pod, so this happens once per change.
+ */
+export function staleUnschedulablePod(pods: V1Pod[]): string | undefined {
+  const time = (t: Date | string | undefined) => (t ? new Date(t).getTime() : NaN);
+  for (const pod of pods) {
+    if (pod.metadata?.deletionTimestamp || pod.status?.phase !== 'Pending' || pod.spec?.nodeName) continue;
+    const scheduled = (pod.status?.conditions ?? []).find((c) => c.type === 'PodScheduled');
+    if (scheduled?.status !== 'False' || scheduled.reason !== 'Unschedulable') continue;
+    const foundAt = time(scheduled.lastTransitionTime);
+    const later = pods.some(
+      (other) => other !== pod && !other.metadata?.deletionTimestamp && time(other.metadata?.creationTimestamp) > foundAt,
+    );
+    if (later) return pod.metadata?.name;
+  }
+  return undefined;
 }
 
 /**

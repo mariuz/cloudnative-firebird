@@ -173,7 +173,8 @@ so replicas would stop pulling from an upgraded primary until they had restarted
 Clusters that exist at an upgrade keep what they have: plain segment shipping (pinned since
 v0.77.0, moved with `SEGMENT_TLS_MIGRATE`) and a Lease moved by the operator rather than held by
 the primary (pinned since v0.87.0; set `failover.primaryLease.enabled: true` to move one, a
-rolling update, or `PRIMARY_LEASE_MIGRATE=pinned` on the operator to move them one at a time).
+rolling update, or `PRIMARY_LEASE_MIGRATE=pinned` on the operator to move them one at a time), and no pod anti-affinity among their instances (pinned since v0.90.0; set
+`podAntiAffinity.enabled: true` to add it, a rolling update).
 
 ### Create a Firebird Cluster
 
@@ -854,6 +855,39 @@ highest ordinal down, each handed over as below.
 commits, a replica applying the journal as well getting every change twice, and `sync_replica`
 read from an included file when the database is opened again.
 
+### Scheduling (v0.90.0)
+
+The instances of a cluster repel each other, as with CloudNativePG: the StatefulSet's pods carry a
+pod anti-affinity among the cluster's instance pods (`app.kubernetes.io/component: database`, its
+Job pods are not counted), so that each node runs one instance where it can.
+
+```yaml
+spec:
+  podAntiAffinity:
+    enabled: true          # default for clusters created since v0.90.0
+    type: preferred        # default: instances share a node when no other fits; "required": they stay pending
+    topologyKey: kubernetes.io/hostname   # default; topology.kubernetes.io/zone spreads over zones
+  topologySpreadConstraints:              # Kubernetes TopologySpreadConstraint, passed to the instance pods
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway   # a constraint without labelSelector selects the instance pods
+  affinity: {}             # your own rules: kept, the anti-affinity term is added to them
+  nodeSelector: {}
+  tolerations: []
+```
+
+The default is recorded in the `pod-anti-affinity` annotation on the cluster's first reconcile
+(`enabled`, a `PodAntiAffinityDefaulted` event). Clusters that already have a StatefulSet when the
+operator first sees them are pinned without it (`pinned`), since adding it would restart their
+instances: set `podAntiAffinity.enabled: true` to add it, through the usual rolling update. With
+`type: required`, an instance no node can take stays pending (`Unschedulable`). A rolling update
+recreates such a pod from the new template right away instead of waiting for it to become ready,
+and a pod of the new template that no node took does not hold back the restart of the others: a
+required anti-affinity also binds the instances already running, which keep the old rule until
+they restart. A pending instance found unschedulable before another instance pod was recreated is
+recreated once as well, so that the scheduler looks at it again at once rather than within its
+5-minute retry. So relaxing the rule (or adding nodes) brings the pending instance up.
+
 ### Pod Management
 
 The StatefulSet creates and recreates instance pods in parallel (`podManagementPolicy:
@@ -1324,7 +1358,7 @@ The operator records Kubernetes events on its resources (CloudNativePG 1.29 / 1.
 
 | Resource | Reasons |
 |---|---|
-| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`, `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ImageCheckStarted`, `ImageChecked`, `ImageRefused` (warning); `MajorUpgradeStarted`, `MajorUpgradeConverting`, `MajorUpgradeStarting`, `MajorUpgradeCompleted`, `MajorUpgradeFailed` (warning), `MajorUpgradeAbandoned`; `ReconcileFailed` (warning) |
+| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`, `PodAntiAffinityDefaulted`, `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ImageCheckStarted`, `ImageChecked`, `ImageRefused` (warning); `MajorUpgradeStarted`, `MajorUpgradeConverting`, `MajorUpgradeStarting`, `MajorUpgradeCompleted`, `MajorUpgradeFailed` (warning), `MajorUpgradeAbandoned`; `ReconcileFailed` (warning) |
 | `FirebirdBackup` | `BackupStarted`, `BackupCompleted`, `BackupFailed` (warning) |
 | `FirebirdRestore` | `RestoreStarted`, `RestoreCompleted`, `RestoreFailed` (warning) |
 | `FirebirdUser` | `UserApplied`, `UserFailed` (warning), `UserDropped` |
