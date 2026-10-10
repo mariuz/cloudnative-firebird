@@ -15,7 +15,9 @@ async function main(): Promise<void> {
     logger.info('Loaded Kubernetes config from default (local)');
   }
 
-  const operator = new Operator(kubeConfig);
+  // RESYNC_INTERVAL_SECONDS: how often every cluster is reconciled without an event (default 30)
+  const resync = Number(process.env.RESYNC_INTERVAL_SECONDS);
+  const operator = Number.isFinite(resync) && resync > 0 ? new Operator(kubeConfig, 8080, resync * 1000) : new Operator(kubeConfig);
 
   // Graceful shutdown handlers
   const shutdown = (signal: string) => {

@@ -41,7 +41,7 @@ jobs:
   integration-tests:
     # one run per Firebird version: the operator's FIREBIRD_DEFAULT_IMAGE (unset: latest, Firebird 5)
     # applies to every cluster below, none sets spec.imageName
-    name: Integration Tests (kind${{ matrix.firebird.suffix }})
+    name: Integration Tests (kind${{ matrix.firebird.suffix }}${{ matrix.track.suffix }})
     runs-on: ubuntu-latest
     needs: unit-tests
     strategy:
@@ -52,6 +52,13 @@ jobs:
           - { suffix: ", Firebird 4", image: "firebirdsql/firebird:4" }
           # a development build: its failures are reported but do not fail the workflow
           - { suffix: ", Firebird 6 snapshot", image: "firebirdsql/firebird:6-snapshot", experimental: true }
+        # two tracks per image, each on its own kind cluster, to halve the wall time: "core" runs the
+        # replicated cluster's lifecycle (switchover, failover, rolling updates, backups, users),
+        # "extended" the other clusters (segment TLS, synchronous replication, enabling replication
+        # later, paused reconciliation, fencing of a clone). Steps without a track run in both.
+        track:
+          - { id: core, suffix: "" }
+          - { id: extended, suffix: ", extended" }
     continue-on-error: ${{ matrix.firebird.experimental == true }}
     steps:
       - uses: actions/checkout@v4
@@ -98,10 +105,9 @@ jobs:
           # Patch deployment to use the locally built image and avoid pulling from registry
           sed 's|image: ghcr.io/mariuz/cloudnative-firebird:latest|image: cloudnative-firebird:ci|;s|imagePullPolicy: Always|imagePullPolicy: Never|' \
             config/deploy/deployment.yaml | kubectl apply -f -
-          if [ -n "${{ matrix.firebird.image }}" ]; then
-            kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system \
-              FIREBIRD_DEFAULT_IMAGE="${{ matrix.firebird.image }}"
-          fi
+          # a short resync: the waits below move on at the next reconcile
+          kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system \
+            RESYNC_INTERVAL_SECONDS=10 FIREBIRD_DEFAULT_IMAGE="${{ matrix.firebird.image }}"
 
       - name: Wait for operator to be ready
         run: |
@@ -344,6 +350,7 @@ jobs:
           echo "replica seeded from a replica applied all 30 rows"
 
       - name: Verify backups and restores through the operator
+        if: matrix.track.id == 'core'
         run: |
           DB_DIR=/var/lib/firebird/data
           wait_phase() {
@@ -482,6 +489,7 @@ jobs:
           echo "restores into existing targets are refused"
 
       - name: Verify service account and paused reconciliation
+        if: matrix.track.id == 'extended'
         run: |
           # instance pods run with spec.serviceAccountName (workload identity for S3)
           kubectl create serviceaccount firebird-sa
@@ -501,7 +509,7 @@ jobs:
           spec:
             clusterName: repl
           EOF
-          sleep 45
+          sleep 25
           ! kubectl get job backup-paused 2>/dev/null
           [ -z "$(kubectl get firebirdbackup paused -o jsonpath={.status.phase})" ]
           kubectl annotate firebirdbackup paused firebird.cloudnative-firebird.io/reconciliationDisabled-
@@ -510,6 +518,7 @@ jobs:
           echo "paused backup ran once resumed"
 
       - name: Verify declarative users
+        if: matrix.track.id == 'core'
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           # logs in as the managed user with role READER; prints "APP_USER READER" on success
@@ -592,6 +601,7 @@ jobs:
           hack/users/unmanaged-users.sh repl 2>&1 | grep -q 'every user of cluster repl is managed'
 
       - name: Verify declarative roles
+        if: matrix.track.id == 'core'
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           privs() {
@@ -631,6 +641,7 @@ jobs:
           echo "role applied, updated and dropped"
 
       - name: Verify re-seeding a replica
+        if: matrix.track.id == 'core'
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           count() { kubectl exec "$1" -c firebird -- bash -c "echo 'select count(*) from app;' | isql -q localhost:$DB" | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
@@ -649,6 +660,7 @@ jobs:
           echo "replica re-seeded and following the primary"
 
       - name: Verify re-creating a replica's volume
+        if: matrix.track.id == 'core'
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           count() { kubectl exec "$1" -c firebird -- bash -c "echo 'select count(*) from app;' | isql -q localhost:$DB" | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
@@ -670,6 +682,7 @@ jobs:
           echo "replica runs on a new volume ($old_claim replaced) and follows the primary"
 
       - name: Verify planned switchover
+        if: matrix.track.id == 'core'
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
@@ -717,6 +730,7 @@ jobs:
           kubectl patch firebirdcluster repl --type merge -p '{"spec":{"autoSweep":null,"diagnostics":null}}'
 
       - name: Verify automatic failover
+        if: matrix.track.id == 'core'
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
@@ -760,6 +774,7 @@ jobs:
           echo "failed over from $old to $new"
 
       - name: Verify failover of a cut-off primary
+        if: matrix.track.id == 'core'
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
@@ -841,6 +856,7 @@ jobs:
           echo "failed over from the cut-off primary $old to $new (it fenced itself first)"
 
       - name: Verify rolling update with the primary last
+        if: matrix.track.id == 'core'
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
@@ -887,6 +903,7 @@ jobs:
           echo "rolling update finished with the primary $primary last"
 
       - name: Verify resources are resized in place
+        if: matrix.track.id == 'core'
         run: |
           SEL=firebird.cloudnative-firebird.io/cluster=repl,app.kubernetes.io/component=database
           uids() { kubectl get pods -l "$SEL" -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.uid} {end}'; }
@@ -915,6 +932,7 @@ jobs:
           echo "CPU limit changed in place on every instance, nothing restarted"
 
       - name: Verify the primary Lease
+        if: matrix.track.id == 'core'
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
@@ -996,6 +1014,7 @@ jobs:
           echo "the primary fenced itself when it could not renew its Lease; failed over from $primary to $new"
 
       - name: Verify a cluster without replication is updated by the operator, in place when it can
+        if: matrix.track.id == 'extended'
         run: |
           SEL=firebird.cloudnative-firebird.io/cluster=test-cluster,app.kubernetes.io/component=database
           [ "$(kubectl get statefulset test-cluster -o jsonpath={.spec.updateStrategy.type})" = "OnDelete" ]
@@ -1034,6 +1053,7 @@ jobs:
           echo "a cluster without replication is resized in place"
 
       - name: Verify enabling replication on an existing cluster
+        if: matrix.track.id == 'extended'
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:${3:-$DB}" 2>&1; }
@@ -1096,6 +1116,7 @@ jobs:
           echo "refreshed offline seed seeded late-1, which follows late-0"
 
       - name: Verify instance fencing
+        if: matrix.track.id == 'core'
         run: |
           ANN=firebird.cloudnative-firebird.io/fencedInstances
           kubectl wait pod/test-cluster-1 -n default --for=condition=Ready --timeout=300s
@@ -1130,6 +1151,7 @@ jobs:
             | grep -q '"selector":"app.kubernetes.io/name=firebird'
 
       - name: Verify a clone is admitted by the source cluster's NetworkPolicy
+        if: matrix.track.id == 'extended'
         run: |
           # kind's CNI does not enforce NetworkPolicies: check the generated rule, then the clone itself
           kubectl patch firebirdcluster test-cluster --type merge \
@@ -1175,6 +1197,7 @@ jobs:
           kubectl delete namespace pss-restricted --wait=false
 
       - name: Verify segment TLS
+        if: matrix.track.id == 'extended'
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
@@ -1276,6 +1299,7 @@ jobs:
           echo "plain connections are refused"
 
       - name: Verify moving a pinned cluster to segment TLS
+        if: matrix.track.id == 'extended'
         run: |
           # a cluster as an upgrade from before v0.77.0 leaves it: pinned to plain segment shipping
           # by the operator (the annotation tells it from an owner's choice)
@@ -1311,6 +1335,7 @@ jobs:
           kubectl delete firebirdcluster mig --wait=false
 
       - name: Verify refusing plain segment shipping
+        if: matrix.track.id == 'extended'
         run: |
           # a cluster still plain (as an upgrade from before v0.77.0 leaves it), before the setting
           kubectl apply -f - <<'EOF'
@@ -1386,6 +1411,7 @@ jobs:
           kubectl delete firebirdcluster plain --wait=false
 
       - name: Verify synchronous replication
+        if: matrix.track.id == 'extended'
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
@@ -1529,6 +1555,7 @@ jobs:
           kubectl delete firebirdcluster sync --wait=false
 
       - name: Verify Kubernetes events
+        if: matrix.track.id == 'core'
         run: |
           kubectl get events --sort-by=.lastTimestamp \
             -o custom-columns=KIND:.involvedObject.kind,NAME:.involvedObject.name,TYPE:.type,REASON:.reason,COUNT:.count,MESSAGE:.message \
@@ -1552,6 +1579,7 @@ jobs:
           expect FirebirdUser app-user UserApplied
 
       - name: Verify operator leader election
+        if: matrix.track.id == 'core'
         run: |
           NS=cloudnative-firebird-system
           SEL=app.kubernetes.io/name=cloudnative-firebird,app.kubernetes.io/component=operator
