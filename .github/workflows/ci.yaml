@@ -1469,7 +1469,8 @@ jobs:
           # back to preferred: the rolling update recreates the pod no node took, which then starts
           kubectl patch firebirdcluster spread --type merge -p '{"spec":{"podAntiAffinity":{"type":"preferred"}}}'
           timeout 300 bash -c 'until [ "$(kubectl get pod spread-1 -o jsonpath="{.status.conditions[?(@.type==\"Ready\")].status}" 2>/dev/null)" = True ]; do sleep 5; done' \
-            || { kubectl get pods -l firebird.cloudnative-firebird.io/cluster=spread; kubectl get firebirdcluster spread -o jsonpath='{.status}'; exit 1; }
+            || { kubectl get pods -l firebird.cloudnative-firebird.io/cluster=spread -L controller-revision-hash; kubectl get firebirdcluster spread -o jsonpath='{.status}'; echo
+                 kubectl get pod spread-1 -o jsonpath='{.status.conditions}'; echo; kubectl get events --field-selector involvedObject.name=spread-1; exit 1; }
           kubectl get statefulset spread -o jsonpath='{.spec.template.spec.affinity.podAntiAffinity}' | grep -q preferredDuringScheduling
           kubectl delete firebirdcluster spread --wait=false
 

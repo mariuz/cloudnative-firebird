@@ -140,11 +140,23 @@ describe('spreading the instances', () => {
     });
     expect(plan?.restart).toBe('test-cluster-2');
     expect(plan?.message).toMatch(/never scheduled/);
-    // an unscheduled pod of the current revision is waited for as before
-    const waiting = planRollingUpdate({
+    // a pod of the new revision no node took does not hold back the outdated ones: their old
+    // required anti-affinity may be what keeps it off the node
+    const next = planRollingUpdate({
       cluster,
       statefulSet,
       pods: [pod('test-cluster-0', 'old'), pod('test-cluster-1', 'new'), pod('test-cluster-2', 'new', false)],
+      primaryPod: 'test-cluster-0',
+      fenced: [],
+    });
+    expect(next?.restart).toBe('test-cluster-0');
+    // a pod that is scheduled but not ready yet is still waited for
+    const starting = pod('test-cluster-2', 'new');
+    starting.status = { phase: 'Running', conditions: [{ type: 'Ready', status: 'False' }] };
+    const waiting = planRollingUpdate({
+      cluster,
+      statefulSet,
+      pods: [pod('test-cluster-0', 'old'), pod('test-cluster-1', 'new'), starting],
       primaryPod: 'test-cluster-0',
       fenced: [],
     });

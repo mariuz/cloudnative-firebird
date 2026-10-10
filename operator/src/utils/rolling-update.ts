@@ -101,7 +101,12 @@ export function planRollingUpdate(options: {
     plan.message = `recreating ${name(unscheduled)} on revision ${revision}: it was never scheduled`;
     return plan;
   }
-  const notReady = pods.filter((p) => !fenced.includes(name(p)) && (p.metadata?.deletionTimestamp || !isPodReady(p)));
+  // a pod of the new revision no node took does not hold the others back: it may be waiting for
+  // them (a required anti-affinity applies to the pods already running, which keep the old rule)
+  const neverScheduled = (p: V1Pod) => p.status?.phase === 'Pending' && !p.spec?.nodeName && !outdated.includes(name(p));
+  const notReady = pods.filter(
+    (p) => !fenced.includes(name(p)) && !neverScheduled(p) && (p.metadata?.deletionTimestamp || !isPodReady(p)),
+  );
   if (notReady.length > 0 || pods.length < cluster.spec.instances) {
     plan.message = `waiting for all instances to be ready before restarting the next one (${outdated.join(', ')} outdated)`;
     return plan;

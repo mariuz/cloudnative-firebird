@@ -880,9 +880,11 @@ The default is recorded in the `pod-anti-affinity` annotation on the cluster's f
 (`enabled`, a `PodAntiAffinityDefaulted` event). Clusters that already have a StatefulSet when the
 operator first sees them are pinned without it (`pinned`), since adding it would restart their
 instances: set `podAntiAffinity.enabled: true` to add it, through the usual rolling update. With
-`type: required`, an instance no node can take stays pending (`Unschedulable`); a rolling update
+`type: required`, an instance no node can take stays pending (`Unschedulable`). A rolling update
 recreates such a pod from the new template right away instead of waiting for it to become ready,
-so relaxing the rule (or adding nodes) brings it up.
+and a pod of the new template that no node took does not hold back the restart of the others: a
+required anti-affinity also binds the instances already running, which keep the old rule until
+they restart. So relaxing the rule (or adding nodes) brings the pending instance up.
 
 ### Pod Management
 
