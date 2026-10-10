@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, type Mock } from 'vitest';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
 import { FirebirdCluster } from '../src/types';
-import { AppsV1Api, BatchV1Api, CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, PolicyV1Api } from '@kubernetes/client-node';
+import { AppsV1Api, BatchV1Api, CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, PolicyV1Api, RbacAuthorizationV1Api } from '@kubernetes/client-node';
 
 /** Shape of arguments passed to createNamespacedService mock calls */
 type CreateServiceCall = [{ namespace: string; body: { metadata?: { name?: string; labels?: Record<string, string>; ownerReferences?: Array<{ kind?: string; uid?: string }> } } }];
@@ -118,6 +118,10 @@ function makeMockKubeConfig({
     readNamespacedLease: vi.fn().mockRejectedValue(notFoundError),
     createNamespacedLease: vi.fn().mockResolvedValue({}),
   };
+  // the primary Lease's Role (none: nothing to remove)
+  const mockRbacApi = {
+    readNamespacedRole: vi.fn().mockRejectedValue(notFoundError),
+  };
 
   const mockKubeConfig = new KubeConfig();
   vi.spyOn(mockKubeConfig, 'makeApiClient').mockImplementation((ApiType: unknown) => {
@@ -127,6 +131,7 @@ function makeMockKubeConfig({
     if (ApiType === CustomObjectsApi) return mockCustomApi as unknown as CustomObjectsApi;
     if (ApiType === PolicyV1Api) return mockPolicyApi as unknown as PolicyV1Api;
     if (ApiType === CoordinationV1Api) return mockCoordinationApi as unknown as CoordinationV1Api;
+    if (ApiType === RbacAuthorizationV1Api) return mockRbacApi as unknown as RbacAuthorizationV1Api;
     return {} as unknown as CoreV1Api;
   });
 

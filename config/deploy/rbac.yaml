@@ -194,6 +194,21 @@ rules:
       - update
       - patch
       - delete
+  # The Role and RoleBinding that let the instances renew their cluster's Lease
+  # (replication.failover.primaryLease)
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - roles
+      - rolebindings
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
   # PodDisruptionBudgets
   - apiGroups:
       - policy

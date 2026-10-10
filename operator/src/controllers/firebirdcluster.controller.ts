@@ -2,6 +2,15 @@ import { segmentTlsEnabled } from '../utils/segment-tls-pods';
 import { ensureSegmentTlsSecret, reconcileSegmentTlsPeers } from '../utils/segment-tls-client';
 import { nativeSidecarsSupported, segmentTlsDefault, segmentTlsRequired } from '../utils/segment-tls-default';
 import { MIGRATION_ANNOTATION, migrationInProgress, migrationMode, migrationStep, notMigrating } from '../utils/segment-tls-migration';
+import {
+  buildPrimaryLeaseRole,
+  buildPrimaryLeaseRoleBinding,
+  leaseAgeSeconds,
+  leaseExpired,
+  primaryLeaseDurationSeconds,
+  primaryLeaseEnabled,
+  primaryLeaseRoleName,
+} from '../utils/primary-lease';
 import { superuserPasswordFrom } from '../utils/restore-target';
 import { inPlaceResize, RESIZE_ANNOTATION, RESIZE_TIMEOUT_SECONDS, resizeApplied, resizeInfeasible } from '../utils/in-place';
 import crypto from 'crypto';
@@ -9,6 +18,7 @@ import {
   AppsV1Api,
   BatchV1Api,
   CoordinationV1Api,
+  RbacAuthorizationV1Api,
   CoreV1Api,
   CustomObjectsApi,
   KubeConfig,
@@ -43,7 +53,7 @@ import {
   pendingDropsConfigMapName,
 } from '../utils/pending-drops';
 import { firebirdUsername } from '../utils/users';
-import { recordClusterMetrics, recordReconcile } from '../utils/metrics';
+import { metrics, recordClusterMetrics, recordReconcile } from '../utils/metrics';
 import { RESEED_VOLUME, dataClaimName, planVolumeRecreation } from '../utils/volume-recreation';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { PRIMARY_RESTART_GRACE_SECONDS, REVISION_LABEL, planRollingUpdate, rollingUpdateTarget } from '../utils/rolling-update';
@@ -232,6 +242,7 @@ export class FirebirdClusterController {
   private readonly appsApi: AppsV1Api;
   private readonly batchApi: BatchV1Api;
   private readonly coordinationApi: CoordinationV1Api;
+  private readonly rbacApi: RbacAuthorizationV1Api;
   private readonly coreApi: CoreV1Api;
   private readonly customApi: CustomObjectsApi;
   private readonly networkingApi: NetworkingV1Api;
@@ -249,6 +260,7 @@ export class FirebirdClusterController {
     this.appsApi = kubeConfig.makeApiClient(AppsV1Api);
     this.batchApi = kubeConfig.makeApiClient(BatchV1Api);
     this.coordinationApi = kubeConfig.makeApiClient(CoordinationV1Api);
+    this.rbacApi = kubeConfig.makeApiClient(RbacAuthorizationV1Api);
     this.coreApi = kubeConfig.makeApiClient(CoreV1Api);
     this.customApi = kubeConfig.makeApiClient(CustomObjectsApi);
     this.networkingApi = kubeConfig.makeApiClient(NetworkingV1Api);
@@ -384,6 +396,7 @@ export class FirebirdClusterController {
       await this.reconcileJournalArchiveCronJob(cluster, primaryPod, log);
       const journalArchiveSequence = await this.journalArchiveSequence(cluster, switchover.journalArchiveSequence);
       await this.reconcileLease(cluster, log);
+      await this.reconcilePrimaryLeaseRbac(cluster, log);
       await this.warnUnusedCertificate(cluster, log);
       await this.reconcilePodDisruptionBudget(cluster, log);
       await this.reconcileNetworkPolicy(cluster, log);
@@ -605,6 +618,14 @@ export class FirebirdClusterController {
     const { name, namespace = 'default' } = cluster.metadata;
     try {
       const lease = await this.coordinationApi.readNamespacedLease({ name: `${name}-lease`, namespace });
+      if (primaryLeaseEnabled(cluster)) {
+        metrics.set(
+          'firebird_cluster_primary_lease_age_seconds',
+          'Seconds since the primary last renewed its Lease (replication.failover.primaryLease)',
+          { namespace, cluster: name },
+          Math.round(leaseAgeSeconds(lease) ?? -1),
+        );
+      }
       if (lease.spec?.holderIdentity) return lease.spec.holderIdentity;
     } catch {
       log.debug('Leader lease not found, assuming ordinal 0 is primary');
@@ -693,7 +714,8 @@ export class FirebirdClusterController {
 
     // A primary that fenced itself while cut off from the cluster (isolation check) and still
     // holds the Lease: nothing was promoted meanwhile, so it is brought back online
-    if (!inFlight && failover?.enabled && !primaryReady && !fenced.includes(primaryPod) && podOf(primaryPod)) {
+    // (with the primary Lease the primary rejoins itself once it holds the Lease again, utils/primary-lease.ts)
+    if (!inFlight && failover?.enabled && !primaryReady && !fenced.includes(primaryPod) && podOf(primaryPod) && !primaryLeaseEnabled(cluster)) {
       if (await this.rejoinIsolatedPrimary(cluster, primaryPod, log)) return result;
     }
 
@@ -891,6 +913,34 @@ export class FirebirdClusterController {
         await persist({ ...phase, phase: 'Failed', message: `election Job ${electionJob} failed (see its logs)`, completionTime: now });
         await this.batchApi.deleteNamespacedJob({ name: electionJob, namespace, propagationPolicy: 'Background' });
         return result;
+      }
+
+      // the primary Lease (utils/primary-lease.ts): the old primary is replaced only once it has
+      // stopped renewing its Lease, so it is down or fenced, never still taking writes
+      if (primaryLeaseEnabled(cluster)) {
+        const lease = await this.coordinationApi.readNamespacedLease({ name: `${name}-lease`, namespace }).catch(() => undefined);
+        if (lease?.spec?.holderIdentity === phase.from && !leaseExpired(lease, primaryLeaseDurationSeconds(cluster))) {
+          const message = `elected ${target}; waiting for the Lease of ${phase.from} to expire before promoting it`;
+          log.warn({ primary: phase.from, target, ageSeconds: leaseAgeSeconds(lease) }, 'Failover waits for the primary Lease to expire');
+          if (phase.message !== message) await persist({ ...phase, message }, EventReason.PrimaryLeaseHeld);
+          return result;
+        }
+        // the Lease is taken over with the version that was read: a renewal by the old primary
+        // that lands first (it reached the API server again and re-acquired it) wins, and the
+        // failover looks again
+        if (lease) {
+          try {
+            await this.coordinationApi.replaceNamespacedLease({
+              name: `${name}-lease`,
+              namespace,
+              body: { ...lease, spec: { ...lease.spec, holderIdentity: target, renewTime: new V1MicroTime() } },
+            });
+          } catch (err) {
+            if ((err as { code?: number })?.code !== 409) throw err;
+            log.warn({ primary: phase.from, target }, 'The primary renewed its Lease while the failover took it over; looking again');
+            return result;
+          }
+        }
       }
 
       // replicas behind the elected one, unready ones and the old primary are re-seeded
@@ -2493,6 +2543,50 @@ export class FirebirdClusterController {
         namespace,
         body: desired,
       });
+    }
+  }
+
+  /**
+   * The Role and RoleBinding through which the instances renew their cluster's Lease (the
+   * lease-holder sidecar, utils/primary-lease.ts); removed again when the primary Lease is off
+   */
+  private async reconcilePrimaryLeaseRbac(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    const namespace = cluster.metadata.namespace ?? 'default';
+    const name = primaryLeaseRoleName(cluster);
+    if (!primaryLeaseEnabled(cluster)) {
+      try {
+        await this.rbacApi.readNamespacedRole({ name, namespace });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+        return;
+      }
+      log.info({ role: name }, 'Removing the primary Lease Role: the primary no longer holds its Lease');
+      for (const remove of [
+        () => this.rbacApi.deleteNamespacedRoleBinding({ name, namespace }),
+        () => this.rbacApi.deleteNamespacedRole({ name, namespace }),
+      ]) {
+        await remove().catch((err) => {
+          if (!isNotFound(err)) throw err;
+        });
+      }
+      return;
+    }
+    const role = buildPrimaryLeaseRole(cluster);
+    const binding = buildPrimaryLeaseRoleBinding(cluster);
+    try {
+      await this.rbacApi.readNamespacedRole({ name, namespace });
+      await this.rbacApi.patchNamespacedRole({ name, namespace, body: role }, MERGE_PATCH);
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+      log.info({ role: name }, 'Creating the primary Lease Role');
+      await this.rbacApi.createNamespacedRole({ namespace, body: role });
+    }
+    try {
+      await this.rbacApi.readNamespacedRoleBinding({ name, namespace });
+      await this.rbacApi.patchNamespacedRoleBinding({ name, namespace, body: binding }, MERGE_PATCH);
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+      await this.rbacApi.createNamespacedRoleBinding({ namespace, body: binding });
     }
   }
 

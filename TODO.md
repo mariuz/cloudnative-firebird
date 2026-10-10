@@ -11,12 +11,15 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   fix version. Replication stays experimental until then.
 - [ ] **File the commit/TIP window upstream** ([ISSUES.md](ISSUES.md) issue 2, confirmed): the
   report is ready in [docs/upstream](docs/upstream/02-commit-journaled-before-tip.md).
-- [ ] **Failover safety**: the Lease is moved by the operator, not held and renewed by the
-  instances (CloudNativePG 1.30's promotion mutex). The isolation check fences a primary cut off
-  from both the API server and every replica (v0.52.0), and since v0.74.0 also one that neither
-  the operator nor any replica has reached for `contactTimeoutSeconds`, before a cut-off primary
-  is failed over (v0.63.0), since v0.78.0 also when cluster DNS fails with the partition (the
-  peers known from the last answer and the addresses the operator publishes, v0.80.0).
+- [ ] **Failover safety**: since v0.86.0 the primary can hold and renew the Lease itself
+  (`failover.primaryLease`, CloudNativePG 1.30's promotion mutex): it fences itself when the
+  Lease names another instance or cannot be renewed, and the operator promotes only once the
+  Lease expired. Opt-in for now (it adds a sidecar and a Role per cluster); making it the default
+  for new clusters, as segment TLS is, is the remaining step. The isolation check fences a primary
+  cut off from both the API server and every replica (v0.52.0), and since v0.74.0 also one that
+  neither the operator nor any replica has reached for `contactTimeoutSeconds`, before a cut-off
+  primary is failed over (v0.63.0), since v0.78.0 also when cluster DNS fails with the partition
+  (the peers known from the last answer and the addresses the operator publishes, v0.80.0).
 - [ ] **Synchronous replication follow-ups** (one standby since v0.53.0, several since v0.61.0):
   an "any N of M" quorum (Firebird waits for every `sync_replica`). Attaching and detaching
   without the short write pause is not possible with Firebird 5 or 6: `sync_replica` is read

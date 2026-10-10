@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.85.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.86.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Primary Lease as a Promotion Mutex** *(v0.86.0, opt-in; CloudNativePG 1.30's primary Lease)*
+  - The cluster Lease was only moved by the operator; nothing held it. With `failover.primaryLease.enabled`, a `lease-holder` sidecar (operator image, native sidecar) in every instance pod renews the Lease every third of `durationSeconds` (default 15) while its pod is the primary and its database is online (segment server `STATE`), through the pod's ServiceAccount: a Role on that one Lease and a RoleBinding the operator manages, a token projected into the sidecar alone.
+  - The primary fences its database (segment server `FENCE`, the isolation check's full shutdown) when the Lease names another instance or could not be renewed for the Lease's duration (API requests time out after 5 s), and brings it back itself (`REJOIN`) once it re-acquires the Lease, with the version it read. A database that is down stops the renewals. The operator no longer rejoins an isolated primary itself with the primary Lease on.
+  - The operator promotes a failover's elected replica only once the Lease has expired (`PrimaryLeaseHeld` event while it waits), taking the Lease over with the version it read (a renewal that lands first wins); `firebird_cluster_primary_lease_age_seconds`. Unit tests cover the holder's decisions, the pod wiring, the RBAC objects and the gate; the kind CI cuts the primary off from the API server alone and checks that it fences itself before the failover replaces it.
 - [x] **Synchronous Attach Without the Write Pause: Not Possible** *(v0.85.0, investigated)*
   - Firebird 5.0.3 and the 6.0 snapshot read `replication.conf`, and the file it includes, when a database is opened (its first attachment after the last one closed) and keep it with the database's global objects; nothing reloads it. A changed `sync_replica` is ignored while any attachment stays open and takes effect once every attachment is closed, without a shutdown (`hack/repro/sync-replica.sh`, [ISSUES.md](ISSUES.md) issue 9). With clients attached only a shutdown creates that moment, and it is also where the journal and the synchronous stream agree, so the pause stays.
   - The sync-standby Job now reports how long writes were stopped (`paused 3s` on the second line of its termination message); `status.synchronous.message` and the attach and detach events carry it.

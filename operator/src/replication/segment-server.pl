@@ -76,6 +76,11 @@
 #                                 reaches the pod's files later. A synchronous standby continues
 #                                 after the last segment it saw archived (sync-seen) when higher.
 #                                 "ERR ..." leaves it a replica.
+#   "<token> STATE\n"           -> "OK online" or "OK shutdown": the database's state (the primary
+#                                 Lease holder, lease-holder.ts, renews the Lease only while online)
+#   "<token> FENCE <reason>\n"  -> "OK": fences the primary like the isolation check does (marker
+#                                 and full shutdown; "OK fenced" when it is already), when the
+#                                 Lease holder lost the primary Lease or cannot renew it
 #   "<token> REJOIN\n"          -> "OK": brings a database fenced by the isolation check back
 #                                 online, sent by the operator once it checked that this instance
 #                                 still holds the leader Lease ("OK" too when it is not fenced)
@@ -218,6 +223,34 @@ sub is_primary {
   return 1 if !$files_only && -e $promoted_flag;
   my $primary = slurp($primary_file);
   return $primary eq '' || $primary =~ /^\Q$self\E(\.|$)/;
+}
+
+# The database's state from the local server: "online", "shutdown", or undef (no answer)
+sub database_state {
+  my $out = `fbsvcmgr localhost:service_mgr action_db_stats dbname '$database' sts_hdr_pages 2>&1`;
+  # Firebird 6 refuses header statistics for a database in full shutdown
+  return 'shutdown' if $out =~ /^database .* shutdown/m;
+  return undef if $?;
+  return $out =~ /shutdown/ ? 'shutdown' : 'online';
+}
+
+# Fences the primary as the isolation check does (isolation-check.pl): the marker first, so that a
+# restarted sidecar never takes the fenced database for an online one, then the full shutdown.
+# Lifted (REJOIN) by the Lease holder once it holds the Lease again, or by the operator.
+sub fence_database {
+  my ($reason) = @_;
+  open(my $fh, '>', "$self_fenced.tmp") or do { print "cannot write $self_fenced: $!\n"; return 0 };
+  print $fh time, "\n";
+  close $fh;
+  rename "$self_fenced.tmp", $self_fenced;
+  print "$reason: fencing the primary (database in full shutdown)\n";
+  if (system('fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database,
+             'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') != 0) {
+    unlink $self_fenced;
+    print "full shutdown failed\n";
+    return 0;
+  }
+  return 1;
 }
 
 # Replication sequence (HDR_repl_seq clump, 0 without one) from the header page of a database file
@@ -811,6 +844,16 @@ while (1) {
     print $client (defined $seq ? "OK $seq\n" : "ERR cannot read the header of $database\n");
   } elsif ($cmd eq 'ISOLATION') {
     print $client (-f $self_fenced ? "OK fenced " . (slurp($self_fenced) || 0) . "\n" : "OK online\n");
+  } elsif ($cmd eq 'STATE') {
+    my $state = database_state();
+    print $client (defined $state ? "OK $state\n" : "ERR cannot read the state of $database\n");
+  } elsif ($cmd eq 'FENCE') {
+    if (-f $self_fenced) {
+      print $client "OK fenced\n";
+    } else {
+      my $reason = defined $arg && $arg =~ /^[\w .:,()\/-]{1,200}$/ ? $arg : 'requested';
+      print $client (fence_database($reason) ? "OK\n" : "ERR cannot shut $database down\n");
+    }
   } elsif ($cmd eq 'REJOIN') {
     if (!-f $self_fenced) {
       print $client "OK\n";

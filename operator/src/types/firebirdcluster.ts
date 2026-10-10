@@ -630,6 +630,21 @@ export interface FailoverConfiguration {
    * by default with automatic failover.
    */
   isolationCheck?: IsolationCheckConfiguration;
+  /**
+   * The primary holds the cluster Lease itself (CloudNativePG's primary Lease, a promotion
+   * mutex): a sidecar renews it while the primary's database is online and fences the database
+   * when the Lease names another instance or cannot be renewed; the operator promotes a replica
+   * only once the Lease has expired. Default false.
+   */
+  primaryLease?: PrimaryLeaseConfiguration;
+}
+
+/** Primary Lease settings */
+export interface PrimaryLeaseConfiguration {
+  /** Whether the primary holds and renews the Lease (default false) */
+  enabled?: boolean;
+  /** How long a renewal keeps the Lease valid (default 15, 5 to 120); renewed every third of it */
+  durationSeconds?: number;
 }
 
 /** Primary isolation check settings */

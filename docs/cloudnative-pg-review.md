@@ -28,8 +28,8 @@ Status: **done** (in this repository), **planned** (listed in [ROADMAP.md](../RO
 
 | CloudNativePG | What it means here |
 |---|---|
-| 1.30: primary `Lease` as a promotion mutex; the instance must hold it before acting as primary, and releases it on clean shutdown | Planned switchover (v0.13.0) and automatic failover (v0.14.0) move the `<cluster>-lease` to the promoted instance. The instances do not hold or renew it yet, so it is not a promotion mutex in CloudNativePG's sense (TODO.md, "Failover safety"). |
-| 1.30 security: operator-to-instance calls authenticated with a client certificate | Requests to the segment server are signed with the SYSDBA password (HMAC-SHA256, time and nonce: the password is not sent, requests cannot be replayed) since v0.64.0; the transfers are plain TCP inside the cluster, see "Encrypt segment shipping" in TODO.md. |
+| 1.30: primary `Lease` as a promotion mutex; the instance must hold it before acting as primary, and releases it on clean shutdown | **Aligned (opt-in, v0.86.0):** with `failover.primaryLease.enabled` the primary's `lease-holder` sidecar renews the `<cluster>-lease` while its database is online, fences the database when the Lease names another instance or cannot be renewed, and the operator promotes a replica only once the Lease expired. Off, the Lease is only moved by the operator as before (v0.13.0, v0.14.0). |
+| 1.30 security: operator-to-instance calls authenticated with a client certificate | Requests to the segment server are signed with the SYSDBA password (HMAC-SHA256, time and nonce: the password is not sent, requests cannot be replayed) since v0.64.0; since v0.76.0 the transfers run over mutual TLS with the cluster's own CA (`spec.segmentTLS`, the default for new clusters since v0.77.0; docs/segment-tls.md). |
 
 ## Already aligned
 

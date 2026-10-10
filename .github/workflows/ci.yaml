@@ -909,6 +909,84 @@ jobs:
           timeout 120 bash -c 'until [ -z "$(kubectl get firebirdcluster repl -o jsonpath={.status.rollingUpdate})" ]; do sleep 5; done'
           echo "CPU limit changed in place on every instance, nothing restarted"
 
+      - name: Verify the primary Lease
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
+          count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          SEL=firebird.cloudnative-firebird.io/cluster=repl,app.kubernetes.io/component=database
+          # the primary holds its Lease (replication.failover.primaryLease): the lease-holder
+          # sidecar reaches every instance through a rolling update
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"replication":{"failover":{"primaryLease":{"enabled":true}}}}}'
+          timeout 120 bash -c 'until kubectl get statefulset repl -o jsonpath="{.spec.template.spec.initContainers[*].name}" | grep -q lease-holder; do sleep 3; done'
+          rev=$(kubectl get statefulset repl -o jsonpath={.status.updateRevision})
+          updated() {
+            kubectl get pods -l "$SEL" \
+              -o jsonpath='{range .items[*]}{.metadata.labels.controller-revision-hash} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+              | grep -c "^$rev True$"
+          }
+          for n in $(seq 1 120); do
+            [ "$(updated)" = 3 ] && [ -z "$(kubectl get firebirdcluster repl -o jsonpath={.status.rollingUpdate})" ] && break
+            sleep 5
+          done
+          [ "$(updated)" = 3 ] || { kubectl get pods -l "$SEL" -L controller-revision-hash; kubectl get firebirdcluster repl -o jsonpath='{.status.rollingUpdate}'; exit 1; }
+          kubectl get role/repl-primary-lease rolebinding/repl-primary-lease
+          primary=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
+          # renewed by the primary's sidecar through its own ServiceAccount: the renewal time moves on
+          t1=$(kubectl get lease repl-lease -o jsonpath={.spec.renewTime}); sleep 12
+          t2=$(kubectl get lease repl-lease -o jsonpath={.spec.renewTime})
+          [ "$t1" != "$t2" ] || { echo "the Lease was not renewed ($t1)"; kubectl logs "$primary" -c lease-holder; exit 1; }
+          kubectl logs "$primary" -c lease-holder | grep 'holding the Lease'
+          replica=$(kubectl get pods -l "$SEL" -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep -v "^$primary$" | head -1)
+          kubectl logs "$replica" -c lease-holder | grep 'not the primary'
+          before=$(count "$primary")
+          last_failover=$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})
+          old_uid=$(kubectl get pod "$primary" -o jsonpath={.metadata.uid})
+          # the primary is cut off from the API server only: the operator and the replicas still
+          # reach it (the isolation check does not fence it), but it cannot renew its Lease, so it
+          # fences itself once the Lease's duration (15 s) passed, and the operator, finding it
+          # not ready, fails over once the Lease expired. The rules go into the pod's network
+          # namespace from the kind node, as in the cut-off primary step.
+          api_ip=$(kubectl get endpoints kubernetes -o jsonpath='{.subsets[0].addresses[0].ip}')
+          api_port=$(kubectl get endpoints kubernetes -o jsonpath='{.subsets[0].ports[0].port}')
+          svc_ip=$(kubectl get service kubernetes -o jsonpath={.spec.clusterIP})
+          node=firebird-test-control-plane
+          sandbox=$(docker exec "$node" crictl pods --namespace default --name "^$primary\$" --state ready -q | head -1)
+          pid=$(docker exec "$node" crictl inspectp -o go-template --template '{{.info.pid}}' "$sandbox")
+          docker exec "$node" nsenter -t "$pid" -n iptables -I OUTPUT -d "$svc_ip" -p tcp --dport 443 -j DROP
+          docker exec "$node" nsenter -t "$pid" -n iptables -I OUTPUT -d "$api_ip" -p tcp --dport "$api_port" -j DROP
+          echo "cut $primary off from the API server ($svc_ip:443, $api_ip:$api_port)"
+          fenced=no
+          for n in $(seq 1 120); do
+            if [ "$fenced" = no ] && [ "$(kubectl get pod "$primary" -o jsonpath={.metadata.uid} 2>/dev/null)" = "$old_uid" ] &&
+              kubectl logs "$primary" -c lease-holder 2>/dev/null | tee /tmp/lease-holder.log | grep -q 'fenced: the Lease could not be renewed'; then
+              fenced=yes
+              kubectl logs "$primary" -c segment-server > /tmp/lease-segment-server.log 2>/dev/null || true
+            fi
+            kubectl get firebirdcluster repl -o jsonpath='{.status.switchover.kind} {.status.switchover.phase}' | grep -q 'failover Completed' &&
+              [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})" != "$last_failover" ] && break
+            sleep 5
+          done
+          kubectl get firebirdcluster repl -o jsonpath='{.status.switchover.kind} {.status.switchover.phase}' | grep -q 'failover Completed' \
+            || { kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo; cat /tmp/lease-holder.log 2>/dev/null; kubectl get pods -o wide; exit 1; }
+          [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})" != "$last_failover" ]
+          [ "$fenced" = yes ] || { echo "the primary did not fence itself when it could not renew its Lease"; cat /tmp/lease-holder.log 2>/dev/null; exit 1; }
+          grep -E 'cannot (read|renew) the Lease' /tmp/lease-holder.log
+          grep 'cannot renew the Lease: the API server has not answered' /tmp/lease-segment-server.log
+          grep -q 'fencing the primary (database in full shutdown)' /tmp/lease-segment-server.log
+          new=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
+          [ "$new" != "$primary" ]
+          [ "$(count "$new")" = "$before" ]
+          # the new primary holds the Lease now
+          timeout 120 bash -c "until kubectl logs $new -c lease-holder | grep -q 'holding the Lease'; do sleep 5; done"
+          # the old primary comes back re-seeded (its pod is deleted, which removes the rules too)
+          timeout 300 bash -c "until uid=\$(kubectl get pod $primary -o jsonpath={.metadata.uid} 2>/dev/null) &&
+            [ -n \"\$uid\" ] && [ \"\$uid\" != $old_uid ]; do sleep 3; done"
+          kubectl wait pod/"$primary" --for=condition=Ready --timeout=300s
+          kubectl logs "$primary" -c replication-init | grep 're-seed requested'
+          kubectl logs "$primary" -c lease-holder | grep 'not the primary'
+          echo "the primary fenced itself when it could not renew its Lease; failed over from $primary to $new"
+
       - name: Verify a cluster without replication is updated by the operator, in place when it can
         run: |
           SEL=firebird.cloudnative-firebird.io/cluster=test-cluster,app.kubernetes.io/component=database
