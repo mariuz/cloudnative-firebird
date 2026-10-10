@@ -15,6 +15,8 @@ export const makeCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): F
     name: 'test-cluster',
     namespace: 'default',
     uid: 'test-uid-1234',
+    // as the controller's first reconcile records it (primary-lease.ts)
+    annotations: { 'firebird.cloudnative-firebird.io/primary-lease': 'pinned' },
   },
   spec: {
     instances: 1,
@@ -52,7 +54,7 @@ export const makeNamedCluster = (
   overrides: Partial<FirebirdCluster['spec']> = {},
 ): FirebirdCluster => ({
   ...makeCluster(overrides),
-  metadata: { name, namespace, uid: `uid-${name}` },
+  metadata: { ...makeCluster().metadata, name, namespace, uid: `uid-${name}` },
 });
 
 /**

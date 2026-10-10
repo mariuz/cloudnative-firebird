@@ -127,6 +127,10 @@ before. Releases also keep the earlier ones they still have to: since v0.83.0 th
 and later. An operator from before v0.64.0 has to be upgraded to v0.82.0 first, and its clusters
 rolled. Its instances send the SYSDBA password in plain text, which current segment servers refuse,
 so replicas would stop pulling from an upgraded primary until they had restarted themselves.
+Clusters that exist at an upgrade keep what they have: plain segment shipping (pinned since
+v0.77.0, moved with `SEGMENT_TLS_MIGRATE`) and a Lease moved by the operator rather than held by
+the primary (pinned since v0.87.0; set `failover.primaryLease.enabled: true` to move one, a
+rolling update).
 
 ### Create a Firebird Cluster
 
@@ -654,14 +658,21 @@ off. The fence needs the cluster DNS (the headless Service) to know that replica
 
 #### Primary Lease (promotion mutex)
 
-CloudNativePG 1.30 makes the primary hold a Lease and promotes only once it is free. Opt in
+CloudNativePG 1.30 makes the primary hold a Lease and promotes only once it is free. Since
+v0.87.0 this is the default for **new** clusters with automatic failover on Kubernetes 1.29 or
+later (native sidecars): the operator records the decision in the
+`firebird.cloudnative-firebird.io/primary-lease` annotation on a cluster's first reconcile
+(`enabled`, or `pinned` for clusters that already had a StatefulSet when the operator first saw
+them, since the sidecar would restart their instances), with a `PrimaryLeaseDefaulted` event, so
+it never changes for an existing cluster; `PRIMARY_LEASE_DEFAULT` on the operator (`auto`,
+`true`, `false`) sets it for clusters created from then on. The owner's choice always wins
 (v0.86.0):
 
 ```yaml
     failover:
       enabled: true
       primaryLease:
-        enabled: true
+        enabled: true         # or false; unset: as recorded on the cluster
         durationSeconds: 15   # default; 5 to 120
 ```
 
@@ -678,9 +689,9 @@ token projected into the sidecar alone):
   the other side). Clients that still reach it cannot write to a database that may no longer be
   the primary. The sidecar brings it back online itself once it can re-acquire the Lease (the
   Lease still names it, or nobody: with the version it read, so a failover that took the Lease
-  over meanwhile wins), which also covers a fence by the isolation check; the operator does not
-  rejoin an isolated primary itself with the primary Lease on. A primary replaced meanwhile is
-  re-seeded;
+  over meanwhile wins). A fence by the isolation check (nothing reached the primary) stays the
+  operator's to lift, as before: a primary that still reaches the API server but nothing else
+  must not take writes again on its own. A primary replaced meanwhile is re-seeded;
 - a primary whose database is down stops renewing, so the Lease expires on its own;
 - the operator **promotes a replica only once the Lease has expired**: a primary that still
   renews it is alive, online and reaching the API server, and is never replaced. A failover that
@@ -690,9 +701,10 @@ token projected into the sidecar alone):
   as before.
 
 `firebird_cluster_primary_lease_age_seconds` shows how long ago the primary renewed the Lease.
-Enabling it restarts the instances (a rolling update, the primary last) to add the sidecar; the
-kind CI enables it, cuts the primary off from the API server alone and checks that it fences
-itself before the operator fails over.
+Enabling it on a cluster that runs restarts the instances (a rolling update, the primary last) to
+add the sidecar, as enabling failover does for the isolation check; the kind CI checks the
+default on new clusters, then cuts a primary off from the API server alone and checks that it
+fences itself before the operator fails over.
 
 ### Synchronous Replication
 
@@ -1259,7 +1271,7 @@ The operator records Kubernetes events on its resources (CloudNativePG 1.29 / 1.
 
 | Resource | Reasons |
 |---|---|
-| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReconcileFailed` (warning) |
+| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReconcileFailed` (warning) |
 | `FirebirdBackup` | `BackupStarted`, `BackupCompleted`, `BackupFailed` (warning) |
 | `FirebirdRestore` | `RestoreStarted`, `RestoreCompleted`, `RestoreFailed` (warning) |
 | `FirebirdUser` | `UserApplied`, `UserFailed` (warning), `UserDropped` |

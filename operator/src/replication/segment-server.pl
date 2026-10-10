@@ -76,11 +76,15 @@
 #                                 reaches the pod's files later. A synchronous standby continues
 #                                 after the last segment it saw archived (sync-seen) when higher.
 #                                 "ERR ..." leaves it a replica.
-#   "<token> STATE\n"           -> "OK online" or "OK shutdown": the database's state (the primary
-#                                 Lease holder, lease-holder.ts, renews the Lease only while online)
+#   "<token> STATE\n"           -> "OK online", "OK shutdown", "OK fenced lease" (by the Lease
+#                                 holder) or "OK fenced" (by the isolation check): the database's
+#                                 state for the primary Lease holder (lease-holder.ts), which
+#                                 renews the Lease only while online. STATE, FENCE and REJOIN
+#                                 come from this pod and do not count as contact (last-contact)
 #   "<token> FENCE <reason>\n"  -> "OK": fences the primary like the isolation check does (marker
 #                                 and full shutdown; "OK fenced" when it is already), when the
-#                                 Lease holder lost the primary Lease or cannot renew it
+#                                 Lease holder lost the primary Lease or cannot renew it; ISOLATION
+#                                 then answers "OK fenced <epoch> lease"
 #   "<token> REJOIN\n"          -> "OK": brings a database fenced by the isolation check back
 #                                 online, sent by the operator once it checked that this instance
 #                                 still holds the leader Lease ("OK" too when it is not fenced)
@@ -162,7 +166,7 @@ my $self_fenced = "$base/self-fenced";
 my $last_contact_file = "$base/last-contact";
 my $last_contact_touch = 0;
 sub contacted {
-  return if time == $last_contact_touch;
+  return if time == $last_contact_touch && -f $last_contact_file;
   $last_contact_touch = time;
   if (open(my $fh, '>', $last_contact_file)) { print $fh time, "\n"; close $fh; }
 }
@@ -236,11 +240,13 @@ sub database_state {
 
 # Fences the primary as the isolation check does (isolation-check.pl): the marker first, so that a
 # restarted sidecar never takes the fenced database for an online one, then the full shutdown.
-# Lifted (REJOIN) by the Lease holder once it holds the Lease again, or by the operator.
+# The marker says "lease" (ISOLATION reports "OK fenced <epoch> lease"): lifted (REJOIN) by the
+# Lease holder once it holds the Lease again, not by the operator, which lifts the isolation
+# check's fences (its marker has no "lease") as before.
 sub fence_database {
   my ($reason) = @_;
   open(my $fh, '>', "$self_fenced.tmp") or do { print "cannot write $self_fenced: $!\n"; return 0 };
-  print $fh time, "\n";
+  print $fh time, " lease\n";
   close $fh;
   rename "$self_fenced.tmp", $self_fenced;
   print "$reason: fencing the primary (database in full shutdown)\n";
@@ -803,7 +809,8 @@ while (1) {
   if (!defined $line) { close $client; next; }
   $line =~ s/\r?\n$//;
   my ($cmd, $arg, $denied) = authorize($line);
-  contacted() if defined $cmd;
+  # the Lease holder's requests come from this pod: not the operator or a replica reaching it
+  contacted() if defined $cmd && $cmd !~ /^(?:STATE|FENCE|REJOIN)$/;
   if (defined $denied) {
     print $client "ERR unauthorized ($denied)\n";
   } elsif ($cmd eq 'PING') {
@@ -845,8 +852,12 @@ while (1) {
   } elsif ($cmd eq 'ISOLATION') {
     print $client (-f $self_fenced ? "OK fenced " . (slurp($self_fenced) || 0) . "\n" : "OK online\n");
   } elsif ($cmd eq 'STATE') {
+    # the database's state, with the fence that shut it down: "online", "shutdown", "fenced lease"
+    # (the Lease holder's, lifted by it), "fenced" (the isolation check's, lifted by the operator)
     my $state = database_state();
-    print $client (defined $state ? "OK $state\n" : "ERR cannot read the state of $database\n");
+    if (!defined $state) { print $client "ERR cannot read the state of $database\n"; }
+    elsif ($state eq 'shutdown' && -f $self_fenced) { print $client "OK fenced" . (slurp($self_fenced) =~ /\blease\b/ ? " lease" : "") . "\n"; }
+    else { print $client "OK $state\n"; }
   } elsif ($cmd eq 'FENCE') {
     if (-f $self_fenced) {
       print $client "OK fenced\n";

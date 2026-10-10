@@ -68,6 +68,10 @@ spec:
             # existing plain clusters get a SegmentTLS condition and a warning (docs/segment-tls.md)
             # - name: SEGMENT_TLS_REQUIRED
             #   value: "true"
+            # the primary holds its Lease (a promotion mutex) in new clusters with automatic
+            # failover: auto = on from Kubernetes 1.29 (native sidecars), true, false
+            - name: PRIMARY_LEASE_DEFAULT
+              value: auto
             - name: OPERATOR_NAMESPACE
               valueFrom:
                 fieldRef:

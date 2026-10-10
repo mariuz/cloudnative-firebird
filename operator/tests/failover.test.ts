@@ -18,7 +18,8 @@ import { metrics } from '../src/utils/metrics';
 const makeCluster = (status?: FirebirdCluster['status'], failover: object = { enabled: true, delaySeconds: 30 }): FirebirdCluster => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
   kind: 'FirebirdCluster',
-  metadata: { name: 'db', namespace: 'default', uid: 'c' },
+  // as the controller's first reconcile recorded it for a cluster that existed before v0.87.0
+  metadata: { name: 'db', namespace: 'default', uid: 'c', annotations: { 'firebird.cloudnative-firebird.io/primary-lease': 'pinned' } },
   spec: { instances: 3, storage: { size: '1Gi' }, segmentTLS: { enabled: false }, replication: { enabled: true, failover } },
   ...(status ? { status } : {}),
 });
@@ -270,15 +271,21 @@ describe('the primary Lease as a promotion mutex', () => {
     expect(off.status().switchover).toMatchObject({ phase: 'Promoting' });
   });
 
-  it('leaves a fenced primary to its holder: no rejoin by the operator', async () => {
-    const segment = vi.fn().mockImplementation((_host: string, _port: number, line: string) =>
-      Promise.resolve(line.endsWith(' ISOLATION') ? ['OK fenced 1700000000'] : line.endsWith(' REJOIN') ? ['OK'] : ['ERR bad request']),
-    );
-    const s = setup({ segment, lease: renewed(60) });
+  it('leaves a primary fenced over its Lease to its holder, and still lifts the isolation check\'s fences', async () => {
+    const answering = (isolation: string) =>
+      vi.fn().mockImplementation((_host: string, _port: number, line: string) =>
+        Promise.resolve(line.endsWith(' ISOLATION') ? [isolation] : line.endsWith(' REJOIN') ? ['OK'] : ['ERR bad request']),
+      );
+    const s = setup({ segment: answering('OK fenced 1700000000 lease'), lease: renewed(60) });
     await s.controller.reconcile(makeCluster({ primaryNotReadySince: longAgo }, withLease));
-    expect(segment.mock.calls.map((c) => c[2])).not.toContain('masterkey REJOIN');
+    expect(s.segment.mock.calls.map((c) => c[2])).not.toContain('masterkey REJOIN');
     // it fails over instead
     expect(s.created().some((j) => j.metadata?.name === 'db-failover')).toBe(true);
+    // the isolation check's fence (nothing reached the primary): rejoined as before, no failover
+    const isolated = setup({ segment: answering('OK fenced 1700000000'), lease: renewed(60) });
+    await isolated.controller.reconcile(makeCluster({ primaryNotReadySince: longAgo }, withLease));
+    expect(isolated.segment.mock.calls.map((c) => c[2])).toContain('masterkey REJOIN');
+    expect(isolated.created().some((j) => j.metadata?.name === 'db-failover')).toBe(false);
   });
 
   it('manages the Role and RoleBinding that let the instances renew the Lease', async () => {

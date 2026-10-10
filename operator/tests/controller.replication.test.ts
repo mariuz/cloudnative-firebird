@@ -16,6 +16,8 @@ const makeCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): Firebird
     name: 'test-cluster',
     namespace: 'default',
     uid: 'test-uid-1234',
+    // as the controller's first reconcile records it (primary-lease.ts)
+    annotations: { 'firebird.cloudnative-firebird.io/primary-lease': 'pinned' },
   },
   spec: {
     instances: 1,

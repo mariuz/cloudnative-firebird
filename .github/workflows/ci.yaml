@@ -161,6 +161,11 @@ jobs:
           # the backup file server behind it listens on localhost only
           kubectl wait pod/test-cluster-0 --for=condition=Ready --timeout=300s
           kubectl logs test-cluster-0 -c backup-files | grep -q 'listening on 127.0.0.1:3061'
+          # and records that the primary will hold its Lease once automatic failover is on (v0.87.0)
+          kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1 \
+            | grep 'Primary Lease default' | tee /dev/stderr | grep -q '"primaryLeaseDefault":true'
+          [ "$(kubectl get firebirdcluster test-cluster -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/primary-lease}')" = enabled ]
+          kubectl get events --field-selector reason=PrimaryLeaseDefaulted,involvedObject.name=test-cluster -o name | grep -q .
 
       - name: Verify the admission webhook
         run: |
@@ -915,10 +920,13 @@ jobs:
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
           count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
           SEL=firebird.cloudnative-firebird.io/cluster=repl,app.kubernetes.io/component=database
-          # the primary holds its Lease (replication.failover.primaryLease): the lease-holder
-          # sidecar reaches every instance through a rolling update
+          # the primary holds its Lease by default since automatic failover was enabled on this
+          # cluster (v0.87.0: recorded on its first reconcile): the lease-holder sidecar is already
+          # in every instance; setting it explicitly changes nothing
+          [ "$(kubectl get firebirdcluster repl -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/primary-lease}')" = enabled ]
+          kubectl get statefulset repl -o jsonpath="{.spec.template.spec.initContainers[*].name}" | grep -q lease-holder
           kubectl patch firebirdcluster repl --type merge -p '{"spec":{"replication":{"failover":{"primaryLease":{"enabled":true}}}}}'
-          timeout 120 bash -c 'until kubectl get statefulset repl -o jsonpath="{.spec.template.spec.initContainers[*].name}" | grep -q lease-holder; do sleep 3; done'
+          sleep 5
           rev=$(kubectl get statefulset repl -o jsonpath={.status.updateRevision})
           updated() {
             kubectl get pods -l "$SEL" \
@@ -1321,6 +1329,9 @@ jobs:
           kubectl wait pod/plain-0 --for=condition=Ready --timeout=300s
           kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system SEGMENT_TLS_REQUIRED=true
           kubectl rollout status deployment/cloudnative-firebird-operator -n cloudnative-firebird-system --timeout=180s
+          # the admission webhook is served by every replica: wait until the old ones, without the
+          # new setting, are gone too (a terminating pod can still answer for a few seconds)
+          timeout 120 bash -c 'until [ -z "$(kubectl get pods -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird -o jsonpath="{range .items[*]}{.metadata.deletionTimestamp}{end}")" ]; do sleep 3; done'
           # the plain cluster is reported, not restarted (the new leader reconciles it after the rollout)
           echo "waiting for the SegmentTLS condition"
           timeout 180 bash -c 'until [ "$(kubectl get firebirdcluster plain -o jsonpath="{.status.conditions[?(@.type==\"SegmentTLS\")].reason}")" = PlainSegmentShipping ]; do sleep 5; done' \
@@ -1369,6 +1380,9 @@ jobs:
           kubectl patch firebirdcluster plain --type merge -p '{"spec":{"env":[{"name":"STILL_PLAIN","value":"1"}]}}'
           kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system SEGMENT_TLS_REQUIRED-
           kubectl rollout status deployment/cloudnative-firebird-operator -n cloudnative-firebird-system --timeout=180s
+          # the admission webhook is served by every replica: wait until the old ones, without the
+          # new setting, are gone too (a terminating pod can still answer for a few seconds)
+          timeout 120 bash -c 'until [ -z "$(kubectl get pods -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird -o jsonpath="{range .items[*]}{.metadata.deletionTimestamp}{end}")" ]; do sleep 3; done'
           kubectl delete firebirdcluster plain --wait=false
 
       - name: Verify synchronous replication

@@ -370,10 +370,26 @@ describe('segment server ISOLATION and REJOIN', () => {
     expect(await ask('STATE')).toEqual(['OK online']);
     expect(await ask('FENCE the Lease is held by db-1')).toEqual(['OK']);
     expect(ws.calls().pop()).toBe('localhost:service_mgr action_properties dbname /data/db.fdb prp_shutdown_mode prp_sm_full prp_force_shutdown 0');
-    expect(Number(readFileSync(join(base, 'self-fenced'), 'utf8'))).toBeGreaterThan(Date.now() / 1000 - 30);
+    expect(readFileSync(join(base, 'self-fenced'), 'utf8')).toMatch(/^\d+ lease\n$/);
     writeFileSync(join(ws.dir, 'state'), 'shutdown');
+    expect(await ask('STATE')).toEqual(['OK fenced lease']);
+    expect((await ask('ISOLATION'))[0]).toMatch(/^OK fenced \d+ lease$/);
+    // the isolation check's own fence reads differently, and a shutdown without a marker plainly
+    writeFileSync(join(base, 'self-fenced'), '1700000000\n');
+    expect(await ask('STATE')).toEqual(['OK fenced']);
+    spawnSync('rm', [join(base, 'self-fenced')]);
     expect(await ask('STATE')).toEqual(['OK shutdown']);
-    expect((await ask('ISOLATION'))[0]).toMatch(/^OK fenced \d+$/);
+    // the holder's requests come from this pod: they do not count as contact
+    spawnSync('rm', [join(base, 'last-contact')]);
+    expect(await ask('STATE')).toEqual(['OK shutdown']);
+    expect(await ask('FENCE local')).toEqual(['OK']);
+    expect(await ask('REJOIN')).toEqual(['OK']);
+    expect(existsSync(join(base, 'last-contact'))).toBe(false);
+    writeFileSync(join(ws.dir, 'state'), 'online');
+    expect(await ask('ISOLATION')).toEqual(['OK online']);
+    expect(existsSync(join(base, 'last-contact'))).toBe(true);
+    writeFileSync(join(ws.dir, 'state'), 'shutdown');
+    expect(await ask('FENCE again')).toEqual(['OK']);
     // repeated: nothing to do
     const calls = ws.calls().length;
     expect(await ask('FENCE again')).toEqual(['OK fenced']);

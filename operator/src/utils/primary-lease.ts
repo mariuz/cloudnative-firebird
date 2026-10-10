@@ -4,6 +4,7 @@ import { clusterLabels, FIREBIRD_DATA_DIR } from './resources';
 import { OPERATOR_CONFIG_DIR, PRIMARY_KEY, SEGMENT_PORT, replicationDirectories } from './replication';
 import { operatorImage } from './operator-image';
 import { SEGMENT_SERVER_LOCAL_PORT, segmentTlsEnabled } from './segment-tls-pods';
+import { nativeSidecarsSupported } from './segment-tls-default';
 
 /**
  * The primary Lease as a promotion mutex (spec.replication.failover.primaryLease, CloudNativePG
@@ -19,10 +20,20 @@ import { SEGMENT_SERVER_LOCAL_PORT, segmentTlsEnabled } from './segment-tls-pods
  * has expired, taking it over with the version it read, so a primary that still renews it
  * (alive, online and reaching the API server) is never replaced, and one the operator replaces
  * has stopped taking writes before: either its database is down (it stopped renewing) or it
- * fenced itself. The operator's own rejoin of an isolated primary is off with the primary Lease.
+ * fenced itself. The operator still lifts the isolation check's fences; the holder's own are
+ * lifted by the holder once it holds the Lease again.
  *
  * The sidecar renews the Lease with the pod's ServiceAccount, through a Role on that one Lease
  * and a RoleBinding the operator manages, and a projected token mounted into it alone.
+ *
+ * The default (v0.87.0): a new cluster gets the primary Lease with automatic failover unless its
+ * owner sets failover.primaryLease.enabled, as PRIMARY_LEASE_DEFAULT says (auto, the default: on
+ * when the API server runs native sidecars, Kubernetes 1.29 or later; true; false). The decision
+ * is recorded in the primary-lease annotation on the cluster's first reconcile ("enabled", or
+ * "pinned": off), so it never changes for an existing cluster, and clusters that already have a
+ * StatefulSet when the operator first sees them (created by an earlier version) are pinned: the
+ * sidecar would restart their instances. Enabling failover later on a cluster follows what was
+ * recorded; the owner's spec value always wins.
  */
 
 export const PRIMARY_LEASE_CONTAINER = 'lease-holder';
@@ -36,10 +47,22 @@ export function leaseName(cluster: FirebirdCluster): string {
   return `${cluster.metadata.name}-lease`;
 }
 
-/** Whether the primary holds its Lease (automatic failover with failover.primaryLease.enabled) */
+/** The decision recorded on the cluster's first reconcile: "enabled" (the default applied) or "pinned" (off) */
+export const PRIMARY_LEASE_ANNOTATION = `${API_GROUP}/primary-lease`;
+
+/** The default for new clusters: PRIMARY_LEASE_DEFAULT auto (native sidecars) / true / false */
+export function primaryLeaseDefault(env = process.env): boolean {
+  const setting = (env.PRIMARY_LEASE_DEFAULT ?? 'auto').trim().toLowerCase();
+  if (setting === 'true') return true;
+  if (setting === 'false') return false;
+  return nativeSidecarsSupported() === true;
+}
+
+/** Whether the primary holds its Lease: automatic failover, and the owner's choice or the recorded default */
 export function primaryLeaseEnabled(cluster: FirebirdCluster): boolean {
   const failover = cluster.spec.replication?.failover;
-  return failover?.enabled === true && failover.primaryLease?.enabled === true;
+  if (failover?.enabled !== true) return false;
+  return failover.primaryLease?.enabled ?? cluster.metadata.annotations?.[PRIMARY_LEASE_ANNOTATION] === 'enabled';
 }
 
 /** How long the Lease stays valid after a renewal */
