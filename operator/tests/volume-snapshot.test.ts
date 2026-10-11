@@ -132,6 +132,8 @@ describe('volume snapshot resources', () => {
     const env = Object.fromEntries((spec.containers[0].env ?? []).map((e) => [e.name, e.value]));
     expect(env).toMatchObject({ SOURCE_DATABASE: '/var/lib/firebird/data/old.fdb', TARGET_PATH: '/var/lib/firebird/data/mydb.fdb' });
     expect(spec.containers[0].args![0]).toContain('nbackup" -F');
+    // built when the Job is: the data directory is never left undefined by the module load order
+    expect(spec.containers[0].args![0]).toContain('D=/var/lib/firebird/data\n');
     // no bootstrap init container: the database is on the volume before the instance starts
     expect(buildBootstrapInitContainers(cluster)).toEqual([]);
 
