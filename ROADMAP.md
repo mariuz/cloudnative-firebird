@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.93.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.94.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Declarative Databases** *(v0.94.0; CloudNativePG's Database resource)*
+  - `FirebirdDatabase`: another database file of a cluster without replication. A Job creates it on every ready instance (page size, character set, `initSql` once), adopting an existing file; the instances and volumes it is on are tracked so a replaced volume gets it again. `reclaimPolicy: delete` drops it from every instance through a finalizer.
+  - Replicated clusters are refused (webhook and controller): replication and everything built on it cover the one cluster database. So are the cluster database, a file another resource manages, and the security database. `kubectl firebird status` lists the databases.
+  - The Job script was run against Firebird 5; unit tests cover the validation, conflicts, Jobs and controller; the kind CI creates, checks and drops databases on a two-instance cluster and checks the refusal on a replicated one.
 - [x] **kubectl Plugin** *(v0.93.0; CloudNativePG's kubectl cnpg)*
   - `kubectl firebird` (`operator/src/plugin`, the `kubectl-firebird` bin of the operator package) covers:
     - `status`: the phase, primary, replication, any switchover, replica cluster or upgrade, fenced instances, each instance's role, readiness, node and lag, the latest backups, the schedules and any unmet conditions;
@@ -466,6 +470,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | `targetPrimary` annotation | **v0.13.0 (Done)** |
 | **Pod Anti-Affinity / Spread** | `affinity.enablePodAntiAffinity`, `topologySpreadConstraints` | `podAntiAffinity` (on for new clusters), `topologySpreadConstraints` | **v0.90.0 (Done)** |
+| **Declarative Databases** | `Database` resource | `FirebirdDatabase` (clusters without replication) | **v0.94.0 (Done)** |
 | **kubectl Plugin** | `kubectl cnpg` (status, promote, restart, fencing, hibernate, backup, psql) | `kubectl firebird` (status, promote, restart, fence, hibernate, reseed, backup, isql) | **v0.93.0 (Done)** |
 | **Volume Snapshots** | `method: volumeSnapshot` backups, bootstrap from `volumeSnapshots` | `type: volumeSnapshot` (online, nbackup lock), scheduled with retention, `bootstrap.recovery.volumeSnapshot` | **v0.92.0 (Done)** |
 | **Replica Clusters** | `replica` with `source` (object store or streaming) | `replica` following the source's journal archive in S3, promotion | **v0.91.0 (Done)** |

@@ -320,38 +320,41 @@ export function buildSnapshotRecoveryClaim(cluster: FirebirdCluster, template: V
  * enables publication on the new primary), and moved to TARGET_PATH. The source's replication
  * state and work files are removed. A marker makes a retried Job a no-op.
  */
-export const SNAPSHOT_RECOVERY_SCRIPT = [
-  'set -eu',
-  'FB=/opt/firebird/bin',
-  `D=${FIREBIRD_DATA_DIR}`,
-  'M="$D/.snapshot-recovered"',
-  'if [ -f "$M" ]; then echo "recovered from the snapshot already"; exit 0; fi',
-  'fail() { echo "volume snapshot recovery failed: $*" >&2; exit 1; }',
-  'if [ ! -f "$SOURCE_DATABASE" ]; then ls -la "$D" >&2 || true; fail "no database $SOURCE_DATABASE on the volume restored from the snapshot (bootstrap.recovery.volumeSnapshot.databaseName)"; fi',
-  // the source's offline work files and replication state (seeds, journals, control files)
-  'rm -rf "$D/.bootstrap.fdb" "$D/.init.fdb" "$D/.init.fdb.ctl" "$D/.init.fdb.kind" "$D/.switchover.fdb" "$D/.enable-replication.fdb" "$D/.pitr-recovery"',
-  'for r in $REPLICATION_DIRS; do rm -rf "$r"; done',
-  'if [ "$TARGET_PATH" != "$SOURCE_DATABASE" ] && [ -e "$TARGET_PATH" ]; then fail "$TARGET_PATH exists on the snapshot\'s volume"; fi',
-  'attrs=$("$FB/gstat" -h "$SOURCE_DATABASE" | sed -n "s/^[[:space:]]*Attributes[[:space:]]*//p")',
-  'case "$attrs" in',
-  '  *"backup lock"*)',
-  '    rm -f "$SOURCE_DATABASE.delta"',
-  '    "$FB/nbackup" -F "$SOURCE_DATABASE"',
-  '    echo "the database as of its backup lock (the snapshot\'s delta file discarded)" ;;',
-  '  *"backup merge"*)',
-  '    fail "the snapshot was taken while the database merged its backup changes: take another snapshot backup" ;;',
-  '  *)',
-  '    rm -f "$SOURCE_DATABASE.delta"',
-  '    echo "note: the database was not locked for backup when the snapshot was taken; it is used as a crash-consistent copy" ;;',
-  'esac',
-  'case "$attrs" in *shutdown*) "$FB/gfix" -user SYSDBA -online "$SOURCE_DATABASE" ;; esac',
-  '"$FB/gfix" -user SYSDBA -replica none "$SOURCE_DATABASE"',
-  'echo "ALTER DATABASE DISABLE PUBLICATION; COMMIT;" | "$FB/isql" -q -b -user SYSDBA "$SOURCE_DATABASE"',
-  'if [ "$TARGET_PATH" != "$SOURCE_DATABASE" ]; then mv "$SOURCE_DATABASE" "$TARGET_PATH"; fi',
-  '[ "$(id -u)" -ne 0 ] || chown firebird:firebird "$TARGET_PATH"',
-  'touch "$M"',
-  'echo "database restored from the volume snapshot at $TARGET_PATH"',
-].join('\n');
+export function snapshotRecoveryScript(): string {
+  // built on use: FIREBIRD_DATA_DIR comes from a module that may still be loading when this one is
+  return [
+    'set -eu',
+    'FB=/opt/firebird/bin',
+    `D=${FIREBIRD_DATA_DIR}`,
+    'M="$D/.snapshot-recovered"',
+    'if [ -f "$M" ]; then echo "recovered from the snapshot already"; exit 0; fi',
+    'fail() { echo "volume snapshot recovery failed: $*" >&2; exit 1; }',
+    'if [ ! -f "$SOURCE_DATABASE" ]; then ls -la "$D" >&2 || true; fail "no database $SOURCE_DATABASE on the volume restored from the snapshot (bootstrap.recovery.volumeSnapshot.databaseName)"; fi',
+    // the source's offline work files and replication state (seeds, journals, control files)
+    'rm -rf "$D/.bootstrap.fdb" "$D/.init.fdb" "$D/.init.fdb.ctl" "$D/.init.fdb.kind" "$D/.switchover.fdb" "$D/.enable-replication.fdb" "$D/.pitr-recovery"',
+    'for r in $REPLICATION_DIRS; do rm -rf "$r"; done',
+    'if [ "$TARGET_PATH" != "$SOURCE_DATABASE" ] && [ -e "$TARGET_PATH" ]; then fail "$TARGET_PATH exists on the snapshot\'s volume"; fi',
+    'attrs=$("$FB/gstat" -h "$SOURCE_DATABASE" | sed -n "s/^[[:space:]]*Attributes[[:space:]]*//p")',
+    'case "$attrs" in',
+    '  *"backup lock"*)',
+    '    rm -f "$SOURCE_DATABASE.delta"',
+    '    "$FB/nbackup" -F "$SOURCE_DATABASE"',
+    '    echo "the database as of its backup lock (the snapshot\'s delta file discarded)" ;;',
+    '  *"backup merge"*)',
+    '    fail "the snapshot was taken while the database merged its backup changes: take another snapshot backup" ;;',
+    '  *)',
+    '    rm -f "$SOURCE_DATABASE.delta"',
+    '    echo "note: the database was not locked for backup when the snapshot was taken; it is used as a crash-consistent copy" ;;',
+    'esac',
+    'case "$attrs" in *shutdown*) "$FB/gfix" -user SYSDBA -online "$SOURCE_DATABASE" ;; esac',
+    '"$FB/gfix" -user SYSDBA -replica none "$SOURCE_DATABASE"',
+    'echo "ALTER DATABASE DISABLE PUBLICATION; COMMIT;" | "$FB/isql" -q -b -user SYSDBA "$SOURCE_DATABASE"',
+    'if [ "$TARGET_PATH" != "$SOURCE_DATABASE" ]; then mv "$SOURCE_DATABASE" "$TARGET_PATH"; fi',
+    '[ "$(id -u)" -ne 0 ] || chown firebird:firebird "$TARGET_PATH"',
+    'touch "$M"',
+    'echo "database restored from the volume snapshot at $TARGET_PATH"',
+  ].join('\n');
+}
 
 /**
  * Job preparing a new cluster's database on its first instance's volume, created from the
@@ -386,7 +389,7 @@ export function buildSnapshotRecoveryJob(cluster: FirebirdCluster): V1Job {
               name: 'snapshot-recovery',
               image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
               command: ['/bin/sh', '-c'],
-              args: [SNAPSHOT_RECOVERY_SCRIPT],
+              args: [snapshotRecoveryScript()],
               env: [
                 { name: 'SOURCE_DATABASE', value: `${FIREBIRD_DATA_DIR}/${source.databaseName ?? databaseName(cluster)}` },
                 { name: 'TARGET_PATH', value: target },

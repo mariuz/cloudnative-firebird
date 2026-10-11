@@ -10,6 +10,7 @@ import {
 } from '../src/utils/validation';
 import { validateUserSpec } from '../src/utils/users';
 import { validateRoleSpec } from '../src/utils/roles';
+import { validateDatabaseSpec } from '../src/utils/databases';
 
 /**
  * The CRDs reject invalid specs at admission (hack/crd-validation/test.sh runs these manifests
@@ -23,6 +24,7 @@ const validators: Record<string, (obj: never) => void> = {
   FirebirdRestore: validateRestoreSpec,
   FirebirdUser: validateUserSpec,
   FirebirdRole: validateRoleSpec,
+  FirebirdDatabase: validateDatabaseSpec,
 };
 
 describe('CRD admission rules and operator validation agree', () => {

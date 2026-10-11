@@ -16,6 +16,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical and physical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
 - **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
 - **Declarative users** (`FirebirdUser`, after CloudNativePG's `DatabaseRole`) with Secret-backed passwords, role grants and a reclaim policy; users persist across pod restarts
+- **Declarative databases** (`FirebirdDatabase`, after CloudNativePG's `Database`) on clusters without replication: created on every instance, dropped with `reclaimPolicy: delete`
 - **Declarative roles** (`FirebirdRole`): a database role and exactly the privileges it holds on tables, views, procedures, functions, packages, sequences and exceptions
 - **Automatic failover** (opt-in) to the synchronous standby (no transaction lost) or the most advanced replica; the old primary is re-seeded when it returns
 - **Planned switchover** with the `targetPrimary` annotation: no data loss, the other replicas continue without re-seeding
@@ -216,7 +217,7 @@ kubectl plugin list | grep firebird
 
 | Command | What it does |
 |---|---|
-| `kubectl firebird status my-cluster` | Shows the phase, the primary, the replication settings, any switchover, replica cluster or upgrade, and the fenced instances. Lists every instance with its role, readiness, node, last applied segment and lag, then the latest backups, the backup schedules and any conditions that are not met. |
+| `kubectl firebird status my-cluster` | Shows the phase, the primary, the replication settings, the declarative databases, any switchover, replica cluster or upgrade, and the fenced instances. Lists every instance with its role, readiness, node, last applied segment and lag, then the latest backups, the backup schedules and any conditions that are not met. |
 | `kubectl firebird promote my-cluster 2` | Planned switchover to `my-cluster-2` (the `targetPrimary` annotation). |
 | `kubectl firebird restart my-cluster [instance]` | Rolling restart with the primary last (`kubectl.kubernetes.io/restartedAt` on the pod template), or deletes one instance's pod. |
 | `kubectl firebird fence on\|off my-cluster 1\|all` | Edits the `fencedInstances` annotation. Lifting one instance out of `all` keeps the others fenced. |
@@ -1507,6 +1508,61 @@ Role names follow SQL too: `roleName: reporting` is the role `REPORTING`, while 
 quotes is used exactly as written, e.g. `roleName: '"Sales Team"'` (a quote inside is written
 `""`). `FirebirdUser.spec.roles` refers to such a role the same way (`roles: ['"Sales Team"']`).
 
+### Declarative Databases (v0.94.0)
+
+A `FirebirdDatabase` manages another database file of a cluster as its own resource, like
+CloudNativePG's `Database`:
+
+```yaml
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdDatabase
+metadata:
+  name: sales                 # file sales.fdb, unless spec.databaseName is set
+spec:
+  clusterName: my-cluster     # a cluster without replication
+  databaseName: sales.fdb     # file in the data directory (immutable)
+  pageSize: 16384             # immutable; the engine's default when unset
+  characterSet: UTF8          # default character set (immutable; default UTF8)
+  initSql: |                  # run once, right after the database is created on an instance
+    CREATE TABLE orders (id INTEGER PRIMARY KEY);
+  reclaimPolicy: retain       # delete: DROP DATABASE on every instance when the resource is deleted
+```
+
+**Creating it.** A Job (`database-<name>`) creates the database on every ready instance over the
+network, as SYSDBA (`CREATE DATABASE`, then `initSql`, which is passed to `isql` from the
+environment and never through the shell). A file that already exists there is adopted as it is,
+without `initSql`.
+
+**Status.** `status.instances` records the instances and the volumes the database is on, so an
+instance whose volume is replaced gets the database again. `status.path` is the path clients
+connect to (`my-cluster:/var/lib/firebird/data/sales.fdb`), and `kubectl firebird status` lists
+the cluster's databases. A failed Job (an `initSql` error, say) is retried after five minutes.
+The resource waits while the cluster is hibernated or upgrading.
+
+**Deleting it.** With `reclaimPolicy: delete`, a finalizer drops the database from every instance
+before the resource goes. An instance that holds it but stays unready for 15 minutes keeps its
+file, with a warning event. `retain` leaves the files.
+
+**Refused.**
+- Clusters with replication, refused by the admission webhook and the controller.
+  Replication, seeding, switchover, failover, backups and point-in-time recovery cover the
+  cluster's one database (`spec.databaseName`), so another database would exist on the primary
+  alone and be lost at the first failover.
+- The cluster's own database.
+- A file another `FirebirdDatabase` of the same cluster manages (the older resource keeps it).
+- The security database's name.
+
+**Not covered.** `FirebirdBackup` backs up the cluster database only; back up other databases
+with `gbak` yourself.
+
+**Testing.**
+- The Job script was run against Firebird 5: creating, adopting on a second run, page size,
+  character set, `initSql`, and dropping.
+- Unit tests cover the validation, the conflicts, the Jobs and every controller path.
+- The kind CI creates two databases on a two-instance cluster and checks each instance, the
+  plugin's listing and the webhook's refusal on a replicated cluster. It then deletes them: one
+  dropped everywhere, one kept.
+
 ### Fencing
 
 Fencing follows CloudNativePG: the `firebird.cloudnative-firebird.io/fencedInstances` annotation
@@ -1546,6 +1602,7 @@ The operator records Kubernetes events on its resources (CloudNativePG 1.29 / 1.
 | `FirebirdRestore` | `RestoreStarted`, `RestoreCompleted`, `RestoreFailed` (warning) |
 | `FirebirdUser` | `UserApplied`, `UserFailed` (warning), `UserDropped` |
 | `FirebirdRole` | `RoleApplied`, `RoleFailed` (warning), `RoleDropped` |
+| `FirebirdDatabase` | `DatabaseCreated`, `DatabaseFailed` (warning), `DatabaseDropped` |
 
 Events are recorded on transitions; a repeated event (e.g. the same reconcile error) increments
 the count of the previous one for ten minutes, like client-go's event recorder.

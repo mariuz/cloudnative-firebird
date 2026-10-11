@@ -1,0 +1,8 @@
+# expect: spec.databaseName in body should match
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdDatabase
+metadata:
+  name: d1
+spec:
+  clusterName: c1
+  databaseName: ../data/mydb.fdb

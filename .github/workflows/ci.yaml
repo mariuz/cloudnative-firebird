@@ -1767,6 +1767,79 @@ jobs:
           kubectl delete firebirdscheduledbackup snap-every-minute
           kubectl delete firebirdbackup --all --wait=false
 
+      - name: Verify declarative databases
+        if: matrix.track.id == 'extended'
+        run: |
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: dbs
+          spec:
+            instances: 2
+            storage:
+              size: 1Gi
+          EOF
+          timeout 300 bash -c 'until kubectl get pod dbs-1 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/dbs-0 pod/dbs-1 --for=condition=Ready --timeout=300s
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdDatabase
+          metadata:
+            name: sales
+          spec:
+            clusterName: dbs
+            pageSize: 16384
+            characterSet: WIN1252
+            reclaimPolicy: delete
+            initSql: "CREATE TABLE orders (id INTEGER PRIMARY KEY, note VARCHAR(20)); COMMIT; INSERT INTO orders VALUES (1, 'created'); COMMIT;"
+          ---
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdDatabase
+          metadata:
+            name: archive
+          spec:
+            clusterName: dbs
+            databaseName: archive-2026.fdb
+          EOF
+          for d in sales archive; do
+            timeout 300 bash -c "until [ \"\$(kubectl get firebirddatabase $d -o jsonpath={.status.phase})\" = Ready ]; do sleep 5; done" \
+              || { kubectl get firebirddatabase $d -o jsonpath='{.status}'; echo; kubectl logs job/database-$d || true; exit 1; }
+          done
+          kubectl get firebirddatabases
+          [ "$(kubectl get firebirddatabase sales -o jsonpath={.status.path})" = /var/lib/firebird/data/sales.fdb ]
+          # on every instance, created as asked, initSql run once on each
+          for pod in dbs-0 dbs-1; do
+            kubectl exec $pod -c firebird -- bash -c "echo \"select 'rows=' || count(*) from orders; select 'charset=' || trim(rdb\\\$character_set_name) from rdb\\\$database;\" | isql -q localhost:/var/lib/firebird/data/sales.fdb" | tee /tmp/db-$pod.txt
+            grep -q 'rows=1' /tmp/db-$pod.txt
+            grep -q 'charset=WIN1252' /tmp/db-$pod.txt
+            kubectl exec $pod -c firebird -- gstat -h /var/lib/firebird/data/sales.fdb | grep -E 'Page size\s+16384'
+            kubectl exec $pod -c firebird -- test -f /var/lib/firebird/data/archive-2026.fdb
+          done
+          # the plugin lists them
+          (cd operator && npm run build >/dev/null) && node operator/dist/plugin/kubectl-firebird.js status dbs | tee /tmp/db-status.txt
+          grep -qE '^sales +/var/lib/firebird/data/sales.fdb +Ready +delete' /tmp/db-status.txt
+          # refused on a replicated cluster (the webhook)
+          if kubectl apply -f - <<'EOF' 2>/tmp/db-denied.txt; then echo "a database on a replicated cluster was accepted"; exit 1; fi
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdDatabase
+          metadata:
+            name: on-repl
+          spec:
+            clusterName: repl
+          EOF
+          grep -q 'uses replication' /tmp/db-denied.txt
+          # reclaimPolicy delete drops it from every instance; retain keeps the file
+          kubectl delete firebirddatabase sales --timeout=300s
+          kubectl delete firebirddatabase archive --timeout=120s
+          for pod in dbs-0 dbs-1; do
+            if kubectl exec $pod -c firebird -- test -e /var/lib/firebird/data/sales.fdb; then echo "sales.fdb still on $pod"; exit 1; fi
+            kubectl exec $pod -c firebird -- test -f /var/lib/firebird/data/archive-2026.fdb
+          done
+          reasons=$(kubectl get events -o jsonpath='{range .items[?(@.involvedObject.kind=="FirebirdDatabase")]}{.reason}{"\n"}{end}')
+          for reason in DatabaseCreated DatabaseDropped; do echo "$reasons" | grep -qx "$reason" || { echo "no $reason event"; exit 1; }; done
+          kubectl delete firebirdcluster dbs --wait=false
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |

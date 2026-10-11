@@ -226,6 +226,19 @@ describe('admission checks', () => {
     expect((await validate(req('FirebirdUser', user('none')))).warnings).toEqual(['Secret none does not exist (yet) in namespace default']);
   });
 
+  it('refuses databases on replicated clusters and invalid database specs', async () => {
+    const replicated = { ...cluster, metadata: { name: 'repl', namespace: 'default' }, spec: { ...cluster.spec, replication: { enabled: true } } };
+    const validate = createAdmissionValidator(lookups({ clusters: [cluster, replicated] }));
+    const database = (spec: object) => ({ metadata: { name: 'sales' }, spec: { clusterName: 'db', ...spec } });
+    expect(await validate(req('FirebirdDatabase', database({})))).toEqual({});
+    expect((await validate(req('FirebirdDatabase', database({ clusterName: 'repl' })))).denied).toMatch(/uses replication/);
+    expect((await validate(req('FirebirdDatabase', database({ databaseName: 'mydb.fdb' })))).denied).toMatch(/is the cluster database/);
+    expect((await validate(req('FirebirdDatabase', database({ pageSize: 1000 })))).denied).toMatch(/pageSize/);
+    expect((await validate(req('FirebirdDatabase', database({ clusterName: 'later' })))).warnings).toEqual([
+      'FirebirdCluster later does not exist (yet) in namespace default',
+    ]);
+  });
+
   it('only checks updates that change the spec (the operator\'s own updates pass), and never deletions', async () => {
     const lookup = vi.fn();
     const validate = createAdmissionValidator({ cluster: lookup, backup: lookup, secret: lookup });

@@ -14,6 +14,7 @@ import { metrics } from './utils/metrics';
 import { FirebirdClusterController } from './controllers/firebirdcluster.controller';
 import { FirebirdBackupController } from './controllers/backup.controller';
 import { FirebirdUserController } from './controllers/user.controller';
+import { FirebirdDatabaseController } from './controllers/database.controller';
 import { FirebirdRoleController } from './controllers/role.controller';
 import { FENCED_INSTANCES_ANNOTATION } from './utils/fencing';
 import { TARGET_PRIMARY_ANNOTATION } from './utils/switchover';
@@ -27,6 +28,7 @@ import {
   FirebirdCluster,
   FirebirdRestore,
   FirebirdRole,
+  FirebirdDatabase,
   FirebirdScheduledBackup,
   FirebirdUser,
   RESOURCE_PLURAL,
@@ -100,6 +102,7 @@ export class Operator {
   private readonly controller: FirebirdClusterController;
   private readonly backupController: FirebirdBackupController;
   private readonly userController: FirebirdUserController;
+  private readonly databaseController: FirebirdDatabaseController;
   private readonly roleController: FirebirdRoleController;
   private readonly watch: Watch;
   private readonly healthServer: HealthServer;
@@ -134,6 +137,7 @@ export class Operator {
     this.controller = new FirebirdClusterController(kubeConfig);
     this.backupController = new FirebirdBackupController(kubeConfig);
     this.userController = new FirebirdUserController(kubeConfig);
+    this.databaseController = new FirebirdDatabaseController(kubeConfig);
     this.roleController = new FirebirdRoleController(kubeConfig);
     this.backupKinds = [
       {
@@ -155,6 +159,10 @@ export class Operator {
       {
         plural: 'firebirdroles',
         reconcile: (obj) => this.roleController.reconcileRole(obj as FirebirdRole),
+      },
+      {
+        plural: 'firebirddatabases',
+        reconcile: (obj) => this.databaseController.reconcileDatabase(obj as FirebirdDatabase),
       },
     ];
     this.watch = new Watch(kubeConfig);

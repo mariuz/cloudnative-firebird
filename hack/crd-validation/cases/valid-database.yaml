@@ -1,0 +1,12 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdDatabase
+metadata:
+  name: d1
+spec:
+  clusterName: c1
+  databaseName: sales.fdb
+  pageSize: 16384
+  characterSet: WIN1252
+  initSql: "CREATE TABLE t (id INTEGER);"
+  reclaimPolicy: delete
