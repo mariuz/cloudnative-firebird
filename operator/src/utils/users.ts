@@ -1,6 +1,7 @@
+import { clusterImage } from './image-catalog';
 import { createHash } from 'crypto';
 import { V1Job } from '@kubernetes/client-node';
-import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster, FirebirdUser } from '../types';
+import { API_GROUP, FirebirdCluster, FirebirdUser } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, jobPodSpec } from './resources';
 import { instanceHost } from './replication';
 import { ValidationError } from './validation';
@@ -206,7 +207,7 @@ export function buildUserJob(
           containers: [
             {
               name: 'user',
-              image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+              image: clusterImage(cluster),
               command: ['/bin/sh', '-c'],
               args: [script],
               env: [

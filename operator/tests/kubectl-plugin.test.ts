@@ -155,6 +155,17 @@ describe('kubectl firebird', () => {
     expect(out.join('\n')).not.toContain('Databases:');
   });
 
+  it('shows the image a catalog resolves to', () => {
+    const text = formatStatus(
+      { ...makeCluster({ imageCatalogRef: { kind: 'FirebirdClusterImageCatalog', name: 'firebird', major: 5 } }), status: { image: 'fb:5.0.3' } },
+      [],
+      [],
+      [],
+      new Date(),
+    );
+    expect(text).toContain('Image:        fb:5.0.3 (FirebirdClusterImageCatalog firebird, Firebird 5)');
+  });
+
   it('formats a cluster without replication or pods', () => {
     const text = formatStatus(makeCluster({ replication: undefined, instances: 1 }), [], [], [], new Date());
     expect(text).toContain('Replication:  off');

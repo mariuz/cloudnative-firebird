@@ -9,7 +9,7 @@ import { isPodReady, ROLE_LABEL } from '../utils/routing';
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.94.0';
+export const PLUGIN_VERSION = '0.95.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -184,7 +184,14 @@ export function formatStatus(
   field('Cluster', `${namespace}/${name}`);
   field('Phase', `${status.phase ?? 'Unknown'}${status.phaseReason ? ` (${status.phaseReason})` : ''}`);
   field('Instances', `${status.readyInstances ?? 0}/${cluster.spec.instances} ready`);
-  field('Image', cluster.spec.imageName ?? 'operator default');
+  const catalog = cluster.spec.imageCatalogRef;
+  field(
+    'Image',
+    cluster.spec.imageName ??
+      (catalog
+        ? `${status.image ?? '(not resolved)'} (${catalog.kind ?? 'FirebirdImageCatalog'} ${catalog.name}, Firebird ${catalog.major})`
+        : status.image ?? 'operator default'),
+  );
   field('Database', cluster.spec.databaseName ?? 'mydb.fdb');
   field('Primary', primary);
   if (replication) {

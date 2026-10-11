@@ -1,5 +1,6 @@
+import { clusterImage } from './image-catalog';
 import { V1Job } from '@kubernetes/client-node';
-import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster } from '../types';
+import { API_GROUP, FirebirdCluster } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, jobPodSpec } from './resources';
 import { instanceHost } from './replication';
 import { ValidationError } from './validation';
@@ -122,7 +123,7 @@ export function buildFencingJob(cluster: FirebirdCluster, pod: string, action: F
           containers: [
             {
               name: 'fencing',
-              image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+              image: clusterImage(cluster),
               command: ['/bin/sh', '-c'],
               args: [`set -eu; ${script}`],
               env: [

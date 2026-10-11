@@ -67,6 +67,14 @@ import {
   recoveryBootstrapJobName,
 } from '../utils/backup';
 import {
+  catalogKind,
+  catalogPlural,
+  CLUSTER_IMAGE_CATALOG_KIND,
+  clusterImage,
+  resolveCatalogImage,
+  withCatalogImage,
+} from '../utils/image-catalog';
+import {
   buildSnapshotRecoveryClaim,
   buildSnapshotRecoveryJob,
   SNAPSHOT_API_GROUP,
@@ -176,6 +184,7 @@ import {
   API_GROUP,
   API_VERSION,
   FirebirdCluster,
+  FirebirdImageCatalog,
   FirebirdClusterCondition,
   FirebirdClusterStatus,
   FirebirdUser,
@@ -348,6 +357,10 @@ export class FirebirdClusterController {
         log.info('Cluster no longer exists; nothing to reconcile');
         return;
       }
+      // an image catalog: its image for the cluster's major version, used as spec.imageName
+      const resolved = await this.resolveImage(cluster, log);
+      if (!resolved) return;
+      cluster = resolved;
       await this.defaultSegmentTls(cluster, log);
       await this.defaultPrimaryLease(cluster, log);
       await this.defaultPodAntiAffinity(cluster, log);
@@ -3444,6 +3457,64 @@ export class FirebirdClusterController {
     } catch (err) {
       return !isNotFound(err);
     }
+  }
+
+  /**
+   * The cluster with its image resolved (utils/image-catalog.ts): spec.imageCatalogRef's entry
+   * as spec.imageName, in memory; status.image records the cluster's image (with the reconcile's
+   * status write). A catalog or entry
+   * not found keeps a running cluster on the image it resolved last, and returns undefined for a
+   * cluster that never had one (it waits).
+   */
+  private async resolveImage(cluster: FirebirdCluster, log: Logger): Promise<FirebirdCluster | undefined> {
+    const ref = cluster.spec.imageCatalogRef;
+    let image = clusterImage(cluster);
+    if (ref) {
+      let catalog: FirebirdImageCatalog | undefined;
+      try {
+        catalog = (catalogKind(ref) === CLUSTER_IMAGE_CATALOG_KIND
+          ? await this.customApi.getClusterCustomObject({ group: API_GROUP, version: API_VERSION, plural: catalogPlural(ref), name: ref.name })
+          : await this.customApi.getNamespacedCustomObject({
+              group: API_GROUP,
+              version: API_VERSION,
+              namespace: cluster.metadata.namespace ?? 'default',
+              plural: catalogPlural(ref),
+              name: ref.name,
+            })) as FirebirdImageCatalog;
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+      const result = resolveCatalogImage(ref, catalog);
+      const last = cluster.status?.image;
+      if (result.error !== undefined) {
+        const message = `${result.error}: ${last ? `the cluster stays on ${last}` : 'the cluster waits for it'}`;
+        log.warn(message);
+        await this.event(cluster, 'Warning', EventReason.ImageCatalogUnresolved, message);
+        if (!last) {
+          await this.updateStatus(cluster, {
+            phaseReason: message,
+            conditions: [this.makeCondition('Ready', 'False', 'ImageCatalogUnresolved', message)],
+          });
+          return undefined;
+        }
+        image = last;
+      } else {
+        if (last && last !== result.image) {
+          await this.event(
+            cluster,
+            'Normal',
+            EventReason.ImageCatalogChanged,
+            `${catalogKind(ref)} ${ref.name} gives Firebird ${ref.major} the image ${result.image} (was ${last})`,
+          );
+        }
+        image = result.image;
+      }
+    }
+    // in place, before the copy below shares it, and not written now (rewriting the status from
+    // this copy could drop what the previous reconcile stored): the reconcile's own status write
+    // starts from this status object
+    if (cluster.status?.image !== image) Object.assign((cluster.status ??= {}), { image });
+    return ref ? withCatalogImage(cluster, image) : cluster;
   }
 
   async updateStatus(

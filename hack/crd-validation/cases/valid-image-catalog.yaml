@@ -1,0 +1,9 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdImageCatalog
+metadata:
+  name: firebird
+spec:
+  images:
+    - { major: 4, image: "firebirdsql/firebird:4" }
+    - { major: 5, image: "firebirdsql/firebird:5" }

@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.94.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.95.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Image Catalogs** *(v0.95.0; CloudNativePG's ImageCatalog, ClusterImageCatalog and imageCatalogRef)*
+  - `FirebirdImageCatalog` (namespaced) and `FirebirdClusterImageCatalog` (cluster-wide) give the image of each Firebird major version; `spec.imageCatalogRef {kind, name, major}` replaces `imageName`. The reconcile resolves the entry first and continues with it as the image (in memory), so a changed entry goes through the image check, rolling update or major upgrade like a new `imageName`; `status.image` records the image, which the operator's Jobs use.
+  - A catalog or entry not found keeps a running cluster on its image and holds a new one (`ImageCatalogUnresolved`); `ImageCatalogChanged` reports a new image. The CRDs refuse duplicate major versions and `imageName` with `imageCatalogRef`; `kubectl firebird status` shows the catalog.
+  - Unit tests cover validation, resolution, Jobs and the reconcile paths; the kind CI runs a cluster from a catalog, rolls it to a changed entry and deletes the catalog.
 - [x] **Declarative Databases** *(v0.94.0; CloudNativePG's Database resource)*
   - `FirebirdDatabase`: another database file of a cluster without replication. A Job creates it on every ready instance (page size, character set, `initSql` once), adopting an existing file; the instances and volumes it is on are tracked so a replaced volume gets it again. `reclaimPolicy: delete` drops it from every instance through a finalizer.
   - Replicated clusters are refused (webhook and controller): replication and everything built on it cover the one cluster database. So are the cluster database, a file another resource manages, and the security database. `kubectl firebird status` lists the databases.
@@ -470,6 +474,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | `targetPrimary` annotation | **v0.13.0 (Done)** |
 | **Pod Anti-Affinity / Spread** | `affinity.enablePodAntiAffinity`, `topologySpreadConstraints` | `podAntiAffinity` (on for new clusters), `topologySpreadConstraints` | **v0.90.0 (Done)** |
+| **Image Catalogs** | `ImageCatalog` / `ClusterImageCatalog`, `imageCatalogRef` | `FirebirdImageCatalog` / `FirebirdClusterImageCatalog`, `imageCatalogRef` | **v0.95.0 (Done)** |
 | **Declarative Databases** | `Database` resource | `FirebirdDatabase` (clusters without replication) | **v0.94.0 (Done)** |
 | **kubectl Plugin** | `kubectl cnpg` (status, promote, restart, fencing, hibernate, backup, psql) | `kubectl firebird` (status, promote, restart, fence, hibernate, reseed, backup, isql) | **v0.93.0 (Done)** |
 | **Volume Snapshots** | `method: volumeSnapshot` backups, bootstrap from `volumeSnapshots` | `type: volumeSnapshot` (online, nbackup lock), scheduled with retention, `bootstrap.recovery.volumeSnapshot` | **v0.92.0 (Done)** |

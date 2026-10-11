@@ -50,6 +50,16 @@ rules:
       - patch
       - update
       - delete
+  # Image catalogs (spec.imageCatalogRef)
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdimagecatalogs
+      - firebirdclusterimagecatalogs
+    verbs:
+      - get
+      - list
+      - watch
   # VolumeSnapshots of instance volumes (volume snapshot backups, bootstrap from a snapshot)
   - apiGroups:
       - snapshot.storage.k8s.io

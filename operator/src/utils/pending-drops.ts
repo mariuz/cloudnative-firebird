@@ -1,5 +1,6 @@
+import { clusterImage } from './image-catalog';
 import { V1ConfigMap, V1Job } from '@kubernetes/client-node';
-import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster, RESOURCE_KIND } from '../types';
+import { API_GROUP, FirebirdCluster, RESOURCE_KIND } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, jobPodSpec, superuserClientEnv } from './resources';
 import { instanceHost } from './replication';
 
@@ -164,7 +165,7 @@ export function buildPendingDropJob(cluster: FirebirdCluster, pod: string, usern
           containers: [
             {
               name: 'drop-users',
-              image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+              image: clusterImage(cluster),
               command: ['/bin/sh', '-c'],
               args: [
                 'set -eu; printf \'%s\\n\' "$DROP_SQL" | isql -q -b "$FIREBIRD_HOST:$DATABASE_PATH"; ' +

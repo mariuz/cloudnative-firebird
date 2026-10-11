@@ -1,5 +1,6 @@
+import { clusterImage } from './image-catalog';
 import { V1Job, V1Pod } from '@kubernetes/client-node';
-import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster, SynchronousStatus } from '../types';
+import { API_GROUP, FirebirdCluster, SynchronousStatus } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, jobPodSpec } from './resources';
 import { OPERATOR_CONFIG_DIR, SEGMENT_PORT, instanceHost } from './replication';
 import { REPLICATION_LAG_ANNOTATION, isPodReady } from './routing';
@@ -124,7 +125,7 @@ export function buildSyncStandbyJob(
           containers: [
             {
               name: 'sync-standby',
-              image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+              image: clusterImage(cluster),
               command: ['perl', `${OPERATOR_CONFIG_DIR}/sync-standby.pl`],
               env: [
                 ...superuserClientEnv(cluster),

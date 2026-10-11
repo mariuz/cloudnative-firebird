@@ -1,5 +1,6 @@
+import { clusterImage } from './image-catalog';
 import { V1Job } from '@kubernetes/client-node';
-import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster, FirebirdDatabase } from '../types';
+import { API_GROUP, FirebirdCluster, FirebirdDatabase } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, jobPodSpec, superuserClientEnv } from './resources';
 import { instanceHost } from './replication';
 import { ValidationError } from './validation';
@@ -157,7 +158,7 @@ export function buildDatabaseJob(
           containers: [
             {
               name: 'database',
-              image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+              image: clusterImage(cluster),
               command: ['/bin/sh', '-c'],
               args: [databaseJobScript(action)],
               env: [
