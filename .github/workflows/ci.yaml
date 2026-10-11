@@ -1550,10 +1550,15 @@ jobs:
           timeout 300 bash -c 'until [ "$(kubectl get firebirdbackup src-base -o jsonpath={.status.phase})" = Completed ]; do
             [ "$(kubectl get firebirdbackup src-base -o jsonpath={.status.phase})" = Failed ] && { kubectl logs job/backup-src-base --all-containers; exit 1; }; sleep 5; done'
           sql src-0 "insert into dr_t values (2, 'after the backup'); commit;"
-          # the archive has the segments of the backup and after it
-          before=$(kubectl get firebirdcluster src -o jsonpath='{.status.journalArchiveSequence}'); before=${before:-0}
-          timeout 240 bash -c "until [ \"\$(kubectl get firebirdcluster src -o jsonpath='{.status.journalArchiveSequence}')\" -gt $((before + 1)) ] 2>/dev/null; do sleep 5; done" \
+          # the S3 archive has every segment the source archived after that change (the archive
+          # timeout closes its segment within seconds, the archive Job uploads every minute)
+          sleep 10
+          last=$(kubectl exec src-0 -c firebird -- ls /var/lib/firebird/data/replication/archive | sed -n 's/.*\.journal-0*\([0-9][0-9]*\)$/\1/p' | sort -n | tail -n 1)
+          echo "the source archived up to segment $last"
+          timeout 240 bash -c "until [ \"\$(kubectl get firebirdcluster src -o jsonpath='{.status.journalArchiveSequence}')\" -ge $last ] 2>/dev/null; do sleep 5; done" \
             || { kubectl get firebirdcluster src -o jsonpath='{.status}'; kubectl get jobs; exit 1; }
+          # the sequence is recorded once listed: wait for no archive Job uploading (the listing one is done)
+          timeout 180 bash -c 'until [ -z "$(kubectl get pods -l firebird.cloudnative-firebird.io/cluster=src,app.kubernetes.io/component=journal-archive --field-selector=status.phase!=Succeeded,status.phase!=Failed -o name)" ]; do sleep 3; done'
           # the replica cluster: bootstrapped from the backup and the archive, then following it
           kubectl apply -f - <<EOF
           apiVersion: firebird.cloudnative-firebird.io/v1
