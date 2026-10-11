@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.90.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.91.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Replica Clusters** *(v0.91.0; CloudNativePG replica clusters through the object store)*
+  - `spec.replica` makes a cluster follow another one through its journal archive in S3, for disaster recovery elsewhere: the point-in-time recovery Job bootstraps it from the source's nbackup chain and archive but leaves the database a read-only replica; an `archive-follower` sidecar downloads the next segments for the Firebird replica server; `status.replicaCluster` shows the segments applied and archived (segment server `FOLLOW`).
+  - Failovers of the source are followed: at a lineage marker the follower stops at the promoted replica's segment and the operator restarts the instance, whose init container moves the position past the lost primary's segments; a replica that applied them is reported. `replica.enabled: false` promotes the instance once through the switchover's promote directive. Roles and restores wait while it follows.
+  - The scripts were run against Firebird 5 and an S3 server (bootstrap across a failover, following, repositioning, promotion); unit tests cover the validation, the sidecar, the bootstrap Job, the state and the controller; the kind CI runs `rclone serve s3` in the cluster for a source with a journal archive and base backup, and a replica cluster that follows it and is promoted.
 - [x] **Scheduling: Spreading the Instances** *(v0.90.0; CloudNativePG's enablePodAntiAffinity, podAntiAffinityType, topologyKey, topologySpreadConstraints)*
   - New clusters get a pod anti-affinity among their instance pods (`podAntiAffinity`: `preferred` by default, or `required`, on `kubernetes.io/hostname` or another `topologyKey`), added to the owner's `affinity`; the default is recorded in the `pod-anti-affinity` annotation (`PodAntiAffinityDefaulted`), and clusters that existed before are pinned without it so an operator upgrade restarts nothing. `topologySpreadConstraints` are passed to the instance pods, a constraint without `labelSelector` getting the instance pods' one.
   - A rolling update recreates an outdated pod that was never scheduled right away (a `required` rule no node can meet) instead of waiting for it; the StatefulSet comparison of scheduling fields ignores the API server's key order.
@@ -451,6 +455,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | `targetPrimary` annotation | **v0.13.0 (Done)** |
 | **Pod Anti-Affinity / Spread** | `affinity.enablePodAntiAffinity`, `topologySpreadConstraints` | `podAntiAffinity` (on for new clusters), `topologySpreadConstraints` | **v0.90.0 (Done)** |
+| **Replica Clusters** | `replica` with `source` (object store or streaming) | `replica` following the source's journal archive in S3, promotion | **v0.91.0 (Done)** |
 | **Major Version Upgrade** | Offline `pg_upgrade` | Image check, offline `gbak` conversion per volume | **v0.89.0 (Done)** |
 | **Rolling Updates** | Primary last, `primaryUpdateStrategy` / `primaryUpdateMethod` | Same settings, `OnDelete` StatefulSet | **v0.15.0 (Done)** |
 | **Declarative Roles** | `DatabaseRole` / `managed.roles` | `FirebirdUser` | **v0.12.0 (Done)** |

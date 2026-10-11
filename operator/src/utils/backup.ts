@@ -33,6 +33,7 @@ import {
   instanceHost,
   OPERATOR_CONFIG_DIR,
   PRIMARY_KEY,
+  replicationDirectories,
   replicationEnabled,
   SEGMENT_PORT,
 } from './replication';
@@ -202,7 +203,7 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function awsCommand(s3: S3BackupConfiguration): string {
+export function awsCommand(s3: S3BackupConfiguration): string {
   return s3.endpoint ? `aws --endpoint-url ${shellQuote(s3.endpoint)}` : 'aws';
 }
 
@@ -226,7 +227,7 @@ export function s3ClientEnv(s3: S3BackupConfiguration): V1EnvVar[] {
   return [...keys, { name: 'AWS_DEFAULT_REGION', value: s3.region ?? 'us-east-1' }];
 }
 
-function s3ClientImage(s3: S3BackupConfiguration): string {
+export function s3ClientImage(s3: S3BackupConfiguration): string {
   return s3.clientImage ?? DEFAULT_S3_CLIENT_IMAGE;
 }
 
@@ -873,7 +874,9 @@ export function buildRecoveryBootstrapJob(cluster: FirebirdCluster): V1Job {
   const recovery = cluster.spec.bootstrap!.recovery!;
   const keys = [recovery.sourcePath!, ...(recovery.incrementalPaths ?? [])];
   const labels = { ...clusterLabels(name), 'app.kubernetes.io/component': 'pitr-recovery' };
-  const target = replicationEnabled(cluster)
+  // a replica cluster's database stays a replica, in place (no primary bootstrap)
+  const replica = cluster.spec.replica;
+  const target = replicationEnabled(cluster) && !replica
     ? `${FIREBIRD_DATA_DIR}/.bootstrap.fdb`
     : `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`;
   return {
@@ -891,12 +894,14 @@ export function buildRecoveryBootstrapJob(cluster: FirebirdCluster): V1Job {
         metadata: { labels },
         spec: replayPodSpec(cluster, {
           chain: { s3: recovery.s3!, keys },
-          journalS3: recovery.pointInTime!.journalS3!,
-          target: recovery.pointInTime!,
+          journalS3: replica ? replica.journalS3 : recovery.pointInTime!.journalS3!,
+          // a replica cluster: every archived segment
+          target: replica ? {} : recovery.pointInTime!,
           command: `set -eu; . ${OPERATOR_CONFIG_DIR}/pitr-restore.sh`,
           env: [
             { name: 'LOCAL_TARGET', value: target },
             { name: 'CHAIN_COUNT', value: String(keys.length) },
+            ...(replica ? [{ name: 'REPLICA_SOURCE', value: replicationDirectories(cluster, FIREBIRD_DATA_DIR).source }] : []),
           ],
           volumes: [{ name: 'firebird-data', persistentVolumeClaim: { claimName: instanceDataClaimName(cluster, 0) } }],
           mounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }],
@@ -1074,8 +1079,9 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
 export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Container[] {
   const bootstrap = cluster.spec.bootstrap;
   if (!bootstrap?.recovery && !bootstrap?.clone) return [];
-  // recovered by a Job before the instances start (buildRecoveryBootstrapJob)
-  if (bootstrap.recovery?.pointInTime) return [];
+  // recovered by a Job before the instances start (buildRecoveryBootstrapJob); a replica cluster
+  // too, which keeps its bootstrap after its promotion
+  if (bootstrap.recovery?.pointInTime || cluster.spec.replica) return [];
 
   const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
   const replicated = replicationEnabled(cluster);

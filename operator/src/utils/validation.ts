@@ -1,3 +1,4 @@
+import { replicaClusterErrors } from './replica-cluster';
 import { FirebirdCluster, FirebirdBackup, FirebirdRestore, PointInTimeRecovery, S3BackupConfiguration } from '../types';
 import { parseQuantity } from './storage';
 
@@ -18,6 +19,9 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
   if (!spec) {
     throw new ValidationError('FirebirdCluster spec is required');
   }
+
+  const replicaErrors = replicaClusterErrors(cluster);
+  if (replicaErrors.length > 0) throw new ValidationError(replicaErrors.join('; '));
 
   const antiAffinity = spec.podAntiAffinity;
   if (antiAffinity?.type !== undefined && !['preferred', 'required'].includes(antiAffinity.type)) {

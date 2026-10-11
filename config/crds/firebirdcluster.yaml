@@ -561,6 +561,50 @@ spec:
                       x-kubernetes-validations:
                         - rule: self.all(k, k.lowerAscii() != 'securitydatabase')
                           message: SecurityDatabase is managed by the operator (the security database is kept on the instance volume)
+                replica:
+                  description: Replica cluster, following another cluster's journal archive in S3 as a read-only replica; enabled false promotes it
+                  type: object
+                  required:
+                    - enabled
+                    - journalS3
+                  properties:
+                    enabled:
+                      description: true follows the source; false promotes this cluster to a primary of its own (once)
+                      type: boolean
+                    journalS3:
+                      description: The source cluster's journal archive (its replication.journalArchiveS3)
+                      type: object
+                      required:
+                        - bucket
+                      properties:
+                        endpoint:
+                          type: string
+                        bucket:
+                          type: string
+                          minLength: 1
+                        region:
+                          type: string
+                        prefix:
+                          type: string
+                        clientImage:
+                          description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                          type: string
+                        secretRef:
+                          description: >-
+                            Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                            credentials of its environment (workload identity through serviceAccountName, instance profile)
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
+                              minLength: 1
+                    pollIntervalSeconds:
+                      description: Seconds between two looks at the archive (default 30)
+                      type: integer
+                      minimum: 5
+                      maximum: 3600
                 bootstrap:
                   description: Bootstrap options for initial database creation
                   type: object
@@ -896,6 +940,26 @@ spec:
                     (journalArchiveS3); a promoted replica's journal continues after it
                   type: integer
                   format: int64
+                replicaCluster:
+                  description: Replica cluster (spec.replica) following its source, or promoted
+                  type: object
+                  properties:
+                    phase:
+                      type: string
+                      enum:
+                        - Following
+                        - Promoting
+                        - Promoted
+                    appliedSegment:
+                      type: integer
+                    archivedSegment:
+                      type: integer
+                    message:
+                      type: string
+                    promotingPodUid:
+                      type: string
+                    promotionTime:
+                      type: string
                 imageCheck:
                   description: Check of a new spec.imageName against the image the instances run (on-disk structure and server version of each)
                   type: object

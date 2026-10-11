@@ -1476,6 +1476,132 @@ jobs:
           kubectl get statefulset spread -o jsonpath='{.spec.template.spec.affinity.podAntiAffinity}' | grep -q preferredDuringScheduling
           kubectl delete firebirdcluster spread --wait=false
 
+      - name: Verify a replica cluster following a source through S3
+        if: matrix.track.id == 'extended'
+        run: |
+          # an S3 server in the cluster (rclone serve s3, buckets are directories) and its keys
+          kubectl create secret generic s3-credentials --from-literal=AWS_ACCESS_KEY_ID=ci-key --from-literal=AWS_SECRET_ACCESS_KEY=ci-secret-key
+          kubectl apply -f - <<'EOF'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: s3
+          spec:
+            selector: { matchLabels: { app: s3 } }
+            template:
+              metadata: { labels: { app: s3 } }
+              spec:
+                securityContext: { runAsNonRoot: true, runAsUser: 1000, seccompProfile: { type: RuntimeDefault } }
+                containers:
+                  - name: s3
+                    image: rclone/rclone:1.75.2
+                    args: [serve, s3, /data, --addr, ":8080", --auth-key, "ci-key,ci-secret-key"]
+                    env: [{ name: HOME, value: /tmp }]
+                    securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+                    ports: [{ containerPort: 8080 }]
+                    volumeMounts: [{ name: data, mountPath: /data }]
+                volumes: [{ name: data, emptyDir: {} }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: s3
+          spec:
+            selector: { app: s3 }
+            ports: [{ port: 8080, targetPort: 8080 }]
+          EOF
+          kubectl rollout status deployment/s3 --timeout=180s
+          kubectl exec deploy/s3 -- mkdir -p /data/dr
+          S3='{ bucket: dr, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }'
+          # the source: replication with its journal archive, every minute
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: src
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            replication:
+              enabled: true
+              archiveSchedule: "* * * * *"
+              archiveTimeoutSeconds: 5
+              journalArchiveS3: { bucket: dr, prefix: src, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }
+          EOF
+          timeout 300 bash -c 'until kubectl get pod src-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/src-0 --for=condition=Ready --timeout=300s
+          DB=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB"; }
+          rows() { sql "$1" "select 'rows=' || count(*) from dr_t;" | sed -n 's/.*rows=\([0-9]*\).*/\1/p'; }
+          sql src-0 "create table dr_t (id int primary key, s varchar(30)); commit; insert into dr_t values (1, 'before the backup'); commit;"
+          # its base backup in S3, then changes after it
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: src-base
+          spec:
+            clusterName: src
+            type: physical
+            level: 0
+            s3: { bucket: dr, prefix: src-backups, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }
+          EOF
+          timeout 300 bash -c 'until [ "$(kubectl get firebirdbackup src-base -o jsonpath={.status.phase})" = Completed ]; do
+            [ "$(kubectl get firebirdbackup src-base -o jsonpath={.status.phase})" = Failed ] && { kubectl logs job/backup-src-base --all-containers; exit 1; }; sleep 5; done'
+          sql src-0 "insert into dr_t values (2, 'after the backup'); commit;"
+          # the archive has the segments of the backup and after it
+          before=$(kubectl get firebirdcluster src -o jsonpath='{.status.journalArchiveSequence}'); before=${before:-0}
+          timeout 240 bash -c "until [ \"\$(kubectl get firebirdcluster src -o jsonpath='{.status.journalArchiveSequence}')\" -gt $((before + 1)) ] 2>/dev/null; do sleep 5; done" \
+            || { kubectl get firebirdcluster src -o jsonpath='{.status}'; kubectl get jobs; exit 1; }
+          # the replica cluster: bootstrapped from the backup and the archive, then following it
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: dr
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            replication:
+              enabled: true
+            replica:
+              enabled: true
+              pollIntervalSeconds: 5
+              journalS3: { bucket: dr, prefix: src, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }
+            bootstrap:
+              recovery:
+                sourcePath: nbackup-l0-src-base.nbk
+                s3: { bucket: dr, prefix: src-backups, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }
+          EOF
+          timeout 600 bash -c 'until kubectl get pod dr-0 >/dev/null 2>&1; do
+            [ -n "$(kubectl get job dr-pitr-recovery -o jsonpath="{.status.failed}" 2>/dev/null)" ] && { kubectl logs job/dr-pitr-recovery --all-containers; exit 1; }; sleep 5; done'
+          kubectl logs job/dr-pitr-recovery -c firebird-restore | tail -5
+          kubectl wait pod/dr-0 --for=condition=Ready --timeout=300s
+          kubectl get pod dr-0 -o jsonpath='{.spec.containers[*].name}' | grep -q archive-follower
+          [ "$(rows dr-0)" = 2 ] || { echo "the replica cluster has $(rows dr-0) rows"; exit 1; }
+          # it follows: a change on the source arrives through the archive
+          sql src-0 "insert into dr_t values (3, 'followed'); commit;"
+          timeout 300 bash -c "until [ \"\$(kubectl exec dr-0 -c firebird -- bash -c \"echo \\\"select 'rows=' || count(*) from dr_t;\\\" | isql -q localhost:$DB\" | sed -n 's/.*rows=\([0-9]*\).*/\1/p')\" = 3 ]; do sleep 5; done" \
+            || { kubectl get firebirdcluster dr -o jsonpath='{.status.replicaCluster}'; kubectl logs dr-0 -c archive-follower --tail=20; exit 1; }
+          timeout 60 bash -c 'until [ "$(kubectl get firebirdcluster dr -o jsonpath={.status.replicaCluster.phase})" = Following ] && [ -n "$(kubectl get firebirdcluster dr -o jsonpath={.status.replicaCluster.appliedSegment})" ]; do sleep 5; done'
+          kubectl get firebirdcluster dr -o jsonpath='{.status.replicaCluster}'; echo
+          # read-only while it follows
+          if sql dr-0 "insert into dr_t values (99, 'refused'); commit;" 2>&1 | grep -q 'read-only'; then echo "writes refused"; else echo "a write went through on the replica cluster"; exit 1; fi
+          # promoted: a primary of its own, with the data it had
+          kubectl patch firebirdcluster dr --type merge -p '{"spec":{"replica":{"enabled":false}}}'
+          timeout 300 bash -c 'until [ "$(kubectl get firebirdcluster dr -o jsonpath={.status.replicaCluster.phase})" = Promoted ]; do sleep 5; done' \
+            || { kubectl get firebirdcluster dr -o jsonpath='{.status}'; exit 1; }
+          kubectl wait pod/dr-0 --for=condition=Ready --timeout=300s
+          ! kubectl get pod dr-0 -o jsonpath='{.spec.containers[*].name}' | grep -q archive-follower
+          sql dr-0 "insert into dr_t values (4, 'after the promotion'); commit;"
+          [ "$(rows dr-0)" = 4 ]
+          reasons=$(kubectl get events --field-selector involvedObject.name=dr -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}')
+          for reason in ReplicaClusterPromoting ReplicaClusterPromoted; do echo "$reasons" | grep -qx "$reason" || { echo "no $reason event"; exit 1; }; done
+          kubectl delete firebirdcluster dr src --wait=false
+          kubectl delete deployment s3 --wait=false
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |

@@ -7,6 +7,10 @@
 # Cluster bootstrap (bootstrap.recovery.pointInTime, LOCAL_TARGET set): the Job mounts the first
 # instance's volume; the scratch database lives there and is moved to LOCAL_TARGET at the end.
 # Nothing is done when LOCAL_TARGET exists already (a retried Job).
+# Replica cluster bootstrap (spec.replica, REPLICA_SOURCE set as well): no target, every archived
+# segment is replayed and the database stays a read-only replica; its replica control file goes
+# to REPLICA_SOURCE (the instance's journal_source_directory), where the archive follower
+# (archive-follower.sh) continues from it.
 #
 # 1. Restores the nbackup chain into a scratch database here (nbackup -SEQ -R keeps the
 #    replication sequence S of the last backup in the chain).
@@ -127,7 +131,7 @@ awk '{
     at = name; sub(/.*\.archived-/, "", at); mark[s + 0] = at
   }
 } END { for (s in seg) print s, seg[s], ((s in mark) ? mark[s] : up[s]) }' "$W/journals.list" | sort -n > "$W/segments.idx"
-[ -s "$W/segments.idx" ] || fail "the journal archive is empty"
+[ -s "$W/segments.idx" ] || fail "the journal archive is empty (a replica cluster needs the source's segment of the backup archived: wait for its journal archive Job and delete this Job to retry)"
 # lineage switches "<P> <U>" (failovers), by U; a target past U skips the lost primary's
 # segments P+1..U, which are not in the history of the segments after U
 awk '{ n = $4; if (n ~ /\.lineage-[0-9]+-[0-9]+$/) { sub(/.*\.lineage-/, "", n); split(n, a, "-"); print a[1] + 0, a[2] + 0 } }' \
@@ -286,6 +290,19 @@ while read -r p u end; do
   : > "$W/fb/replication.log"
   replay "$end"
 done < "$W/parts"
+if [ -n "${REPLICA_SOURCE:-}" ]; then
+  # a replica cluster: the database stays a replica, the follower continues after segment L
+  mkdir -p "$REPLICA_SOURCE"
+  find "$REPLICA_SOURCE" -maxdepth 1 -name '*.journal-*' -exec rm -f {} +
+  cp "$SRC/$guid" "$REPLICA_SOURCE/.$guid.tmp"
+  mv "$REPLICA_SOURCE/.$guid.tmp" "$REPLICA_SOURCE/$guid"
+  # failovers of the source replayed across already (the follower must not ask for them again)
+  if [ -s "$W/parts" ]; then cut -d' ' -f2 "$W/parts" >> "$(dirname "$REPLICA_SOURCE")/repositioned"; fi
+  mv "$DB" "$LOCAL_TARGET"
+  rm -rf "$(dirname "$DB")"
+  echo "replica of the source cluster at segment $L in place at $LOCAL_TARGET; the archive follower continues from there"
+  exit 0
+fi
 "$FB/gfix" -user SYSDBA -replica none "$DB"
 if [ -n "$cut_name" ]; then
   echo "recovered to segment $L up to its length $cut_length (the last recovery point at or before $TARGET_TIME)"

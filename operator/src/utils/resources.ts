@@ -1,3 +1,4 @@
+import { buildArchiveFollowerContainer, replicaClusterFollowing } from './replica-cluster';
 import { instanceAffinity, instanceTopologySpreadConstraints } from './scheduling';
 import { withSegmentTls } from './segment-tls-pods';
 import { withPrimaryLease } from './primary-lease';
@@ -388,6 +389,8 @@ export function buildStatefulSet(
         ]
       : []),
     ...(replication?.sidecars ?? [buildBackupFilesContainer(cluster, image)]),
+    // a replica cluster following its source: the segments come from the source's journal archive
+    ...(replication && replicaClusterFollowing(cluster) ? [buildArchiveFollowerContainer(cluster)] : []),
   ];
 
   const volumes = [

@@ -22,6 +22,27 @@ primary=$(cat "$PRIMARY_FILE" 2>/dev/null || true)
 # a promotion in place (segment-server.pl PROMOTE) only stands for the ConfigMap until a restart
 rm -f "$REPLICATION_DIR/promoted"
 
+# Replica cluster (spec.replica): across a failover in the source, the archive follower asked for
+# this restart once it had applied the promoted replica's segment P; the replica continues after
+# the archive's segment U (the lost primary's segments P+1..U are not in the new lineage), with
+# the transactions still open at P rolled back by the restart (archive-follower.sh).
+if [ -f "$REPLICATION_DIR/reposition" ]; then
+  u=$(cat "$REPLICATION_DIR/reposition")
+  ctl=$(find "$SOURCE_DIR" -maxdepth 1 -name '{*}' | head -n 1)
+  case "$u" in
+    ''|*[!0-9]*) echo "ignoring an invalid reposition request: $u" ;;
+    *)
+      if [ -n "$ctl" ]; then
+        perl "$SCRIPT_DIR/pitr-plan.pl" --reposition "$u" "$ctl"
+        find "$SOURCE_DIR" -maxdepth 1 -name '*.journal-*' -exec rm -f {} +
+        echo "$u" >> "$REPLICATION_DIR/repositioned"
+        own firebird:firebird "$REPLICATION_DIR/repositioned"
+      fi
+      ;;
+  esac
+  rm -f "$REPLICATION_DIR/reposition"
+fi
+
 # gstat omits "Replication sequence" while it is 0 (e.g. a database created offline)
 seq_of() { s=$(gstat -h "$1" | sed -n 's/^[[:space:]]*Replication sequence:[[:space:]]*\([0-9]*\).*/\1/p'); echo "${s:-0}"; }
 field() { echo "$header" | sed -n "s/^[[:space:]]*$1:*[[:space:]]*\\([0-9{][0-9A-F{}-]*\\).*/\\1/p"; }
