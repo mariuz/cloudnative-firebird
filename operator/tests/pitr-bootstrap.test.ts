@@ -126,3 +126,44 @@ describe('point-in-time bootstrap', () => {
     expect(api('createNamespacedPersistentVolumeClaim')).not.toHaveBeenCalled();
   });
 });
+
+describe('bootstrap from a volume snapshot', () => {
+  const snapshotCluster = () =>
+    makeCluster({ instances: 2, replication: { enabled: true }, bootstrap: { recovery: { volumeSnapshot: { name: 'nightly' } } } });
+
+  it('waits for the snapshot, restores the first volume from it, and starts the instances after the Job', async () => {
+    const snapshot = { metadata: { name: 'nightly' }, spec: { source: {} }, status: { readyToUse: false } };
+    const { kubeConfig, api } = mockApi({
+      getNamespacedCustomObject: vi.fn().mockImplementation(({ plural }) =>
+        plural === 'volumesnapshots' ? Promise.resolve(snapshot) : Promise.reject(notFoundError),
+      ),
+    });
+    const controller = new FirebirdClusterController(kubeConfig);
+    await controller.reconcile(snapshotCluster());
+    expect(api('createNamespacedPersistentVolumeClaim')).not.toHaveBeenCalled();
+    const waiting = api('patchNamespacedCustomObjectStatus').mock.calls.at(-1)?.[0].body;
+    expect(JSON.stringify(waiting)).toContain('Waiting for VolumeSnapshot nightly to be ready to use');
+
+    // larger than the volume asked for
+    Object.assign(snapshot.status, { readyToUse: true, restoreSize: '2Gi' });
+    await controller.reconcile(snapshotCluster());
+    expect(api('createNamespacedPersistentVolumeClaim')).not.toHaveBeenCalled();
+    expect(JSON.stringify(api('patchNamespacedCustomObjectStatus').mock.calls.at(-1)?.[0].body)).toContain('smaller than the restore size 2Gi');
+
+    Object.assign(snapshot.status, { restoreSize: '1Gi' });
+    await controller.reconcile(snapshotCluster());
+    const claim = api('createNamespacedPersistentVolumeClaim').mock.calls[0][0].body;
+    expect(claim.metadata.name).toBe('firebird-data-test-cluster-0');
+    expect(claim.spec.dataSource).toEqual({ apiGroup: 'snapshot.storage.k8s.io', kind: 'VolumeSnapshot', name: 'nightly' });
+    expect(claim.spec.resources).toEqual({ requests: { storage: '1Gi' } });
+    expect(api('createNamespacedJob').mock.calls[0][0].body.metadata.name).toBe('test-cluster-snapshot-recovery');
+    expect(api('createNamespacedStatefulSet')).not.toHaveBeenCalled();
+
+    api('readNamespacedPersistentVolumeClaim').mockResolvedValue({});
+    api('readNamespacedJob').mockResolvedValue({ status: { conditions: [{ type: 'Complete', status: 'True' }] } });
+    await controller.reconcile(snapshotCluster());
+    expect(api('createNamespacedStatefulSet')).toHaveBeenCalledTimes(1);
+    const sts = api('createNamespacedStatefulSet').mock.calls[0][0].body;
+    expect(sts.spec.template.spec.initContainers.map((c: { name: string }) => c.name)).not.toContain('bootstrap-restore');
+  });
+});

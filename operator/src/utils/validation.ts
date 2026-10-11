@@ -1,4 +1,6 @@
 import { replicaClusterErrors } from './replica-cluster';
+import { parseCron } from './cron';
+import { volumeSnapshotRecoveryErrors, volumeSnapshotSpecErrors } from './volume-snapshot';
 import { FirebirdCluster, FirebirdBackup, FirebirdRestore, PointInTimeRecovery, S3BackupConfiguration } from '../types';
 import { parseQuantity } from './storage';
 
@@ -206,7 +208,15 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     }
   }
 
-  if (spec.bootstrap?.recovery) {
+  if (spec.bootstrap?.recovery?.volumeSnapshot) {
+    const errors = volumeSnapshotRecoveryErrors(cluster);
+    if (errors.length > 0) throw new ValidationError(errors.join('; '));
+    if (spec.instances > 1 && !spec.replication?.enabled) {
+      throw new ValidationError(
+        'bootstrap.recovery.volumeSnapshot with more than one instance needs replication: only the first instance is restored',
+      );
+    }
+  } else if (spec.bootstrap?.recovery) {
     const { sourcePath, s3 } = spec.bootstrap.recovery;
     if ((!sourcePath || sourcePath.trim() === '') && !s3) {
       throw new ValidationError('Bootstrap recovery requires either sourcePath or s3 configuration');
@@ -378,9 +388,11 @@ export function validateBackupSpec(backup: FirebirdBackup): void {
   if (!backup.spec?.clusterName || backup.spec.clusterName.trim() === '') {
     throw new ValidationError('FirebirdBackup clusterName is required');
   }
-  if (backup.spec.type && !['logical', 'physical'].includes(backup.spec.type)) {
-    throw new ValidationError(`Invalid backup type: ${backup.spec.type}. Must be 'logical' or 'physical'.`);
+  if (backup.spec.type && !['logical', 'physical', 'volumeSnapshot'].includes(backup.spec.type)) {
+    throw new ValidationError(`Invalid backup type: ${backup.spec.type}. Must be 'logical', 'physical' or 'volumeSnapshot'.`);
   }
+  const snapshotErrors = volumeSnapshotSpecErrors(backup.spec, 'spec');
+  if (snapshotErrors.length > 0) throw new ValidationError(snapshotErrors.join('; '));
   if (backup.spec.level !== undefined && ![0, 1, 2].includes(backup.spec.level)) {
     throw new ValidationError(`Invalid physical backup level: ${backup.spec.level}. Must be 0, 1, or 2.`);
   }
@@ -473,8 +485,17 @@ export function validateScheduledBackupSpec(scheduledBackup: {
   if (!scheduledBackup.spec?.schedule || scheduledBackup.spec.schedule.trim().split(/\s+/).length !== 5) {
     throw new ValidationError(`Invalid scheduled backup schedule cron expression: "${scheduledBackup.spec?.schedule}". Standard 5-field cron expression required.`);
   }
-  if (scheduledBackup.spec.type && !['logical', 'physical'].includes(scheduledBackup.spec.type)) {
-    throw new ValidationError(`Invalid backup type: ${scheduledBackup.spec.type}. Must be 'logical' or 'physical'.`);
+  if (scheduledBackup.spec.type && !['logical', 'physical', 'volumeSnapshot'].includes(scheduledBackup.spec.type)) {
+    throw new ValidationError(`Invalid backup type: ${scheduledBackup.spec.type}. Must be 'logical', 'physical' or 'volumeSnapshot'.`);
+  }
+  const snapshotErrors = volumeSnapshotSpecErrors(scheduledBackup.spec, 'spec');
+  if (snapshotErrors.length > 0) throw new ValidationError(snapshotErrors.join('; '));
+  if (scheduledBackup.spec.type === 'volumeSnapshot') {
+    try {
+      parseCron(scheduledBackup.spec.schedule);
+    } catch (err) {
+      throw new ValidationError(`Invalid scheduled backup schedule: ${(err as Error).message}`);
+    }
   }
   if (scheduledBackup.spec.level !== undefined && ![0, 1, 2].includes(scheduledBackup.spec.level)) {
     throw new ValidationError(`Invalid physical backup level: ${scheduledBackup.spec.level}. Must be 0, 1, or 2.`);

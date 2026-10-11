@@ -1263,6 +1263,99 @@ security database of the instance is its own. The kind CI runs an S3 server in t
 (`rclone serve s3`), takes a base backup of a source cluster, bootstraps a replica cluster from it
 and its archive, checks that a later change arrives and that writes are refused, and promotes it.
 
+### Volume Snapshot Backups (v0.92.0)
+
+A `volumeSnapshot` backup is a Kubernetes VolumeSnapshot of the primary's volume, taken online
+like CloudNativePG's volume snapshot backups. A new cluster can bootstrap from it. This needs a
+CSI driver that supports snapshots, plus the CSI snapshot controller and its CRDs.
+
+```yaml
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdBackup
+metadata:
+  name: my-cluster-snap
+spec:
+  clusterName: my-cluster
+  type: volumeSnapshot
+  volumeSnapshot:
+    className: csi-snapclass        # VolumeSnapshotClass; the default class when unset
+    lockTimeoutSeconds: 600         # default
+    labels: { team: billing }       # optional, also annotations
+```
+
+- **Taking the backup.** A Job locks the primary's database for backup
+  (`ALTER DATABASE BEGIN BACKUP`, as `nbackup -L`). The database file stops changing and new
+  writes go to its delta file. The operator then creates the VolumeSnapshot (named after the
+  backup) of the primary's PersistentVolumeClaim. Once the snapshot is cut (`creationTime`), a
+  second Job unlocks the database (`END BACKUP` merges the delta back). The backup completes when
+  the snapshot is `readyToUse`.
+- **Status.** `status.volumeSnapshot` records the snapshot's name, the volume, `lockedAt`,
+  `unlockedAt`, `creationTime`, `restoreSize` and `readyToUse`.
+- **Failures.** A snapshot that fails, or that is not cut within `lockTimeoutSeconds`, fails the
+  backup. The database is always unlocked; a snapshot not cut yet is deleted first, so it cannot
+  be cut later from the unlocked volume. A database already in backup mode (an nbackup, another
+  snapshot) is not locked again, and the backup fails. If the unlock Job fails, the backup reports
+  that the database may still be locked (`ALTER DATABASE END BACKUP` releases it). A finalizer
+  keeps a backup deleted mid-way until the database is unlocked.
+- **Restrictions.** Snapshots are taken of the primary only (no `prefer-standby`, `s3`, `level` or
+  `verify`), and not while the cluster is hibernated, upgrading or following as a replica
+  cluster. A `FirebirdRestore` cannot read a snapshot backup: bootstrap a new cluster from it.
+
+A `FirebirdScheduledBackup` with `type: volumeSnapshot` creates no CronJob. At each scheduled time
+(UTC), the operator creates a FirebirdBackup named `<schedule>-<YYYYMMDDHHMM>`, labelled
+`firebird.cloudnative-firebird.io/scheduled-backup`. A run is skipped while the schedule's
+previous backup is still running. `retentionPolicy` deletes the schedule's backups that finished
+before the window, together with their VolumeSnapshots, and always keeps the newest completed one.
+Backups taken by hand and VolumeSnapshots of deleted FirebirdBackups are left alone.
+
+**Bootstrap from a snapshot.**
+
+```yaml
+spec:
+  instances: 3
+  replication: { enabled: true }    # more than one instance needs replication
+  storage: { size: 10Gi, storageClass: csi-hostpath-sc }   # at least the snapshot's restoreSize
+  bootstrap:
+    recovery:
+      volumeSnapshot:
+        name: my-cluster-snap       # a VolumeSnapshot in the cluster's namespace
+        databaseName: mydb.fdb      # the database file on it; defaults to this cluster's
+```
+
+How the bootstrap runs:
+
+1. The operator waits for the snapshot to be `readyToUse`. The cluster stays `Creating` with the
+   reason, also when `storage.size` is smaller than the snapshot's restore size.
+2. It creates the first instance's volume from the snapshot (`dataSource`, under the StatefulSet's
+   claim name).
+3. The Job `<cluster>-snapshot-recovery` prepares the database with the embedded engine, running
+   with the instances' security context:
+   - discards the delta file and fixes up the locked copy (`nbackup -F`), giving the database as of
+     the lock;
+   - brings it online if it was shut down;
+   - turns replica mode and publication off;
+   - removes the source's replication state;
+   - moves the database where a restored one is expected.
+4. The instances then start as for any bootstrap. With replication, the primary enables
+   publication and the other instances are seeded from it.
+
+The snapshot's security database comes along, so the source's users exist in the new cluster;
+SYSDBA's password is set from the new cluster's `superuserSecret`. A snapshot of a database that
+was not locked is used as a crash-consistent copy (noted in the Job's log). A failed Job leaves the
+cluster `Degraded`; delete the Job to retry.
+
+**Testing.** The lock, unlock and recovery scripts were run against the Firebird 4, 5 and 6
+snapshot images:
+
+- a row written while the database was locked is in the source but not in the copy;
+- the copy validates, with publication off;
+- the source's replication state is gone;
+- a second lock is refused, and a repeated recovery does nothing.
+
+The kind CI installs the CSI snapshot controller and the hostpath CSI driver. It takes a snapshot
+backup of a replicated cluster and checks that the source is unlocked. It runs a schedule, then
+bootstraps a two-instance cluster from the snapshot and checks its data and its replication.
+
 ### Users
 
 Firebird users live in the **security database**, which the official image keeps on the container

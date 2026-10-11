@@ -1608,6 +1608,118 @@ jobs:
           kubectl delete firebirdcluster dr src --wait=false
           kubectl delete deployment s3 --wait=false
 
+      - name: Verify volume snapshot backups and a cluster bootstrapped from one
+        if: matrix.track.id == 'extended'
+        run: |
+          # kind's default storage cannot snapshot: the CSI snapshot controller and the hostpath CSI driver
+          git clone -q --depth 1 --branch v8.6.0 https://github.com/kubernetes-csi/external-snapshotter /tmp/external-snapshotter
+          git clone -q --depth 1 --branch v1.18.0 https://github.com/kubernetes-csi/csi-driver-host-path /tmp/csi-driver-host-path
+          kubectl apply -k /tmp/external-snapshotter/client/config/crd
+          kubectl apply -k /tmp/external-snapshotter/deploy/kubernetes/snapshot-controller
+          kubectl -n kube-system rollout status deployment/snapshot-controller --timeout=180s
+          /tmp/csi-driver-host-path/deploy/kubernetes-latest/deploy.sh > /tmp/csi-deploy.log 2>&1 || { tail -40 /tmp/csi-deploy.log; exit 1; }
+          kubectl apply -f /tmp/csi-driver-host-path/examples/csi-storageclass.yaml -f /tmp/csi-driver-host-path/examples/csi-volumesnapshotclass.yaml
+          DB=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB"; }
+          rows() { sql "$1" "select 'rows=' || count(*) from snap_t;" | sed -n 's/.*rows=\([0-9]*\).*/\1/p'; }
+          backup_state() { kubectl exec "$1" -c firebird -- bash -c "echo 'set list on; select mon\$backup_state as bstate from mon\$database;' | isql -q localhost:$DB" | awk '$1 == "BSTATE" { print $2 }'; }
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: snap-src
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+              storageClass: csi-hostpath-sc
+            replication:
+              enabled: true
+          EOF
+          timeout 300 bash -c 'until kubectl get pod snap-src-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/snap-src-0 --for=condition=Ready --timeout=300s
+          sql snap-src-0 "create table snap_t (id int primary key, s varchar(30)); commit; insert into snap_t values (1, 'one'); insert into snap_t values (2, 'two'); commit;"
+          # locked, snapshotted, unlocked
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: snap-1
+          spec:
+            clusterName: snap-src
+            type: volumeSnapshot
+            volumeSnapshot:
+              className: csi-hostpath-snapclass
+          EOF
+          timeout 300 bash -c 'until [ "$(kubectl get firebirdbackup snap-1 -o jsonpath={.status.phase})" = Completed ]; do
+            [ "$(kubectl get firebirdbackup snap-1 -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done' \
+            || { kubectl get firebirdbackup snap-1 -o jsonpath='{.status}'; echo; kubectl get volumesnapshot -o wide; kubectl logs job/backup-snap-1-lock || true; kubectl logs job/backup-snap-1-unlock || true; exit 1; }
+          kubectl get firebirdbackup snap-1 -o jsonpath='{.status}'; echo
+          [ "$(kubectl get volumesnapshot snap-1 -o jsonpath={.status.readyToUse})" = true ]
+          [ "$(kubectl get volumesnapshot snap-1 -o jsonpath={.spec.source.persistentVolumeClaimName})" = firebird-data-snap-src-0 ]
+          kubectl logs job/backup-snap-1-lock | grep -q 'locked for backup'
+          kubectl logs job/backup-snap-1-unlock | grep -q 'unlocked'
+          [ "$(backup_state snap-src-0)" = 0 ] || { echo "the source database is still in backup mode"; exit 1; }
+          [ -z "$(kubectl get firebirdbackup snap-1 -o jsonpath='{.metadata.finalizers}')" ]
+          kubectl get events --field-selector involvedObject.name=snap-1 -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}' | grep -qx BackupCompleted
+          # a change after the snapshot: not in the clusters bootstrapped from it
+          sql snap-src-0 "insert into snap_t values (3, 'after the snapshot'); commit;"
+          # a schedule: the operator creates the backups (every minute here)
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdScheduledBackup
+          metadata:
+            name: snap-every-minute
+          spec:
+            clusterName: snap-src
+            schedule: "* * * * *"
+            type: volumeSnapshot
+            retentionPolicy: 7d
+            volumeSnapshot:
+              className: csi-hostpath-snapclass
+          EOF
+          timeout 300 bash -c 'until kubectl get firebirdbackup -l firebird.cloudnative-firebird.io/scheduled-backup=snap-every-minute -o jsonpath="{.items[*].status.phase}" | grep -q Completed; do sleep 5; done' \
+            || { kubectl get firebirdbackup -o wide; kubectl get firebirdscheduledbackup snap-every-minute -o jsonpath='{.status}'; exit 1; }
+          kubectl get firebirdscheduledbackup snap-every-minute -o jsonpath='{.status}'; echo
+          if kubectl get cronjob sched-backup-snap-every-minute >/dev/null 2>&1; then echo "a CronJob was created for volume snapshots"; exit 1; fi
+          kubectl patch firebirdscheduledbackup snap-every-minute --type merge -p '{"spec":{"suspend":true}}'
+          # a new cluster from the snapshot: its first volume is created from it, the second is seeded by replication
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: snap-dst
+          spec:
+            instances: 2
+            storage:
+              size: 1Gi
+              storageClass: csi-hostpath-sc
+            replication:
+              enabled: true
+            bootstrap:
+              recovery:
+                volumeSnapshot:
+                  name: snap-1
+          EOF
+          timeout 600 bash -c 'until kubectl get pod snap-dst-0 >/dev/null 2>&1; do
+            [ -n "$(kubectl get job snap-dst-snapshot-recovery -o jsonpath="{.status.failed}" 2>/dev/null)" ] && exit 1; sleep 5; done' \
+            || { kubectl get firebirdcluster snap-dst -o jsonpath='{.status}'; echo; kubectl get pvc; kubectl describe pod -l job-name=snap-dst-snapshot-recovery | tail -30; kubectl logs job/snap-dst-snapshot-recovery || true; exit 1; }
+          kubectl logs job/snap-dst-snapshot-recovery
+          [ "$(kubectl get pvc firebird-data-snap-dst-0 -o jsonpath={.spec.dataSource.name})" = snap-1 ]
+          kubectl wait pod/snap-dst-0 --for=condition=Ready --timeout=300s
+          timeout 300 bash -c 'until kubectl get pod snap-dst-1 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/snap-dst-1 --for=condition=Ready --timeout=600s
+          [ "$(rows snap-dst-0)" = 2 ] || { echo "the restored cluster has $(rows snap-dst-0) rows"; exit 1; }
+          [ "$(backup_state snap-dst-0)" = 0 ]
+          # a primary of its own, replicating to the seeded instance
+          sql snap-dst-0 "insert into snap_t values (10, 'restored cluster'); commit;"
+          timeout 180 bash -c "until [ \"\$(kubectl exec snap-dst-1 -c firebird -- bash -c \"echo \\\"select 'rows=' || count(*) from snap_t;\\\" | isql -q localhost:$DB\" | sed -n 's/.*rows=\([0-9]*\).*/\1/p')\" = 3 ]; do sleep 5; done" \
+            || { echo "the replica of the restored cluster did not receive the change"; exit 1; }
+          [ "$(rows snap-src-0)" = 3 ]
+          kubectl delete firebirdcluster snap-dst snap-src --wait=false
+          kubectl delete firebirdscheduledbackup snap-every-minute
+          kubectl delete firebirdbackup --all --wait=false
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |
