@@ -616,8 +616,10 @@ spec:
                       description: Cloud or file backup recovery configuration for database bootstrapping
                       type: object
                       x-kubernetes-validations:
-                        - rule: has(self.s3) || (has(self.sourcePath) && self.sourcePath != '')
-                          message: bootstrap recovery requires either sourcePath or s3
+                        - rule: has(self.volumeSnapshot) || has(self.s3) || (has(self.sourcePath) && self.sourcePath != '')
+                          message: bootstrap recovery requires sourcePath, s3 or volumeSnapshot
+                        - rule: "!has(self.volumeSnapshot) || (!has(self.s3) && !has(self.sourcePath) && !has(self.pointInTime))"
+                          message: bootstrap.recovery.volumeSnapshot is mutually exclusive with sourcePath, s3 and pointInTime
                         - rule: "!has(self.incrementalPaths) || size(self.incrementalPaths) == 0 || has(self.pointInTime)"
                           message: bootstrap.recovery.incrementalPaths applies to point-in-time recovery only
                         - rule: "!has(self.pointInTime) || (has(self.s3) && has(self.sourcePath) && has(self.pointInTime.journalS3))"
@@ -657,6 +659,23 @@ spec:
                                 name:
                                   type: string
                                   minLength: 1
+                        volumeSnapshot:
+                          description: >-
+                            Bootstrap from a VolumeSnapshot (a volumeSnapshot FirebirdBackup, or a snapshot of an
+                            instance volume taken while its database was locked for backup): the first instance's
+                            volume is created from it and a Job turns its database into this cluster's, as of the lock
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              description: Name of the VolumeSnapshot, in the cluster's namespace
+                              type: string
+                              minLength: 1
+                            databaseName:
+                              description: Database file name on the snapshot's volume (defaults to databaseName)
+                              type: string
+                              pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
                         incrementalPaths:
                           description: nbackup level 1 and 2 object keys applied on top of sourcePath (pointInTime only)
                           type: array

@@ -1,4 +1,4 @@
-# expect: requires either sourcePath or s3
+# expect: bootstrap recovery requires sourcePath, s3 or volumeSnapshot
 apiVersion: firebird.cloudnative-firebird.io/v1
 kind: FirebirdCluster
 metadata:

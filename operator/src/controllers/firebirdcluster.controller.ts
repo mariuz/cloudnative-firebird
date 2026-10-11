@@ -67,6 +67,16 @@ import {
   recoveryBootstrapJobName,
 } from '../utils/backup';
 import {
+  buildSnapshotRecoveryClaim,
+  buildSnapshotRecoveryJob,
+  SNAPSHOT_API_GROUP,
+  SNAPSHOT_API_VERSION,
+  SNAPSHOT_PLURAL,
+  snapshotRecoveryJobName,
+  VolumeSnapshot,
+} from '../utils/volume-snapshot';
+import { parseQuantity } from '../utils/storage';
+import {
   PENDING_DROP_USERS_ANNOTATION,
   buildPendingDropJob,
   formatPendingDrops,
@@ -1859,14 +1869,16 @@ export class FirebirdClusterController {
 
   /** Reconcile the StatefulSet for the cluster and return ready replica count and secret hash */
   /**
-   * Point-in-time bootstrap (bootstrap.recovery.pointInTime). Before the StatefulSet exists, the
-   * operator creates the first instance's volume under the StatefulSet's claim name (the
-   * StatefulSet adopts it) and runs a Job that leaves the recovered database on it. Returns a
+   * Point-in-time bootstrap (bootstrap.recovery.pointInTime) and bootstrap from a volume snapshot
+   * (bootstrap.recovery.volumeSnapshot). Before the StatefulSet exists, the operator creates the
+   * first instance's volume under the StatefulSet's claim name (the StatefulSet adopts it), from
+   * the snapshot for the latter, and runs a Job that leaves the recovered database on it. Returns a
    * status message while the recovery runs, undefined once the StatefulSet may be created.
    */
   private async reconcileRecoveryBootstrap(cluster: FirebirdCluster, log: Logger): Promise<string | undefined> {
+    const snapshot = cluster.spec.bootstrap?.recovery?.volumeSnapshot;
     // a replica cluster is bootstrapped by the same Job, which keeps the database a replica
-    if (!cluster.spec.bootstrap?.recovery?.pointInTime && !replicaClusterFollowing(cluster)) return undefined;
+    if (!snapshot && !cluster.spec.bootstrap?.recovery?.pointInTime && !replicaClusterFollowing(cluster)) return undefined;
     const { name, namespace = 'default' } = cluster.metadata;
     try {
       await this.appsApi.readNamespacedStatefulSet({ name, namespace });
@@ -1881,39 +1893,87 @@ export class FirebirdClusterController {
     } catch (err) {
       if (!isNotFound(err)) throw err;
       const template = buildStatefulSet(cluster).spec!.volumeClaimTemplates![0];
-      log.info({ claimName }, 'Creating the first instance volume for point-in-time recovery');
-      await this.coreApi.createNamespacedPersistentVolumeClaim({
-        namespace,
-        body: {
-          apiVersion: 'v1',
-          kind: 'PersistentVolumeClaim',
-          metadata: { ...template.metadata, name: claimName, namespace },
-          spec: template.spec,
-        },
-      });
+      if (snapshot) {
+        const waiting = await this.snapshotNotRestorable(cluster, snapshot.name);
+        if (waiting) return waiting;
+        log.info({ claimName, volumeSnapshot: snapshot.name }, 'Creating the first instance volume from the volume snapshot');
+        await this.coreApi.createNamespacedPersistentVolumeClaim({ namespace, body: buildSnapshotRecoveryClaim(cluster, template) });
+      } else {
+        log.info({ claimName }, 'Creating the first instance volume for point-in-time recovery');
+        await this.coreApi.createNamespacedPersistentVolumeClaim({
+          namespace,
+          body: {
+            apiVersion: 'v1',
+            kind: 'PersistentVolumeClaim',
+            metadata: { ...template.metadata, name: claimName, namespace },
+            spec: template.spec,
+          },
+        });
+      }
     }
 
-    const jobName = recoveryBootstrapJobName(cluster);
+    const jobName = snapshot ? snapshotRecoveryJobName(cluster) : recoveryBootstrapJobName(cluster);
+    const what = snapshot ? `Restoring the database from VolumeSnapshot ${snapshot.name}` : 'Recovering the database to a point in time';
     let job: V1Job;
     try {
       job = await this.batchApi.readNamespacedJob({ name: jobName, namespace });
     } catch (err) {
       if (!isNotFound(err)) throw err;
-      log.info({ jobName }, 'Starting point-in-time recovery');
-      await this.batchApi.createNamespacedJob({ namespace, body: buildRecoveryBootstrapJob(cluster) });
-      await this.event(cluster, 'Normal', EventReason.RecoveryStarted, `recovering the database to a point in time (Job ${jobName})`);
-      return `Recovering the database to a point in time (Job ${jobName})`;
+      log.info({ jobName }, snapshot ? 'Starting the recovery from the volume snapshot' : 'Starting point-in-time recovery');
+      await this.batchApi.createNamespacedJob({ namespace, body: snapshot ? buildSnapshotRecoveryJob(cluster) : buildRecoveryBootstrapJob(cluster) });
+      await this.event(
+        cluster,
+        'Normal',
+        EventReason.RecoveryStarted,
+        snapshot
+          ? `restoring the database from VolumeSnapshot ${snapshot.name} (Job ${jobName})`
+          : `recovering the database to a point in time (Job ${jobName})`,
+      );
+      return `${what} (Job ${jobName})`;
     }
     switch (jobOutcome(job)) {
       case 'Completed':
-        log.info({ jobName }, 'Point-in-time recovery completed');
+        log.info({ jobName }, snapshot ? 'Recovery from the volume snapshot completed' : 'Point-in-time recovery completed');
         await this.event(cluster, 'Normal', EventReason.RecoveryCompleted, `database recovered by Job ${jobName}; starting the instances`);
         return undefined;
       case 'Failed':
-        throw new Error(`point-in-time recovery Job ${jobName} failed; see its pod logs, then delete the Job to retry`);
+        throw new Error(
+          `${snapshot ? 'volume snapshot recovery' : 'point-in-time recovery'} Job ${jobName} failed; see its pod logs, then delete the Job to retry`,
+        );
       default:
-        return `Recovering the database to a point in time (Job ${jobName})`;
+        return `${what} (Job ${jobName})`;
     }
+  }
+
+  /**
+   * Why the first volume cannot be created from the snapshot yet (missing, not ready, larger than
+   * spec.storage.size), or undefined when it can
+   */
+  private async snapshotNotRestorable(cluster: FirebirdCluster, snapshotName: string): Promise<string | undefined> {
+    const namespace = cluster.metadata.namespace ?? 'default';
+    let snapshot: VolumeSnapshot;
+    try {
+      snapshot = (await this.customApi.getNamespacedCustomObject({
+        group: SNAPSHOT_API_GROUP,
+        version: SNAPSHOT_API_VERSION,
+        namespace,
+        plural: SNAPSHOT_PLURAL,
+        name: snapshotName,
+      })) as VolumeSnapshot;
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+      return `Waiting for VolumeSnapshot ${snapshotName} (not found in namespace ${namespace})`;
+    }
+    if (snapshot.status?.readyToUse !== true) {
+      const error = snapshot.status?.error?.message;
+      return `Waiting for VolumeSnapshot ${snapshotName} to be ready to use${error ? `: ${error}` : ''}`;
+    }
+    const restoreSize = parseQuantity(snapshot.status.restoreSize);
+    const size = parseQuantity(cluster.spec.storage.size);
+    if (restoreSize !== null && size !== null && size < restoreSize) {
+      return `spec.storage.size ${cluster.spec.storage.size} is smaller than the restore size ${snapshot.status.restoreSize} of VolumeSnapshot ${snapshotName}`;
+    }
+    return undefined;
   }
 
   private async reconcileStatefulSet(

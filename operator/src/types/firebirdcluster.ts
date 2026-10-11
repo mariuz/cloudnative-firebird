@@ -317,6 +317,21 @@ export interface BackupRecoveryConfiguration {
   pointInTime?: PointInTimeRecovery;
   /** nbackup level 1 and 2 object keys applied on top of sourcePath (pointInTime only) */
   incrementalPaths?: string[];
+  /**
+   * Bootstrap from a VolumeSnapshot (a volumeSnapshot FirebirdBackup, or any snapshot of an
+   * instance volume taken while its database was locked for backup): the first instance's volume
+   * is created from it and a Job makes its database a normal one again, as of the lock
+   * (utils/volume-snapshot.ts). Mutually exclusive with sourcePath, s3 and pointInTime.
+   */
+  volumeSnapshot?: VolumeSnapshotSource;
+}
+
+/** VolumeSnapshot a new cluster bootstraps from */
+export interface VolumeSnapshotSource {
+  /** Name of the VolumeSnapshot, in the cluster's namespace */
+  name: string;
+  /** Database file name on the snapshot's volume (defaults to this cluster's databaseName) */
+  databaseName?: string;
 }
 
 /**

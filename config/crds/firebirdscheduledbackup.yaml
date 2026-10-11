@@ -50,6 +50,8 @@ spec:
               x-kubernetes-validations:
                 - rule: "!has(self.verify) || !self.verify || !has(self.type) || self.type != 'physical'"
                   message: verify is supported for logical backups only
+                - rule: "!has(self.type) || self.type != 'volumeSnapshot' || (!has(self.s3) && !has(self.level))"
+                  message: a volumeSnapshot backup copies the primary's whole volume (no s3 or level)
               required:
                 - clusterName
                 - schedule
@@ -69,11 +71,38 @@ spec:
                   description: Whether scheduled backup execution is suspended
                   type: boolean
                 type:
-                  description: Backup type ('logical' or 'physical')
+                  description: >-
+                    Backup type: logical (gbak), physical (nbackup) or volumeSnapshot (a VolumeSnapshot of the
+                    primary's volume taken while the database is locked for backup)
                   type: string
                   enum:
                     - logical
                     - physical
+                    - volumeSnapshot
+                volumeSnapshot:
+                  description: VolumeSnapshot settings (type volumeSnapshot)
+                  type: object
+                  properties:
+                    className:
+                      description: VolumeSnapshotClass (the default class when unset)
+                      type: string
+                    labels:
+                      description: Labels added to the VolumeSnapshot
+                      type: object
+                      additionalProperties:
+                        type: string
+                    annotations:
+                      description: Annotations added to the VolumeSnapshot
+                      type: object
+                      additionalProperties:
+                        type: string
+                    lockTimeoutSeconds:
+                      description: >-
+                        How long the database may stay locked for backup while the snapshot is being cut
+                        (default 600); past it the database is unlocked and the backup fails
+                      type: integer
+                      minimum: 30
+                      maximum: 86400
                 level:
                   description: Physical backup level (0, 1, 2)
                   type: integer
@@ -82,7 +111,7 @@ spec:
                 retentionPolicy:
                   description: >-
                     How long scheduled backups are kept: <n>d, <n>w or <n>m (30 days). Enforced for backups
-                    to S3 and server-side backups (expired backups of the schedule are deleted
+                    to S3, server-side backups and volume snapshots (expired backups of the schedule are deleted
                     after each backup, the newest is always kept; an nbackup file stays while a kept backup's chain
                     needs it).
                   type: string
@@ -137,4 +166,7 @@ spec:
                   type: string
                   format: date-time
                 cronJobName:
+                  type: string
+                lastBackupName:
+                  description: The last FirebirdBackup created by the operator (volume snapshots)
                   type: string

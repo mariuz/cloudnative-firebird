@@ -10,8 +10,13 @@ export interface FirebirdBackupSpec {
    * Backup strategy:
    * - 'logical': uses gbak tool (default)
    * - 'physical': uses nbackup tool
+   * - 'volumeSnapshot': a Kubernetes VolumeSnapshot of the primary's volume, taken while the
+   *   database is locked for backup (ALTER DATABASE BEGIN BACKUP); a new cluster bootstraps
+   *   from it with bootstrap.recovery.volumeSnapshot (utils/volume-snapshot.ts)
    */
-  type?: 'logical' | 'physical';
+  type?: FirebirdBackupType;
+  /** VolumeSnapshot settings (type volumeSnapshot) */
+  volumeSnapshot?: VolumeSnapshotConfiguration;
   /**
    * nbackup level (for physical backups):
    * 0: Full physical base backup
@@ -55,8 +60,46 @@ export interface FirebirdBackupStatus {
   instance?: string;
   /** The backup was restored into a scratch database and validated (spec.verify) */
   verified?: boolean;
+  /** The VolumeSnapshot taken (type volumeSnapshot) */
+  volumeSnapshot?: VolumeSnapshotStatus;
   /** Error message if backup failed */
   error?: string;
+}
+
+/** Backup strategies of FirebirdBackup and FirebirdScheduledBackup */
+export type FirebirdBackupType = 'logical' | 'physical' | 'volumeSnapshot';
+
+/** VolumeSnapshot settings of a volumeSnapshot backup */
+export interface VolumeSnapshotConfiguration {
+  /** VolumeSnapshotClass (the cluster's default class when unset) */
+  className?: string;
+  /** Labels added to the VolumeSnapshot */
+  labels?: Record<string, string>;
+  /** Annotations added to the VolumeSnapshot */
+  annotations?: Record<string, string>;
+  /**
+   * How long the database may stay locked for backup while the snapshot is being cut (default
+   * 600): past it, the database is unlocked and the backup fails
+   */
+  lockTimeoutSeconds?: number;
+}
+
+/** The VolumeSnapshot of a volumeSnapshot backup */
+export interface VolumeSnapshotStatus {
+  /** Name of the VolumeSnapshot (the FirebirdBackup's name) */
+  name: string;
+  /** PersistentVolumeClaim it was taken of */
+  claimName: string;
+  /** Time the snapshot was cut (VolumeSnapshot status.creationTime) */
+  creationTime?: string;
+  /** When the database was locked for backup */
+  lockedAt?: string;
+  /** When the database was unlocked again */
+  unlockedAt?: string;
+  /** Size a volume restored from it needs at least (VolumeSnapshot status.restoreSize) */
+  restoreSize?: string;
+  /** The snapshot can be restored from (VolumeSnapshot status.readyToUse) */
+  readyToUse?: boolean;
 }
 
 /**
@@ -73,6 +116,9 @@ export interface FirebirdBackup {
     generation?: number;
     labels?: Record<string, string>;
     annotations?: Record<string, string>;
+    finalizers?: string[];
+    creationTimestamp?: string | Date;
+    deletionTimestamp?: string | Date;
   };
   spec: FirebirdBackupSpec;
   status?: FirebirdBackupStatus;
@@ -175,8 +221,14 @@ export interface FirebirdScheduledBackupSpec {
   schedule: string;
   /** Whether scheduled backup execution is suspended */
   suspend?: boolean;
-  /** Backup strategy ('logical' or 'physical') */
-  type?: 'logical' | 'physical';
+  /**
+   * Backup strategy ('logical', 'physical' or 'volumeSnapshot'). Volume snapshots are taken by
+   * the operator, which creates a FirebirdBackup "<name>-<YYYYMMDDHHMM>" at each scheduled time
+   * (UTC) instead of running a CronJob
+   */
+  type?: FirebirdBackupType;
+  /** VolumeSnapshot settings (type volumeSnapshot) */
+  volumeSnapshot?: VolumeSnapshotConfiguration;
   /** Physical backup level (0, 1, 2) */
   level?: 0 | 1 | 2;
   /**
@@ -208,8 +260,10 @@ export interface FirebirdScheduledBackupStatus {
   lastScheduleTime?: string;
   /** Timestamp when the last backup completed successfully (from the CronJob) */
   lastSuccessfulTime?: string;
-  /** Name of the CronJob running the backups */
+  /** Name of the CronJob running the backups (not for volume snapshots) */
   cronJobName?: string;
+  /** The last FirebirdBackup created by the operator (volume snapshots) */
+  lastBackupName?: string;
 }
 
 /**
@@ -226,6 +280,7 @@ export interface FirebirdScheduledBackup {
     generation?: number;
     labels?: Record<string, string>;
     annotations?: Record<string, string>;
+    creationTimestamp?: string | Date;
   };
   spec: FirebirdScheduledBackupSpec;
   status?: FirebirdScheduledBackupStatus;

@@ -1,0 +1,10 @@
+# expect: a volumeSnapshot backup copies the primary's whole volume
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdBackup
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  type: volumeSnapshot
+  s3:
+    bucket: b

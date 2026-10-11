@@ -5,7 +5,8 @@ import { validateBackupSpec, validateClusterSpec, validateRestoreSpec, validateS
 import { validateUserSpec } from './users';
 import { validateRoleSpec } from './roles';
 import { desiredFencedInstances } from './fencing';
-import { pointInTimeSourceError, restoreTargetDatabase } from './backup';
+import { jobBackupType, pointInTimeSourceError, restoreTargetDatabase } from './backup';
+import { volumeSnapshotRestoreMessage } from './volume-snapshot';
 import { databaseName } from './resources';
 import { AdmissionRequest, AdmissionVerdict, AdmissionValidator } from './webhook';
 import { existingTargetMessage, restoreTargetExists, superuserPasswordFrom } from './restore-target';
@@ -240,7 +241,8 @@ async function restoreRefusal(
     const backup = await lookups.backup(namespace, spec.backupName);
     if (!backup) return `FirebirdBackup ${spec.backupName} not found in namespace ${namespace}`;
     if (backup.status?.phase === 'Failed') return `FirebirdBackup ${spec.backupName} failed`;
-    const type = backup.spec.type ?? 'logical';
+    if (backup.spec.type === 'volumeSnapshot') return volumeSnapshotRestoreMessage(spec.backupName);
+    const type = jobBackupType(backup.spec.type);
     if (spec.restoreType && spec.restoreType !== type) {
       return `restoreType ${spec.restoreType} does not match the ${type} backup ${spec.backupName}`;
     }

@@ -13,6 +13,7 @@ import {
   API_GROUP,
   DEFAULT_FIREBIRD_IMAGE,
   FirebirdBackup,
+  FirebirdBackupType,
   FirebirdCluster,
   FirebirdRestore,
   FirebirdScheduledBackup,
@@ -62,6 +63,12 @@ const WORK_DIR = '/work';
 const TIMESTAMP = '$(date -u +%Y%m%dT%H%M%SZ)';
 
 export type BackupType = 'logical' | 'physical';
+
+/** The strategy of a backup taken by a Job (volume snapshots are taken by the operator itself) */
+export function jobBackupType(type: FirebirdBackupType | undefined): BackupType {
+  if (type === 'volumeSnapshot') throw new Error('volume snapshots are not taken by a backup Job');
+  return type ?? 'logical';
+}
 
 /** A backup source resolved for a restore */
 export interface BackupSource {
@@ -236,7 +243,7 @@ export function serverPath(path: string): string {
   return path.startsWith('/') ? path : `${FIREBIRD_DATA_DIR}/${path}`;
 }
 
-function ownerReference(kind: string, name: string, uid: string | undefined): V1OwnerReference {
+export function ownerReference(kind: string, name: string, uid: string | undefined): V1OwnerReference {
   return {
     apiVersion: `${API_GROUP}/v1`,
     kind,
@@ -523,7 +530,7 @@ export function buildScheduledBackupCronJob(
 ): V1CronJob {
   const { name: sbName, namespace = 'default', uid } = scheduledBackup.metadata;
   const spec = scheduledBackup.spec;
-  const type = spec.type ?? 'logical';
+  const type = jobBackupType(spec.type);
   const labels = { ...clusterLabels(spec.clusterName), 'app.kubernetes.io/component': 'scheduled-backup' };
   return cronJob(
     {
@@ -570,7 +577,7 @@ export function buildBackupJob(backup: FirebirdBackup, cluster: FirebirdCluster,
         metadata: { labels },
         spec: buildBackupPodSpec(cluster, {
           primaryHost: instanceHost(cluster, primaryPod ?? `${clusterName}-0`),
-          type: backup.spec.type ?? 'logical',
+          type: jobBackupType(backup.spec.type),
           level: backup.spec.level,
           fileName: onDemandBackupFileName(backup),
           s3: backup.spec.s3,
@@ -1081,7 +1088,7 @@ export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Contai
   if (!bootstrap?.recovery && !bootstrap?.clone) return [];
   // recovered by a Job before the instances start (buildRecoveryBootstrapJob); a replica cluster
   // too, which keeps its bootstrap after its promotion
-  if (bootstrap.recovery?.pointInTime || cluster.spec.replica) return [];
+  if (bootstrap.recovery?.pointInTime || bootstrap.recovery?.volumeSnapshot || cluster.spec.replica) return [];
 
   const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
   const replicated = replicationEnabled(cluster);

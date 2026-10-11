@@ -1,0 +1,11 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdBackup
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  type: volumeSnapshot
+  volumeSnapshot:
+    className: csi-snapclass
+    lockTimeoutSeconds: 120

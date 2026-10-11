@@ -1,5 +1,25 @@
 import { clusterStoppedReason } from '../utils/major-upgrade';
 import { replicaClusterFollowing } from '../utils/replica-cluster';
+import { latestCronTime } from '../utils/cron';
+import {
+  buildScheduledSnapshotBackup,
+  buildSnapshotLockJob,
+  buildVolumeSnapshot,
+  DEFAULT_LOCK_TIMEOUT_SECONDS,
+  expiredSnapshotBackups,
+  instanceClaimName,
+  labelValue,
+  lockTimedOut,
+  SCHEDULED_BACKUP_LABEL,
+  SNAPSHOT_API_GROUP,
+  SNAPSHOT_API_VERSION,
+  SNAPSHOT_FINALIZER,
+  SNAPSHOT_PLURAL,
+  snapshotLockJobName,
+  snapshotProgress,
+  VolumeSnapshot,
+  volumeSnapshotRestoreMessage,
+} from '../utils/volume-snapshot';
 import {
   BatchV1Api,
   CoordinationV1Api,
@@ -20,6 +40,7 @@ import {
   buildBackupJob,
   buildRestoreJob,
   buildScheduledBackupCronJob,
+  jobBackupType,
   jobOutcome,
   onDemandBackupFileName,
   pointInTimeSourceError,
@@ -39,6 +60,7 @@ import {
   API_VERSION,
   FirebirdCluster,
   FirebirdBackup,
+  FirebirdBackupType,
   FirebirdScheduledBackup,
   FirebirdRestore,
   reconciliationDisabled,
@@ -56,11 +78,23 @@ function jobInstance(job: V1Job): string | undefined {
   return host?.split('.')[0];
 }
 
+/** HTTP status of a Kubernetes API error */
+function statusCode(err: unknown): number | undefined {
+  const e = err as { code?: number; statusCode?: number; response?: { statusCode?: number } };
+  return e?.code ?? e?.statusCode ?? e?.response?.statusCode;
+}
+
 /** Returns true for a Kubernetes API "not found" error */
 function isNotFound(err: unknown): boolean {
-  const e = err as { code?: number; statusCode?: number; response?: { statusCode?: number } };
-  return e?.code === 404 || e?.statusCode === 404 || e?.response?.statusCode === 404;
+  return statusCode(err) === 404;
 }
+
+/** Whether a backup reached a terminal phase */
+function finished(backup: FirebirdBackup): boolean {
+  return backup.status?.phase === 'Completed' || backup.status?.phase === 'Failed';
+}
+
+type Log = typeof logger;
 
 /**
  * Reconciles FirebirdBackup, FirebirdScheduledBackup and FirebirdRestore resources.
@@ -90,13 +124,13 @@ export class FirebirdBackupController {
   /** Instance a backup runs on: the primary, or a replica with target prefer-standby */
   private async backupInstance(
     cluster: FirebirdCluster,
-    spec: { target?: BackupTarget; type?: 'logical' | 'physical'; s3?: S3BackupConfiguration },
+    spec: { target?: BackupTarget; type?: FirebirdBackupType; s3?: S3BackupConfiguration },
   ): Promise<string> {
     const primaryPod = await this.primaryPod(cluster);
     if (spec.target !== 'prefer-standby') return primaryPod;
     const { name, namespace = 'default' } = cluster.metadata;
     const pods = (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items;
-    return chooseBackupInstance({ cluster, primaryPod, pods, ...spec });
+    return chooseBackupInstance({ cluster, primaryPod, pods, target: spec.target, s3: spec.s3, type: jobBackupType(spec.type) });
   }
 
   /** Records a Kubernetes event on a backup or restore */
@@ -166,11 +200,17 @@ export class FirebirdBackupController {
 
     if (backup.status?.phase === 'Completed' || backup.status?.phase === 'Failed') {
       log.debug({ phase: backup.status.phase }, 'FirebirdBackup is already in terminal state');
+      // a volume snapshot backup finished without releasing its finalizer (interrupted)
+      if (backup.metadata.finalizers?.includes(SNAPSHOT_FINALIZER)) await this.ensureSnapshotFinalizer(backup, false);
       return;
     }
 
     try {
       validateBackupSpec(backup);
+      if (backup.spec.type === 'volumeSnapshot') {
+        await this.reconcileSnapshotBackup(backup, log);
+        return;
+      }
       const cluster = await this.getCluster(namespace, backup.spec.clusterName);
       const jobName = `backup-${name}`;
       const fileName = onDemandBackupFileName(backup);
@@ -246,6 +286,10 @@ export class FirebirdBackupController {
     }
 
     validateScheduledBackupSpec(scheduledBackup);
+    if (scheduledBackup.spec.type === 'volumeSnapshot') {
+      await this.reconcileScheduledSnapshots(scheduledBackup, log);
+      return;
+    }
     const cluster = await this.getCluster(namespace, scheduledBackup.spec.clusterName);
     const instance = await this.backupInstance(cluster, scheduledBackup.spec);
     const desired = buildScheduledBackupCronJob(scheduledBackup, cluster, instance, instance !== (await this.primaryPod(cluster)));
@@ -269,6 +313,321 @@ export class FirebirdBackupController {
       cronJobName: cronName,
       lastScheduleTime: iso(current.status?.lastScheduleTime),
       lastSuccessfulTime: iso(current.status?.lastSuccessfulTime),
+    });
+  }
+
+  /**
+   * A volume snapshot backup (utils/volume-snapshot.ts): lock the primary's database, snapshot its
+   * volume, unlock once the snapshot is cut, complete once it is ready to use. The status records
+   * each step (volumeSnapshot.lockedAt, unlockedAt); a reason to fail found while the database is
+   * locked is kept in status.error until it is unlocked.
+   */
+  private async reconcileSnapshotBackup(backup: FirebirdBackup, log: Log): Promise<void> {
+    const { name, namespace = 'default' } = backup.metadata;
+    const status = backup.status ?? {};
+    const snap = status.volumeSnapshot;
+    const deleting = Boolean(backup.metadata.deletionTimestamp);
+    const now = new Date();
+    const startTime = status.startTime ?? now.toISOString();
+    const lockName = snapshotLockJobName(backup, 'lock');
+    const unlockName = snapshotLockJobName(backup, 'unlock');
+
+    let cluster: FirebirdCluster;
+    try {
+      cluster = await this.getCluster(namespace, backup.spec.clusterName);
+    } catch (err) {
+      // nothing left to unlock
+      if (isNotFound(err) && deleting) return this.ensureSnapshotFinalizer(backup, false);
+      throw err;
+    }
+
+    if (!snap) {
+      let lock = await this.readJob(lockName, namespace);
+      if (!lock) {
+        if (deleting) return this.ensureSnapshotFinalizer(backup, false);
+        const stopped =
+          clusterStoppedReason(cluster) ??
+          (replicaClusterFollowing(cluster) ? 'the replica cluster follows its source (read-only) until it is promoted' : undefined);
+        if (stopped) {
+          await this.updateBackupStatus(backup, { phase: 'Pending', error: stopped });
+          return;
+        }
+        const instance = await this.primaryPod(cluster);
+        await this.ensureSnapshotFinalizer(backup, true);
+        log.info({ jobName: lockName, instance }, 'Locking the database for a volume snapshot');
+        lock = await this.batchApi.createNamespacedJob({ namespace, body: buildSnapshotLockJob(backup, cluster, instance, 'lock') });
+        await this.event(
+          backup,
+          'FirebirdBackup',
+          'Normal',
+          EventReason.BackupStarted,
+          `volume snapshot backup of cluster ${backup.spec.clusterName} started: locking the database on ${instance} (Job ${lockName})`,
+        );
+      }
+      const instance = jobInstance(lock) ?? (await this.primaryPod(cluster));
+      const outcome = jobOutcome(lock);
+      if (outcome === 'Failed') {
+        const error = `locking the database on ${instance} failed (Job ${lockName}); see its pod logs`;
+        await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, error);
+        await this.updateBackupStatus(backup, { phase: 'Failed', jobName: lockName, instance, startTime, error });
+        await this.ensureSnapshotFinalizer(backup, false);
+        return;
+      }
+      if (outcome === 'Running') {
+        await this.updateBackupStatus(backup, { phase: 'Running', jobName: lockName, instance, startTime, error: undefined });
+        return;
+      }
+      // locked: the snapshot of the instance's volume
+      const desired = buildVolumeSnapshot(backup, cluster, instance);
+      let error: string | undefined;
+      try {
+        await this.customApi.createNamespacedCustomObject({
+          group: SNAPSHOT_API_GROUP,
+          version: SNAPSHOT_API_VERSION,
+          namespace,
+          plural: SNAPSHOT_PLURAL,
+          body: desired,
+        });
+        log.info({ volumeSnapshot: name, claim: desired.spec.source.persistentVolumeClaimName }, 'VolumeSnapshot created');
+      } catch (err) {
+        if (isNotFound(err)) {
+          error = `the VolumeSnapshot API (${SNAPSHOT_API_GROUP}/${SNAPSHOT_API_VERSION}) is not available: install the CSI snapshot controller and its CRDs`;
+        } else if (statusCode(err) !== 409) {
+          throw err;
+        }
+      }
+      await this.updateBackupStatus(backup, {
+        phase: 'Running',
+        jobName: lockName,
+        instance,
+        startTime,
+        volumeSnapshot: { name, claimName: instanceClaimName(cluster, instance), lockedAt: now.toISOString() },
+        error,
+      });
+      return;
+    }
+
+    const instance = status.instance ?? (await this.primaryPod(cluster));
+    const current = await this.readVolumeSnapshot(snap.name, namespace);
+    const progress = current ? snapshotProgress(current) : undefined;
+    const observed = {
+      ...snap,
+      ...(current?.status?.creationTime ? { creationTime: new Date(current.status.creationTime).toISOString() } : {}),
+      ...(current?.status?.restoreSize ? { restoreSize: current.status.restoreSize } : {}),
+      ...(progress ? { readyToUse: progress.ready } : {}),
+    };
+
+    if (!snap.unlockedAt) {
+      let error = status.error;
+      if (!error) {
+        if (!current) error = `VolumeSnapshot ${snap.name} not found`;
+        else if (progress!.error) error = `VolumeSnapshot ${snap.name} failed: ${progress!.error}`;
+        else if (!progress!.taken && lockTimedOut(backup, snap.lockedAt, now)) {
+          error =
+            `VolumeSnapshot ${snap.name} was not cut within ${backup.spec.volumeSnapshot?.lockTimeoutSeconds ?? DEFAULT_LOCK_TIMEOUT_SECONDS}s ` +
+            '(volumeSnapshot.lockTimeoutSeconds): is its VolumeSnapshotClass and CSI driver working?';
+        } else if (!progress!.taken && deleting) error = 'the FirebirdBackup was deleted before the snapshot was cut';
+      }
+      if (!error && !progress!.taken) {
+        await this.updateBackupStatus(backup, { phase: 'Running', startTime, volumeSnapshot: observed, error: undefined });
+        return;
+      }
+      // a snapshot not cut yet must not be cut from the unlocked volume later
+      if (error && current && !progress!.taken) await this.deleteVolumeSnapshot(snap.name, namespace);
+
+      let unlock = await this.readJob(unlockName, namespace);
+      if (!unlock) {
+        log.info({ jobName: unlockName, instance }, 'Unlocking the database');
+        unlock = await this.batchApi.createNamespacedJob({ namespace, body: buildSnapshotLockJob(backup, cluster, instance, 'unlock') });
+      }
+      const outcome = jobOutcome(unlock);
+      if (outcome === 'Failed') {
+        const message =
+          `unlocking the database on ${instance} failed (Job ${unlockName}): it may still be locked for backup, ` +
+          'its changes going to the delta file; run ALTER DATABASE END BACKUP on it' +
+          (error ? ` (${error})` : '');
+        await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, message);
+        await this.updateBackupStatus(backup, { phase: 'Failed', jobName: unlockName, startTime, volumeSnapshot: observed, error: message });
+        await this.ensureSnapshotFinalizer(backup, false);
+        return;
+      }
+      if (outcome === 'Running') {
+        await this.updateBackupStatus(backup, { phase: 'Running', jobName: unlockName, startTime, volumeSnapshot: observed, error });
+        return;
+      }
+      log.info({ jobName: unlockName, instance }, 'Database unlocked');
+      observed.unlockedAt = now.toISOString();
+      await this.updateBackupStatus(backup, { phase: 'Running', jobName: unlockName, startTime, volumeSnapshot: observed, error });
+      backup.status = { ...status, volumeSnapshot: observed, error };
+    }
+
+    // unlocked: the outcome
+    const error =
+      backup.status?.error ??
+      (!current
+        ? `VolumeSnapshot ${snap.name} not found`
+        : progress!.error
+          ? `VolumeSnapshot ${snap.name} failed: ${progress!.error}`
+          : undefined);
+    if (error) {
+      await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, error);
+      await this.updateBackupStatus(backup, { phase: 'Failed', startTime, volumeSnapshot: observed, error });
+    } else if (progress!.ready) {
+      const location = `VolumeSnapshot ${namespace}/${snap.name}`;
+      log.info({ volumeSnapshot: snap.name, restoreSize: observed.restoreSize }, 'Volume snapshot backup completed');
+      await this.event(
+        backup,
+        'FirebirdBackup',
+        'Normal',
+        EventReason.BackupCompleted,
+        `volume snapshot ${snap.name} of ${snap.claimName} ready${observed.restoreSize ? ` (restore size ${observed.restoreSize})` : ''}`,
+      );
+      await this.updateBackupStatus(backup, {
+        phase: 'Completed',
+        startTime,
+        completionTime: now.toISOString(),
+        location,
+        volumeSnapshot: observed,
+        error: undefined,
+      });
+    } else {
+      await this.updateBackupStatus(backup, { phase: 'Running', startTime, volumeSnapshot: observed, error: undefined });
+    }
+    await this.ensureSnapshotFinalizer(backup, false);
+  }
+
+  /** A VolumeSnapshot, or undefined when it (or the VolumeSnapshot API) does not exist */
+  private async readVolumeSnapshot(name: string, namespace: string): Promise<VolumeSnapshot | undefined> {
+    try {
+      return (await this.customApi.getNamespacedCustomObject({
+        group: SNAPSHOT_API_GROUP,
+        version: SNAPSHOT_API_VERSION,
+        namespace,
+        plural: SNAPSHOT_PLURAL,
+        name,
+      })) as VolumeSnapshot;
+    } catch (err) {
+      if (isNotFound(err)) return undefined;
+      throw err;
+    }
+  }
+
+  private async deleteVolumeSnapshot(name: string, namespace: string): Promise<void> {
+    try {
+      await this.customApi.deleteNamespacedCustomObject({ group: SNAPSHOT_API_GROUP, version: SNAPSHOT_API_VERSION, namespace, plural: SNAPSHOT_PLURAL, name });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+  }
+
+  /**
+   * Adds or removes the finalizer that keeps a FirebirdBackup until the database it locked is
+   * unlocked (read afresh: the status writes before changed its version)
+   */
+  private async ensureSnapshotFinalizer(backup: FirebirdBackup, wanted: boolean): Promise<void> {
+    const { name, namespace = 'default' } = backup.metadata;
+    let fresh: FirebirdBackup;
+    try {
+      fresh = (await this.customApi.getNamespacedCustomObject({
+        group: API_GROUP,
+        version: API_VERSION,
+        namespace,
+        plural: 'firebirdbackups',
+        name,
+      })) as FirebirdBackup;
+    } catch (err) {
+      if (isNotFound(err)) return;
+      throw err;
+    }
+    const finalizers = fresh.metadata.finalizers ?? [];
+    if (finalizers.includes(SNAPSHOT_FINALIZER) === wanted) return;
+    await this.customApi.patchNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: 'firebirdbackups',
+      name,
+      body: [
+        // guards against overwriting finalizers added concurrently by someone else
+        { op: 'test', path: '/metadata/resourceVersion', value: fresh.metadata.resourceVersion },
+        {
+          op: 'add',
+          path: '/metadata/finalizers',
+          value: wanted ? [...finalizers, SNAPSHOT_FINALIZER] : finalizers.filter((f) => f !== SNAPSHOT_FINALIZER),
+        },
+      ],
+    });
+  }
+
+  /**
+   * Scheduled volume snapshots: at each scheduled time (UTC) the operator creates a FirebirdBackup
+   * (skipped while one of the schedule's backups is still running), and deletes the schedule's
+   * backups the retention policy expires, with their VolumeSnapshots
+   */
+  private async reconcileScheduledSnapshots(scheduled: FirebirdScheduledBackup, log: Log): Promise<void> {
+    const { name, namespace = 'default' } = scheduled.metadata;
+    const spec = scheduled.spec;
+    const now = new Date();
+
+    // a CronJob of the schedule from another backup type
+    try {
+      await this.batchApi.deleteNamespacedCronJob({ name: `sched-backup-${name}`, namespace });
+      log.info('Deleted the scheduled backup CronJob: volume snapshots are scheduled by the operator');
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+
+    const list = (await this.customApi.listNamespacedCustomObject({
+      group: API_GROUP,
+      version: API_VERSION,
+      namespace,
+      plural: 'firebirdbackups',
+      labelSelector: `${SCHEDULED_BACKUP_LABEL}=${labelValue(name)}`,
+    })) as { items?: FirebirdBackup[] };
+    const backups = list.items ?? [];
+
+    const status = scheduled.status ?? {};
+    let { lastScheduleTime, lastBackupName } = status;
+    if (!spec.suspend) {
+      const created = scheduled.metadata.creationTimestamp ? new Date(scheduled.metadata.creationTimestamp) : now;
+      const due = latestCronTime(spec.schedule, lastScheduleTime ? new Date(lastScheduleTime) : created, now);
+      if (due) {
+        const running = backups.find((b) => !finished(b));
+        if (running) {
+          log.info({ running: running.metadata.name }, 'Scheduled volume snapshot skipped: the previous one is still running');
+        } else {
+          const body = buildScheduledSnapshotBackup(scheduled, due);
+          try {
+            await this.customApi.createNamespacedCustomObject({ group: API_GROUP, version: API_VERSION, namespace, plural: 'firebirdbackups', body });
+            log.info({ backup: body.metadata.name }, 'Scheduled volume snapshot backup created');
+          } catch (err) {
+            if (statusCode(err) !== 409) throw err;
+          }
+          lastBackupName = body.metadata.name;
+        }
+        lastScheduleTime = due.toISOString();
+      }
+    }
+
+    for (const expired of expiredSnapshotBackups(backups, spec.retentionPolicy, now)) {
+      log.info({ backup: expired.metadata.name }, 'Deleting a volume snapshot backup past the retention policy');
+      await this.deleteVolumeSnapshot(expired.status?.volumeSnapshot?.name ?? expired.metadata.name, namespace);
+      try {
+        await this.customApi.deleteNamespacedCustomObject({ group: API_GROUP, version: API_VERSION, namespace, plural: 'firebirdbackups', name: expired.metadata.name });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+    }
+
+    const successes = backups
+      .map((b) => (b.status?.phase === 'Completed' ? b.status.completionTime : undefined))
+      .filter((t): t is string => Boolean(t))
+      .sort();
+    await this.updateScheduledBackupStatus(scheduled, {
+      cronJobName: undefined,
+      lastScheduleTime,
+      lastBackupName,
+      lastSuccessfulTime: successes.length > 0 ? new Date(successes[successes.length - 1]).toISOString() : status.lastSuccessfulTime,
     });
   }
 
@@ -299,8 +658,9 @@ export class FirebirdBackupController {
     if (backup.status?.phase === 'Failed') {
       throw new ValidationError(`FirebirdBackup ${spec.backupName} failed`);
     }
+    if (backup.spec.type === 'volumeSnapshot') throw new ValidationError(volumeSnapshotRestoreMessage(spec.backupName));
     if (backup.status?.phase !== 'Completed' || !backup.status.backupFileName) return undefined;
-    const type = backup.spec.type ?? 'logical';
+    const type = jobBackupType(backup.spec.type);
     if (spec.restoreType && spec.restoreType !== type) {
       throw new ValidationError(`restoreType ${spec.restoreType} does not match the ${type} backup ${spec.backupName}`);
     }

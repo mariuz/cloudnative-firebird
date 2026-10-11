@@ -39,6 +39,28 @@ rules:
       - get
       - list
       - watch
+  # Volume snapshot backups: the unlock finalizer, and the backups of their schedules (created, and
+  # deleted by the retention policy)
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdbackups
+    verbs:
+      - create
+      - patch
+      - update
+      - delete
+  # VolumeSnapshots of instance volumes (volume snapshot backups, bootstrap from a snapshot)
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
   - apiGroups:
       - firebird.cloudnative-firebird.io
     resources:

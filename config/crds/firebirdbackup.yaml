@@ -50,6 +50,8 @@ spec:
               x-kubernetes-validations:
                 - rule: "!has(self.verify) || !self.verify || !has(self.type) || self.type != 'physical'"
                   message: verify is supported for logical backups only
+                - rule: "!has(self.type) || self.type != 'volumeSnapshot' || (!has(self.s3) && !has(self.level))"
+                  message: a volumeSnapshot backup copies the primary's whole volume (no s3 or level)
               required:
                 - clusterName
               properties:
@@ -61,11 +63,38 @@ spec:
                     - rule: self == oldSelf
                       message: clusterName is immutable
                 type:
-                  description: Backup type ('logical' or 'physical')
+                  description: >-
+                    Backup type: logical (gbak), physical (nbackup) or volumeSnapshot (a VolumeSnapshot of the
+                    primary's volume taken while the database is locked for backup)
                   type: string
                   enum:
                     - logical
                     - physical
+                    - volumeSnapshot
+                volumeSnapshot:
+                  description: VolumeSnapshot settings (type volumeSnapshot)
+                  type: object
+                  properties:
+                    className:
+                      description: VolumeSnapshotClass (the default class when unset)
+                      type: string
+                    labels:
+                      description: Labels added to the VolumeSnapshot
+                      type: object
+                      additionalProperties:
+                        type: string
+                    annotations:
+                      description: Annotations added to the VolumeSnapshot
+                      type: object
+                      additionalProperties:
+                        type: string
+                    lockTimeoutSeconds:
+                      description: >-
+                        How long the database may stay locked for backup while the snapshot is being cut
+                        (default 600); past it the database is unlocked and the backup fails
+                      type: integer
+                      minimum: 30
+                      maximum: 86400
                 level:
                   description: Physical backup level (0, 1, 2)
                   type: integer
@@ -142,5 +171,31 @@ spec:
                   type: string
                 jobName:
                   type: string
+                volumeSnapshot:
+                  description: The VolumeSnapshot taken (type volumeSnapshot)
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    claimName:
+                      description: PersistentVolumeClaim it was taken of
+                      type: string
+                    lockedAt:
+                      description: When the database was locked for backup
+                      type: string
+                      format: date-time
+                    unlockedAt:
+                      description: When the database was unlocked again
+                      type: string
+                      format: date-time
+                    creationTime:
+                      description: When the snapshot was cut
+                      type: string
+                      format: date-time
+                    restoreSize:
+                      description: Size a volume restored from it needs at least
+                      type: string
+                    readyToUse:
+                      type: boolean
                 error:
                   type: string
