@@ -1,5 +1,5 @@
 import { V1Pod } from '@kubernetes/client-node';
-import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdScheduledBackup } from '../types';
+import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdScheduledBackup } from '../types';
 import { isPodReady, ROLE_LABEL } from '../utils/routing';
 
 /**
@@ -9,7 +9,7 @@ import { isPodReady, ROLE_LABEL } from '../utils/routing';
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.93.0';
+export const PLUGIN_VERSION = '0.94.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -28,6 +28,7 @@ export interface PluginApi {
   patchStatefulSet(namespace: string, name: string, patch: object): Promise<void>;
   listBackups(namespace: string): Promise<FirebirdBackup[]>;
   listScheduledBackups(namespace: string): Promise<FirebirdScheduledBackup[]>;
+  listDatabases(namespace: string): Promise<FirebirdDatabase[]>;
   createBackup(namespace: string, body: FirebirdBackup): Promise<void>;
 }
 
@@ -48,7 +49,7 @@ export const USAGE = `kubectl firebird: manage cloudnative-firebird clusters
 Usage: kubectl firebird <command> [arguments] [-n namespace] [--context context]
 
 Commands:
-  status <cluster>                          the cluster, its instances, replication and backups
+  status <cluster>                          the cluster, its instances, replication, databases and backups
   promote <cluster> <instance>              switchover: promote a replica (targetPrimary annotation)
   restart <cluster> [instance]              rolling restart of the cluster (primary last), or restart one instance
   fence on|off <cluster> <instance|all>     fence (database full shutdown) or unfence instances
@@ -167,6 +168,7 @@ export function formatStatus(
   backups: FirebirdBackup[],
   scheduled: FirebirdScheduledBackup[],
   now: Date,
+  databases: FirebirdDatabase[] = [],
 ): string {
   const { name, namespace = 'default' } = cluster.metadata;
   const status = cluster.status ?? {};
@@ -234,6 +236,21 @@ export function formatStatus(
     ]);
   }
   lines.push(rows.length > 1 ? table(rows) : '(no instance pods)');
+
+  const ownDatabases = databases.filter((d) => d.spec.clusterName === name);
+  if (ownDatabases.length > 0) {
+    lines.push('', 'Databases:');
+    const databaseRows = [['NAME', 'PATH', 'PHASE', 'RECLAIM']];
+    for (const d of ownDatabases) {
+      databaseRows.push([
+        d.metadata.name,
+        d.status?.path ?? `/var/lib/firebird/data/${d.spec.databaseName ?? `${d.metadata.name}.fdb`}`,
+        d.status?.phase ?? 'Pending',
+        d.spec.reclaimPolicy ?? 'retain',
+      ]);
+    }
+    lines.push(table(databaseRows));
+  }
 
   const own = backups
     .filter((b) => b.spec.clusterName === name)
@@ -327,12 +344,14 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
       case 'status': {
         const [name] = need(parsed, 1, 'status <cluster>');
         const cluster = await api.getCluster(namespace, name);
-        const [pods, backups, scheduled] = await Promise.all([
+        const [pods, backups, scheduled, databases] = await Promise.all([
           api.listPods(namespace, `${CLUSTER_LABEL}=${name},app.kubernetes.io/component=database`),
           api.listBackups(namespace),
           api.listScheduledBackups(namespace),
+          // an operator without the FirebirdDatabase CRD: no databases
+          api.listDatabases(namespace).catch(() => [] as FirebirdDatabase[]),
         ]);
-        io.out(formatStatus(cluster, pods, backups, scheduled, io.now()));
+        io.out(formatStatus(cluster, pods, backups, scheduled, io.now(), databases));
         return 0;
       }
 

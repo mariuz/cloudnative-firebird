@@ -7,7 +7,7 @@ import {
   PatchStrategy,
   setHeaderOptions,
 } from '@kubernetes/client-node';
-import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdScheduledBackup } from '../types';
+import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdScheduledBackup } from '../types';
 import { PluginApi, run } from './cli';
 
 /**
@@ -52,6 +52,8 @@ function kubeApi(kubeConfig: KubeConfig): PluginApi {
     listScheduledBackups: async (namespace) =>
       ((await custom.listNamespacedCustomObject(crd(namespace, 'firebirdscheduledbackups'))) as { items?: FirebirdScheduledBackup[] })
         .items ?? [],
+    listDatabases: async (namespace) =>
+      ((await custom.listNamespacedCustomObject(crd(namespace, 'firebirddatabases'))) as { items?: FirebirdDatabase[] }).items ?? [],
     createBackup: async (namespace, body) => {
       await custom.createNamespacedCustomObject({ ...crd(namespace, 'firebirdbackups'), body });
     },

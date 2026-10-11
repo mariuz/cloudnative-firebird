@@ -1,6 +1,7 @@
 import { nativeSidecarsSupported, segmentTlsRequired } from './segment-tls-default';
 import { CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Secret } from '@kubernetes/client-node';
-import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdRestore, FirebirdRole, FirebirdUser, RESOURCE_PLURAL } from '../types';
+import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdRole, FirebirdUser, RESOURCE_PLURAL } from '../types';
+import { databaseClusterError, validateDatabaseSpec } from './databases';
 import { validateBackupSpec, validateClusterSpec, validateRestoreSpec, validateScheduledBackupSpec } from './validation';
 import { validateUserSpec } from './users';
 import { validateRoleSpec } from './roles';
@@ -208,6 +209,15 @@ export function createAdmissionValidator(lookups: AdmissionLookups): AdmissionVa
           const role = object as FirebirdRole;
           validateRoleSpec(role);
           await clusterOf(role.spec.clusterName);
+          break;
+        }
+        case 'FirebirdDatabase': {
+          const database = object as FirebirdDatabase;
+          validateDatabaseSpec(database);
+          const cluster = await clusterOf(database.spec.clusterName);
+          // a conflict with another FirebirdDatabase is left to the controller (it lists them)
+          const denied = cluster ? databaseClusterError(database, cluster, []) : undefined;
+          if (denied) return { denied, warnings };
           break;
         }
         default:

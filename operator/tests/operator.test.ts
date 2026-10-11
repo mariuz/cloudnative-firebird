@@ -82,6 +82,11 @@ vi.mock('../src/controllers/role.controller', () => ({
   FirebirdRoleController: vi.fn().mockImplementation(() => ({ reconcileRole: mockReconcileRole })),
 }));
 
+const mockReconcileDatabase = vi.fn().mockResolvedValue(undefined);
+vi.mock('../src/controllers/database.controller', () => ({
+  FirebirdDatabaseController: vi.fn().mockImplementation(() => ({ reconcileDatabase: mockReconcileDatabase })),
+}));
+
 // Mock the health server so no real HTTP port is opened during tests
 const mockHealthStart = vi.fn();
 const mockHealthStop = vi.fn();
@@ -122,7 +127,7 @@ describe('Operator – lifecycle', () => {
       expect(mockHealthStart).toHaveBeenCalledTimes(1);
     });
 
-    it('watches FirebirdCluster, backup, restore and user resources', async () => {
+    it('watches FirebirdCluster, backup, restore, user, role and database resources', async () => {
       const { operator } = makeOperator();
       await operator.start();
       expect(mockWatchFn.mock.calls.map((c) => c[0])).toEqual([
@@ -132,10 +137,11 @@ describe('Operator – lifecycle', () => {
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdrestores',
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdusers',
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdroles',
+        '/apis/firebird.cloudnative-firebird.io/v1/firebirddatabases',
         '/api/v1/pods',
       ]);
       // only instance pods, not Job pods
-      expect(mockWatchFn.mock.calls[6][1]).toEqual({ labelSelector: INSTANCE_POD_WATCH_SELECTOR });
+      expect(mockWatchFn.mock.calls[7][1]).toEqual({ labelSelector: INSTANCE_POD_WATCH_SELECTOR });
     });
 
     it('watches the correct API path for FirebirdCluster resources', async () => {
@@ -170,7 +176,7 @@ describe('Operator – lifecycle', () => {
       const { operator } = makeOperator();
       await operator.start();
       operator.stop();
-      expect(mockWatchAbort).toHaveBeenCalledTimes(7);
+      expect(mockWatchAbort).toHaveBeenCalledTimes(8);
     });
 
     it('marks the operator as not ready', async () => {

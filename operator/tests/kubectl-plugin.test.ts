@@ -54,6 +54,7 @@ describe('kubectl firebird', () => {
       patchStatefulSet: vi.fn().mockResolvedValue(undefined),
       listBackups: vi.fn().mockResolvedValue([]),
       listScheduledBackups: vi.fn().mockResolvedValue([]),
+      listDatabases: vi.fn().mockResolvedValue([]),
       createBackup: vi.fn().mockResolvedValue(undefined),
     };
     out = [];
@@ -123,6 +124,15 @@ describe('kubectl firebird', () => {
       { apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdBackup', metadata: { name: 'other' }, spec: { clusterName: 'elsewhere' } },
     ];
     api.listBackups.mockResolvedValue(backups);
+    api.listDatabases.mockResolvedValue([
+      {
+        apiVersion: 'firebird.cloudnative-firebird.io/v1',
+        kind: 'FirebirdDatabase',
+        metadata: { name: 'sales' },
+        spec: { clusterName: 'db', reclaimPolicy: 'delete' },
+        status: { phase: 'Ready', path: '/var/lib/firebird/data/sales.fdb' },
+      },
+    ]);
     expect(await exec('status', 'db')).toBe(0);
     const text = out.join('\n');
     expect(api.listPods).toHaveBeenCalledWith('prod', 'firebird.cloudnative-firebird.io/cluster=db,app.kubernetes.io/component=database');
@@ -135,7 +145,14 @@ describe('kubectl firebird', () => {
     expect(text).toMatch(/db-2\s+replica \(fenced\)\s+false.*error: segment server unreachable/);
     expect(text).toMatch(/nightly\s+volumeSnapshot\s+Completed\s+1h ago\s+VolumeSnapshot prod\/nightly/);
     expect(text).not.toContain('other');
+    expect(text).toMatch(/sales\s+\/var\/lib\/firebird\/data\/sales\.fdb\s+Ready\s+delete/);
     expect(text).toContain('Ready=True AllReady');
+  });
+
+  it('lists no databases when the CRD is missing', async () => {
+    api.listDatabases.mockRejectedValue(Object.assign(new Error('not found'), { code: 404 }));
+    expect(await exec('status', 'db')).toBe(0);
+    expect(out.join('\n')).not.toContain('Databases:');
   });
 
   it('formats a cluster without replication or pods', () => {

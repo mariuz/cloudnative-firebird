@@ -71,12 +71,13 @@ rules:
       - get
       - update
       - patch
-  # Declarative users (the finalizer is managed on the object itself)
+  # Declarative users and databases (the finalizer is managed on the object itself)
   - apiGroups:
       - firebird.cloudnative-firebird.io
     resources:
       - firebirdusers
       - firebirdroles
+      - firebirddatabases
     verbs:
       - get
       - list
@@ -88,6 +89,7 @@ rules:
     resources:
       - firebirdusers/status
       - firebirdroles/status
+      - firebirddatabases/status
     verbs:
       - get
       - update
