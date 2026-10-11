@@ -98,6 +98,36 @@ describe('replica clusters', () => {
     expect(replicaPromotionToken(replicaCluster())).toMatch(/^replica-cluster-/);
   });
 
+  it("creates the segment TLS Secret before the bootstrap Job, whose proxy sidecar mounts it", async () => {
+    const cluster = replicaCluster({ segmentTLS: { enabled: true } });
+    cluster.status = { phase: 'Creating' };
+    const order: string[] = [];
+    const calls: Record<string, Mock> = {};
+    const overrides: Record<string, Mock> = {
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+      createNamespacedSecret: vi.fn().mockImplementation(async () => { order.push('secret'); return {}; }),
+      createNamespacedJob: vi.fn().mockImplementation(async ({ body }: { body: { metadata: { name: string } } }) => {
+        order.push(`job:${body.metadata.name}`);
+        return {};
+      }),
+    };
+    const fn = (m: string): Mock =>
+      (calls[m] ??=
+        overrides[m] ??
+        (m.startsWith('read') || m.startsWith('get')
+          ? vi.fn().mockRejectedValue(notFoundError)
+          : m.startsWith('list')
+            ? vi.fn().mockResolvedValue({ items: [] })
+            : vi.fn().mockResolvedValue({})));
+    const kubeConfig = new KubeConfig();
+    vi.spyOn(kubeConfig, 'makeApiClient').mockReturnValue(new Proxy({}, { get: (_t, p: string) => fn(p) }) as never);
+    await new FirebirdClusterController(kubeConfig).reconcile(cluster);
+    expect(order).toEqual(['secret', 'job:test-cluster-pitr-recovery']);
+    const job = fn('createNamespacedJob').mock.calls[0][0].body;
+    const mounts = JSON.stringify(job.spec.template.spec.volumes);
+    expect(mounts).toContain('test-cluster-segment-tls');
+  });
+
   describe('in the controller', () => {
     const readyPod = (uid: string): V1Pod => ({
       // created from the StatefulSet's current revision: no rolling update

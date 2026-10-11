@@ -1581,7 +1581,8 @@ jobs:
                 s3: { bucket: dr, prefix: src-backups, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }
           EOF
           timeout 600 bash -c 'until kubectl get pod dr-0 >/dev/null 2>&1; do
-            [ -n "$(kubectl get job dr-pitr-recovery -o jsonpath="{.status.failed}" 2>/dev/null)" ] && { kubectl logs job/dr-pitr-recovery --all-containers; exit 1; }; sleep 5; done'
+            [ -n "$(kubectl get job dr-pitr-recovery -o jsonpath="{.status.failed}" 2>/dev/null)" ] && { kubectl logs job/dr-pitr-recovery --all-containers; exit 1; }; sleep 5; done' \
+            || { kubectl describe pod -l job-name=dr-pitr-recovery | tail -40; kubectl logs job/dr-pitr-recovery --all-containers --tail=30 || true; exit 1; }
           kubectl logs job/dr-pitr-recovery -c firebird-restore | tail -5
           kubectl wait pod/dr-0 --for=condition=Ready --timeout=300s
           kubectl get pod dr-0 -o jsonpath='{.spec.containers[*].name}' | grep -q archive-follower

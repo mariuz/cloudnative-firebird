@@ -374,6 +374,9 @@ export class FirebirdClusterController {
           if (!isNotFound(err)) throw err; // already gone
         }
       }
+      // segment TLS: the certificates exist (and are renewed) before pods mount them, the
+      // point-in-time recovery Job's pod included (its proxy sidecar mounts them too)
+      if (segmentTlsEnabled(cluster)) await ensureSegmentTlsSecret(this.coreApi, cluster);
       // a point-in-time bootstrap prepares the first volume before the StatefulSet exists
       const recovering = await this.reconcileRecoveryBootstrap(cluster, log);
       if (recovering) {
@@ -393,8 +396,6 @@ export class FirebirdClusterController {
       const readRouting = await this.reconcileReadRouting(cluster, primaryPod, log);
       await this.reconcileHeadlessService(cluster, log);
       await this.reconcileService(cluster, log);
-      // segment TLS: the certificates exist (and are renewed) before pods mount them
-      if (segmentTlsEnabled(cluster)) await ensureSegmentTlsSecret(this.coreApi, cluster);
       // before the StatefulSet: an instance restarted into the new mode reads it when it starts
       await reconcileSegmentTlsPeers(this.coreApi, cluster);
       const { readyInstances, superuserSecretHash, statefulSetExisted, statefulSet } =
