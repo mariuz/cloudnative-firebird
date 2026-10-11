@@ -724,6 +724,29 @@ spec:
                   items:
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
+                podAntiAffinity:
+                  description: Anti-affinity among the cluster's instance pods (on by default for new clusters, preferred on kubernetes.io/hostname)
+                  type: object
+                  properties:
+                    enabled:
+                      description: Unset, on for clusters created since v0.90.0 (the pod-anti-affinity annotation) and off before
+                      type: boolean
+                    type:
+                      description: preferred (default) lets instances share a node when no other fits; required leaves them pending instead
+                      type: string
+                      enum:
+                        - preferred
+                        - required
+                    topologyKey:
+                      description: Node label whose values the instances spread over (default kubernetes.io/hostname)
+                      type: string
+                      minLength: 1
+                topologySpreadConstraints:
+                  description: Topology spread constraints of the instance pods; one without a labelSelector selects the cluster's instance pods
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
                 runAsFirebirdUser:
                   description: >-
                     Run every instance container as the image's firebird user (uid 84) with no

@@ -19,6 +19,14 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     throw new ValidationError('FirebirdCluster spec is required');
   }
 
+  const antiAffinity = spec.podAntiAffinity;
+  if (antiAffinity?.type !== undefined && !['preferred', 'required'].includes(antiAffinity.type)) {
+    throw new ValidationError(`Invalid podAntiAffinity.type "${antiAffinity.type}": preferred or required`);
+  }
+  if (antiAffinity?.topologyKey !== undefined && antiAffinity.topologyKey.trim() === '') {
+    throw new ValidationError('podAntiAffinity.topologyKey must not be empty');
+  }
+
   const managedSettings = Object.keys(spec.config?.settings ?? {}).filter((k) => k.toLowerCase() === 'securitydatabase');
   if (managedSettings.length > 0) {
     throw new ValidationError(

@@ -19,7 +19,7 @@ const makeCluster = (status?: FirebirdCluster['status'], failover: object = { en
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
   kind: 'FirebirdCluster',
   // as the controller's first reconcile recorded it for a cluster that existed before v0.87.0
-  metadata: { name: 'db', namespace: 'default', uid: 'c', annotations: { 'firebird.cloudnative-firebird.io/primary-lease': 'pinned' } },
+  metadata: { name: 'db', namespace: 'default', uid: 'c', annotations: { 'firebird.cloudnative-firebird.io/primary-lease': 'pinned', 'firebird.cloudnative-firebird.io/pod-anti-affinity': 'pinned' } },
   spec: { instances: 3, storage: { size: '1Gi' }, segmentTLS: { enabled: false }, replication: { enabled: true, failover } },
   ...(status ? { status } : {}),
 });

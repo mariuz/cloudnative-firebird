@@ -1,3 +1,4 @@
+import { instanceAffinity, instanceTopologySpreadConstraints } from './scheduling';
 import { withSegmentTls } from './segment-tls-pods';
 import { withPrimaryLease } from './primary-lease';
 import { createHash } from 'crypto';
@@ -460,8 +461,11 @@ export function buildStatefulSet(
           securityContext: instancePodSecurityContext(cluster),
           ...(initContainers.length > 0 ? { initContainers: initContainers.map(secured) } : {}),
           ...(spec.nodeSelector ? { nodeSelector: spec.nodeSelector } : {}),
-          ...(spec.affinity ? { affinity: spec.affinity } : {}),
+          ...(instanceAffinity(cluster) ? { affinity: instanceAffinity(cluster) } : {}),
           ...(spec.tolerations ? { tolerations: spec.tolerations } : {}),
+          ...(instanceTopologySpreadConstraints(cluster)
+            ? { topologySpreadConstraints: instanceTopologySpreadConstraints(cluster) }
+            : {}),
           containers: containers.map(secured),
           ...(volumes.length > 0 ? { volumes } : {}),
         }, superuserClientEnv(cluster)), true),
@@ -663,9 +667,11 @@ export function statefulSetNeedsUpdate(
   const securityContexts = (spec: V1PodSpec) =>
     JSON.stringify([...(spec.initContainers ?? []), ...(spec.containers ?? [])].map((c) => c.securityContext ?? {}));
   if (securityContexts(existingPodSpec) !== securityContexts(desiredPodSpec)) return true;
-  if (JSON.stringify(existingPodSpec.nodeSelector) !== JSON.stringify(desiredPodSpec.nodeSelector)) return true;
-  if (JSON.stringify(existingPodSpec.affinity) !== JSON.stringify(desiredPodSpec.affinity)) return true;
-  if (JSON.stringify(existingPodSpec.tolerations) !== JSON.stringify(desiredPodSpec.tolerations)) return true;
+  // scheduling: the API server returns objects with its own key order
+  if (canonicalJson(existingPodSpec.nodeSelector) !== canonicalJson(desiredPodSpec.nodeSelector)) return true;
+  if (canonicalJson(existingPodSpec.affinity) !== canonicalJson(desiredPodSpec.affinity)) return true;
+  if (canonicalJson(existingPodSpec.tolerations) !== canonicalJson(desiredPodSpec.tolerations)) return true;
+  if (canonicalJson(existingPodSpec.topologySpreadConstraints) !== canonicalJson(desiredPodSpec.topologySpreadConstraints)) return true;
 
   const names = (list?: Array<{ name: string }>) => (list ?? []).map((c) => c.name).join(',');
   if (names(existingPodSpec.containers) !== names(desiredPodSpec.containers)) return true;
@@ -703,6 +709,51 @@ export const FIREBIRD_UID = 84;
  * FOWNER). Everything else is dropped.
  */
 export const INSTANCE_CAPABILITIES = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER'];
+
+const plainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/**
+ * `desired` with null for every key `existing` has and `desired` lacks, at every object level
+ * (arrays are replaced whole): a JSON merge patch only removes keys sent as null
+ */
+export function withRemovals(existing: unknown, desired: unknown): unknown {
+  if (!plainObject(existing) || !plainObject(desired)) return desired;
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(desired)) result[key] = withRemovals(existing[key], value);
+  for (const key of Object.keys(existing)) if (!(key in desired)) result[key] = null;
+  return result;
+}
+
+/** Scheduling fields of the instance pod template a StatefulSet update replaces rather than merges */
+const SCHEDULING_FIELDS = ['affinity', 'nodeSelector', 'tolerations', 'topologySpreadConstraints'] as const;
+
+/**
+ * The StatefulSet merge patch body: the scheduling fields of the pod template as desired, with what
+ * the existing template has beyond them removed (e.g. a required anti-affinity turned preferred)
+ */
+export function statefulSetPatchBody(existing: V1StatefulSet, desired: V1StatefulSet): V1StatefulSet {
+  const existingPod = existing.spec?.template?.spec;
+  const desiredPod = desired.spec?.template?.spec;
+  if (!existingPod || !desiredPod || !desired.spec) return desired;
+  const pod: Record<string, unknown> = { ...desiredPod };
+  for (const field of SCHEDULING_FIELDS) {
+    if (desiredPod[field] === undefined) {
+      if (existingPod[field] !== undefined) pod[field] = null;
+    } else {
+      pod[field] = withRemovals(existingPod[field], desiredPod[field]);
+    }
+  }
+  return { ...desired, spec: { ...desired.spec, template: { ...desired.spec.template, spec: pod as unknown as V1PodSpec } } };
+}
+
+/** JSON with object keys sorted at every level, to compare objects whatever their key order */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    v && typeof v === 'object' && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)))
+      : v,
+  );
+}
 
 /** Pod security context of the instance pods: defaults, overridden by spec.podSecurityContext */
 export function instancePodSecurityContext(cluster: FirebirdCluster): V1PodSecurityContext {

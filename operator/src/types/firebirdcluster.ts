@@ -396,6 +396,24 @@ export interface FirebirdClusterSpec {
   /** Node taint tolerations */
   tolerations?: Array<object>;
   /**
+   * Anti-affinity among the cluster's instance pods (utils/scheduling.ts; CloudNativePG
+   * affinity.enablePodAntiAffinity): on by default for new clusters, "preferred" on
+   * kubernetes.io/hostname
+   */
+  podAntiAffinity?: {
+    /** Unset: on for clusters created since v0.90.0 (the pod-anti-affinity annotation), off before */
+    enabled?: boolean;
+    /** "preferred" (default): instances may share a node when no other fits; "required": they stay pending instead */
+    type?: 'preferred' | 'required';
+    /** Node label whose values the instances spread over (default kubernetes.io/hostname) */
+    topologyKey?: string;
+  };
+  /**
+   * Topology spread constraints of the instance pods (Kubernetes TopologySpreadConstraint); one
+   * without a labelSelector selects the cluster's instance pods
+   */
+  topologySpreadConstraints?: Array<object>;
+  /**
    * Existing ServiceAccount for the instance pods and every Job of the cluster (backups,
    * restores, journal archiving, maintenance), e.g. for S3 access through workload identity
    * instead of static keys (CloudNativePG 1.29 serviceAccountName). Defaults to the namespace's
