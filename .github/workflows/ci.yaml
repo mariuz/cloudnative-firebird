@@ -114,6 +114,20 @@ jobs:
           kubectl rollout status deployment/cloudnative-firebird-operator \
             -n cloudnative-firebird-system --timeout=120s
 
+      - name: Install the CSI snapshot controller and the hostpath CSI driver
+        if: matrix.track.id == 'extended'
+        run: |
+          # kind's default storage cannot snapshot (volume snapshot backups). The driver runs privileged
+          # in the default namespace (its manifests name it): installed before the baseline enforcement,
+          # which does not evict running pods
+          git clone -q --depth 1 --branch v8.6.0 https://github.com/kubernetes-csi/external-snapshotter /tmp/external-snapshotter
+          git clone -q --depth 1 --branch v1.18.0 https://github.com/kubernetes-csi/csi-driver-host-path /tmp/csi-driver-host-path
+          kubectl apply -k /tmp/external-snapshotter/client/config/crd
+          kubectl apply -k /tmp/external-snapshotter/deploy/kubernetes/snapshot-controller
+          kubectl -n kube-system rollout status deployment/snapshot-controller --timeout=180s
+          /tmp/csi-driver-host-path/deploy/kubernetes-latest/deploy.sh > /tmp/csi-deploy.log 2>&1 || { tail -60 /tmp/csi-deploy.log; exit 1; }
+          kubectl apply -f /tmp/csi-driver-host-path/examples/csi-storageclass.yaml -f /tmp/csi-driver-host-path/examples/csi-volumesnapshotclass.yaml
+
       - name: Enforce the baseline Pod Security Standard
         run: |
           # every instance pod and Job created from here on must pass baseline admission
@@ -1611,14 +1625,9 @@ jobs:
       - name: Verify volume snapshot backups and a cluster bootstrapped from one
         if: matrix.track.id == 'extended'
         run: |
-          # kind's default storage cannot snapshot: the CSI snapshot controller and the hostpath CSI driver
-          git clone -q --depth 1 --branch v8.6.0 https://github.com/kubernetes-csi/external-snapshotter /tmp/external-snapshotter
-          git clone -q --depth 1 --branch v1.18.0 https://github.com/kubernetes-csi/csi-driver-host-path /tmp/csi-driver-host-path
-          kubectl apply -k /tmp/external-snapshotter/client/config/crd
-          kubectl apply -k /tmp/external-snapshotter/deploy/kubernetes/snapshot-controller
-          kubectl -n kube-system rollout status deployment/snapshot-controller --timeout=180s
-          /tmp/csi-driver-host-path/deploy/kubernetes-latest/deploy.sh > /tmp/csi-deploy.log 2>&1 || { tail -40 /tmp/csi-deploy.log; exit 1; }
-          kubectl apply -f /tmp/csi-driver-host-path/examples/csi-storageclass.yaml -f /tmp/csi-driver-host-path/examples/csi-volumesnapshotclass.yaml
+          # the CSI snapshot controller and the hostpath CSI driver were installed before the baseline enforcement
+          kubectl get storageclass csi-hostpath-sc
+          kubectl get volumesnapshotclass csi-hostpath-snapclass
           DB=/var/lib/firebird/data/mydb.fdb
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB"; }
           rows() { sql "$1" "select 'rows=' || count(*) from snap_t;" | sed -n 's/.*rows=\([0-9]*\).*/\1/p'; }
