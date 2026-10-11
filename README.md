@@ -21,6 +21,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Planned switchover** with the `targetPrimary` annotation: no data loss, the other replicas continue without re-seeding
 - **Rolling updates with the primary last** (`primaryUpdateStrategy` / `primaryUpdateMethod`, as in CloudNativePG): replicas are restarted one at a time, then the primary is restarted or switched over
 - **Replica re-seeding** with a pod annotation (CloudNativePG `unrecoverable`)
+- **kubectl plugin** (`kubectl firebird`): status, switchover, restart, fencing, hibernation, re-seeding, backups and `isql`
 - **Instance fencing** via the `fencedInstances` annotation (CloudNativePG format): the database is shut down, the pod keeps running
 - **Lag-aware read-only routing** to replicas via the `<name>-replica` Service (`spec.replication.readOnlyRouting`)
 - **Secret-based** SYSDBA password management
@@ -198,6 +199,39 @@ Connect to the database (port-forward for local testing):
 ```bash
 kubectl port-forward svc/my-firebird-cluster 3050:3050
 ```
+
+### kubectl Plugin (v0.93.0)
+
+`kubectl firebird` is a kubectl plugin for cluster status and day-2 actions, like CloudNativePG's
+`kubectl cnpg`. It edits the same annotations and fields described below; the operator does the
+work. It uses kubectl's kubeconfig and current context, or `-n` and `--context`.
+
+Install it from a checkout. It needs Node.js 22; `npm link` puts `kubectl-firebird` on the PATH,
+where kubectl finds it:
+
+```bash
+cd operator && npm ci && npm run build && npm link
+kubectl plugin list | grep firebird
+```
+
+| Command | What it does |
+|---|---|
+| `kubectl firebird status my-cluster` | Shows the phase, the primary, the replication settings, any switchover, replica cluster or upgrade, and the fenced instances. Lists every instance with its role, readiness, node, last applied segment and lag, then the latest backups, the backup schedules and any conditions that are not met. |
+| `kubectl firebird promote my-cluster 2` | Planned switchover to `my-cluster-2` (the `targetPrimary` annotation). |
+| `kubectl firebird restart my-cluster [instance]` | Rolling restart with the primary last (`kubectl.kubernetes.io/restartedAt` on the pod template), or deletes one instance's pod. |
+| `kubectl firebird fence on\|off my-cluster 1\|all` | Edits the `fencedInstances` annotation. Lifting one instance out of `all` keeps the others fenced. |
+| `kubectl firebird hibernate on\|off my-cluster` | Sets `spec.hibernated`. |
+| `kubectl firebird reseed my-cluster 1` | Re-seeds a replica (the `reseed` pod annotation). The primary is refused. |
+| `kubectl firebird backup my-cluster [--type logical\|physical\|volumeSnapshot] [--level n] [--snapshot-class c] [--name n]` | Creates a `FirebirdBackup`, to the cluster's `backup.s3` when it has one. |
+| `kubectl firebird isql my-cluster [--replica\|--instance 1] [-- isql args]` | Runs `isql` in the `firebird` container (`kubectl exec`; `-it` from a terminal, so a script can be piped in) as SYSDBA, through the container's credentials. |
+
+An instance is named by its pod name or its ordinal. Wrong arguments exit with 2 and API errors
+with 1, showing the API server's message.
+
+**Testing.** Unit tests cover the argument parsing, the status report, every command and its
+refusals. The kind CI puts the plugin on the PATH, reads the status of the replicated cluster,
+runs `isql` on its primary and a replica, takes a backup, and fences and unfences a replica
+through it.
 
 ## FirebirdCluster CRD Reference
 
@@ -1541,6 +1575,7 @@ cloudnative-firebird/
 │   │   ├── controllers/    # FirebirdCluster and backup/restore controllers
 │   │   ├── replication/    # Scripts shipped to instance pods (replication, journal archive)
 │   │   ├── utils/          # Resource builders, logger
+│   │   ├── plugin/         # kubectl-firebird, the kubectl plugin
 │   │   ├── operator.ts     # Watch/event loop
 │   │   └── index.ts        # Entrypoint
 │   ├── tests/              # Unit tests (Vitest)

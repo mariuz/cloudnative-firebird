@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.92.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.93.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,12 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **kubectl Plugin** *(v0.93.0; CloudNativePG's kubectl cnpg)*
+  - `kubectl firebird` (`operator/src/plugin`, the `kubectl-firebird` bin of the operator package) covers:
+    - `status`: the phase, primary, replication, any switchover, replica cluster or upgrade, fenced instances, each instance's role, readiness, node and lag, the latest backups, the schedules and any unmet conditions;
+    - `promote` (the `targetPrimary` annotation), `restart` (a rolling restart through the pod template, or one pod), `fence on|off` (the `fencedInstances` annotation), `hibernate on|off`, `reseed` (the pod annotation, never the primary);
+    - `backup` (a `FirebirdBackup` of any type), and `isql` on the primary, a replica or an instance through `kubectl exec`.
+  - Unit tests cover the parsing, the status report and every command; the kind CI runs the plugin against the replicated cluster (status, isql on the primary and a replica, a backup, fencing a replica and lifting it).
 - [x] **Volume Snapshot Backups** *(v0.92.0; CloudNativePG's volumeSnapshot backup method and bootstrap from volume snapshots)*
   - `FirebirdBackup` `type: volumeSnapshot`: a Job locks the primary's database for backup (`ALTER DATABASE BEGIN BACKUP`), the operator snapshots the primary's volume (`volumeSnapshot.className`, labels, annotations) and unlocks once the snapshot is cut; the backup completes when it is ready to use (`status.volumeSnapshot`). A failed snapshot, or one not cut within `lockTimeoutSeconds`, fails the backup after unlocking; a finalizer keeps a backup deleted mid-way until the unlock.
   - `FirebirdScheduledBackup` `type: volumeSnapshot`: the operator creates the backups at the scheduled times (UTC, its own cron evaluation) and applies `retentionPolicy`, deleting the expired backups with their VolumeSnapshots.
@@ -460,6 +466,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | `targetPrimary` annotation | **v0.13.0 (Done)** |
 | **Pod Anti-Affinity / Spread** | `affinity.enablePodAntiAffinity`, `topologySpreadConstraints` | `podAntiAffinity` (on for new clusters), `topologySpreadConstraints` | **v0.90.0 (Done)** |
+| **kubectl Plugin** | `kubectl cnpg` (status, promote, restart, fencing, hibernate, backup, psql) | `kubectl firebird` (status, promote, restart, fence, hibernate, reseed, backup, isql) | **v0.93.0 (Done)** |
 | **Volume Snapshots** | `method: volumeSnapshot` backups, bootstrap from `volumeSnapshots` | `type: volumeSnapshot` (online, nbackup lock), scheduled with retention, `bootstrap.recovery.volumeSnapshot` | **v0.92.0 (Done)** |
 | **Replica Clusters** | `replica` with `source` (object store or streaming) | `replica` following the source's journal archive in S3, promotion | **v0.91.0 (Done)** |
 | **Major Version Upgrade** | Offline `pg_upgrade` | Image check, offline `gbak` conversion per volume | **v0.89.0 (Done)** |
