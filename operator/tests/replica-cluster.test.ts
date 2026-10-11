@@ -57,7 +57,7 @@ describe('replica clusters', () => {
       SOURCE_DIR: '/var/lib/firebird/data/replication/source',
       REPLICATION_DIR: '/var/lib/firebird/data/replication',
       JOURNALS: 's3://dr/prod/journals/',
-      AWS: "aws --endpoint-url 'http://s3:9000'",
+      S3_ENDPOINT: 'http://s3:9000',
       POLL_SECONDS: '10',
     });
     const names = (c: FirebirdCluster) => buildStatefulSet(c).spec!.template.spec!.containers.map((x) => x.name);

@@ -19,14 +19,15 @@
 # - writes its state to $REPLICATION_DIR/follow.state, one line the segment server returns for
 #   FOLLOW: "applied=<n> archived=<n>" plus " restart=<U>" or " error=<message>".
 #
-# Environment: SOURCE_DIR, REPLICATION_DIR, JOURNALS (s3://bucket/prefix/journals/), AWS (the aws
-# command, with --endpoint-url when set), POLL_SECONDS, BATCH.
+# Environment: SOURCE_DIR, REPLICATION_DIR, JOURNALS (s3://bucket/prefix/journals/), S3_ENDPOINT
+# (optional), POLL_SECONDS, BATCH.
 set -u
 POLL=${POLL_SECONDS:-30}
 BATCH=${BATCH:-20}
 STATE="$REPLICATION_DIR/follow.state"
 W=$(mktemp -d)
 
+aws_s3() { if [ -n "${S3_ENDPOINT:-}" ]; then aws --endpoint-url "$S3_ENDPOINT" s3 "$@"; else aws s3 "$@"; fi; }
 report() { printf '%s\n' "$1" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"; }
 position() { # <control file>: "<applied> <offset>"
   printf '%s %s\n' "$(od -An -tu8 -j16 -N8 "$1" | tr -d ' ')" "$(od -An -tu4 -j24 -N4 "$1" | tr -d ' ')"
@@ -43,7 +44,7 @@ while :; do
   set -- $(position "$ctl")
   applied=${1:-0}
   offset=${2:-0}
-  if ! $AWS s3 ls "$JOURNALS" > "$W/listing" 2> "$W/ls.err"; then
+  if ! aws_s3 ls "$JOURNALS" > "$W/listing" 2> "$W/ls.err"; then
     # an empty prefix lists nothing and fails: an archive with no segment yet
     if [ -s "$W/ls.err" ]; then
       report "applied=$applied archived=0 error=listing $JOURNALS failed: $(tr '\n' ' ' < "$W/ls.err" | cut -c1-300)"
@@ -90,7 +91,7 @@ while :; do
     awk -v a="$applied" -v l="$limit" '$1 > a && $1 <= l { print $2 }' "$W/segments" | head -n "$BATCH" > "$W/wanted"
     while read -r name; do
       [ -f "$SOURCE_DIR/$name" ] && continue
-      if $AWS s3 cp --only-show-errors "$JOURNALS$name" "$SOURCE_DIR/.$name.tmp" 2> "$W/cp.err"; then
+      if aws_s3 cp --only-show-errors "$JOURNALS$name" "$SOURCE_DIR/.$name.tmp" 2> "$W/cp.err"; then
         chmod 644 "$SOURCE_DIR/.$name.tmp"
         mv "$SOURCE_DIR/.$name.tmp" "$SOURCE_DIR/$name"
       else

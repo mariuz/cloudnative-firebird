@@ -1,6 +1,6 @@
 import { V1Container } from '@kubernetes/client-node';
 import { FirebirdCluster } from '../types';
-import { awsCommand, s3ClientEnv, s3ClientImage, s3Uri } from './backup';
+import { s3ClientEnv, s3ClientImage, s3Uri } from './backup';
 import { FIREBIRD_DATA_DIR } from './resources';
 import { replicationDirectories, UPGRADE_SCRIPTS } from './replication';
 
@@ -46,7 +46,7 @@ export function buildArchiveFollowerContainer(cluster: FirebirdCluster): V1Conta
       { name: 'SOURCE_DIR', value: dirs.source },
       { name: 'REPLICATION_DIR', value: dirs.base },
       { name: 'JOURNALS', value: s3Uri(replica.journalS3, 'journals/') },
-      { name: 'AWS', value: awsCommand(replica.journalS3) },
+      ...(replica.journalS3.endpoint ? [{ name: 'S3_ENDPOINT', value: replica.journalS3.endpoint }] : []),
       { name: 'POLL_SECONDS', value: String(replica.pollIntervalSeconds ?? DEFAULT_FOLLOW_POLL_SECONDS) },
       // the aws CLI may write a cache under HOME, whatever user the container runs as
       { name: 'HOME', value: '/tmp' },
