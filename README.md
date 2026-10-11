@@ -1207,6 +1207,62 @@ instances are seeded from it. A failed Job leaves the cluster `Degraded`; delete
 `journalS3` is required here and must not be the new cluster's own `journalArchiveS3` (it would
 archive its segments over the ones it recovers from); more than one instance needs replication.
 
+### Replica Clusters (v0.91.0)
+
+A replica cluster follows another cluster, its source, through the source's journal archive in
+S3, as CloudNativePG's replica clusters do: for disaster recovery in another namespace, region or
+Kubernetes cluster, with nothing connecting to the source itself. Its instance is a read-only
+replica of the source database until it is promoted.
+
+```yaml
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: my-cluster-dr
+spec:
+  instances: 1                      # one instance while it follows; scale it after the promotion
+  replication: { enabled: true }
+  replica:
+    enabled: true                   # false promotes it
+    pollIntervalSeconds: 30         # default
+    journalS3: { bucket: firebird-backups, prefix: my-cluster, secretRef: { name: s3-credentials } }  # the source's journalArchiveS3
+  bootstrap:
+    recovery:                       # the source's nbackup chain in S3 (no pointInTime)
+      sourcePath: nbackup-l0-weekly-20261001T000000Z.nbk
+      incrementalPaths: [nbackup-l1-daily-20261004T000000Z.nbk]
+      s3: { bucket: firebird-backups, prefix: my-cluster, secretRef: { name: s3-credentials } }
+```
+
+- **Bootstrap.** The point-in-time recovery Job (`<cluster>-pitr-recovery`) restores the chain
+  and replays every archived segment after it, across the source's failovers, but leaves the
+  database a read-only replica, with its replica control file in the instance's journal source
+  directory. The source's journal archive must hold the backup's segment already (its journal
+  archive Job runs after the backup); a Job that fails is retried by deleting it.
+- **Following.** An `archive-follower` sidecar (the S3 client image) looks at the archive every
+  `pollIntervalSeconds` and downloads the segments after the replica's position, which the
+  Firebird replica server applies. `status.replicaCluster` shows the last segment applied and the
+  last one archived (`appliedSegment`, `archivedSegment`, from the segment server's `FOLLOW`).
+- **Failovers of the source.** A lineage marker in the archive (the replica the source promoted at
+  segment P continued after segment U) stops the follower at P; once P is applied the operator
+  restarts the instance, whose init container moves the position after U (transactions still open
+  at P are rolled back: they never committed in the new lineage) and the follower continues with
+  the new primary's segments (`ReplicaClusterRepositioning`). A replica that applied segments of
+  the lost primary after P cannot follow the new lineage (as with PostgreSQL timelines): it is
+  reported (`ReplicaClusterFollowFailed`) and needs a new bootstrap.
+- **Promotion.** `replica.enabled: false` promotes the instance once (`ReplicaClusterPromoting`,
+  `ReplicaClusterPromoted`, phase `Promoted`): the operator lists the switchover's promote
+  directive for it and restarts it, and the replication init container makes the database a
+  primary of its own, its journal continuing after the source's last segment it applied, with a
+  new offline seed for replicas. The follower sidecar goes; scale the cluster up from there. Keep
+  `spec.replica` (disabled) after the promotion: it records that the cluster was bootstrapped
+  as a replica. Its own `replication.journalArchiveS3` must not be the source's.
+
+While it follows, the database refuses writes: `FirebirdRole` and restores into it wait until the
+promotion, and roles and grants come from the source. Users (`FirebirdUser`) are applied: the
+security database of the instance is its own. The kind CI runs an S3 server in the cluster
+(`rclone serve s3`), takes a base backup of a source cluster, bootstraps a replica cluster from it
+and its archive, checks that a later change arrives and that writes are refused, and promotes it.
+
 ### Users
 
 Firebird users live in the **security database**, which the official image keeps on the container
@@ -1358,7 +1414,7 @@ The operator records Kubernetes events on its resources (CloudNativePG 1.29 / 1.
 
 | Resource | Reasons |
 |---|---|
-| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`, `PodAntiAffinityDefaulted`, `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ImageCheckStarted`, `ImageChecked`, `ImageRefused` (warning); `MajorUpgradeStarted`, `MajorUpgradeConverting`, `MajorUpgradeStarting`, `MajorUpgradeCompleted`, `MajorUpgradeFailed` (warning), `MajorUpgradeAbandoned`; `ReconcileFailed` (warning) |
+| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`, `PodAntiAffinityDefaulted`, `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReplicaClusterRepositioning`, `ReplicaClusterFollowFailed` (warning), `ReplicaClusterPromoting`, `ReplicaClusterPromoted`; `ImageCheckStarted`, `ImageChecked`, `ImageRefused` (warning); `MajorUpgradeStarted`, `MajorUpgradeConverting`, `MajorUpgradeStarting`, `MajorUpgradeCompleted`, `MajorUpgradeFailed` (warning), `MajorUpgradeAbandoned`; `ReconcileFailed` (warning) |
 | `FirebirdBackup` | `BackupStarted`, `BackupCompleted`, `BackupFailed` (warning) |
 | `FirebirdRestore` | `RestoreStarted`, `RestoreCompleted`, `RestoreFailed` (warning) |
 | `FirebirdUser` | `UserApplied`, `UserFailed` (warning), `UserDropped` |

@@ -40,6 +40,31 @@ export interface ResourceRequirements {
 /**
  * S3 cloud object storage configuration for database backups.
  */
+/** A replica cluster's source (spec.replica) */
+export interface ReplicaClusterConfiguration {
+  /** true: follow the source; false: promote this cluster to a primary of its own (once) */
+  enabled: boolean;
+  /** The source cluster's journal archive (its replication.journalArchiveS3) */
+  journalS3: S3BackupConfiguration;
+  /** Seconds between two looks at the archive (default 30) */
+  pollIntervalSeconds?: number;
+}
+
+/** A replica cluster's state (status.replicaCluster) */
+export interface ReplicaClusterStatus {
+  /** Following the source, being promoted, or promoted */
+  phase: 'Following' | 'Promoting' | 'Promoted';
+  /** The source's last segment the replica applied */
+  appliedSegment?: number;
+  /** The last segment in the source's journal archive */
+  archivedSegment?: number;
+  /** The follower's last problem, or what happens */
+  message?: string;
+  /** The instance pod being restarted to promote it */
+  promotingPodUid?: string;
+  promotionTime?: string;
+}
+
 export interface S3BackupConfiguration {
   /** S3 Endpoint URL (e.g., "https://s3.us-east-1.amazonaws.com" or MinIO endpoint) */
   endpoint?: string;
@@ -359,6 +384,12 @@ export interface FirebirdClusterSpec {
    */
   segmentTLS?: { enabled?: boolean };
   replication?: ReplicationConfiguration;
+  /**
+   * Replica cluster (CloudNativePG replica clusters): the cluster follows another cluster's
+   * journal archive in S3 as a read-only replica, for disaster recovery in another namespace or
+   * Kubernetes cluster; enabled: false promotes it (utils/replica-cluster.ts)
+   */
+  replica?: ReplicaClusterConfiguration;
   /** AutoSweep configuration for periodic gfix database sweeping */
   autoSweep?: AutoSweepConfiguration;
   /** Diagnostics configuration for online database integrity checks */
@@ -580,6 +611,8 @@ export interface FirebirdClusterStatus {
   imageCheck?: ImageCheckStatus;
   /** Major version upgrade in progress, or the last one (utils/major-upgrade.ts) */
   majorUpgrade?: MajorUpgradeStatus;
+  /** Replica cluster (spec.replica): following the source, or promoted */
+  replicaCluster?: ReplicaClusterStatus;
 }
 
 /** Progress of a rolling update of the instance pods */

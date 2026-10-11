@@ -68,9 +68,9 @@ export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.from
   ),
 );
 
-/** Scripts of the image check and major upgrade Jobs (utils/major-upgrade.ts), inlined into the Jobs */
+/** Scripts inlined into containers: the image check and major upgrade Jobs, the archive follower */
 export const UPGRADE_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
-  ['image-check.sh', 'major-upgrade.sh'].map((name) => [name, readScript(name)]),
+  ['image-check.sh', 'major-upgrade.sh', 'archive-follower.sh'].map((name) => [name, readScript(name)]),
 );
 
 /**

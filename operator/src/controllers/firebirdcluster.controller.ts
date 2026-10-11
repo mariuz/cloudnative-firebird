@@ -21,6 +21,7 @@ import {
 } from '../utils/primary-lease';
 import { superuserPasswordFrom } from '../utils/restore-target';
 import { POD_ANTI_AFFINITY_ANNOTATION } from '../utils/scheduling';
+import { parseFollowState, replicaClusterFollowing, replicaPromotionToken } from '../utils/replica-cluster';
 import {
   buildImageCheckJob,
   buildMajorUpgradeJob,
@@ -171,6 +172,7 @@ import {
   DEFAULT_FIREBIRD_IMAGE,
   ImageCheckStatus,
   MajorUpgradeStatus,
+  ReplicaClusterStatus,
   ReplicaLagStatus,
   VolumeRecreationStatus,
   SegmentRetentionStatus,
@@ -348,6 +350,9 @@ export class FirebirdClusterController {
 
       const switchover = await this.reconcileSwitchover(cluster, await this.resolvePrimaryPod(cluster, log), log);
       const primaryPod = switchover.primaryPod;
+      // a replica cluster: its follower's state, a restart across a failover of the source, the
+      // promotion (the promote directive and the restart go with the switchover's)
+      const replicaCluster = await this.reconcileReplicaCluster(cluster, primaryPod, switchover, log);
       // the synchronous standby is detached before it is re-seeded: it must never receive the
       // journal and the primary's synchronous changes together
       const syncHold = switchover.synchronous?.primary === primaryPod ? synchronousMembers(switchover.synchronous) : [];
@@ -369,6 +374,9 @@ export class FirebirdClusterController {
           if (!isNotFound(err)) throw err; // already gone
         }
       }
+      // segment TLS: the certificates exist (and are renewed) before pods mount them, the
+      // point-in-time recovery Job's pod included (its proxy sidecar mounts them too)
+      if (segmentTlsEnabled(cluster)) await ensureSegmentTlsSecret(this.coreApi, cluster);
       // a point-in-time bootstrap prepares the first volume before the StatefulSet exists
       const recovering = await this.reconcileRecoveryBootstrap(cluster, log);
       if (recovering) {
@@ -388,8 +396,6 @@ export class FirebirdClusterController {
       const readRouting = await this.reconcileReadRouting(cluster, primaryPod, log);
       await this.reconcileHeadlessService(cluster, log);
       await this.reconcileService(cluster, log);
-      // segment TLS: the certificates exist (and are renewed) before pods mount them
-      if (segmentTlsEnabled(cluster)) await ensureSegmentTlsSecret(this.coreApi, cluster);
       // before the StatefulSet: an instance restarted into the new mode reads it when it starts
       await reconcileSegmentTlsPeers(this.coreApi, cluster);
       const { readyInstances, superuserSecretHash, statefulSetExisted, statefulSet } =
@@ -528,6 +534,7 @@ export class FirebirdClusterController {
         reseedingInstances: Object.keys(reseed.requests).sort(),
         recreatingVolumes,
         rollingUpdate,
+        ...(replicaCluster ? { replicaCluster } : {}),
         ...(switchover.status ? { switchover: switchover.status } : {}),
         primaryNotReadySince: switchover.primaryNotReadySince,
         synchronous,
@@ -871,6 +878,87 @@ export class FirebirdClusterController {
       upgrading: `Major upgrade to ${upgrade.to}: starting the instances on the new image (replicas are seeded again)${pending}`,
       conditions: [],
     };
+  }
+
+  /**
+   * A replica cluster (utils/replica-cluster.ts): while it follows its source, the archive
+   * follower's state (segment server FOLLOW) and a restart when it asks for one (a failover in the
+   * source); once replica.enabled is false, the promotion of its instance: the promote directive,
+   * applied offline by the replication init container, and the restart. Returns the status to keep.
+   */
+  private async reconcileReplicaCluster(
+    cluster: FirebirdCluster,
+    primaryPod: string,
+    switchover: SwitchoverResult,
+    log: Logger,
+  ): Promise<ReplicaClusterStatus | undefined> {
+    const namespace = cluster.metadata.namespace ?? 'default';
+    const stored = cluster.status?.replicaCluster;
+    // not a replica cluster, or promoted already
+    if (!replicaClusterFollowing(cluster) && (!stored || stored.phase === 'Promoted')) return stored;
+    let pod: V1Pod | undefined;
+    try {
+      pod = await this.coreApi.readNamespacedPod({ name: primaryPod, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+
+    if (replicaClusterFollowing(cluster)) {
+      const following: ReplicaClusterStatus = { ...(stored ?? {}), phase: 'Following' };
+      if (!pod || !isPodReady(pod) || pod.metadata?.deletionTimestamp) return following;
+      const token = await this.superuserPassword(cluster);
+      if (token === undefined) return following;
+      const host = `${instanceHost(cluster, primaryPod)}.${namespace}.svc`;
+      let reply: string | undefined;
+      try {
+        reply = (await this.segmentClient(host, SEGMENT_PORT, `${token} FOLLOW`))[0];
+      } catch (err) {
+        log.debug({ err }, 'Cannot read the archive follower state');
+        return following;
+      }
+      const state = parseFollowState(reply);
+      if (!state) return following;
+      let message = state.error;
+      if (state.restart !== undefined) {
+        message = `the source failed over: restarting ${primaryPod} to continue after its archive's segment ${state.restart}`;
+        log.info({ pod: primaryPod, after: state.restart }, 'Replica cluster: restarting to follow the source after its failover');
+        await this.event(cluster, 'Normal', EventReason.ReplicaClusterRepositioning, message);
+        switchover.restart.push(primaryPod);
+      } else if (state.error && stored?.message !== state.error) {
+        log.warn({ error: state.error }, 'Replica cluster: the archive follower reports a problem');
+        await this.event(cluster, 'Warning', EventReason.ReplicaClusterFollowFailed, state.error);
+      }
+      return {
+        phase: 'Following',
+        appliedSegment: state.applied,
+        archivedSegment: state.archived,
+        ...(message ? { message } : {}),
+      };
+    }
+
+    // promoted once, a cluster that followed its source (replica.enabled false, or spec.replica
+    // removed); the directive stays listed while it is being promoted
+    if (!stored || stored.phase === 'Promoted') return stored;
+    switchover.promote[primaryPod] = replicaPromotionToken(cluster);
+    if (stored.phase === 'Following') {
+      const message = `promoting ${primaryPod}: the database becomes a primary of its own, its journal continuing after the source's segment ${stored.appliedSegment ?? 0}`;
+      log.info({ pod: primaryPod }, 'Replica cluster: promoting the instance');
+      await this.event(cluster, 'Normal', EventReason.ReplicaClusterPromoting, message);
+      switchover.restart.push(primaryPod);
+      const promoting: ReplicaClusterStatus = { ...stored, phase: 'Promoting', message };
+      if (pod?.metadata?.uid) promoting.promotingPodUid = pod.metadata.uid;
+      await this.persistStatus(cluster, { replicaCluster: promoting });
+      return promoting;
+    }
+    if (pod && pod.metadata?.uid !== stored.promotingPodUid && isPodReady(pod)) {
+      const message = `${primaryPod} promoted: the cluster no longer follows its source`;
+      log.info({ pod: primaryPod }, 'Replica cluster: promoted');
+      await this.event(cluster, 'Normal', EventReason.ReplicaClusterPromoted, message);
+      const { promotingPodUid: _done, ...rest } = stored;
+      void _done;
+      return { ...rest, phase: 'Promoted', message, promotionTime: new Date().toISOString() };
+    }
+    return stored;
   }
 
   /** Reconcile the headless service used by the StatefulSet */
@@ -1777,7 +1865,8 @@ export class FirebirdClusterController {
    * status message while the recovery runs, undefined once the StatefulSet may be created.
    */
   private async reconcileRecoveryBootstrap(cluster: FirebirdCluster, log: Logger): Promise<string | undefined> {
-    if (!cluster.spec.bootstrap?.recovery?.pointInTime) return undefined;
+    // a replica cluster is bootstrapped by the same Job, which keeps the database a replica
+    if (!cluster.spec.bootstrap?.recovery?.pointInTime && !replicaClusterFollowing(cluster)) return undefined;
     const { name, namespace = 'default' } = cluster.metadata;
     try {
       await this.appsApi.readNamespacedStatefulSet({ name, namespace });

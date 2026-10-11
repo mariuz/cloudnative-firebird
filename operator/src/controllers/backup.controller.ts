@@ -1,4 +1,5 @@
 import { clusterStoppedReason } from '../utils/major-upgrade';
+import { replicaClusterFollowing } from '../utils/replica-cluster';
 import {
   BatchV1Api,
   CoordinationV1Api,
@@ -348,8 +349,12 @@ export class FirebirdBackupController {
         }
         const pitrError = pointInTimeSourceError(restore, cluster, source);
         if (pitrError) throw new ValidationError(pitrError);
-        if (clusterStoppedReason(cluster)) {
-          await this.updateRestoreStatus(restore, { ...base, phase: 'Pending', error: clusterStoppedReason(cluster) });
+        if (clusterStoppedReason(cluster) || replicaClusterFollowing(cluster)) {
+          await this.updateRestoreStatus(restore, {
+            ...base,
+            phase: 'Pending',
+            error: clusterStoppedReason(cluster) ?? 'the replica cluster follows its source (read-only) until it is promoted',
+          });
           return;
         }
         const primary = await this.primaryPod(cluster);

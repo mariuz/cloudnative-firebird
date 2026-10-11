@@ -1,4 +1,5 @@
 import { clusterStoppedReason } from '../utils/major-upgrade';
+import { replicaClusterFollowing } from '../utils/replica-cluster';
 import { BatchV1Api, CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Job } from '@kubernetes/client-node';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { logger } from '../utils/logger';
@@ -100,8 +101,11 @@ export class FirebirdRoleController {
       await this.updateStatus(role, { phase: 'Pending', message: `FirebirdCluster ${role.spec.clusterName} not found` });
       return;
     }
-    if (clusterStoppedReason(cluster)) {
-      await this.updateStatus(role, { phase: 'Pending', message: clusterStoppedReason(cluster) });
+    if (clusterStoppedReason(cluster) || replicaClusterFollowing(cluster)) {
+      await this.updateStatus(role, {
+        phase: 'Pending',
+        message: clusterStoppedReason(cluster) ?? 'the replica cluster follows its source: roles come from the source until it is promoted',
+      });
       return;
     }
 

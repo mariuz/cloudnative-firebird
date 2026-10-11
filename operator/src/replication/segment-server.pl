@@ -935,6 +935,11 @@ while (1) {
     # replica: seconds since the segment puller last reached the primary, and which one
     my ($at, $host) = slurp("$base/primary-seen") =~ /^(\d+) (\S+)$/;
     print $client defined $at ? "OK " . (time - $at) . " $host\n" : "OK never\n";
+  } elsif ($cmd eq 'FOLLOW') {
+    # replica cluster: the archive follower's last state (archive-follower.sh)
+    my $state = slurp("$base/follow.state");
+    $state =~ s/\s+$// if defined $state;
+    print $client defined $state && length $state ? "OK $state\n" : "OK none\n";
   } elsif ($cmd eq 'VERSION') {
     my $version = live_value(q{RDB$GET_CONTEXT('SYSTEM', 'ENGINE_VERSION')});
     print $client defined $version && $version =~ /^[\d.]+$/ ? "OK $version\n" : "ERR cannot read the engine version\n";
