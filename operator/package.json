@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Cloud Native Kubernetes Operator for Firebird Database",
   "main": "dist/index.js",
+  "bin": {
+    "kubectl-firebird": "dist/plugin/kubectl-firebird.js"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
