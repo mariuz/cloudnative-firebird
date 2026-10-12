@@ -84,3 +84,17 @@ export function clusterImage(cluster: FirebirdCluster): string {
   if (cluster.spec.imageCatalogRef && cluster.status?.image) return cluster.status.image;
   return DEFAULT_FIREBIRD_IMAGE;
 }
+
+/**
+ * The key of a catalog (kind, namespace for FirebirdImageCatalog, name), as the operator's catalog
+ * watches record catalogs and clusters reference them
+ */
+export function catalogKey(kind: string, namespace: string | undefined, name: string): string {
+  return kind === CLUSTER_IMAGE_CATALOG_KIND ? `${kind}//${name}` : `${kind}/${namespace ?? 'default'}/${name}`;
+}
+
+/** The key of the catalog a cluster references, if it references one */
+export function referencedCatalogKey(cluster: FirebirdCluster): string | undefined {
+  const ref = cluster.spec?.imageCatalogRef;
+  return ref ? catalogKey(catalogKind(ref), cluster.metadata.namespace, ref.name) : undefined;
+}
