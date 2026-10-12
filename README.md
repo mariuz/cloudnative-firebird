@@ -1518,7 +1518,7 @@ Service over every instance.
 
 | Service | Selects |
 |---|---|
-| `<name>` | the primary with `replication.readOnlyRouting`, every instance otherwise |
+| `<name>` | the primary with replication, every instance otherwise |
 | `<name>-replica` | the read-routable replicas, every instance without routing (with replication) |
 | `<name>-headless` | every instance, for the instances' DNS names |
 
@@ -1544,8 +1544,8 @@ spec:
 
 **Selectors.**
 - `rw` selects the primary, `ro` the replicas, `r` every instance.
-- With replication, the operator keeps the instances' `role` label up to date for `rw` and `ro`,
-  even without read-only routing.
+- With replication, the operator keeps the instances' `role` label up to date for `<name>`, `rw`
+  and `ro`, even without read-only routing.
 - With routing, `ro` takes the read-routable replicas, as `<name>-replica` does. `ro` needs
   replication.
 - Without replication, `rw` selects every instance (each is a primary of its own).
@@ -1734,10 +1734,12 @@ the count of the previous one for ten minutes, like client-go's event recorder.
 
 ### Read-Only Traffic Routing
 
-With `spec.replication.readOnlyRouting.enabled: true` the operator labels every pod with
-`firebird.cloudnative-firebird.io/role` (`primary` / `replica`) and
-`firebird.cloudnative-firebird.io/read-routable`. The primary Service selects only the
-primary pod, and the `<name>-replica` Service selects only ready replicas whose replication
+With replication the operator labels every pod with `firebird.cloudnative-firebird.io/role`
+(`primary` / `replica`), and the primary Service (`<name>`) selects only the primary pod
+(since v0.97.0; before, without read-only routing, it selected every instance and could send a
+write to a read-only replica). With `spec.replication.readOnlyRouting.enabled: true` the pods
+are also labelled `firebird.cloudnative-firebird.io/read-routable`, and the `<name>-replica`
+Service selects only ready replicas whose replication
 lag is within `maxLagSeconds` (default 30). Lag is read from the
 `firebird.cloudnative-firebird.io/replication-lag-seconds` pod annotation, which the operator
 publishes from its own measurement (see Replication Lag); replicas without a lag report are routed

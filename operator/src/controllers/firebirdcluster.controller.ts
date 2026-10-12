@@ -1894,7 +1894,7 @@ export class FirebirdClusterController {
   ): Promise<ReadRoutingResult | undefined> {
     if (!cluster.spec.replication?.enabled || cluster.spec.hibernated) return undefined;
     if (!readOnlyRoutingEnabled(cluster)) {
-      // the role label only, for the managed Services ("rw", "ro"; utils/managed-services.ts)
+      // the role label only, for <name> and the managed Services ("rw", "ro"; utils/managed-services.ts)
       await this.reconcileRoleLabels(cluster, primaryPod, log);
       return undefined;
     }
