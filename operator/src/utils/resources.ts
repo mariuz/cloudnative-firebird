@@ -241,11 +241,12 @@ export function readOnlyRoutingEnabled(cluster: FirebirdCluster): boolean {
 
 /**
  * Returns the pod selector for the primary (read-write) Service.
- * With read-only routing enabled, only the pod labelled as primary receives write traffic.
+ * With replication, only the pod labelled as primary receives traffic (the operator keeps the
+ * role label with or without read-only routing); without it every instance is a primary.
  */
 export function primaryServiceSelector(cluster: FirebirdCluster): Record<string, string> {
   const labels = clusterLabels(cluster.metadata.name);
-  return readOnlyRoutingEnabled(cluster) ? { ...labels, [ROLE_LABEL]: 'primary' } : labels;
+  return cluster.spec.replication?.enabled ? { ...labels, [ROLE_LABEL]: 'primary' } : labels;
 }
 
 /**

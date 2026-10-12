@@ -1928,7 +1928,10 @@ jobs:
           timeout 120 bash -c "until [ \"\$(kubectl get endpointslices -l kubernetes.io/service-name=svc-rw -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].targetRef.name}')\" = $primary ]; do sleep 3; done" \
             || { kubectl get pods -l firebird.cloudnative-firebird.io/cluster=svc --show-labels; kubectl get endpointslices -l kubernetes.io/service-name=svc-rw -o yaml; exit 1; }
           timeout 120 bash -c 'until [ "$(kubectl get endpointslices -l kubernetes.io/service-name=svc-all -o jsonpath="{.items[*].endpoints[?(@.conditions.ready==true)].targetRef.name}" | wc -w)" = 2 ]; do sleep 3; done'
-          echo "svc-rw: $(endpoints svc-rw); svc-all: $(endpoints svc-all)"
+          # the default <name> Service: the primary only too (replication without read-only routing)
+          timeout 120 bash -c "until [ \"\$(kubectl get endpointslices -l kubernetes.io/service-name=svc -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].targetRef.name}')\" = $primary ]; do sleep 3; done" \
+            || { kubectl get service svc -o yaml; kubectl get endpointslices -l kubernetes.io/service-name=svc -o yaml; exit 1; }
+          echo "svc: $(endpoints svc); svc-rw: $(endpoints svc-rw); svc-all: $(endpoints svc-all)"
           [ "$(kubectl get service svc-rw -o jsonpath={.spec.type})" = NodePort ]
           [ "$(kubectl get service svc-rw -o jsonpath='{.metadata.annotations.example\.com/tier}')" = gold ]
           if kubectl get service svc-replica >/dev/null 2>&1; then echo "the disabled replica Service exists"; exit 1; fi

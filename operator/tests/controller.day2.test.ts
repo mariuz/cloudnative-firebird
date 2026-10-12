@@ -258,7 +258,7 @@ describe('FirebirdClusterController – smart read-only routing', () => {
     expect(patched).toEqual(['test-cluster', 'test-cluster-replica']);
   });
 
-  it('leaves pods and selectors untouched when routing is disabled', async () => {
+  it('points only the primary Service at the role label when routing is disabled', async () => {
     const { kubeConfig, api } = makeMockKubeConfig({
       readNamespacedService: vi.fn().mockResolvedValue({ spec: { selector: clusterLabels('test-cluster') } }),
     });
@@ -267,7 +267,18 @@ describe('FirebirdClusterController – smart read-only routing', () => {
       makeCluster({ instances: 2, replication: { enabled: true } }),
     );
 
-    // pods are listed for replication seed sources, but never relabelled
+    // <name> takes the primary (the replicas are read-only); <name>-replica keeps every instance
+    const patched = api('patchNamespacedService').mock.calls.map((c) => [c[0].name, c[0].body[0].value]);
+    expect(patched).toEqual([['test-cluster', { ...clusterLabels('test-cluster'), [ROLE_LABEL]: 'primary' }]]);
+  });
+
+  it('leaves the selectors of a cluster without replication untouched', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig({
+      readNamespacedService: vi.fn().mockResolvedValue({ spec: { selector: clusterLabels('test-cluster') } }),
+    });
+
+    await new FirebirdClusterController(kubeConfig).reconcile(makeCluster({ instances: 1 }));
+
     expect(api('patchNamespacedPod')).not.toHaveBeenCalled();
     expect(api('patchNamespacedService')).not.toHaveBeenCalled();
   });
