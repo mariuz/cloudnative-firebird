@@ -53,6 +53,7 @@ import {
   V1MicroTime,
   V1Pod,
   V1PodTemplateSpec,
+  V1Service,
   V1StatefulSet,
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
@@ -66,6 +67,13 @@ import {
   jobOutcome,
   recoveryBootstrapJobName,
 } from '../utils/backup';
+import {
+  buildManagedService,
+  MANAGED_SERVICE_LABEL,
+  managedServiceDiffers,
+  ownedByCluster,
+  replicaServiceDisabled,
+} from '../utils/managed-services';
 import {
   catalogKind,
   catalogPlural,
@@ -161,7 +169,7 @@ import {
   instancePodSelector,
   instancePods,
 } from '../utils/resources';
-import { REPLICATION_LAG_ANNOTATION, computeReadRouting, isPodReady, podRoutingLabelPatch } from '../utils/routing';
+import { REPLICATION_LAG_ANNOTATION, ROLE_LABEL, computeReadRouting, isPodReady, podRoutingLabelPatch } from '../utils/routing';
 import {
   SegmentClient,
   computeLag,
@@ -453,6 +461,7 @@ export class FirebirdClusterController {
       if (cluster.spec.replication?.enabled) {
         await this.reconcileReplicaService(cluster, log);
       }
+      await this.reconcileManagedServices(cluster, log);
 
       await this.reconcileJournalArchiveCronJob(cluster, primaryPod, log);
       const journalArchiveSequence = await this.journalArchiveSequence(cluster, switchover.journalArchiveSequence);
@@ -1025,6 +1034,7 @@ export class FirebirdClusterController {
       return;
     }
     await this.reconcileServiceSelector(name, namespace, existing?.spec?.selector, primaryServiceSelector(cluster), log);
+    await this.reconcileServiceSettings(existing, desired, log);
   }
 
   /** Reconcile the read-replica service for replication-enabled clusters */
@@ -1040,6 +1050,7 @@ export class FirebirdClusterController {
     try {
       existing = await this.coreApi.readNamespacedService({ name: replicaName, namespace });
     } catch {
+      if (replicaServiceDisabled(cluster)) return;
       log.info('Creating replica service');
       await this.coreApi.createNamespacedService({
         namespace,
@@ -1047,7 +1058,101 @@ export class FirebirdClusterController {
       });
       return;
     }
+    if (replicaServiceDisabled(cluster)) {
+      // spec.managed.services.disabledDefaultServices: [ro]
+      if (ownedByCluster(existing, cluster)) {
+        log.info({ service: replicaName }, 'Deleting the replica service (disabledDefaultServices)');
+        await this.coreApi.deleteNamespacedService({ name: replicaName, namespace });
+      }
+      return;
+    }
     await this.reconcileServiceSelector(replicaName, namespace, existing?.spec?.selector, replicaServiceSelector(cluster), log);
+    await this.reconcileServiceSettings(existing, desired, log);
+  }
+
+  /**
+   * A default Service follows spec.serviceType and spec.serviceAnnotations after it was created
+   * (annotations others added are kept)
+   */
+  private async reconcileServiceSettings(existing: V1Service, desired: V1Service, log: Logger): Promise<void> {
+    const name = existing.metadata?.name ?? desired.metadata!.name!;
+    const namespace = existing.metadata?.namespace ?? desired.metadata?.namespace ?? 'default';
+    const annotations = desired.metadata?.annotations ?? {};
+    const missing = Object.entries(annotations).filter(([k, v]) => existing.metadata?.annotations?.[k] !== v);
+    const type = desired.spec?.type ?? 'ClusterIP';
+    if ((existing.spec?.type ?? 'ClusterIP') === type && missing.length === 0) return;
+    log.info({ service: name, type }, 'Updating service type and annotations');
+    await this.coreApi.patchNamespacedService(
+      { name, namespace, body: { metadata: { annotations: Object.fromEntries(missing) }, spec: { type } } },
+      MERGE_PATCH,
+    );
+  }
+
+  /**
+   * The managed Services (spec.managed.services.additional, utils/managed-services.ts): created,
+   * updated by their updateStrategy, and deleted once they are no longer listed
+   */
+  private async reconcileManagedServices(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    const namespace = cluster.metadata.namespace ?? 'default';
+    const wanted = cluster.spec.managed?.services?.additional ?? [];
+    for (const managed of wanted) {
+      const desired = buildManagedService(cluster, managed);
+      const serviceName = desired.metadata!.name!;
+      let existing: V1Service | undefined;
+      try {
+        existing = await this.coreApi.readNamespacedService({ name: serviceName, namespace });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+      if (!existing) {
+        log.info({ service: serviceName, selectorType: managed.selectorType }, 'Creating managed service');
+        await this.coreApi.createNamespacedService({ namespace, body: desired });
+        continue;
+      }
+      if (!ownedByCluster(existing, cluster)) {
+        await this.event(cluster, 'Warning', EventReason.ManagedServiceConflict, `Service ${serviceName} exists and is not this cluster's: left as it is`);
+        continue;
+      }
+      if (!managedServiceDiffers(existing, desired)) continue;
+      if (managed.updateStrategy === 'replace') {
+        log.info({ service: serviceName }, 'Replacing managed service');
+        await this.coreApi.deleteNamespacedService({ name: serviceName, namespace });
+        await this.coreApi.createNamespacedService({ namespace, body: desired });
+      } else {
+        log.info({ service: serviceName }, 'Updating managed service');
+        await this.coreApi.patchNamespacedService({ name: serviceName, namespace, body: desired }, MERGE_PATCH);
+      }
+    }
+    // the ones created earlier and no longer listed (status.managedServices)
+    const names = wanted.map((m) => m.serviceTemplate.metadata.name).sort();
+    for (const serviceName of (cluster.status?.managedServices ?? []).filter((n) => !names.includes(n))) {
+      let service: V1Service | undefined;
+      try {
+        service = await this.coreApi.readNamespacedService({ name: serviceName, namespace });
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+      }
+      if (!service || !ownedByCluster(service, cluster) || !service.metadata?.labels?.[MANAGED_SERVICE_LABEL]) continue;
+      log.info({ service: serviceName }, 'Deleting managed service no longer listed');
+      await this.coreApi.deleteNamespacedService({ name: serviceName, namespace });
+    }
+    // in place: recorded with the reconcile's status write
+    if (JSON.stringify(cluster.status?.managedServices ?? []) !== JSON.stringify(names)) {
+      Object.assign((cluster.status ??= {}), { managedServices: names.length > 0 ? names : undefined });
+    }
+  }
+
+  /** The role label of each instance pod (primary or replica), without read-only routing */
+  private async reconcileRoleLabels(cluster: FirebirdCluster, primaryPod: string, log: Logger): Promise<void> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    const pods = instancePods((await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items, name);
+    for (const pod of pods) {
+      const podName = pod.metadata!.name!;
+      const role = podName === primaryPod ? 'primary' : 'replica';
+      if (pod.metadata?.labels?.[ROLE_LABEL] === role) continue;
+      log.info({ pod: podName, role }, 'Updating pod role label');
+      await this.coreApi.patchNamespacedPod({ name: podName, namespace, body: { metadata: { labels: { [ROLE_LABEL]: role } } } }, MERGE_PATCH);
+    }
   }
 
   /** Patch a Service selector when it drifts from the desired routing selector */
@@ -1787,7 +1892,12 @@ export class FirebirdClusterController {
     primaryPod: string,
     log: Logger,
   ): Promise<ReadRoutingResult | undefined> {
-    if (!readOnlyRoutingEnabled(cluster) || cluster.spec.hibernated) return undefined;
+    if (!cluster.spec.replication?.enabled || cluster.spec.hibernated) return undefined;
+    if (!readOnlyRoutingEnabled(cluster)) {
+      // the role label only, for the managed Services ("rw", "ro"; utils/managed-services.ts)
+      await this.reconcileRoleLabels(cluster, primaryPod, log);
+      return undefined;
+    }
     const { name, namespace = 'default' } = cluster.metadata;
 
     const pods = {

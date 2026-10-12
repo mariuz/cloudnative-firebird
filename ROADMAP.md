@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.95.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.96.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Managed Services** *(v0.96.0; CloudNativePG's spec.managed.services)*
+  - `spec.managed.services.additional`: Services from templates selecting the primary (`rw`), the replicas (`ro`, the read-routable ones with read-only routing) or every instance (`r`), with any Service type and spec; updated in place (`patch`) or recreated (`replace`), deleted once no longer listed (`status.managedServices`), another owner's Service left alone (`ManagedServiceConflict`). `disabledDefaultServices: [ro]` turns off `<name>-replica`. With replication the instances keep their role label without read-only routing too.
+  - The default Services now follow later changes of `serviceType` and `serviceAnnotations`.
+  - Unit tests cover selectors, validation, building, comparison and every reconcile path; the kind CI checks endpoints, a write through an `rw` NodePort Service, patching, replacing, removing and the replica Service turned off and on.
 - [x] **Image Catalogs** *(v0.95.0; CloudNativePG's ImageCatalog, ClusterImageCatalog and imageCatalogRef)*
   - `FirebirdImageCatalog` (namespaced) and `FirebirdClusterImageCatalog` (cluster-wide) give the image of each Firebird major version; `spec.imageCatalogRef {kind, name, major}` replaces `imageName`. The reconcile resolves the entry first and continues with it as the image (in memory), so a changed entry goes through the image check, rolling update or major upgrade like a new `imageName`; `status.image` records the image, which the operator's Jobs use.
   - A catalog or entry not found keeps a running cluster on its image and holds a new one (`ImageCatalogUnresolved`); `ImageCatalogChanged` reports a new image. The CRDs refuse duplicate major versions and `imageName` with `imageCatalogRef`; `kubectl firebird status` shows the catalog.
@@ -474,6 +478,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | `targetPrimary` annotation | **v0.13.0 (Done)** |
 | **Pod Anti-Affinity / Spread** | `affinity.enablePodAntiAffinity`, `topologySpreadConstraints` | `podAntiAffinity` (on for new clusters), `topologySpreadConstraints` | **v0.90.0 (Done)** |
+| **Managed Services** | `managed.services` (additional, disabledDefaultServices) | `managed.services` (rw / ro / r, patch / replace, disabling `ro`) | **v0.96.0 (Done)** |
 | **Image Catalogs** | `ImageCatalog` / `ClusterImageCatalog`, `imageCatalogRef` | `FirebirdImageCatalog` / `FirebirdClusterImageCatalog`, `imageCatalogRef` | **v0.95.0 (Done)** |
 | **Declarative Databases** | `Database` resource | `FirebirdDatabase` (clusters without replication) | **v0.94.0 (Done)** |
 | **kubectl Plugin** | `kubectl cnpg` (status, promote, restart, fencing, hibernate, backup, psql) | `kubectl firebird` (status, promote, restart, fence, hibernate, reseed, backup, isql) | **v0.93.0 (Done)** |

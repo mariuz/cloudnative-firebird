@@ -1890,6 +1890,67 @@ jobs:
           node operator/dist/plugin/kubectl-firebird.js status cat | grep -E "^Image: +docker.io/$IMG \(FirebirdImageCatalog fb-images, Firebird $MAJOR\)"
           kubectl delete firebirdcluster cat --wait=false
 
+      - name: Verify managed services
+        if: matrix.track.id == 'extended'
+        run: |
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: svc
+          spec:
+            instances: 2
+            storage:
+              size: 1Gi
+            replication:
+              enabled: true
+            managed:
+              services:
+                disabledDefaultServices: [ro]
+                additional:
+                  - selectorType: rw
+                    serviceTemplate:
+                      metadata:
+                        name: svc-rw
+                        annotations: { example.com/tier: gold }
+                      spec:
+                        type: NodePort
+                  - selectorType: r
+                    serviceTemplate:
+                      metadata:
+                        name: svc-all
+          EOF
+          timeout 300 bash -c 'until kubectl get pod svc-1 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/svc-0 pod/svc-1 --for=condition=Ready --timeout=600s
+          primary=$(kubectl get firebirdcluster svc -o jsonpath={.status.replicationStatus.primaryPod}); primary=${primary:-svc-0}
+          endpoints() { kubectl get endpointslices -l kubernetes.io/service-name=$1 -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].targetRef.name}' | tr ' ' '\n' | sort | tr '\n' ' '; }
+          # rw: the primary only; r: every instance; the default replica Service turned off
+          timeout 120 bash -c "until [ \"\$(kubectl get endpointslices -l kubernetes.io/service-name=svc-rw -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].targetRef.name}')\" = $primary ]; do sleep 3; done" \
+            || { kubectl get pods -l firebird.cloudnative-firebird.io/cluster=svc --show-labels; kubectl get endpointslices -l kubernetes.io/service-name=svc-rw -o yaml; exit 1; }
+          timeout 120 bash -c 'until [ "$(kubectl get endpointslices -l kubernetes.io/service-name=svc-all -o jsonpath="{.items[*].endpoints[?(@.conditions.ready==true)].targetRef.name}" | wc -w)" = 2 ]; do sleep 3; done'
+          echo "svc-rw: $(endpoints svc-rw); svc-all: $(endpoints svc-all)"
+          [ "$(kubectl get service svc-rw -o jsonpath={.spec.type})" = NodePort ]
+          [ "$(kubectl get service svc-rw -o jsonpath='{.metadata.annotations.example\.com/tier}')" = gold ]
+          if kubectl get service svc-replica >/dev/null 2>&1; then echo "the disabled replica Service exists"; exit 1; fi
+          kubectl get firebirdcluster svc -o jsonpath='{.status.managedServices}' | grep -q svc-rw
+          # writes through the rw Service reach the primary
+          kubectl exec svc-1 -c firebird -- bash -c "echo 'create table via_rw (id int); commit; insert into via_rw values (1); commit;' | isql -q svc-rw:/var/lib/firebird/data/mydb.fdb"
+          # a changed template: patched in place (rw), recreated (all, replace)
+          uid=$(kubectl get service svc-all -o jsonpath={.metadata.uid})
+          kubectl patch firebirdcluster svc --type json -p '[
+            {"op":"replace","path":"/spec/managed/services/additional/0/serviceTemplate/metadata/annotations","value":{"example.com/tier":"platinum"}},
+            {"op":"add","path":"/spec/managed/services/additional/1/updateStrategy","value":"replace"},
+            {"op":"add","path":"/spec/managed/services/additional/1/serviceTemplate/metadata/labels","value":{"team":"dba"}}]'
+          timeout 120 bash -c 'until [ "$(kubectl get service svc-rw -o jsonpath="{.metadata.annotations.example\.com/tier}")" = platinum ]; do sleep 3; done'
+          timeout 120 bash -c "until [ \"\$(kubectl get service svc-all -o jsonpath={.metadata.labels.team} 2>/dev/null)\" = dba ]; do sleep 3; done"
+          [ "$(kubectl get service svc-all -o jsonpath={.metadata.uid})" != "$uid" ] || { echo "svc-all was not recreated"; exit 1; }
+          # removed from the list: deleted; the default replica Service back
+          kubectl patch firebirdcluster svc --type json -p '[{"op":"remove","path":"/spec/managed/services/additional/1"},{"op":"remove","path":"/spec/managed/services/disabledDefaultServices"}]'
+          timeout 120 bash -c 'while kubectl get service svc-all >/dev/null 2>&1; do sleep 3; done'
+          timeout 120 bash -c 'until kubectl get service svc-replica >/dev/null 2>&1; do sleep 3; done'
+          kubectl get service svc-rw
+          kubectl delete firebirdcluster svc --wait=false
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |

@@ -1,0 +1,14 @@
+# expect: each managed Service name is listed once
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  managed:
+    services:
+      additional:
+        - { selectorType: r, serviceTemplate: { metadata: { name: c1-all } } }
+        - { selectorType: rw, serviceTemplate: { metadata: { name: c1-all } } }

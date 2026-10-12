@@ -51,6 +51,7 @@ export const EventReason = {
   ImageRefused: 'ImageRefused',
   ImageCatalogChanged: 'ImageCatalogChanged',
   ImageCatalogUnresolved: 'ImageCatalogUnresolved',
+  ManagedServiceConflict: 'ManagedServiceConflict',
   MajorUpgradeStarted: 'MajorUpgradeStarted',
   MajorUpgradeConverting: 'MajorUpgradeConverting',
   MajorUpgradeStarting: 'MajorUpgradeStarting',

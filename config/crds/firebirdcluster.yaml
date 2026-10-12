@@ -897,10 +897,78 @@ spec:
                   type: object
                   additionalProperties:
                     type: string
+                managed:
+                  description: Resources the operator manages besides the cluster's own (CloudNativePG's spec.managed)
+                  type: object
+                  properties:
+                    services:
+                      description: Additional Services built from templates, and default Services turned off
+                      type: object
+                      properties:
+                        disabledDefaultServices:
+                          description: Default Services not to create (ro, the <name>-replica Service)
+                          type: array
+                          items:
+                            type: string
+                            enum: [ro]
+                        additional:
+                          type: array
+                          maxItems: 16
+                          x-kubernetes-validations:
+                            - rule: "self.all(a, self.exists_one(b, b.serviceTemplate.metadata.name == a.serviceTemplate.metadata.name))"
+                              message: each managed Service name is listed once
+                          items:
+                            type: object
+                            required:
+                              - selectorType
+                              - serviceTemplate
+                            properties:
+                              selectorType:
+                                description: rw the primary, ro the replicas, r every instance
+                                type: string
+                                enum: [rw, ro, r]
+                              updateStrategy:
+                                description: patch (default) updates the Service in place, replace recreates it
+                                type: string
+                                enum: [patch, replace]
+                              serviceTemplate:
+                                type: object
+                                required:
+                                  - metadata
+                                properties:
+                                  metadata:
+                                    type: object
+                                    required:
+                                      - name
+                                    properties:
+                                      name:
+                                        type: string
+                                        maxLength: 63
+                                        pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+                                      labels:
+                                        type: object
+                                        additionalProperties:
+                                          type: string
+                                      annotations:
+                                        type: object
+                                        additionalProperties:
+                                          type: string
+                                  spec:
+                                    description: >-
+                                      Service spec fields (type, loadBalancerIP, loadBalancerSourceRanges,
+                                      externalTrafficPolicy, ...); the selector and the Firebird port are set by the
+                                      operator (ports[0].port and nodePort are kept)
+                                    type: object
+                                    x-kubernetes-preserve-unknown-fields: true
             status:
               description: FirebirdClusterStatus defines the observed state of a FirebirdCluster
               type: object
               properties:
+                managedServices:
+                  description: The managed Services the operator created
+                  type: array
+                  items:
+                    type: string
                 image:
                   description: The Firebird image of the cluster (spec.imageName, its image catalog's entry, or the operator default)
                   type: string
