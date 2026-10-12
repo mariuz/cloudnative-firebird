@@ -1,0 +1,9 @@
+# expect: only logical backups are taken of a FirebirdDatabase
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdBackup
+metadata:
+  name: database-physical
+spec:
+  clusterName: my-cluster
+  type: physical
+  database: sales

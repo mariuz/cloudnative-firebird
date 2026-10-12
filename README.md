@@ -225,7 +225,7 @@ kubectl plugin list | grep firebird
 | `kubectl firebird fence on\|off my-cluster 1\|all` | Edits the `fencedInstances` annotation. Lifting one instance out of `all` keeps the others fenced. |
 | `kubectl firebird hibernate on\|off my-cluster` | Sets `spec.hibernated`. |
 | `kubectl firebird reseed my-cluster 1` | Re-seeds a replica (the `reseed` pod annotation). The primary is refused. |
-| `kubectl firebird backup my-cluster [--type logical\|physical\|volumeSnapshot] [--level n] [--snapshot-class c] [--name n]` | Creates a `FirebirdBackup`, to the cluster's `backup.s3` when it has one. |
+| `kubectl firebird backup my-cluster [--type logical\|physical\|volumeSnapshot] [--level n] [--snapshot-class c] [--name n] [--database d]` | Creates a `FirebirdBackup`, to the cluster's `backup.s3` when it has one; `--database` backs up a `FirebirdDatabase` (logical). |
 | `kubectl firebird isql my-cluster [--replica\|--instance 1] [-- isql args]` | Runs `isql` in the `firebird` container (`kubectl exec`; `-it` from a terminal, so a script can be piped in) as SYSDBA, through the container's credentials. |
 | `kubectl firebird logs my-cluster [--instance 1] [--container c] [--tail n] [-f]` | The logs of every instance at once, each line prefixed with its pod (`kubectl logs -l ... --prefix`), or of one instance. The `firebird` container by default; `--container` takes a sidecar or init container (`replication-init`, `segment-server`, ...). Since v0.99.0. |
 | `kubectl firebird destroy my-cluster 2` | Deletes a replica's pod and volume; the operator creates a new volume and seeds it from the primary (the `reseed=volume` annotation, see Re-seeding a Replica). The primary, clusters without replication (the instance would come back empty) and hibernated clusters are refused. Since v0.99.0. |
@@ -1685,16 +1685,41 @@ file, with a warning event. `retain` leaves the files.
 - A file another `FirebirdDatabase` of the same cluster manages (the older resource keeps it).
 - The security database's name.
 
-**Not covered.** `FirebirdBackup` backs up the cluster database only; back up other databases
-with `gbak` yourself.
+**Backing it up** (v0.100.0). A logical `FirebirdBackup` or `FirebirdScheduledBackup` takes the
+database with `spec.database`, the name of a `FirebirdDatabase` of the cluster, instead of the
+cluster database; `kubectl firebird backup my-cluster --database sales` does the same:
+
+```yaml
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdScheduledBackup
+metadata:
+  name: sales-nightly
+spec:
+  clusterName: my-cluster
+  schedule: "0 2 * * *"
+  database: sales             # the FirebirdDatabase's file, not spec.databaseName
+  retentionPolicy: 14d
+  s3: { bucket: backups, prefix: sales, secretRef: { name: s3-credentials } }
+```
+
+- Everything else is as for the cluster database: server-side or to S3, `verify`, retention,
+  `status.location`. `status.databasePath` records the file backed up.
+- A `FirebirdRestore` of the backup restores it into a new file (`targetDatabase`), as any
+  logical backup.
+- An on-demand backup waits (`Pending`) until the database is `Ready`. A database that does not
+  exist or belongs to another cluster fails it; a schedule's CronJob is not created then.
+- Physical backups and volume snapshots are refused with `database` (the CRD and the operator):
+  nbackup chains and point-in-time recovery follow the cluster database, and a snapshot copies
+  the whole volume, these databases included.
 
 **Testing.**
 - The Job script was run against Firebird 5: creating, adopting on a second run, page size,
   character set, `initSql`, and dropping.
 - Unit tests cover the validation, the conflicts, the Jobs and every controller path.
 - The kind CI creates two databases on a two-instance cluster and checks each instance, the
-  plugin's listing and the webhook's refusal on a replicated cluster. It then deletes them: one
-  dropped everywhere, one kept.
+  plugin's listing and the webhook's refusal on a replicated cluster. It backs one up through the
+  plugin, restores the backup into a new file and reads it, and checks the refusals (a physical
+  backup, another cluster's database). It then deletes them: one dropped everywhere, one kept.
 
 ### Fencing
 

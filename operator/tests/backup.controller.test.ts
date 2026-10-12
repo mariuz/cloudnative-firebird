@@ -122,6 +122,51 @@ describe('FirebirdBackupController', () => {
       expect(lastStatus().location).toBe('s3://b/p/backup-test-backup.fbk');
     });
 
+    describe('of a FirebirdDatabase', () => {
+      const sales = (clusterName = 'test-cluster', phase = 'Ready') => ({
+        apiVersion: 'firebird.cloudnative-firebird.io/v1',
+        kind: 'FirebirdDatabase',
+        metadata: { name: 'sales', namespace: 'default' },
+        spec: { clusterName, databaseName: 'sales-2026.fdb' },
+        status: { phase },
+      });
+      const ofSales = (status?: FirebirdBackup['status']) =>
+        makeBackup({ spec: { clusterName: 'test-cluster', database: 'sales' }, ...(status ? { status } : {}) });
+      const jobEnv = () => batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec.containers[0].env as Array<{ name: string; value?: string }>;
+
+      it("backs up the database's file and records it", async () => {
+        objects['firebirddatabases/sales'] = sales();
+        await controller.reconcileBackup(ofSales());
+        expect(jobEnv().find((e) => e.name === 'DATABASE_PATH')?.value).toBe('/var/lib/firebird/data/sales-2026.fdb');
+        expect(lastStatus()).toMatchObject({ phase: 'Running', databasePath: '/var/lib/firebird/data/sales-2026.fdb' });
+        // later reconciles keep it
+        batchApi.readNamespacedJob.mockResolvedValue(complete);
+        await controller.reconcileBackup(ofSales({ phase: 'Running', databasePath: '/var/lib/firebird/data/sales-2026.fdb' }));
+        expect(lastStatus()).toMatchObject({ phase: 'Completed', databasePath: '/var/lib/firebird/data/sales-2026.fdb' });
+      });
+
+      it('waits until the database is ready', async () => {
+        objects['firebirddatabases/sales'] = sales('test-cluster', 'Creating');
+        await controller.reconcileBackup(ofSales());
+        expect(batchApi.createNamespacedJob).not.toHaveBeenCalled();
+        expect(lastStatus()).toMatchObject({ phase: 'Pending', error: 'FirebirdDatabase sales is not ready yet (Creating)' });
+      });
+
+      it("fails for a missing database or another cluster's", async () => {
+        await expect(controller.reconcileBackup(ofSales())).rejects.toThrow(ValidationError);
+        expect(lastStatus()).toMatchObject({ phase: 'Failed', error: 'spec.database: FirebirdDatabase sales not found' });
+        objects['firebirddatabases/sales'] = sales('other-cluster');
+        await expect(controller.reconcileBackup(ofSales())).rejects.toThrow('belongs to cluster other-cluster');
+        expect(batchApi.createNamespacedJob).not.toHaveBeenCalled();
+      });
+
+      it('refuses physical backups and volume snapshots of a database', async () => {
+        await expect(
+          controller.reconcileBackup(makeBackup({ spec: { clusterName: 'test-cluster', type: 'physical', database: 'sales' } })),
+        ).rejects.toThrow('only logical backups');
+      });
+    });
+
     it('waits while the cluster is hibernated', async () => {
       cluster.spec.hibernated = true;
       await controller.reconcileBackup(makeBackup());
@@ -294,6 +339,20 @@ describe('FirebirdBackupController', () => {
       await controller.reconcileScheduledBackup(scheduled);
       expect(batchApi.createNamespacedCronJob.mock.calls[0][0].body.metadata.name).toBe('sched-backup-nightly-backup');
       expect(lastStatus()).toEqual({ cronJobName: 'sched-backup-nightly-backup' });
+    });
+
+    it("backs up a FirebirdDatabase's file on schedule", async () => {
+      objects['firebirddatabases/sales'] = {
+        metadata: { name: 'sales' },
+        spec: { clusterName: 'test-cluster' },
+        status: { phase: 'Creating' },
+      };
+      await controller.reconcileScheduledBackup({ ...scheduled, spec: { ...scheduled.spec, database: 'sales' } });
+      const env = batchApi.createNamespacedCronJob.mock.calls[0][0].body.spec.jobTemplate.spec.template.spec.containers[0].env;
+      expect(env.find((e: { name: string }) => e.name === 'DATABASE_PATH').value).toBe('/var/lib/firebird/data/sales.fdb');
+      await expect(
+        controller.reconcileScheduledBackup({ ...scheduled, spec: { ...scheduled.spec, database: 'missing' } }),
+      ).rejects.toThrow('FirebirdDatabase missing not found');
     });
 
     it('updates a changed CronJob and reports its schedule times', async () => {

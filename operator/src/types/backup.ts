@@ -38,6 +38,11 @@ export interface FirebirdBackupSpec {
    * validation); the backup fails when it does not restore or validate. Logical backups only.
    */
   verify?: boolean;
+  /**
+   * A FirebirdDatabase of the cluster (its name) to back up instead of the cluster database.
+   * Logical backups only; restore it with a FirebirdRestore (into a new database file).
+   */
+  database?: string;
 }
 
 /**
@@ -58,6 +63,8 @@ export interface FirebirdBackupStatus {
   jobName?: string;
   /** Instance the backup was taken from */
   instance?: string;
+  /** The database file backed up (spec.database: the FirebirdDatabase's file) */
+  databasePath?: string;
   /** The backup was restored into a scratch database and validated (spec.verify) */
   verified?: boolean;
   /** The VolumeSnapshot taken (type volumeSnapshot) */
@@ -250,6 +257,11 @@ export interface FirebirdScheduledBackupSpec {
    * validation); the backup fails when it does not restore or validate. Logical backups only.
    */
   verify?: boolean;
+  /**
+   * A FirebirdDatabase of the cluster (its name) to back up instead of the cluster database.
+   * Logical backups only; restore it with a FirebirdRestore (into a new database file).
+   */
+  database?: string;
 }
 
 /**

@@ -10,7 +10,7 @@ import { formatEvents, listYaml, operatorLogLines, podContainers, sanitize } fro
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.99.0';
+export const PLUGIN_VERSION = '0.100.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -71,7 +71,7 @@ Commands:
   hibernate on|off <cluster>                stop every instance keeping the volumes, or resume
   reseed <cluster> <instance>               discard a replica's database and seed it again
   backup <cluster> [--type logical|physical|volumeSnapshot] [--level 0|1|2]
-                   [--snapshot-class name] [--name backup-name]
+                   [--snapshot-class name] [--name backup-name] [--database firebird-database]
                                             take an on-demand backup (FirebirdBackup)
   isql <cluster> [--replica | --instance i] [-- isql arguments]
                                             isql on the primary (or a replica), in the firebird container
@@ -93,7 +93,7 @@ interface Parsed {
   rest: string[];
 }
 
-const VALUE_FLAGS = new Set(['namespace', 'context', 'type', 'level', 'name', 'snapshot-class', 'instance', 'container', 'tail', 'output', 'operator-namespace']);
+const VALUE_FLAGS = new Set(['namespace', 'context', 'type', 'level', 'name', 'snapshot-class', 'instance', 'container', 'tail', 'output', 'operator-namespace', 'database']);
 const BOOLEAN_FLAGS = new Set(['replica', 'help', 'follow', 'no-logs']);
 const SHORT: Record<string, string> = { n: 'namespace', f: 'follow', o: 'output' };
 
@@ -464,6 +464,8 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
         }
         const snapshotClass = parsed.flags.get('snapshot-class') as string | undefined;
         if (snapshotClass && type !== 'volumeSnapshot') throw new UsageError('--snapshot-class is for volumeSnapshot backups');
+        const database = parsed.flags.get('database') as string | undefined;
+        if (database && type !== 'logical') throw new UsageError('--database (a FirebirdDatabase) is for logical backups');
         const stamp = io.now().toISOString().replace(/[-:T]/g, '').slice(0, 14);
         const backupName = (parsed.flags.get('name') as string | undefined) ?? `${cluster.metadata.name}-${stamp}`;
         // the backup's own S3 destination, as the cluster's scheduled backups have it
@@ -478,10 +480,11 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
             ...(levelFlag !== undefined ? { level: Number(levelFlag) as 0 | 1 | 2 } : {}),
             ...(s3 ? { s3 } : {}),
             ...(snapshotClass ? { volumeSnapshot: { className: snapshotClass } } : {}),
+            ...(database ? { database } : {}),
           },
         };
         await api.createBackup(namespace, body);
-        io.out(`FirebirdBackup ${backupName} created (${type}${s3 ? `, to s3://${s3.bucket}` : ''}); kubectl get firebirdbackup ${backupName} -n ${namespace} -w`);
+        io.out(`FirebirdBackup ${backupName} created (${type}${database ? ` of FirebirdDatabase ${database}` : ''}${s3 ? `, to s3://${s3.bucket}` : ''}); kubectl get firebirdbackup ${backupName} -n ${namespace} -w`);
         return 0;
       }
 

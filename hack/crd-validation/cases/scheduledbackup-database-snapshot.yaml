@@ -1,0 +1,10 @@
+# expect: only logical backups are taken of a FirebirdDatabase
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdScheduledBackup
+metadata:
+  name: database-snapshot
+spec:
+  clusterName: my-cluster
+  schedule: "0 2 * * *"
+  type: volumeSnapshot
+  database: sales

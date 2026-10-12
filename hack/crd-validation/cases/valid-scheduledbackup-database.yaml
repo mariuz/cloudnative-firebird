@@ -1,0 +1,11 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdScheduledBackup
+metadata:
+  name: database-nightly
+spec:
+  clusterName: my-cluster
+  schedule: "0 2 * * *"
+  type: logical
+  database: sales
+  retentionPolicy: 7d

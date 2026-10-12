@@ -1,0 +1,9 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdBackup
+metadata:
+  name: database-logical
+spec:
+  clusterName: my-cluster
+  database: sales
+  verify: true
