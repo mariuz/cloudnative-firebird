@@ -16,6 +16,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical and physical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
 - **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
 - **Declarative users** (`FirebirdUser`, after CloudNativePG's `DatabaseRole`) with Secret-backed passwords, role grants and a reclaim policy; users persist across pod restarts
+- **Managed services** (`spec.managed.services`): additional Services (rw / ro / r, LoadBalancer, NodePort) from templates, and turning off the replica Service
 - **Image catalogs** (`FirebirdImageCatalog`, `FirebirdClusterImageCatalog`): clusters reference a Firebird major version; editing the catalog rolls them out (or major-upgrades them)
 - **Declarative databases** (`FirebirdDatabase`, after CloudNativePG's `Database`) on clusters without replication: created on every instance, dropped with `reclaimPolicy: delete`
 - **Declarative roles** (`FirebirdRole`): a database role and exactly the privileges it holds on tables, views, procedures, functions, packages, sequences and exceptions
@@ -1509,6 +1510,75 @@ Role names follow SQL too: `roleName: reporting` is the role `REPORTING`, while 
 quotes is used exactly as written, e.g. `roleName: '"Sales Team"'` (a quote inside is written
 `""`). `FirebirdUser.spec.roles` refers to such a role the same way (`roles: ['"Sales Team"']`).
 
+### Managed Services (v0.96.0)
+
+Besides its default Services, a cluster can have more, built from templates. This follows
+CloudNativePG's `spec.managed.services`; typical uses are a `LoadBalancer` for the primary, or a
+Service over every instance.
+
+| Service | Selects |
+|---|---|
+| `<name>` | the primary with `replication.readOnlyRouting`, every instance otherwise |
+| `<name>-replica` | the read-routable replicas, every instance without routing (with replication) |
+| `<name>-headless` | every instance, for the instances' DNS names |
+
+```yaml
+spec:
+  replication: { enabled: true }
+  managed:
+    services:
+      disabledDefaultServices: [ro]      # no <name>-replica
+      additional:
+        - selectorType: rw               # rw: the primary; ro: the replicas; r: every instance
+          updateStrategy: patch          # default; replace deletes and recreates the Service
+          serviceTemplate:
+            metadata:
+              name: my-cluster-lb
+              labels: { team: dba }
+              annotations: { service.beta.kubernetes.io/aws-load-balancer-internal: "true" }
+            spec:
+              type: LoadBalancer
+              loadBalancerSourceRanges: ["10.0.0.0/8"]
+              ports: [{ port: 3050 }]    # optional: the port number and a nodePort
+```
+
+**Selectors.**
+- `rw` selects the primary, `ro` the replicas, `r` every instance.
+- With replication, the operator keeps the instances' `role` label up to date for `rw` and `ro`,
+  even without read-only routing.
+- With routing, `ro` takes the read-routable replicas, as `<name>-replica` does. `ro` needs
+  replication.
+- Without replication, `rw` selects every instance (each is a primary of its own).
+
+**Building and updating.**
+- The template's spec is used as it is, but the operator sets the selector and the Firebird port
+  (target 3050).
+- A changed template is merged into the Service (`patch`) or the Service is recreated
+  (`replace`). Only what the template sets is compared, so fields the API server fills in, such as
+  `clusterIP` or an allocated `nodePort`, are not differences.
+- `status.managedServices` lists the Services the operator manages. One removed from the list is
+  deleted. A Service of that name that the cluster does not own is left alone, with a
+  `ManagedServiceConflict` warning.
+
+**Validation.** The CRD and the operator's validation (also run by the webhook) refuse:
+- a name listed twice, or the name of a default Service;
+- a selector in the template;
+- `ro` without replication;
+- turning off any default Service but `ro`.
+
+**Default Services.** `spec.serviceType` and `spec.serviceAnnotations` now also reach the default
+`<name>` and `<name>-replica` Services after they were created. Annotations others added are kept.
+
+**Testing.** Unit tests cover the selectors, the validation, the Service built and its comparison,
+creating, patching, replacing, deleting, another owner's Service, the role labels and the default
+Services' settings. The kind CI runs a replicated cluster with an `rw` NodePort Service and an `r`
+Service, the replica Service turned off, and checks:
+- the endpoints;
+- a write through the `rw` Service;
+- a template patched in place and one recreated;
+- a removed Service deleted;
+- the replica Service back once it is enabled again.
+
 ### Image Catalogs (v0.95.0)
 
 An image catalog gives the Firebird image of each major version, like CloudNativePG's
@@ -1652,7 +1722,7 @@ The operator records Kubernetes events on its resources (CloudNativePG 1.29 / 1.
 
 | Resource | Reasons |
 |---|---|
-| `FirebirdCluster` | `ImageCatalogChanged`, `ImageCatalogUnresolved` (warning); `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`, `PodAntiAffinityDefaulted`, `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReplicaClusterRepositioning`, `ReplicaClusterFollowFailed` (warning), `ReplicaClusterPromoting`, `ReplicaClusterPromoted`; `ImageCheckStarted`, `ImageChecked`, `ImageRefused` (warning); `MajorUpgradeStarted`, `MajorUpgradeConverting`, `MajorUpgradeStarting`, `MajorUpgradeCompleted`, `MajorUpgradeFailed` (warning), `MajorUpgradeAbandoned`; `ReconcileFailed` (warning) |
+| `FirebirdCluster` | `ImageCatalogChanged`, `ImageCatalogUnresolved` (warning); `ManagedServiceConflict` (warning); `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`, `PodAntiAffinityDefaulted`, `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReplicaClusterRepositioning`, `ReplicaClusterFollowFailed` (warning), `ReplicaClusterPromoting`, `ReplicaClusterPromoted`; `ImageCheckStarted`, `ImageChecked`, `ImageRefused` (warning); `MajorUpgradeStarted`, `MajorUpgradeConverting`, `MajorUpgradeStarting`, `MajorUpgradeCompleted`, `MajorUpgradeFailed` (warning), `MajorUpgradeAbandoned`; `ReconcileFailed` (warning) |
 | `FirebirdBackup` | `BackupStarted`, `BackupCompleted`, `BackupFailed` (warning) |
 | `FirebirdRestore` | `RestoreStarted`, `RestoreCompleted`, `RestoreFailed` (warning) |
 | `FirebirdUser` | `UserApplied`, `UserFailed` (warning), `UserDropped` |

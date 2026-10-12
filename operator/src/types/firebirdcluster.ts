@@ -503,6 +503,41 @@ export interface FirebirdClusterSpec {
   serviceType?: 'ClusterIP' | 'NodePort' | 'LoadBalancer';
   /** Custom annotations to apply to primary and replica services */
   serviceAnnotations?: Record<string, string>;
+  /** Managed resources: additional Services (CloudNativePG's spec.managed, utils/managed-services.ts) */
+  managed?: ManagedConfiguration;
+}
+
+/** Resources the operator manages besides the cluster's own (CloudNativePG's spec.managed) */
+export interface ManagedConfiguration {
+  services?: ManagedServices;
+}
+
+/** Additional Services, and default Services turned off */
+export interface ManagedServices {
+  /** Default Services not to create: "ro" (the <name>-replica Service) */
+  disabledDefaultServices?: Array<'ro'>;
+  /** Services created in addition to the default ones */
+  additional?: ManagedService[];
+}
+
+/** A Service of the cluster built from a template */
+export interface ManagedService {
+  /**
+   * The instances it selects: "rw" the primary, "ro" the replicas (the read-routable ones with
+   * replication.readOnlyRouting), "r" every instance
+   */
+  selectorType: 'rw' | 'ro' | 'r';
+  /** How a changed template reaches the Service: "patch" (default) in place, "replace" recreates it */
+  updateStrategy?: 'patch' | 'replace';
+  serviceTemplate: {
+    metadata: { name: string; labels?: Record<string, string>; annotations?: Record<string, string> };
+    /**
+     * Service spec fields (type, loadBalancerIP, loadBalancerSourceRanges, externalTrafficPolicy,
+     * ...); the selector and the Firebird port are the operator's (ports[0].port and nodePort are
+     * taken when set)
+     */
+    spec?: Record<string, unknown>;
+  };
 }
 
 /**
@@ -600,6 +635,8 @@ export interface VolumeStatus {
 export interface FirebirdClusterStatus {
   /** The Firebird image of the cluster: spec.imageName, its image catalog's entry, or the operator default */
   image?: string;
+  /** The managed Services the operator created (spec.managed.services.additional) */
+  managedServices?: string[];
   /** Total number of instances */
   instances?: number;
   /** Number of ready instances */

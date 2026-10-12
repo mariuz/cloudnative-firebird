@@ -1,0 +1,23 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 2
+  storage:
+    size: 1Gi
+  replication:
+    enabled: true
+  managed:
+    services:
+      disabledDefaultServices: [ro]
+      additional:
+        - selectorType: rw
+          serviceTemplate:
+            metadata:
+              name: c1-lb
+              annotations: { lb.example.com/internal: "true" }
+            spec:
+              type: LoadBalancer
+              loadBalancerSourceRanges: ["10.0.0.0/8"]
