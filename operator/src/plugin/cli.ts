@@ -1,6 +1,7 @@
-import { V1Pod } from '@kubernetes/client-node';
+import { CoreV1Event, dumpYaml, V1PersistentVolumeClaim, V1Pod, V1Service, V1StatefulSet } from '@kubernetes/client-node';
 import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdScheduledBackup } from '../types';
 import { isPodReady, ROLE_LABEL } from '../utils/routing';
+import { formatEvents, listYaml, operatorLogLines, podContainers, sanitize } from './report';
 
 /**
  * kubectl-firebird, the kubectl plugin (CloudNativePG's kubectl cnpg): status of a cluster and the
@@ -9,12 +10,17 @@ import { isPodReady, ROLE_LABEL } from '../utils/routing';
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.98.0';
+export const PLUGIN_VERSION = '0.99.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
 export const RESEED_ANNOTATION = `${API_GROUP}/reseed`;
 export const RESTARTED_AT_ANNOTATION = 'kubectl.kubernetes.io/restartedAt';
+/** The reseed annotation's value that re-creates the instance's volume (utils/volume-recreation.ts) */
+export const RESEED_VOLUME = 'volume';
+/** Where the operator runs by default (config/deploy), and its pods' label */
+export const OPERATOR_NAMESPACE = 'cloudnative-firebird-system';
+export const OPERATOR_SELECTOR = 'app.kubernetes.io/name=cloudnative-firebird';
 const CLUSTER_LABEL = `${API_GROUP}/cluster`;
 
 /** The Kubernetes calls the plugin makes */
@@ -30,6 +36,12 @@ export interface PluginApi {
   listScheduledBackups(namespace: string): Promise<FirebirdScheduledBackup[]>;
   listDatabases(namespace: string): Promise<FirebirdDatabase[]>;
   createBackup(namespace: string, body: FirebirdBackup): Promise<void>;
+  /** report */
+  getStatefulSet(namespace: string, name: string): Promise<V1StatefulSet>;
+  listServices(namespace: string, labelSelector: string): Promise<V1Service[]>;
+  listClaims(namespace: string, labelSelector: string): Promise<V1PersistentVolumeClaim[]>;
+  listEvents(namespace: string): Promise<CoreV1Event[]>;
+  readPodLog(namespace: string, pod: string, container: string): Promise<string>;
 }
 
 export interface PluginIo {
@@ -40,6 +52,9 @@ export interface PluginIo {
   /** Whether stdin is a terminal (isql: -t for kubectl exec) */
   interactive: boolean;
   now(): Date;
+  /** Creates a directory (an error if it exists) */
+  makeDir(path: string): Promise<void>;
+  writeFile(path: string, content: string): Promise<void>;
 }
 
 export class UsageError extends Error {}
@@ -60,6 +75,13 @@ Commands:
                                             take an on-demand backup (FirebirdBackup)
   isql <cluster> [--replica | --instance i] [-- isql arguments]
                                             isql on the primary (or a replica), in the firebird container
+  logs <cluster> [--instance i] [--container c] [--tail n] [-f]
+                                            the logs of every instance (or one), each line prefixed with its pod
+  destroy <cluster> <instance>              delete a replica's pod and volume: the operator re-creates it
+                                            and seeds it again from the primary
+  report <cluster> [--output dir] [--operator-namespace ns] [--no-logs]
+                                            a support bundle: the cluster's resources, status, events,
+                                            instance logs and the operator's log lines about it
   version                                   the plugin's version
 
 An instance is its pod name (my-cluster-1) or its ordinal (1).`;
@@ -71,8 +93,9 @@ interface Parsed {
   rest: string[];
 }
 
-const VALUE_FLAGS = new Set(['namespace', 'context', 'type', 'level', 'name', 'snapshot-class', 'instance']);
-const SHORT: Record<string, string> = { n: 'namespace' };
+const VALUE_FLAGS = new Set(['namespace', 'context', 'type', 'level', 'name', 'snapshot-class', 'instance', 'container', 'tail', 'output', 'operator-namespace']);
+const BOOLEAN_FLAGS = new Set(['replica', 'help', 'follow', 'no-logs']);
+const SHORT: Record<string, string> = { n: 'namespace', f: 'follow', o: 'output' };
 
 export function parseArgs(argv: string[]): Parsed {
   const positional: string[] = [];
@@ -93,7 +116,7 @@ export function parseArgs(argv: string[]): Parsed {
         const value = long?.[2] ?? argv[++i];
         if (value === undefined) throw new UsageError(`${arg} needs a value`);
         flags.set(name, value);
-      } else if (['replica', 'help'].includes(name)) {
+      } else if (BOOLEAN_FLAGS.has(name)) {
         flags.set(name, true);
       } else {
         throw new UsageError(`unknown flag ${arg}`);
@@ -492,6 +515,115 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
           ...parsed.rest,
           `localhost:${database}`,
         ]);
+      }
+
+      case 'logs': {
+        const [name] = need(parsed, 1, 'logs <cluster> [--instance i] [--container c] [--tail n] [-f]');
+        const cluster = await api.getCluster(namespace, name);
+        const container = (parsed.flags.get('container') as string | undefined) ?? 'firebird';
+        const tail = (parsed.flags.get('tail') as string | undefined) ?? '-1';
+        if (!/^(-1|\d+)$/.test(tail)) throw new UsageError(`--tail must be a number of lines (or -1 for all), got ${tail}`);
+        const instance = parsed.flags.get('instance') as string | undefined;
+        const target = instance
+          ? [instanceName(cluster, instance)]
+          : [
+              '-l',
+              `${CLUSTER_LABEL}=${name},app.kubernetes.io/component=database`,
+              '--prefix',
+              // one stream per instance (kubectl's default limit is 5)
+              `--max-log-requests=${Math.max(cluster.spec.instances, 1)}`,
+            ];
+        return io.kubectl([
+          ...(context ? ['--context', context] : []),
+          '-n',
+          namespace,
+          'logs',
+          ...target,
+          '-c',
+          container,
+          `--tail=${tail}`,
+          ...(parsed.flags.has('follow') ? ['-f'] : []),
+        ]);
+      }
+
+      case 'destroy': {
+        const [name, arg] = need(parsed, 2, 'destroy <cluster> <instance>');
+        const cluster = await api.getCluster(namespace, name);
+        // the operator re-creates the volume of replicas only: any other instance would come back empty
+        if (cluster.spec.replication?.enabled !== true) {
+          throw new UsageError(`cluster ${name} has no replication: a destroyed instance would come back with an empty database`);
+        }
+        if (cluster.spec.hibernated) throw new UsageError(`cluster ${name} is hibernated`);
+        const target = instanceName(cluster, arg);
+        const pods = await api.listPods(namespace, `${CLUSTER_LABEL}=${name},app.kubernetes.io/component=database`);
+        if (target === primaryOf(cluster, pods)) throw new UsageError(`${target} is the primary: promote another instance first (kubectl firebird promote)`);
+        if (!pods.some((p) => p.metadata?.name === target)) throw new UsageError(`${target} has no pod: there is nothing to destroy`);
+        await api.patchPod(namespace, target, { metadata: { annotations: { [RESEED_ANNOTATION]: RESEED_VOLUME } } });
+        io.out(`${target} destroyed: the operator deletes its pod and volume and seeds a new one from the primary (kubectl firebird status ${name} follows it)`);
+        return 0;
+      }
+
+      case 'report': {
+        const [name] = need(parsed, 1, 'report <cluster> [--output dir] [--operator-namespace ns] [--no-logs]');
+        const cluster = await api.getCluster(namespace, name);
+        const stamp = io.now().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+        const dir = (parsed.flags.get('output') as string | undefined) ?? `report-${name}-${stamp}`;
+        const withLogs = !parsed.flags.has('no-logs');
+        await io.makeDir(dir);
+        const written: string[] = [];
+        const errors: string[] = [];
+        // one file per item: what cannot be read (permissions, a CRD not installed) is listed in errors.txt
+        const file = async (path: string, produce: () => Promise<string>) => {
+          try {
+            await io.writeFile(`${dir}/${path}`, await produce());
+            written.push(path);
+          } catch (err) {
+            errors.push(`${path}: ${apiErrorMessage(err)}`);
+          }
+        };
+        const selector = `${CLUSTER_LABEL}=${name}`;
+        const pods = await api.listPods(namespace, `${selector},app.kubernetes.io/component=database`);
+        const owned = <T extends { spec: { clusterName: string } }>(items: T[]) => items.filter((i) => i.spec.clusterName === name);
+        const [backups, scheduled, databases] = await Promise.all([
+          api.listBackups(namespace).catch(() => [] as FirebirdBackup[]),
+          api.listScheduledBackups(namespace).catch(() => [] as FirebirdScheduledBackup[]),
+          api.listDatabases(namespace).catch(() => [] as FirebirdDatabase[]),
+        ]);
+        await file('status.txt', async () => `${formatStatus(cluster, pods, backups, scheduled, io.now(), databases)}\n`);
+        await file('cluster.yaml', async () => dumpYaml(sanitize(cluster)));
+        await file('statefulset.yaml', async () => dumpYaml(sanitize(await api.getStatefulSet(namespace, name))));
+        await file('pods.yaml', async () => listYaml(pods));
+        await file('services.yaml', async () => listYaml(await api.listServices(namespace, selector)));
+        await file('pvcs.yaml', async () => listYaml(await api.listClaims(namespace, selector)));
+        await file('backups.yaml', async () => listYaml(owned(backups)));
+        await file('scheduled-backups.yaml', async () => listYaml(owned(scheduled)));
+        await file('databases.yaml', async () => listYaml(owned(databases)));
+        await file('events.txt', async () => formatEvents(await api.listEvents(namespace), name));
+        if (withLogs) {
+          await io.makeDir(`${dir}/logs`);
+          for (const pod of pods) {
+            const podName = pod.metadata?.name ?? '';
+            for (const container of podContainers(pod)) {
+              await file(`logs/${podName}-${container}.log`, () => api.readPodLog(namespace, podName, container));
+            }
+          }
+          const operatorNamespace = (parsed.flags.get('operator-namespace') as string | undefined) ?? OPERATOR_NAMESPACE;
+          await file('operator.log', async () => {
+            const operators = await api.listPods(operatorNamespace, OPERATOR_SELECTOR);
+            if (operators.length === 0) throw new Error(`no operator pod in namespace ${operatorNamespace} (--operator-namespace)`);
+            const parts: string[] = [];
+            for (const op of operators) {
+              const log = await api.readPodLog(operatorNamespace, op.metadata!.name!, op.spec?.containers?.[0]?.name ?? 'operator');
+              parts.push(`# ${operatorNamespace}/${op.metadata!.name}\n${operatorLogLines(log, name, namespace)}`);
+            }
+            return parts.join('\n');
+          });
+        }
+        if (errors.length > 0) await io.writeFile(`${dir}/errors.txt`, `${errors.join('\n')}\n`);
+        io.out(
+          `report of cluster ${name} written to ${dir}/ (${written.length} files${errors.length > 0 ? `; ${errors.length} could not be collected: see errors.txt` : ''})`,
+        );
+        return 0;
       }
 
       default:

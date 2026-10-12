@@ -399,6 +399,25 @@ jobs:
           # errors: the primary cannot be promoted or re-seeded
           if kubectl firebird reseed repl "$primary" 2>/tmp/plugin-err.txt; then echo "re-seeding the primary was accepted"; exit 1; fi
           grep -q 'is the primary' /tmp/plugin-err.txt
+          if kubectl firebird destroy repl "$primary" 2>/tmp/plugin-err.txt; then echo "destroying the primary was accepted"; exit 1; fi
+          grep -q 'is the primary' /tmp/plugin-err.txt
+          # logs: every instance, each line prefixed with its pod (the replicas' seeding in their init container)
+          replica=$(kubectl get pods -l firebird.cloudnative-firebird.io/cluster=repl,app.kubernetes.io/component=database -o name | sed 's|pod/||' | grep -vx "$primary" | head -1)
+          kubectl firebird logs repl --container replication-init > /tmp/plugin-logs.txt
+          grep -q "^\[pod/$replica/replication-init\] .*seed" /tmp/plugin-logs.txt || { echo "no seeding logged for $replica"; head /tmp/plugin-logs.txt; exit 1; }
+          if grep -qv '^\[pod/repl-[0-9]*/replication-init\] ' /tmp/plugin-logs.txt; then echo "a log line without its pod"; exit 1; fi
+          kubectl firebird logs repl --instance "$replica" --container replication-init --tail 5 | grep -q seed
+          # report: a support bundle
+          kubectl firebird report repl -o /tmp/plugin-report | tee /tmp/plugin-report.txt
+          grep -q 'report of cluster repl written to /tmp/plugin-report/' /tmp/plugin-report.txt
+          for f in status.txt cluster.yaml statefulset.yaml pods.yaml services.yaml pvcs.yaml events.txt backups.yaml operator.log "logs/$replica-replication-init.log"; do
+            [ -s "/tmp/plugin-report/$f" ] || { echo "report: $f missing or empty"; ls -R /tmp/plugin-report; cat /tmp/plugin-report/errors.txt 2>/dev/null; exit 1; }
+          done
+          grep -qE "^Primary: +$primary$" /tmp/plugin-report/status.txt
+          grep -q 'plugin-backup' /tmp/plugin-report/backups.yaml
+          grep -q '"cluster":"repl"' /tmp/plugin-report/operator.log
+          if grep -rq managedFields /tmp/plugin-report; then echo "managedFields in the report"; exit 1; fi
+          ls /tmp/plugin-report /tmp/plugin-report/logs
           kubectl delete firebirdbackup plugin-backup
 
       - name: Verify backups and restores through the operator
@@ -717,7 +736,8 @@ jobs:
           DB=/var/lib/firebird/data/mydb.fdb
           count() { kubectl exec "$1" -c firebird -- bash -c "echo 'select count(*) from app;' | isql -q localhost:$DB" | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
           old_claim=$(kubectl get pvc firebird-data-repl-2 -o jsonpath={.metadata.uid})
-          kubectl annotate pod repl-2 firebird.cloudnative-firebird.io/reseed=volume
+          # kubectl firebird destroy (built in the kubectl plugin step) sets the reseed=volume annotation
+          node operator/dist/plugin/kubectl-firebird.js destroy repl 2
           # the operator deletes the claim and the pod until the StatefulSet made a new claim
           timeout 300 bash -c "until c=\$(kubectl get pvc firebird-data-repl-2 -o jsonpath={.metadata.uid} 2>/dev/null) && [ -n \"\$c\" ] && [ \"\$c\" != '$old_claim' ]; do sleep 3; done" \
             || { kubectl get pvc,pods; kubectl get firebirdcluster repl -o jsonpath='{.status.recreatingVolumes}'; exit 1; }

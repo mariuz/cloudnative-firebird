@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { mkdir, writeFile } from 'fs/promises';
 import {
   AppsV1Api,
   CoreV1Api,
@@ -57,6 +58,11 @@ function kubeApi(kubeConfig: KubeConfig): PluginApi {
     createBackup: async (namespace, body) => {
       await custom.createNamespacedCustomObject({ ...crd(namespace, 'firebirdbackups'), body });
     },
+    getStatefulSet: (namespace, name) => apps.readNamespacedStatefulSet({ namespace, name }),
+    listServices: async (namespace, labelSelector) => (await core.listNamespacedService({ namespace, labelSelector })).items,
+    listClaims: async (namespace, labelSelector) => (await core.listNamespacedPersistentVolumeClaim({ namespace, labelSelector })).items,
+    listEvents: async (namespace) => (await core.listNamespacedEvent({ namespace })).items,
+    readPodLog: async (namespace, name, container) => String((await core.readNamespacedPodLog({ namespace, name, container })) ?? ''),
   };
 }
 
@@ -84,6 +90,10 @@ export async function main(): Promise<void> {
         }),
       interactive: Boolean(process.stdin.isTTY),
       now: () => new Date(),
+      makeDir: async (path) => {
+        await mkdir(path);
+      },
+      writeFile: (path, content) => writeFile(path, content),
     },
     namespace,
   );
