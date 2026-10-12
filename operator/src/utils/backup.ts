@@ -1,3 +1,4 @@
+import { clusterImage } from './image-catalog';
 import {
   V1Container,
   V1CronJob,
@@ -11,7 +12,6 @@ import {
 } from '@kubernetes/client-node';
 import {
   API_GROUP,
-  DEFAULT_FIREBIRD_IMAGE,
   FirebirdBackup,
   FirebirdBackupType,
   FirebirdCluster,
@@ -293,7 +293,7 @@ export function buildBackupPodSpec(
   },
 ): V1PodSpec {
   const verify = Boolean(options.verify) && options.type !== 'physical';
-  const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const image = clusterImage(cluster);
   const env: V1EnvVar[] = [
     ...superuserClientEnv(cluster),
     { name: 'FIREBIRD_HOST', value: options.primaryHost },
@@ -606,7 +606,7 @@ export function buildRestoreJob(
 ): V1Job {
   const { name: restoreName, namespace = 'default', uid } = restore.metadata;
   const clusterName = restore.spec.clusterName;
-  const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const image = clusterImage(cluster);
   const labels = { ...clusterLabels(clusterName), 'app.kubernetes.io/component': 'restore' };
   const env: V1EnvVar[] = [
     ...superuserClientEnv(cluster),
@@ -843,7 +843,7 @@ function replayPodSpec(
     containers: [
       {
         name: 'firebird-restore',
-        image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+        image: clusterImage(cluster),
         command: ['/bin/sh', '-c'],
         args: [options.command],
         env: [
@@ -1011,7 +1011,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
     // after a successful upload: every listed segment is in the bucket (pruneAppliedSegments
     // lets the primary delete applied segments only up to there)
     name: 'report-uploaded',
-    image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+    image: clusterImage(cluster),
     command: ['perl', `${OPERATOR_CONFIG_DIR}/fetch-segments.pl`],
     env: [
       ...superuserClientEnv(cluster),
@@ -1041,7 +1041,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
       },
       {
         name: 'fetch-segments',
-        image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+        image: clusterImage(cluster),
         command: ['perl', `${OPERATOR_CONFIG_DIR}/fetch-segments.pl`],
         env: [
           ...superuserClientEnv(cluster),
@@ -1090,7 +1090,7 @@ export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Contai
   // too, which keeps its bootstrap after its promotion
   if (bootstrap.recovery?.pointInTime || bootstrap.recovery?.volumeSnapshot || cluster.spec.replica) return [];
 
-  const image = cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const image = clusterImage(cluster);
   const replicated = replicationEnabled(cluster);
   const target = replicated
     ? `${FIREBIRD_DATA_DIR}/.bootstrap.fdb`

@@ -1,0 +1,9 @@
+# expect: each major version is listed once
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdImageCatalog
+metadata:
+  name: firebird
+spec:
+  images:
+    - { major: 5, image: "firebirdsql/firebird:5" }
+    - { major: 5, image: "firebirdsql/firebird:5.0.3" }

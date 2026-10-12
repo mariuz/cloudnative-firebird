@@ -11,6 +11,13 @@ import {
 import { validateUserSpec } from '../src/utils/users';
 import { validateRoleSpec } from '../src/utils/roles';
 import { validateDatabaseSpec } from '../src/utils/databases';
+import { imageCatalogErrors } from '../src/utils/image-catalog';
+import { FirebirdImageCatalog } from '../src/types';
+
+const validateCatalog = (catalog: FirebirdImageCatalog) => {
+  const errors = imageCatalogErrors(catalog);
+  if (errors.length > 0) throw new Error(errors.join('; '));
+};
 
 /**
  * The CRDs reject invalid specs at admission (hack/crd-validation/test.sh runs these manifests
@@ -25,6 +32,8 @@ const validators: Record<string, (obj: never) => void> = {
   FirebirdUser: validateUserSpec,
   FirebirdRole: validateRoleSpec,
   FirebirdDatabase: validateDatabaseSpec,
+  FirebirdImageCatalog: validateCatalog,
+  FirebirdClusterImageCatalog: validateCatalog,
 };
 
 describe('CRD admission rules and operator validation agree', () => {

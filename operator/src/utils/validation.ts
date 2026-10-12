@@ -1,3 +1,4 @@
+import { imageCatalogRefErrors } from './image-catalog';
 import { replicaClusterErrors } from './replica-cluster';
 import { parseCron } from './cron';
 import { volumeSnapshotRecoveryErrors, volumeSnapshotSpecErrors } from './volume-snapshot';
@@ -24,6 +25,8 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
 
   const replicaErrors = replicaClusterErrors(cluster);
   if (replicaErrors.length > 0) throw new ValidationError(replicaErrors.join('; '));
+  const catalogErrors = imageCatalogRefErrors(cluster);
+  if (catalogErrors.length > 0) throw new ValidationError(catalogErrors.join('; '));
 
   const antiAffinity = spec.podAntiAffinity;
   if (antiAffinity?.type !== undefined && !['preferred', 'required'].includes(antiAffinity.type)) {

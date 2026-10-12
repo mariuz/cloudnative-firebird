@@ -365,6 +365,16 @@ export interface BootstrapConfiguration {
   clone?: CloneConfiguration;
 }
 
+/** Reference to an entry of an image catalog */
+export interface ImageCatalogRef {
+  /** FirebirdImageCatalog (default, in the cluster's namespace) or FirebirdClusterImageCatalog */
+  kind?: 'FirebirdImageCatalog' | 'FirebirdClusterImageCatalog';
+  /** Name of the catalog */
+  name: string;
+  /** Firebird major version: the catalog entry the cluster uses */
+  major: number;
+}
+
 /**
  * Specification of a FirebirdCluster resource.
  */
@@ -376,6 +386,12 @@ export interface FirebirdClusterSpec {
    * Defaults to the operator's FIREBIRD_DEFAULT_IMAGE, or firebirdsql/firebird:latest
    */
   imageName?: string;
+  /**
+   * Image catalog (CloudNativePG's imageCatalogRef): the image is the catalog's entry for this
+   * Firebird major version; changing the entry updates the cluster like a new imageName.
+   * Mutually exclusive with imageName (utils/image-catalog.ts).
+   */
+  imageCatalogRef?: ImageCatalogRef;
   /** Reference to the Secret containing the superuser password (SYSDBA) */
   superuserSecret?: SuperuserSecretRef;
   /** Database file created in each instance's data directory (defaults to "mydb.fdb") */
@@ -582,6 +598,8 @@ export interface VolumeStatus {
  * Status of a FirebirdCluster resource.
  */
 export interface FirebirdClusterStatus {
+  /** The Firebird image of the cluster: spec.imageName, its image catalog's entry, or the operator default */
+  image?: string;
   /** Total number of instances */
   instances?: number;
   /** Number of ready instances */

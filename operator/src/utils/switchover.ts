@@ -1,5 +1,6 @@
+import { clusterImage } from './image-catalog';
 import { V1Job } from '@kubernetes/client-node';
-import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster } from '../types';
+import { API_GROUP, FirebirdCluster } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, jobPodSpec } from './resources';
 import { OPERATOR_CONFIG_DIR, SEGMENT_PORT, contactTimeoutSeconds, instanceHost, isolationCheckTimeoutSeconds } from './replication';
 
@@ -59,7 +60,7 @@ export function buildSwitchoverJob(
           containers: [
             {
               name: 'switchover',
-              image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+              image: clusterImage(cluster),
               command: ['perl', `${OPERATOR_CONFIG_DIR}/switchover.pl`],
               env: [
                 ...superuserClientEnv(cluster),
@@ -188,7 +189,7 @@ export function buildPromoteJob(cluster: FirebirdCluster, target: string, archiv
           containers: [
             {
               name: 'promote',
-              image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+              image: clusterImage(cluster),
               // the reply is the termination message; the Job succeeds once it has one
               command: [
                 'sh',
@@ -244,7 +245,7 @@ export function buildFailoverJob(cluster: FirebirdCluster, candidates: string[])
           containers: [
             {
               name: 'failover',
-              image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+              image: clusterImage(cluster),
               command: ['perl', `${OPERATOR_CONFIG_DIR}/failover.pl`],
               env: [
                 ...superuserClientEnv(cluster),

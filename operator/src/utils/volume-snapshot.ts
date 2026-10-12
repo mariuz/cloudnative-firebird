@@ -1,8 +1,8 @@
+import { clusterImage } from './image-catalog';
 import { createHash } from 'crypto';
 import { V1Job, V1PersistentVolumeClaim } from '@kubernetes/client-node';
 import {
   API_GROUP,
-  DEFAULT_FIREBIRD_IMAGE,
   FirebirdBackup,
   FirebirdCluster,
   FirebirdScheduledBackup,
@@ -170,7 +170,7 @@ export function buildSnapshotLockJob(backup: FirebirdBackup, cluster: FirebirdCl
           containers: [
             {
               name: action,
-              image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+              image: clusterImage(cluster),
               command: ['/bin/sh', '-c'],
               args: [lockScript(action)],
               env: [
@@ -387,7 +387,7 @@ export function buildSnapshotRecoveryJob(cluster: FirebirdCluster): V1Job {
           containers: [
             {
               name: 'snapshot-recovery',
-              image: cluster.spec.imageName ?? DEFAULT_FIREBIRD_IMAGE,
+              image: clusterImage(cluster),
               command: ['/bin/sh', '-c'],
               args: [snapshotRecoveryScript()],
               env: [

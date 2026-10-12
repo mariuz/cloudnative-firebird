@@ -72,6 +72,8 @@ spec:
               x-kubernetes-validations:
                 - rule: "!has(self.bootstrap) || !has(self.bootstrap.clone) || !has(self.bootstrap.recovery)"
                   message: bootstrap recovery and clone are mutually exclusive
+                - rule: "!has(self.imageName) || !has(self.imageCatalogRef)"
+                  message: imageName and imageCatalogRef are mutually exclusive
                 - rule: >-
                     !has(self.bootstrap) || !has(self.bootstrap.recovery) || !has(self.bootstrap.recovery.pointInTime) ||
                     self.instances <= 1 || (has(self.replication) && has(self.replication.enabled) && self.replication.enabled)
@@ -99,6 +101,26 @@ spec:
                     Full name of the Firebird Docker image to use.
                     Defaults to the operator's FIREBIRD_DEFAULT_IMAGE, or firebirdsql/firebird:latest
                   type: string
+                imageCatalogRef:
+                  description: >-
+                    Image catalog entry (CloudNativePG's imageCatalogRef): the cluster runs the catalog's image of
+                    this Firebird major version; a changed entry updates the cluster like a new imageName.
+                    Mutually exclusive with imageName.
+                  type: object
+                  required:
+                    - name
+                    - major
+                  properties:
+                    kind:
+                      type: string
+                      enum: [FirebirdImageCatalog, FirebirdClusterImageCatalog]
+                    name:
+                      type: string
+                      minLength: 1
+                    major:
+                      type: integer
+                      minimum: 1
+                      maximum: 99
                 superuserSecret:
                   description: Reference to the Secret containing the SYSDBA password
                   type: object
@@ -879,6 +901,9 @@ spec:
               description: FirebirdClusterStatus defines the observed state of a FirebirdCluster
               type: object
               properties:
+                image:
+                  description: The Firebird image of the cluster (spec.imageName, its image catalog's entry, or the operator default)
+                  type: string
                 instances:
                   description: Total number of configured instances
                   type: integer

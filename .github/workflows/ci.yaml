@@ -1840,6 +1840,56 @@ jobs:
           for reason in DatabaseCreated DatabaseDropped; do echo "$reasons" | grep -qx "$reason" || { echo "no $reason event"; exit 1; }; done
           kubectl delete firebirdcluster dbs --wait=false
 
+      - name: Verify image catalogs
+        if: matrix.track.id == 'extended'
+        run: |
+          # the image under test, by its major version
+          IMG="${{ matrix.firebird.image }}"; IMG="${IMG:-firebirdsql/firebird:latest}"
+          case "$IMG" in *:4*) MAJOR=4 ;; *6-snapshot*) MAJOR=6 ;; *) MAJOR=5 ;; esac
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdImageCatalog
+          metadata:
+            name: fb-images
+          spec:
+            images:
+              - { major: $MAJOR, image: "$IMG" }
+          ---
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: cat
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            imageCatalogRef:
+              name: fb-images
+              major: $MAJOR
+          EOF
+          timeout 300 bash -c 'until kubectl get pod cat-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/cat-0 --for=condition=Ready --timeout=300s
+          [ "$(kubectl get pod cat-0 -o jsonpath='{.spec.containers[?(@.name=="firebird")].image}')" = "$IMG" ]
+          [ "$(kubectl get firebirdcluster cat -o jsonpath={.status.image})" = "$IMG" ]
+          [ -z "$(kubectl get firebirdcluster cat -o jsonpath={.spec.imageName})" ]
+          # a new image for the major version in the catalog (the same image by its full name: nothing
+          # to pull) is rolled out like a new imageName
+          kubectl patch firebirdimagecatalog fb-images --type merge -p "{\"spec\":{\"images\":[{\"major\":$MAJOR,\"image\":\"docker.io/$IMG\"}]}}"
+          timeout 300 bash -c "until [ \"\$(kubectl get pod cat-0 -o jsonpath='{.spec.containers[?(@.name==\"firebird\")].image}' 2>/dev/null)\" = docker.io/$IMG ]; do sleep 5; done" \
+            || { kubectl get firebirdcluster cat -o jsonpath='{.status}'; echo; exit 1; }
+          kubectl wait pod/cat-0 --for=condition=Ready --timeout=300s
+          [ "$(kubectl get firebirdcluster cat -o jsonpath={.status.image})" = "docker.io/$IMG" ]
+          # the catalog gone: the cluster stays on its image and says why
+          kubectl delete firebirdimagecatalog fb-images
+          timeout 120 bash -c 'until kubectl get events --field-selector involvedObject.name=cat -o jsonpath="{.items[*].reason}" | grep -q ImageCatalogUnresolved; do sleep 5; done'
+          [ "$(kubectl get pod cat-0 -o jsonpath='{.spec.containers[?(@.name=="firebird")].image}')" = "docker.io/$IMG" ]
+          kubectl wait pod/cat-0 --for=condition=Ready --timeout=60s
+          reasons=$(kubectl get events --field-selector involvedObject.name=cat -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}')
+          echo "$reasons" | grep -qx ImageCatalogChanged || { echo "no ImageCatalogChanged event"; exit 1; }
+          (cd operator && npm run build >/dev/null)
+          node operator/dist/plugin/kubectl-firebird.js status cat | grep -E "^Image: +docker.io/$IMG \(FirebirdImageCatalog fb-images, Firebird $MAJOR\)"
+          kubectl delete firebirdcluster cat --wait=false
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |

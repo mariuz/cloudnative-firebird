@@ -1,3 +1,4 @@
+import { clusterImage } from './image-catalog';
 import { buildArchiveFollowerContainer, replicaClusterFollowing } from './replica-cluster';
 import { instanceAffinity, instanceTopologySpreadConstraints } from './scheduling';
 import { withSegmentTls } from './segment-tls-pods';
@@ -20,7 +21,6 @@ import {
 } from '@kubernetes/client-node';
 import {
   FirebirdCluster,
-  DEFAULT_FIREBIRD_IMAGE,
   API_GROUP,
   RESOURCE_KIND,
 } from '../types';
@@ -266,7 +266,7 @@ export function buildStatefulSet(
 ): V1StatefulSet {
   const { name, namespace = 'default' } = cluster.metadata;
   const spec = cluster.spec;
-  const image = spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const image = clusterImage(cluster);
   const labels = clusterLabels(name);
   const storageClassName = spec.storage.storageClass;
   const secretHash = options?.superuserSecretHash ?? cluster.status?.superuserSecretHash;
@@ -1110,7 +1110,7 @@ export function buildAutoSweepCronJob(cluster: FirebirdCluster, primaryPod?: str
   const autoSweep = spec.autoSweep;
   const schedule = autoSweep?.schedule ?? '0 3 * * *';
   const dbName = autoSweep?.databaseName ?? databaseName(cluster);
-  const image = spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const image = clusterImage(cluster);
   const labels = {
     ...clusterLabels(name),
     'app.kubernetes.io/component': 'sweep',
@@ -1336,7 +1336,7 @@ export function buildDiagnosticsCronJob(cluster: FirebirdCluster, primaryPod?: s
   const diag = spec.diagnostics;
   const schedule = diag?.schedule ?? '0 4 * * 0';
   const dbName = diag?.databaseName ?? databaseName(cluster);
-  const image = spec.imageName ?? DEFAULT_FIREBIRD_IMAGE;
+  const image = clusterImage(cluster);
   const labels = {
     ...clusterLabels(name),
     'app.kubernetes.io/component': 'diagnostics',

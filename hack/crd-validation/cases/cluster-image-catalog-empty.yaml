@@ -1,0 +1,7 @@
+# expect: spec.images: Invalid value
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdClusterImageCatalog
+metadata:
+  name: firebird
+spec:
+  images: []

@@ -49,6 +49,8 @@ export const EventReason = {
   ImageCheckStarted: 'ImageCheckStarted',
   ImageChecked: 'ImageChecked',
   ImageRefused: 'ImageRefused',
+  ImageCatalogChanged: 'ImageCatalogChanged',
+  ImageCatalogUnresolved: 'ImageCatalogUnresolved',
   MajorUpgradeStarted: 'MajorUpgradeStarted',
   MajorUpgradeConverting: 'MajorUpgradeConverting',
   MajorUpgradeStarting: 'MajorUpgradeStarting',

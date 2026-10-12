@@ -16,6 +16,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Backups and restores** as Jobs against the primary: `gbak`/`nbackup` through the service manager, logical and physical backups to S3, `FirebirdBackup` / `FirebirdScheduledBackup` / `FirebirdRestore` resources
 - **Bootstrap** a new cluster from an S3 backup or by cloning another cluster
 - **Declarative users** (`FirebirdUser`, after CloudNativePG's `DatabaseRole`) with Secret-backed passwords, role grants and a reclaim policy; users persist across pod restarts
+- **Image catalogs** (`FirebirdImageCatalog`, `FirebirdClusterImageCatalog`): clusters reference a Firebird major version; editing the catalog rolls them out (or major-upgrades them)
 - **Declarative databases** (`FirebirdDatabase`, after CloudNativePG's `Database`) on clusters without replication: created on every instance, dropped with `reclaimPolicy: delete`
 - **Declarative roles** (`FirebirdRole`): a database role and exactly the privileges it holds on tables, views, procedures, functions, packages, sequences and exceptions
 - **Automatic failover** (opt-in) to the synchronous standby (no transaction lost) or the most advanced replica; the old primary is re-seeded when it returns
@@ -1508,6 +1509,60 @@ Role names follow SQL too: `roleName: reporting` is the role `REPORTING`, while 
 quotes is used exactly as written, e.g. `roleName: '"Sales Team"'` (a quote inside is written
 `""`). `FirebirdUser.spec.roles` refers to such a role the same way (`roles: ['"Sales Team"']`).
 
+### Image Catalogs (v0.95.0)
+
+An image catalog gives the Firebird image of each major version, like CloudNativePG's
+`ImageCatalog` and `ClusterImageCatalog`. Clusters reference an entry instead of naming an image,
+so you upgrade every cluster on a major version by editing one catalog:
+
+```yaml
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdClusterImageCatalog      # cluster-wide; FirebirdImageCatalog is namespaced
+metadata:
+  name: firebird
+spec:
+  images:                              # one image per major version
+    - { major: 4, image: "firebirdsql/firebird:4.0.6" }
+    - { major: 5, image: "firebirdsql/firebird:5.0.3" }
+---
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: my-cluster
+spec:
+  instances: 3
+  storage: { size: 10Gi }
+  imageCatalogRef:                     # mutually exclusive with imageName
+    kind: FirebirdClusterImageCatalog  # default FirebirdImageCatalog, in the cluster's namespace
+    name: firebird
+    major: 5
+```
+
+**Resolving the image.** Each reconcile resolves the entry first and continues as if it were
+`spec.imageName`. The resolved image is held in memory only; the spec is never written. A changed
+entry therefore goes through everything a new `imageName` does:
+- the image check;
+- a rolling update with the primary last, or a refusal of an older on-disk structure (ODS);
+- a major upgrade when the new image is a newer major (pointing `major: 5` at a 6 image, or
+  changing the cluster's `major`).
+
+The change is picked up at the next resync. `status.image` records the image in use, which the
+operator's Jobs (backups, users, fencing) also use. `ImageCatalogChanged` reports a new image.
+
+**Unresolvable entry.** If the catalog is missing or invalid, or has no image for the major
+version, a running cluster stays on the image it had (`ImageCatalogUnresolved`, a warning). A new
+cluster waits with `Ready=False` and that reason. The CRDs refuse a major version listed twice and
+`imageName` together with `imageCatalogRef`. `kubectl firebird status` shows the image with its
+catalog.
+
+**Testing.** Unit tests cover the validation, the resolution, the image given to Jobs and the
+reconcile paths: a namespaced and a cluster-wide catalog, a changed entry, a missing catalog for
+a running and for a new cluster, and the image of a cluster without a catalog. The kind CI does
+the following on each Firebird version:
+1. Runs a cluster from a catalog.
+2. Changes the entry and checks that the instance rolls over to the new image.
+3. Deletes the catalog and checks that the cluster stays on its image.
+
 ### Declarative Databases (v0.94.0)
 
 A `FirebirdDatabase` manages another database file of a cluster as its own resource, like
@@ -1597,7 +1652,7 @@ The operator records Kubernetes events on its resources (CloudNativePG 1.29 / 1.
 
 | Resource | Reasons |
 |---|---|
-| `FirebirdCluster` | `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`, `PodAntiAffinityDefaulted`, `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReplicaClusterRepositioning`, `ReplicaClusterFollowFailed` (warning), `ReplicaClusterPromoting`, `ReplicaClusterPromoted`; `ImageCheckStarted`, `ImageChecked`, `ImageRefused` (warning); `MajorUpgradeStarted`, `MajorUpgradeConverting`, `MajorUpgradeStarting`, `MajorUpgradeCompleted`, `MajorUpgradeFailed` (warning), `MajorUpgradeAbandoned`; `ReconcileFailed` (warning) |
+| `FirebirdCluster` | `ImageCatalogChanged`, `ImageCatalogUnresolved` (warning); `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`, `PodAntiAffinityDefaulted`, `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging` (warning); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReplicaClusterRepositioning`, `ReplicaClusterFollowFailed` (warning), `ReplicaClusterPromoting`, `ReplicaClusterPromoted`; `ImageCheckStarted`, `ImageChecked`, `ImageRefused` (warning); `MajorUpgradeStarted`, `MajorUpgradeConverting`, `MajorUpgradeStarting`, `MajorUpgradeCompleted`, `MajorUpgradeFailed` (warning), `MajorUpgradeAbandoned`; `ReconcileFailed` (warning) |
 | `FirebirdBackup` | `BackupStarted`, `BackupCompleted`, `BackupFailed` (warning) |
 | `FirebirdRestore` | `RestoreStarted`, `RestoreCompleted`, `RestoreFailed` (warning) |
 | `FirebirdUser` | `UserApplied`, `UserFailed` (warning), `UserDropped` |
