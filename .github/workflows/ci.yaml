@@ -1879,9 +1879,13 @@ jobs:
             || { kubectl get firebirdcluster cat -o jsonpath='{.status}'; echo; exit 1; }
           kubectl wait pod/cat-0 --for=condition=Ready --timeout=300s
           [ "$(kubectl get firebirdcluster cat -o jsonpath={.status.image})" = "docker.io/$IMG" ]
+          # the catalog watch reconciled the cluster (not only the periodic resync)
+          catalogLog() { kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1 | grep 'Image catalog changed, reconciling' | grep '"cluster":"cat"' | grep -q "\"phase\":\"$1\""; }
+          catalogLog MODIFIED || { echo "the catalog change did not trigger a reconcile"; exit 1; }
           # the catalog gone: the cluster stays on its image and says why
           kubectl delete firebirdimagecatalog fb-images
           timeout 120 bash -c 'until kubectl get events --field-selector involvedObject.name=cat -o jsonpath="{.items[*].reason}" | grep -q ImageCatalogUnresolved; do sleep 5; done'
+          catalogLog DELETED || { echo "the catalog deletion did not trigger a reconcile"; exit 1; }
           [ "$(kubectl get pod cat-0 -o jsonpath='{.spec.containers[?(@.name=="firebird")].image}')" = "docker.io/$IMG" ]
           kubectl wait pod/cat-0 --for=condition=Ready --timeout=60s
           reasons=$(kubectl get events --field-selector involvedObject.name=cat -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}')

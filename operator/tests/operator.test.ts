@@ -127,7 +127,7 @@ describe('Operator – lifecycle', () => {
       expect(mockHealthStart).toHaveBeenCalledTimes(1);
     });
 
-    it('watches FirebirdCluster, backup, restore, user, role and database resources', async () => {
+    it('watches FirebirdCluster, backup, restore, user, role, database and image catalog resources', async () => {
       const { operator } = makeOperator();
       await operator.start();
       expect(mockWatchFn.mock.calls.map((c) => c[0])).toEqual([
@@ -139,6 +139,8 @@ describe('Operator – lifecycle', () => {
         '/apis/firebird.cloudnative-firebird.io/v1/firebirdroles',
         '/apis/firebird.cloudnative-firebird.io/v1/firebirddatabases',
         '/api/v1/pods',
+        '/apis/firebird.cloudnative-firebird.io/v1/firebirdimagecatalogs',
+        '/apis/firebird.cloudnative-firebird.io/v1/firebirdclusterimagecatalogs',
       ]);
       // only instance pods, not Job pods
       expect(mockWatchFn.mock.calls[7][1]).toEqual({ labelSelector: INSTANCE_POD_WATCH_SELECTOR });
@@ -176,7 +178,7 @@ describe('Operator – lifecycle', () => {
       const { operator } = makeOperator();
       await operator.start();
       operator.stop();
-      expect(mockWatchAbort).toHaveBeenCalledTimes(8);
+      expect(mockWatchAbort).toHaveBeenCalledTimes(10);
     });
 
     it('marks the operator as not ready', async () => {
@@ -714,6 +716,89 @@ describe('Operator – instance pod watch', () => {
     emitPod('ADDED', pod('test-cluster-backup-x7k2p', {}));
     emitPod('ERROR', { kind: 'Status' });
     await vi.advanceTimersByTimeAsync(POD_EVENT_DEBOUNCE_MS);
+    expect(mockReconcile).not.toHaveBeenCalled();
+  });
+});
+
+describe('Operator – image catalog watches', () => {
+  const CATALOGS_PATH = '/apis/firebird.cloudnative-firebird.io/v1/firebirdimagecatalogs';
+  const CLUSTER_CATALOGS_PATH = '/apis/firebird.cloudnative-firebird.io/v1/firebirdclusterimagecatalogs';
+  let operator: Operator;
+
+  const catalog = (images: Array<{ major: number; image: string }>, namespace: string | undefined = 'default', name = 'firebird') => ({
+    apiVersion: 'firebird.cloudnative-firebird.io/v1',
+    kind: namespace ? 'FirebirdImageCatalog' : 'FirebirdClusterImageCatalog',
+    metadata: { name, ...(namespace ? { namespace } : {}) },
+    spec: { images },
+  });
+  const emit = (path: string, phase: string, obj: unknown) => eventCallbacks.get(path)!(phase, obj);
+  /** A cluster on a catalog, as the API has it after a reconcile recorded its image */
+  const catalogCluster = (name: string, ref: { kind?: 'FirebirdImageCatalog' | 'FirebirdClusterImageCatalog'; name: string; major: number }, image?: string) => {
+    const cluster = makeNamedCluster(name, 'default', { imageCatalogRef: ref });
+    return image ? { ...cluster, status: { image } } : cluster;
+  };
+  const reconciled = () => mockReconcile.mock.calls.map((c) => c[0].metadata.name).sort();
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    operator = new Operator(new KubeConfig(), 8080, 0);
+    await operator.start();
+    capturedEventCallback!('ADDED', catalogCluster('on-5', { name: 'firebird', major: 5 }, 'fb:5.0.3'));
+    capturedEventCallback!('ADDED', catalogCluster('on-4', { name: 'firebird', major: 4 }, 'fb:4.0.6'));
+    capturedEventCallback!('ADDED', catalogCluster('waiting', { name: 'later', major: 5 }));
+    capturedEventCallback!('ADDED', catalogCluster('wide', { kind: 'FirebirdClusterImageCatalog', name: 'firebird', major: 5 }, 'fb:5.0.3'));
+    capturedEventCallback!('ADDED', makeNamedCluster('plain', 'default'));
+    await flush();
+    mockReconcile.mockClear();
+  });
+
+  afterEach(() => operator.stop());
+
+  it('leaves clusters alone when the operator starts and sees the catalogs they run', async () => {
+    emit(CATALOGS_PATH, 'ADDED', catalog([{ major: 4, image: 'fb:4.0.6' }, { major: 5, image: 'fb:5.0.3' }]));
+    emit(CLUSTER_CATALOGS_PATH, 'ADDED', catalog([{ major: 5, image: 'fb:5.0.3' }], undefined));
+    await flush();
+    // seen again after a watch restart
+    emit(CATALOGS_PATH, 'ADDED', catalog([{ major: 4, image: 'fb:4.0.6' }, { major: 5, image: 'fb:5.0.3' }]));
+    await flush();
+    expect(mockReconcile).not.toHaveBeenCalled();
+  });
+
+  it('reconciles only the clusters whose entry changed', async () => {
+    emit(CATALOGS_PATH, 'ADDED', catalog([{ major: 4, image: 'fb:4.0.6' }, { major: 5, image: 'fb:5.0.3' }]));
+    await flush();
+    emit(CATALOGS_PATH, 'MODIFIED', catalog([{ major: 4, image: 'fb:4.0.6' }, { major: 5, image: 'fb:5.0.4' }]));
+    await flush();
+    expect(reconciled()).toEqual(['on-5']);
+    mockReconcile.mockClear();
+    emit(CLUSTER_CATALOGS_PATH, 'ADDED', catalog([{ major: 5, image: 'fb:5.0.4' }], undefined));
+    await flush();
+    expect(reconciled()).toEqual(['wide']);
+  });
+
+  it('reconciles a cluster waiting for its catalog when it appears, and clusters whose catalog is deleted or made invalid', async () => {
+    emit(CATALOGS_PATH, 'ADDED', catalog([{ major: 5, image: 'fb:5.0.3' }], 'default', 'later'));
+    await flush();
+    expect(reconciled()).toEqual(['waiting']);
+    mockReconcile.mockClear();
+
+    emit(CATALOGS_PATH, 'ADDED', catalog([{ major: 4, image: 'fb:4.0.6' }, { major: 5, image: 'fb:5.0.3' }]));
+    await flush();
+    // a duplicate major 4 entry: the catalog is invalid for every cluster using it
+    emit(CATALOGS_PATH, 'MODIFIED', catalog([{ major: 4, image: 'fb:4.0.6' }, { major: 4, image: 'x' }, { major: 5, image: 'fb:5.0.3' }]));
+    await flush();
+    expect(reconciled()).toEqual(['on-4', 'on-5']);
+    mockReconcile.mockClear();
+
+    emit(CATALOGS_PATH, 'DELETED', catalog([{ major: 5, image: 'fb:5.0.3' }], 'default', 'later'));
+    await flush();
+    expect(reconciled()).toEqual(['waiting']);
+  });
+
+  it('matches namespaced catalogs by namespace', async () => {
+    emit(CATALOGS_PATH, 'ADDED', catalog([{ major: 5, image: 'fb:5.0.9' }], 'other'));
+    emit(CATALOGS_PATH, 'ERROR', { kind: 'Status' });
+    await flush();
     expect(mockReconcile).not.toHaveBeenCalled();
   });
 });

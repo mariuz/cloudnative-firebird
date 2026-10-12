@@ -21,11 +21,13 @@ import { TARGET_PRIMARY_ANNOTATION } from './utils/switchover';
 import { RESEED_ANNOTATION } from './utils/replication';
 import { CLUSTER_LABEL, instancePods } from './utils/resources';
 import { isPodReady } from './utils/routing';
+import { CLUSTER_IMAGE_CATALOG_KIND, IMAGE_CATALOG_KIND, catalogKey, referencedCatalogKey, resolveCatalogImage } from './utils/image-catalog';
 import {
   API_GROUP,
   API_VERSION,
   FirebirdBackup,
   FirebirdCluster,
+  FirebirdImageCatalog,
   FirebirdRestore,
   FirebirdRole,
   FirebirdDatabase,
@@ -130,6 +132,8 @@ export class Operator {
   private readonly podStates = new Map<string, string>();
   /** Pending pod-triggered reconciles, per cluster */
   private readonly podTriggers = new Map<string, NodeJS.Timeout>();
+  /** Latest observed image catalogs, keyed by catalogKey */
+  private readonly catalogs = new Map<string, FirebirdImageCatalog>();
 
   constructor(kubeConfig: KubeConfig, healthPort = 8080, resyncIntervalMs = DEFAULT_RESYNC_INTERVAL_MS) {
     this.resyncIntervalMs = resyncIntervalMs;
@@ -235,6 +239,15 @@ export class Operator {
       async (phase, obj) => this.handlePodEvent(phase, obj as WatchedPod),
       { labelSelector: INSTANCE_POD_WATCH_SELECTOR },
     );
+    // image catalogs: a changed entry rolls out to the clusters using it at once
+    for (const [kind, plural] of [
+      [IMAGE_CATALOG_KIND, 'firebirdimagecatalogs'],
+      [CLUSTER_IMAGE_CATALOG_KIND, 'firebirdclusterimagecatalogs'],
+    ] as const) {
+      await this.watchPath(`/apis/${API_GROUP}/${API_VERSION}/${plural}`, async (phase, obj) =>
+        this.handleCatalogEvent(kind, phase, obj as FirebirdImageCatalog),
+      );
+    }
     if (this.resyncIntervalMs > 0) {
       this.resyncTimer = setInterval(() => this.resync(), this.resyncIntervalMs);
     }
@@ -278,6 +291,7 @@ export class Operator {
     for (const timer of this.podTriggers.values()) clearTimeout(timer);
     this.podTriggers.clear();
     this.podStates.clear();
+    this.catalogs.clear();
     if (this.resyncTimer) {
       clearInterval(this.resyncTimer);
       this.resyncTimer = null;
@@ -390,6 +404,40 @@ export class Operator {
         });
       }, POD_EVENT_DEBOUNCE_MS),
     );
+  }
+
+  /**
+   * Reconciles the clusters whose image a catalog event changes: the image (or the reason there is
+   * none) the catalog gives their major version differs from what it gave before. A catalog seen
+   * again after a watch restart, or a change of another major version's entry, reconciles nothing;
+   * nor does a catalog seen for the first time (the operator starting) that gives a cluster the
+   * image it already runs.
+   */
+  private async handleCatalogEvent(kind: string, phase: string, catalog: FirebirdImageCatalog): Promise<void> {
+    if (phase === 'ERROR' || !catalog?.metadata) {
+      logger.error({ phase, kind, event: catalog }, 'Received error event from watch stream');
+      return;
+    }
+    const { name, namespace } = catalog.metadata;
+    const key = catalogKey(kind, namespace, name);
+    const previous = this.catalogs.get(key);
+    if (phase === 'DELETED') this.catalogs.delete(key);
+    else if (phase === 'ADDED' || phase === 'MODIFIED') this.catalogs.set(key, catalog);
+    else return;
+    const current = this.catalogs.get(key);
+    for (const [clusterKey, cluster] of this.knownClusters) {
+      if (referencedCatalogKey(cluster) !== key) continue;
+      const ref = cluster.spec.imageCatalogRef!;
+      const before = JSON.stringify(resolveCatalogImage(ref, previous));
+      const resolved = resolveCatalogImage(ref, current);
+      const after = JSON.stringify(resolved);
+      if (before === after) continue;
+      if (!previous && resolved.image !== undefined && resolved.image === cluster.status?.image) continue;
+      logger.info({ cluster: cluster.metadata.name, namespace: cluster.metadata.namespace, catalog: name, phase }, 'Image catalog changed, reconciling');
+      this.reconcileCluster(clusterKey).catch((err) => {
+        logger.error({ err, cluster: clusterKey }, 'Catalog-triggered reconcile failed');
+      });
+    }
   }
 
   private async handleBackupEvent(kind: BackupKind, phase: string, obj: WatchedObject): Promise<void> {

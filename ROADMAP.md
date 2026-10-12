@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.97.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.98.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Image catalog watches** *(v0.98.0)*
+  - The operator watches `FirebirdImageCatalog` and `FirebirdClusterImageCatalog` and reconciles the clusters whose image a catalog event changes (the entry for their major version, or the reason there is none: a catalog created, deleted or made invalid) at once, instead of at the next resync. Other entries' changes, catalogs seen again after a watch restart, and catalogs seen at startup with the image a cluster already runs trigger nothing.
+  - Unit tests cover startup, changed entries per major version and kind, a waiting cluster, deletion, an invalid catalog and namespaces; the kind CI checks the operator log for the catalog-triggered reconciles of a changed and a deleted catalog.
 - [x] **Primary-only `<name>` Service** *(v0.97.0; CloudNativePG's `-rw` Service)*
   - With replication, the default `<name>` Service selects only the primary (the `role` label the operator keeps), with or without read-only routing. Before, without routing it selected every instance, so a connection could reach a read-only replica. Without replication it still selects every instance. Pods are labelled before the selector changes, in the same reconcile, so an upgraded operator moves the Service over without a gap.
   - Unit tests cover the selectors; the kind CI checks the Service's endpoints are the primary's.

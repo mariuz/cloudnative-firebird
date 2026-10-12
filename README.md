@@ -1616,7 +1616,11 @@ entry therefore goes through everything a new `imageName` does:
 - a major upgrade when the new image is a newer major (pointing `major: 5` at a 6 image, or
   changing the cluster's `major`).
 
-The change is picked up at the next resync. `status.image` records the image in use, which the
+The operator watches both catalog kinds, so a change reaches the clusters using it at once
+(v0.98.0; before, at the next resync). Only the clusters whose own entry changed are reconciled:
+the image the catalog gives their major version, or the reason it gives none (a catalog
+created, deleted or made invalid). A catalog seen again after a watch restart, or seen first when
+the operator starts with the image the cluster already runs, triggers nothing. `status.image` records the image in use, which the
 operator's Jobs (backups, users, fencing) also use. `ImageCatalogChanged` reports a new image.
 
 **Unresolvable entry.** If the catalog is missing or invalid, or has no image for the major
