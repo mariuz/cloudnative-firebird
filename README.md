@@ -24,7 +24,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Planned switchover** with the `targetPrimary` annotation: no data loss, the other replicas continue without re-seeding
 - **Rolling updates with the primary last** (`primaryUpdateStrategy` / `primaryUpdateMethod`, as in CloudNativePG): replicas are restarted one at a time, then the primary is restarted or switched over
 - **Replica re-seeding** with a pod annotation (CloudNativePG `unrecoverable`)
-- **kubectl plugin** (`kubectl firebird`): status, switchover, restart, fencing, hibernation, re-seeding, backups and `isql`
+- **kubectl plugin** (`kubectl firebird`): status, switchover, restart, fencing, hibernation, re-seeding, backups, `isql`, logs, destroying a replica and support reports
 - **Instance fencing** via the `fencedInstances` annotation (CloudNativePG format): the database is shut down, the pod keeps running
 - **Lag-aware read-only routing** to replicas via the `<name>-replica` Service (`spec.replication.readOnlyRouting`)
 - **Secret-based** SYSDBA password management
@@ -227,14 +227,18 @@ kubectl plugin list | grep firebird
 | `kubectl firebird reseed my-cluster 1` | Re-seeds a replica (the `reseed` pod annotation). The primary is refused. |
 | `kubectl firebird backup my-cluster [--type logical\|physical\|volumeSnapshot] [--level n] [--snapshot-class c] [--name n]` | Creates a `FirebirdBackup`, to the cluster's `backup.s3` when it has one. |
 | `kubectl firebird isql my-cluster [--replica\|--instance 1] [-- isql args]` | Runs `isql` in the `firebird` container (`kubectl exec`; `-it` from a terminal, so a script can be piped in) as SYSDBA, through the container's credentials. |
+| `kubectl firebird logs my-cluster [--instance 1] [--container c] [--tail n] [-f]` | The logs of every instance at once, each line prefixed with its pod (`kubectl logs -l ... --prefix`), or of one instance. The `firebird` container by default; `--container` takes a sidecar or init container (`replication-init`, `segment-server`, ...). Since v0.99.0. |
+| `kubectl firebird destroy my-cluster 2` | Deletes a replica's pod and volume; the operator creates a new volume and seeds it from the primary (the `reseed=volume` annotation, see Re-seeding a Replica). The primary, clusters without replication (the instance would come back empty) and hibernated clusters are refused. Since v0.99.0. |
+| `kubectl firebird report my-cluster [-o dir] [--operator-namespace ns] [--no-logs]` | Writes a support bundle to a new directory (`report-<cluster>-<time>` by default): the status report; the cluster, StatefulSet, pods, Services, PVCs, backups, schedules and databases as YAML; the cluster's events; every container's log of each instance; and the operator's log lines about the cluster (from `cloudnative-firebird-system` by default). Secrets are never read, literal credentials in environment variables (e.g. the default `masterkey`) are redacted and `managedFields` left out. What cannot be read (RBAC, a missing CRD) is listed in `errors.txt`. Since v0.99.0. |
 
 An instance is named by its pod name or its ordinal. Wrong arguments exit with 2 and API errors
 with 1, showing the API server's message.
 
 **Testing.** Unit tests cover the argument parsing, the status report, every command and its
-refusals. The kind CI puts the plugin on the PATH, reads the status of the replicated cluster,
-runs `isql` on its primary and a replica, takes a backup, and fences and unfences a replica
-through it.
+refusals, the report's files and redaction. The kind CI puts the plugin on the PATH, reads the
+status of the replicated cluster, runs `isql` on its primary and a replica, takes a backup,
+fences and unfences a replica, reads the instances' logs, writes and checks a report, and
+destroys a replica (the volume re-creation step).
 
 ## FirebirdCluster CRD Reference
 

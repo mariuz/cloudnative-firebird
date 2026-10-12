@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.98.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.99.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,11 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **kubectl plugin: logs, destroy, report** *(v0.99.0; CloudNativePG's kubectl cnpg logs, destroy and report)*
+  - `logs`: every instance's log at once, prefixed with its pod, or one instance's; any container, `--tail`, `-f`.
+  - `destroy`: deletes a replica's pod and volume through the operator's volume re-creation (`reseed=volume`); the primary, clusters without replication and hibernated clusters are refused.
+  - `report`: a support bundle directory with the status, the cluster's resources as YAML, its events, the instances' logs and the operator's log lines about it; Secrets are not read, literal credentials are redacted, `managedFields` left out, and what cannot be read is listed in `errors.txt`.
+  - Unit tests cover the commands, refusals, report files, redaction and log filtering; the API calls were checked against an API server (envtest); the kind CI runs `logs` and `report` on the replicated cluster and re-creates a replica's volume with `destroy`.
 - [x] **Image catalog watches** *(v0.98.0)*
   - The operator watches `FirebirdImageCatalog` and `FirebirdClusterImageCatalog` and reconciles the clusters whose image a catalog event changes (the entry for their major version, or the reason there is none: a catalog created, deleted or made invalid) at once, instead of at the next resync. Other entries' changes, catalogs seen again after a watch restart, and catalogs seen at startup with the image a cluster already runs trigger nothing.
   - Unit tests cover startup, changed entries per major version and kind, a waiting cluster, deletion, an invalid catalog and namespaces; the kind CI checks the operator log for the catalog-triggered reconciles of a changed and a deleted catalog.
@@ -487,7 +492,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Managed Services** | `managed.services` (additional, disabledDefaultServices) | `managed.services` (rw / ro / r, patch / replace, disabling `ro`) | **v0.96.0 (Done)** |
 | **Image Catalogs** | `ImageCatalog` / `ClusterImageCatalog`, `imageCatalogRef` | `FirebirdImageCatalog` / `FirebirdClusterImageCatalog`, `imageCatalogRef` | **v0.95.0 (Done)** |
 | **Declarative Databases** | `Database` resource | `FirebirdDatabase` (clusters without replication) | **v0.94.0 (Done)** |
-| **kubectl Plugin** | `kubectl cnpg` (status, promote, restart, fencing, hibernate, backup, psql) | `kubectl firebird` (status, promote, restart, fence, hibernate, reseed, backup, isql) | **v0.93.0 (Done)** |
+| **kubectl Plugin** | `kubectl cnpg` (status, promote, restart, fencing, hibernate, backup, psql, logs, destroy, report) | `kubectl firebird` (status, promote, restart, fence, hibernate, reseed, backup, isql, logs, destroy, report) | **v0.93.0, v0.99.0 (Done)** |
 | **Volume Snapshots** | `method: volumeSnapshot` backups, bootstrap from `volumeSnapshots` | `type: volumeSnapshot` (online, nbackup lock), scheduled with retention, `bootstrap.recovery.volumeSnapshot` | **v0.92.0 (Done)** |
 | **Replica Clusters** | `replica` with `source` (object store or streaming) | `replica` following the source's journal archive in S3, promotion | **v0.91.0 (Done)** |
 | **Major Version Upgrade** | Offline `pg_upgrade` | Image check, offline `gbak` conversion per volume | **v0.89.0 (Done)** |

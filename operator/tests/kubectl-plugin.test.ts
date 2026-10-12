@@ -9,12 +9,15 @@ import {
   PluginApi,
   PluginIo,
   RESEED_ANNOTATION,
+  RESEED_VOLUME,
   run,
   TARGET_PRIMARY_ANNOTATION,
 } from '../src/plugin/cli';
 import { FENCED_INSTANCES_ANNOTATION as OPERATOR_FENCED } from '../src/utils/fencing';
 import { TARGET_PRIMARY_ANNOTATION as OPERATOR_TARGET } from '../src/utils/switchover';
 import { RESEED_ANNOTATION as OPERATOR_RESEED } from '../src/utils/replication';
+import { RESEED_VOLUME as OPERATOR_RESEED_VOLUME } from '../src/utils/volume-recreation';
+import { formatEvents, operatorLogLines, sanitize } from '../src/plugin/report';
 import { FirebirdBackup, FirebirdCluster } from '../src/types';
 
 const makeCluster = (spec: Partial<FirebirdCluster['spec']> = {}, status?: FirebirdCluster['status']): FirebirdCluster => ({
@@ -39,6 +42,8 @@ describe('kubectl firebird', () => {
   let errs: string[];
   let io: PluginIo;
   let kubectlArgs: string[] | undefined;
+  let files: Map<string, string>;
+  let dirs: string[];
 
   beforeEach(() => {
     cluster = makeCluster({}, { phase: 'Running', readyInstances: 3, replicationStatus: { primaryPod: 'db-1' } });
@@ -56,7 +61,14 @@ describe('kubectl firebird', () => {
       listScheduledBackups: vi.fn().mockResolvedValue([]),
       listDatabases: vi.fn().mockResolvedValue([]),
       createBackup: vi.fn().mockResolvedValue(undefined),
+      getStatefulSet: vi.fn().mockResolvedValue({ metadata: { name: 'db', managedFields: [{ manager: 'x' }] }, spec: {} }),
+      listServices: vi.fn().mockResolvedValue([{ metadata: { name: 'db' } }, { metadata: { name: 'db-replica' } }]),
+      listClaims: vi.fn().mockRejectedValue(Object.assign(new Error('x'), { code: 403, body: '{"message":"persistentvolumeclaims is forbidden"}' })),
+      listEvents: vi.fn().mockResolvedValue([]),
+      readPodLog: vi.fn().mockImplementation((_ns, name, container) => Promise.resolve(`log of ${name}/${container}\n`)),
     };
+    files = new Map();
+    dirs = [];
     out = [];
     errs = [];
     kubectlArgs = undefined;
@@ -69,6 +81,15 @@ describe('kubectl firebird', () => {
       },
       interactive: false,
       now: () => new Date('2026-10-11T12:00:00Z'),
+      makeDir: (path) => {
+        if (dirs.includes(path)) return Promise.reject(new Error(`EEXIST: file already exists, mkdir '${path}'`));
+        dirs.push(path);
+        return Promise.resolve();
+      },
+      writeFile: (path, content) => {
+        files.set(path, content);
+        return Promise.resolve();
+      },
     };
   });
 
@@ -78,6 +99,7 @@ describe('kubectl firebird', () => {
     expect(FENCED_INSTANCES_ANNOTATION).toBe(OPERATOR_FENCED);
     expect(TARGET_PRIMARY_ANNOTATION).toBe(OPERATOR_TARGET);
     expect(RESEED_ANNOTATION).toBe(OPERATOR_RESEED);
+    expect(RESEED_VOLUME).toBe(OPERATOR_RESEED_VOLUME);
   });
 
   it('parses flags, values and the arguments after --', () => {
@@ -264,5 +286,95 @@ describe('kubectl firebird', () => {
     expect(errs.at(-1)).toBe('error: firebirdclusters "nope" not found');
     expect(apiErrorMessage(Object.assign(new Error('boom'), { code: 500 }))).toBe('boom');
     expect(apiErrorMessage({ code: 404 })).toBe('not found');
+  });
+
+  it('streams the logs of every instance, or of one', async () => {
+    expect(await exec('logs', 'db')).toBe(0);
+    expect(kubectlArgs).toEqual([
+      '-n', 'prod', 'logs', '-l', 'firebird.cloudnative-firebird.io/cluster=db,app.kubernetes.io/component=database',
+      '--prefix', '--max-log-requests=3', '-c', 'firebird', '--tail=-1',
+    ]);
+    expect(await exec('logs', 'db', '--instance', '2', '--container', 'segment-server', '--tail', '50', '-f', '--context', 'kind')).toBe(0);
+    expect(kubectlArgs).toEqual(['--context', 'kind', '-n', 'prod', 'logs', 'db-2', '-c', 'segment-server', '--tail=50', '-f']);
+    expect(await exec('logs', 'db', '--tail', 'all')).toBe(2);
+    expect(await exec('logs', 'db', '--instance', '7')).toBe(2);
+  });
+
+  it('destroys a replica through the volume re-creation the operator runs', async () => {
+    expect(await exec('destroy', 'db', '2')).toBe(0);
+    expect(api.patchPod).toHaveBeenCalledWith('prod', 'db-2', { metadata: { annotations: { [RESEED_ANNOTATION]: 'volume' } } });
+    expect(out.at(-1)).toContain('db-2 destroyed');
+    // never the primary, a cluster without replication, a hibernated one or an instance without a pod
+    expect(await exec('destroy', 'db', 'db-1')).toBe(2);
+    expect(errs.at(-1)).toContain('is the primary');
+    pods = pods.filter((p) => p.metadata?.name !== 'db-0');
+    expect(await exec('destroy', 'db', '0')).toBe(2);
+    expect(errs.at(-1)).toContain('has no pod');
+    cluster.spec.hibernated = true;
+    expect(await exec('destroy', 'db', '2')).toBe(2);
+    cluster.spec.hibernated = false;
+    cluster.spec.replication = { enabled: false };
+    expect(await exec('destroy', 'db', '2')).toBe(2);
+    expect(errs.at(-1)).toContain('empty database');
+    expect(api.patchPod).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes a report of the cluster, listing what it could not collect', async () => {
+    pods[0].spec = { initContainers: [{ name: 'segment-tls' }], containers: [{ name: 'firebird' }] };
+    pods[0].spec.containers[0].env = [{ name: 'ISC_PASSWORD', value: 'masterkey' }, { name: 'ISC_USER', value: 'SYSDBA' }];
+    api.listPods.mockImplementation((ns: string) =>
+      Promise.resolve(ns === 'cloudnative-firebird-system' ? [{ metadata: { name: 'op-1' }, spec: { containers: [{ name: 'operator' }] } }] : pods),
+    );
+    api.readPodLog.mockImplementation((ns: string, name: string, container: string) =>
+      ns === 'cloudnative-firebird-system'
+        ? Promise.resolve(['{"msg":"a","cluster":"db","namespace":"prod"}', '{"msg":"b","cluster":"db","namespace":"other"}', '{"msg":"c","cluster":"x"}', 'plain'].join('\n'))
+        : Promise.resolve(`log of ${name}/${container}\n`),
+    );
+    api.listBackups.mockResolvedValue([
+      { metadata: { name: 'mine' }, spec: { clusterName: 'db' } },
+      { metadata: { name: 'theirs' }, spec: { clusterName: 'other' } },
+    ]);
+    expect(await exec('report', 'db')).toBe(0);
+    const dir = 'report-db-20261011120000';
+    expect(dirs).toEqual([dir, `${dir}/logs`]);
+    expect([...files.keys()].map((k) => k.slice(dir.length + 1)).sort()).toEqual([
+      'backups.yaml', 'cluster.yaml', 'databases.yaml', 'errors.txt', 'events.txt',
+      'logs/db-0-firebird.log', 'logs/db-0-segment-tls.log', 'operator.log', 'pods.yaml', 'scheduled-backups.yaml',
+      'services.yaml', 'statefulset.yaml', 'status.txt',
+    ]);
+    expect(files.get(`${dir}/pods.yaml`)).toContain('value: <redacted>');
+    expect(files.get(`${dir}/pods.yaml`)).not.toContain('masterkey');
+    expect(files.get(`${dir}/pods.yaml`)).toContain('value: SYSDBA');
+    expect(files.get(`${dir}/statefulset.yaml`)).not.toContain('managedFields');
+    expect(files.get(`${dir}/backups.yaml`)).toContain('mine');
+    expect(files.get(`${dir}/backups.yaml`)).not.toContain('theirs');
+    expect(files.get(`${dir}/status.txt`)).toContain('Cluster:      prod/db');
+    expect(files.get(`${dir}/operator.log`)).toBe('# cloudnative-firebird-system/op-1\n{"msg":"a","cluster":"db","namespace":"prod"}\n');
+    expect(files.get(`${dir}/errors.txt`)).toBe('pvcs.yaml: persistentvolumeclaims is forbidden\n');
+    expect(out.at(-1)).toBe(`report of cluster db written to ${dir}/ (12 files; 1 could not be collected: see errors.txt)`);
+
+    // an existing directory is not overwritten; --no-logs leaves the logs out
+    expect(await exec('report', 'db')).toBe(1);
+    expect(errs.at(-1)).toContain('EEXIST');
+    files.clear();
+    expect(await exec('report', 'db', '-o', 'out', '--no-logs')).toBe(0);
+    expect([...files.keys()].some((k) => k.includes('log'))).toBe(false);
+  });
+
+  it('formats events and redacts literal credentials', () => {
+    const events = [
+      { involvedObject: { kind: 'Pod', name: 'db-0' }, reason: 'Started', type: 'Normal', message: 'b', lastTimestamp: new Date('2026-10-11T10:00:02Z') },
+      { involvedObject: { kind: 'FirebirdCluster', name: 'db' }, reason: 'Created', type: 'Normal', message: 'a', count: 2, lastTimestamp: new Date('2026-10-11T10:00:01Z') },
+      { involvedObject: { kind: 'Pod', name: 'dbx-0' }, reason: 'Other', message: 'c' },
+    ];
+    expect(formatEvents(events as never, 'db')).toBe(
+      '2026-10-11T10:00:01.000Z  Normal  Created  FirebirdCluster/db  (x2) a\n2026-10-11T10:00:02.000Z  Normal  Started  Pod/db-0  b\n',
+    );
+    expect(formatEvents([], 'db')).toBe('(no events)\n');
+    expect(sanitize({ env: [{ name: 'AWS_SECRET_ACCESS_KEY', value: 's' }, { name: 'X', valueFrom: {} }] })).toEqual({
+      env: [{ name: 'AWS_SECRET_ACCESS_KEY', value: '<redacted>' }, { name: 'X', valueFrom: {} }],
+    });
+    expect(sanitize({ metadata: { creationTimestamp: new Date('2026-10-11T10:00:00Z') } })).toEqual({ metadata: { creationTimestamp: '2026-10-11T10:00:00.000Z' } });
+    expect(operatorLogLines('{"cluster":"db"}\n{"cluster":"db2"}', 'db', 'prod')).toBe('{"cluster":"db"}\n');
   });
 });
