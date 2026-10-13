@@ -49,6 +49,7 @@ import {
 import { existingTargetMessage, restoreTargetExists, superuserPasswordFrom } from '../utils/restore-target';
 import { SegmentClient, segmentRequest } from '../utils/replication-lag';
 import { cronJobNeedsUpdate, databaseName, FIREBIRD_DATA_DIR, instancePodSelector } from '../utils/resources';
+import { managedDatabaseName } from '../utils/databases';
 import {
   ValidationError,
   validateBackupSpec,
@@ -60,7 +61,9 @@ import {
   API_VERSION,
   FirebirdCluster,
   FirebirdBackup,
+  FirebirdBackupStatus,
   FirebirdBackupType,
+  FirebirdDatabase,
   FirebirdScheduledBackup,
   FirebirdRestore,
   reconciliationDisabled,
@@ -154,6 +157,34 @@ export class FirebirdBackupController {
     })) as FirebirdCluster;
   }
 
+  /**
+   * The database file of spec.database: the FirebirdDatabase's, when it belongs to the backup's
+   * cluster (a ValidationError otherwise), and whether it is ready on the instances yet
+   */
+  private async backupDatabase(
+    namespace: string,
+    spec: { clusterName: string; database?: string },
+  ): Promise<{ file: string; ready: boolean; phase?: string } | undefined> {
+    if (!spec.database) return undefined;
+    let database: FirebirdDatabase;
+    try {
+      database = (await this.customApi.getNamespacedCustomObject({
+        group: API_GROUP,
+        version: API_VERSION,
+        namespace,
+        plural: 'firebirddatabases',
+        name: spec.database,
+      })) as FirebirdDatabase;
+    } catch (err) {
+      if (isNotFound(err)) throw new ValidationError(`spec.database: FirebirdDatabase ${spec.database} not found`);
+      throw err;
+    }
+    if (database.spec.clusterName !== spec.clusterName) {
+      throw new ValidationError(`spec.database: FirebirdDatabase ${spec.database} belongs to cluster ${database.spec.clusterName}, not ${spec.clusterName}`);
+    }
+    return { file: managedDatabaseName(database), ready: database.status?.phase === 'Ready', phase: database.status?.phase };
+  }
+
   /** The primary is the leader Lease holder, or ordinal 0 before a Lease exists */
   private async primaryPod(cluster: FirebirdCluster): Promise<string> {
     const { name, namespace = 'default' } = cluster.metadata;
@@ -214,7 +245,8 @@ export class FirebirdBackupController {
       const cluster = await this.getCluster(namespace, backup.spec.clusterName);
       const jobName = `backup-${name}`;
       const fileName = onDemandBackupFileName(backup);
-      const base = { jobName, backupFileName: fileName, location: backupLocation(fileName, backup.spec.s3) };
+      const base: Partial<FirebirdBackupStatus> = { jobName, backupFileName: fileName, location: backupLocation(fileName, backup.spec.s3) };
+      if (backup.spec.database) base.databasePath = backup.status?.databasePath;
 
       let job = await this.readJob(jobName, namespace);
       if (!job) {
@@ -222,8 +254,18 @@ export class FirebirdBackupController {
           await this.updateBackupStatus(backup, { phase: 'Pending', error: clusterStoppedReason(cluster) });
           return;
         }
+        const database = await this.backupDatabase(namespace, backup.spec);
+        if (database && !database.ready) {
+          // created on the instances first: retried on the resync
+          await this.updateBackupStatus(backup, {
+            phase: 'Pending',
+            error: `FirebirdDatabase ${backup.spec.database} is not ready yet (${database.phase ?? 'Pending'})`,
+          });
+          return;
+        }
+        if (database) base.databasePath = `${FIREBIRD_DATA_DIR}/${database.file}`;
         const instance = await this.backupInstance(cluster, backup.spec);
-        const desired = buildBackupJob(backup, cluster, instance, instance !== (await this.primaryPod(cluster)));
+        const desired = buildBackupJob(backup, cluster, instance, instance !== (await this.primaryPod(cluster)), database?.file);
         log.info({ jobName }, 'Creating backup Job');
         job = await this.batchApi.createNamespacedJob({ namespace, body: desired });
         await this.event(backup, 'FirebirdBackup', 'Normal', EventReason.BackupStarted, `${backup.spec.type ?? 'logical'} backup of cluster ${backup.spec.clusterName} started (Job ${jobName})`);
@@ -292,7 +334,15 @@ export class FirebirdBackupController {
     }
     const cluster = await this.getCluster(namespace, scheduledBackup.spec.clusterName);
     const instance = await this.backupInstance(cluster, scheduledBackup.spec);
-    const desired = buildScheduledBackupCronJob(scheduledBackup, cluster, instance, instance !== (await this.primaryPod(cluster)));
+    // a database not created yet: its first runs fail until it is
+    const database = await this.backupDatabase(namespace, scheduledBackup.spec);
+    const desired = buildScheduledBackupCronJob(
+      scheduledBackup,
+      cluster,
+      instance,
+      instance !== (await this.primaryPod(cluster)),
+      database?.file,
+    );
     const cronName = desired.metadata!.name!;
 
     let current: V1CronJob;

@@ -376,6 +376,17 @@ function validateS3(field: string, s3?: S3BackupConfiguration): void {
   }
 }
 
+/** spec.database: the name of a FirebirdDatabase, for logical backups only */
+function validateBackupDatabase(field: string, type?: string, database?: string): void {
+  if (database === undefined) return;
+  if (!/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(database) || database.length > 253) {
+    throw new ValidationError(`${field}.database "${database}" must be the name of a FirebirdDatabase`);
+  }
+  if (type !== undefined && type !== 'logical') {
+    throw new ValidationError(`${field}.database: only logical backups are taken of a FirebirdDatabase (physical backups and volume snapshots cover the cluster database or the whole volume)`);
+  }
+}
+
 /** Database file names created on the primary: a plain file name */
 const DATABASE_FILE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -405,6 +416,7 @@ export function validateBackupSpec(backup: FirebirdBackup): void {
   validateS3('spec', backup.spec.s3);
   validateBackupDestination('spec', backup.spec.type, backup.spec.verify);
   validateTarget('spec', backup.spec.target);
+  validateBackupDatabase('spec', backup.spec.type, backup.spec.database);
 }
 
 /**
@@ -483,6 +495,7 @@ export function validateScheduledBackupSpec(scheduledBackup: {
     retentionPolicy?: string;
     target?: string;
     verify?: boolean;
+    database?: string;
   };
 }): void {
   if (!scheduledBackup.spec?.clusterName || scheduledBackup.spec.clusterName.trim() === '') {
@@ -510,5 +523,6 @@ export function validateScheduledBackupSpec(scheduledBackup: {
   validateBackupDestination('spec', scheduledBackup.spec.type, scheduledBackup.spec.verify);
   validateRetention('spec', scheduledBackup.spec.retentionPolicy);
   validateTarget('spec', scheduledBackup.spec.target);
+  validateBackupDatabase('spec', scheduledBackup.spec.type, scheduledBackup.spec.database);
 }
 

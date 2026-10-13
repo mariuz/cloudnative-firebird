@@ -1839,6 +1839,43 @@ jobs:
           # the plugin lists them
           (cd operator && npm run build >/dev/null) && node operator/dist/plugin/kubectl-firebird.js status dbs | tee /tmp/db-status.txt
           grep -qE '^sales +/var/lib/firebird/data/sales.fdb +Ready +delete' /tmp/db-status.txt
+          # a logical backup of a FirebirdDatabase (the plugin's --database), restored into a new file
+          node operator/dist/plugin/kubectl-firebird.js backup dbs --database sales --name sales-backup
+          timeout 300 bash -c 'until [ "$(kubectl get firebirdbackup sales-backup -o jsonpath={.status.phase})" = Completed ]; do
+            [ "$(kubectl get firebirdbackup sales-backup -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done' \
+            || { kubectl get firebirdbackup sales-backup -o jsonpath='{.status}'; echo; kubectl logs job/backup-sales-backup || true; exit 1; }
+          [ "$(kubectl get firebirdbackup sales-backup -o jsonpath={.status.databasePath})" = /var/lib/firebird/data/sales.fdb ]
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: sales-restore
+          spec:
+            clusterName: dbs
+            backupName: sales-backup
+            targetDatabase: sales-restored.fdb
+          EOF
+          timeout 300 bash -c 'until [ "$(kubectl get firebirdrestore sales-restore -o jsonpath={.status.phase})" = Completed ]; do
+            [ "$(kubectl get firebirdrestore sales-restore -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done' \
+            || { kubectl get firebirdrestore sales-restore -o jsonpath='{.status}'; echo; exit 1; }
+          on=$(kubectl get firebirdbackup sales-backup -o jsonpath={.status.instance}); on=${on:-dbs-0}
+          kubectl exec "$on" -c firebird -- bash -c "echo \"select 'rows=' || count(*) from orders;\" | isql -q localhost:/var/lib/firebird/data/sales-restored.fdb" | tee /tmp/db-restored.txt
+          grep -q 'rows=1' /tmp/db-restored.txt
+          # not a physical backup of it (the plugin; the CRD too), nor of another cluster's database (the operator)
+          if node operator/dist/plugin/kubectl-firebird.js backup dbs --type physical --database sales 2>/dev/null; then echo "a physical backup of a database was accepted"; exit 1; fi
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: sales-other
+          spec:
+            clusterName: repl
+            database: sales
+          EOF
+          timeout 120 bash -c 'until [ "$(kubectl get firebirdbackup sales-other -o jsonpath={.status.phase})" = Failed ]; do sleep 3; done'
+          kubectl get firebirdbackup sales-other -o jsonpath={.status.error} | grep -q 'belongs to cluster dbs'
+          kubectl delete firebirdbackup sales-backup sales-other
+          kubectl delete firebirdrestore sales-restore
           # refused on a replicated cluster (the webhook)
           if kubectl apply -f - <<'EOF' 2>/tmp/db-denied.txt; then echo "a database on a replicated cluster was accepted"; exit 1; fi
           apiVersion: firebird.cloudnative-firebird.io/v1

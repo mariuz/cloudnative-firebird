@@ -267,6 +267,10 @@ describe('kubectl firebird', () => {
     expect(await exec('backup', 'db', '--type', 'logical', '--level', '1')).toBe(2);
     expect(await exec('backup', 'db', '--type', 'tape')).toBe(2);
     expect(await exec('backup', 'db', '--snapshot-class', 'csi')).toBe(2);
+    expect(await exec('backup', 'db', '--database', 'sales', '--name', 'sales-1')).toBe(0);
+    expect(api.createBackup.mock.calls.at(-1)[1].spec).toEqual({ clusterName: 'db', type: 'logical', database: 'sales', s3: { bucket: 'bk', secretRef: { name: 's' } } });
+    expect(out.at(-1)).toContain('(logical of FirebirdDatabase sales, to s3://bk)');
+    expect(await exec('backup', 'db', '--type', 'physical', '--database', 'sales')).toBe(2);
   });
 
   it('runs isql in the firebird container of the primary or a replica', async () => {

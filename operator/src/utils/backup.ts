@@ -290,6 +290,8 @@ export function buildBackupPodSpec(
      * (NBACKUP), which also writes the replica's position (<file>.ctl) for point-in-time recovery
      */
     replica?: boolean;
+    /** The database file backed up (a FirebirdDatabase's) instead of the cluster database */
+    databaseFile?: string;
   },
 ): V1PodSpec {
   const verify = Boolean(options.verify) && options.type !== 'physical';
@@ -297,7 +299,7 @@ export function buildBackupPodSpec(
   const env: V1EnvVar[] = [
     ...superuserClientEnv(cluster),
     { name: 'FIREBIRD_HOST', value: options.primaryHost },
-    { name: 'DATABASE_PATH', value: `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}` },
+    { name: 'DATABASE_PATH', value: `${FIREBIRD_DATA_DIR}/${options.databaseFile ?? databaseName(cluster)}` },
   ];
 
   if (!options.s3) {
@@ -527,6 +529,7 @@ export function buildScheduledBackupCronJob(
   cluster: FirebirdCluster,
   primaryPod?: string,
   replica = false,
+  databaseFile?: string,
 ): V1CronJob {
   const { name: sbName, namespace = 'default', uid } = scheduledBackup.metadata;
   const spec = scheduledBackup.spec;
@@ -550,6 +553,7 @@ export function buildScheduledBackupCronJob(
       retention: { series: sbName, policy: spec.retentionPolicy },
       verify: spec.verify,
       replica,
+      databaseFile,
     }),
     (spec.suspend ?? false) || Boolean(cluster.spec.hibernated),
   );
@@ -558,7 +562,13 @@ export function buildScheduledBackupCronJob(
 /**
  * Builds the Job for an on-demand FirebirdBackup.
  */
-export function buildBackupJob(backup: FirebirdBackup, cluster: FirebirdCluster, primaryPod?: string, replica = false): V1Job {
+export function buildBackupJob(
+  backup: FirebirdBackup,
+  cluster: FirebirdCluster,
+  primaryPod?: string,
+  replica = false,
+  databaseFile?: string,
+): V1Job {
   const { name: backupName, namespace = 'default', uid } = backup.metadata;
   const clusterName = backup.spec.clusterName;
   const labels = { ...clusterLabels(clusterName), 'app.kubernetes.io/component': 'on-demand-backup' };
@@ -583,6 +593,7 @@ export function buildBackupJob(backup: FirebirdBackup, cluster: FirebirdCluster,
           s3: backup.spec.s3,
           verify: backup.spec.verify,
           replica,
+          databaseFile,
         }),
       },
     },
