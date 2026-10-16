@@ -10,7 +10,7 @@ import { formatEvents, listYaml, operatorLogLines, podContainers, sanitize } fro
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.100.0';
+export const PLUGIN_VERSION = '0.101.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;

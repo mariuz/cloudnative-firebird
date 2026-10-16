@@ -305,7 +305,7 @@ describe('in-place resize during a rolling update', () => {
     );
     const s = setup(infeasible, { revisions });
     await s.controller.reconcile(makeCluster());
-    expect(s.fn('patchNamespacedPod').mock.calls.map((c) => c[0].body.metadata.annotations)).toContainEqual({
+    expect(s.fn('patchNamespacedPod').mock.calls.map((c) => c[0].body.metadata?.annotations)).toContainEqual({
       'firebird.cloudnative-firebird.io/resize-revision': 'failed db-new',
     });
     expect(s.fn('deleteNamespacedPod')).toHaveBeenCalledWith({ name: 'db-2', namespace: 'default' });

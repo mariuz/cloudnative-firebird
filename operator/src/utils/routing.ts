@@ -13,6 +13,13 @@ export const REPLICATION_LAG_ANNOTATION = `${API_GROUP}/replication-lag-seconds`
 /** Default maximum replication lag for a replica to receive read traffic */
 export const DEFAULT_MAX_LAG_SECONDS = 30;
 
+/**
+ * Routing of a replication cluster without readOnlyRouting: replicas on readiness alone (no lag
+ * limit), the primary when no replica is ready. <name>-replica and the "ro" managed Services
+ * select the read-routable pods either way.
+ */
+export const READINESS_ROUTING: ReadOnlyRoutingConfiguration = { enabled: true, maxLagSeconds: Infinity, fallbackToPrimary: true };
+
 /** Desired routing labels for a single pod */
 export interface PodRoutingDecision {
   name: string;

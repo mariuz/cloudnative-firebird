@@ -1523,7 +1523,7 @@ Service over every instance.
 | Service | Selects |
 |---|---|
 | `<name>` | the primary with replication, every instance otherwise |
-| `<name>-replica` | the read-routable replicas, every instance without routing (with replication) |
+| `<name>-replica` | with replication the read-routable pods: the ready replicas (within the lag limit with routing), the primary when none qualifies; every instance without replication |
 | `<name>-headless` | every instance, for the instances' DNS names |
 
 ```yaml
@@ -1547,10 +1547,10 @@ spec:
 ```
 
 **Selectors.**
-- `rw` selects the primary, `ro` the replicas, `r` every instance.
-- With replication, the operator keeps the instances' `role` label up to date for `<name>`, `rw`
-  and `ro`, even without read-only routing.
-- With routing, `ro` takes the read-routable replicas, as `<name>-replica` does. `ro` needs
+- `rw` selects the primary, `ro` the read-routable pods (as `<name>-replica` does), `r` every
+  instance.
+- With replication, the operator keeps the instances' `role` and `read-routable` labels up to
+  date for `<name>`, `<name>-replica`, `rw` and `ro`, even without read-only routing. `ro` needs
   replication.
 - Without replication, `rw` selects every instance (each is a primary of its own).
 
@@ -1770,10 +1770,12 @@ the count of the previous one for ten minutes, like client-go's event recorder.
 With replication the operator labels every pod with `firebird.cloudnative-firebird.io/role`
 (`primary` / `replica`), and the primary Service (`<name>`) selects only the primary pod
 (since v0.97.0; before, without read-only routing, it selected every instance and could send a
-write to a read-only replica). With `spec.replication.readOnlyRouting.enabled: true` the pods
-are also labelled `firebird.cloudnative-firebird.io/read-routable`, and the `<name>-replica`
-Service selects only ready replicas whose replication
-lag is within `maxLagSeconds` (default 30). Lag is read from the
+write to a read-only replica). The pods are also labelled
+`firebird.cloudnative-firebird.io/read-routable`, which `<name>-replica` selects: without
+read-only routing the ready replicas, or the primary when no replica is ready (since v0.101.0;
+before, it selected every instance, the primary included). With
+`spec.replication.readOnlyRouting.enabled: true` only ready replicas whose replication
+lag is within `maxLagSeconds` (default 30) are read-routable. Lag is read from the
 `firebird.cloudnative-firebird.io/replication-lag-seconds` pod annotation, which the operator
 publishes from its own measurement (see Replication Lag); replicas without a lag report are routed
 on readiness alone. When no replica qualifies, reads fall back to the primary unless

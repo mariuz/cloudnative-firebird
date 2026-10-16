@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { V1Pod } from '@kubernetes/client-node';
 import {
+  READINESS_ROUTING,
   READ_ROUTABLE_LABEL,
   REPLICATION_LAG_ANNOTATION,
   ROLE_LABEL,
@@ -147,5 +148,17 @@ describe('podRoutingLabelPatch', () => {
     expect(podRoutingLabelPatch(makePod('db-0'), { name: 'db-0', role: 'primary', readRoutable: false })).toEqual([
       { op: 'add', path: '/metadata/labels', value: { [ROLE_LABEL]: 'primary', [READ_ROUTABLE_LABEL]: 'false' } },
     ]);
+  });
+});
+
+describe('READINESS_ROUTING (replication without readOnlyRouting)', () => {
+  const pod = (name: string, ready: boolean, lag?: string) => ({
+    metadata: { name, annotations: lag ? { 'firebird.cloudnative-firebird.io/replication-lag-seconds': lag } : {} },
+    status: { phase: 'Running', conditions: [{ type: 'Ready', status: ready ? 'True' : 'False' }] },
+  });
+
+  it('routes ready replicas whatever their lag, and the primary only when none is ready', () => {
+    expect(computeReadRouting([pod('c-0', true), pod('c-1', true, '9999'), pod('c-2', false)] as V1Pod[], 'c-0', READINESS_ROUTING).readRoutablePods).toEqual(['c-1']);
+    expect(computeReadRouting([pod('c-0', true), pod('c-1', false)] as V1Pod[], 'c-0', READINESS_ROUTING).readRoutablePods).toEqual(['c-0']);
   });
 });

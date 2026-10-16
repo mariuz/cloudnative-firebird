@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.100.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.101.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Replicas-only `<name>-replica` Service** *(v0.101.0; CloudNativePG's `-ro` Service)*
+  - With replication but without read-only routing, `<name>-replica` (and the managed `ro` Services) select the ready replicas only, and the primary when no replica is ready (the routing labels, decided on readiness alone with no lag limit). Before, `<name>-replica` selected every instance, so reads went to the primary as well while replicas were ready. `readOnlyRouting` still adds the lag limit and `fallbackToPrimary`.
+  - Unit tests cover the readiness routing, the labels without routing and the Service selectors; the kind CI checks the replica Service's endpoints are the replica.
 - [x] **Backups of declarative databases** *(v0.100.0)*
   - `spec.database` on `FirebirdBackup` and `FirebirdScheduledBackup`: a logical backup of a `FirebirdDatabase` of the cluster (its file) instead of the cluster database, server-side or to S3, with `verify` and retention; `status.databasePath` records the file. A `FirebirdRestore` restores it into a new file. `kubectl firebird backup --database`.
   - An on-demand backup waits until the database is `Ready`; a missing database or another cluster's fails it. Physical backups and volume snapshots of a database are refused (CRD and operator).

@@ -169,7 +169,7 @@ import {
   instancePodSelector,
   instancePods,
 } from '../utils/resources';
-import { REPLICATION_LAG_ANNOTATION, ROLE_LABEL, computeReadRouting, isPodReady, podRoutingLabelPatch } from '../utils/routing';
+import { READINESS_ROUTING, REPLICATION_LAG_ANNOTATION, computeReadRouting, isPodReady, podRoutingLabelPatch } from '../utils/routing';
 import {
   SegmentClient,
   computeLag,
@@ -1142,19 +1142,6 @@ export class FirebirdClusterController {
     }
   }
 
-  /** The role label of each instance pod (primary or replica), without read-only routing */
-  private async reconcileRoleLabels(cluster: FirebirdCluster, primaryPod: string, log: Logger): Promise<void> {
-    const { name, namespace = 'default' } = cluster.metadata;
-    const pods = instancePods((await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items, name);
-    for (const pod of pods) {
-      const podName = pod.metadata!.name!;
-      const role = podName === primaryPod ? 'primary' : 'replica';
-      if (pod.metadata?.labels?.[ROLE_LABEL] === role) continue;
-      log.info({ pod: podName, role }, 'Updating pod role label');
-      await this.coreApi.patchNamespacedPod({ name: podName, namespace, body: { metadata: { labels: { [ROLE_LABEL]: role } } } }, MERGE_PATCH);
-    }
-  }
-
   /** Patch a Service selector when it drifts from the desired routing selector */
   private async reconcileServiceSelector(
     serviceName: string,
@@ -1893,11 +1880,9 @@ export class FirebirdClusterController {
     log: Logger,
   ): Promise<ReadRoutingResult | undefined> {
     if (!cluster.spec.replication?.enabled || cluster.spec.hibernated) return undefined;
-    if (!readOnlyRoutingEnabled(cluster)) {
-      // the role label only, for <name> and the managed Services ("rw", "ro"; utils/managed-services.ts)
-      await this.reconcileRoleLabels(cluster, primaryPod, log);
-      return undefined;
-    }
+    // without readOnlyRouting the labels still route <name>, <name>-replica and the managed
+    // Services: replicas on readiness alone, the primary when no replica is ready
+    const routed = readOnlyRoutingEnabled(cluster);
     const { name, namespace = 'default' } = cluster.metadata;
 
     const pods = {
@@ -1906,7 +1891,7 @@ export class FirebirdClusterController {
         name,
       ),
     };
-    const plan = computeReadRouting(pods.items, primaryPod, cluster.spec.replication!.readOnlyRouting!);
+    const plan = computeReadRouting(pods.items, primaryPod, routed ? cluster.spec.replication!.readOnlyRouting! : READINESS_ROUTING);
 
     for (const decision of plan.decisions) {
       const pod = pods.items.find((p) => p.metadata?.name === decision.name)!;
@@ -1915,6 +1900,7 @@ export class FirebirdClusterController {
       log.info({ pod: decision.name, role: decision.role, readRoutable: decision.readRoutable }, 'Updating pod routing labels');
       await this.coreApi.patchNamespacedPod({ name: decision.name, namespace, body: patch });
     }
+    if (!routed) return undefined;
 
     if (plan.laggingReplicas.length > 0) {
       log.warn({ laggingReplicas: plan.laggingReplicas }, 'Replicas excluded from read-only routing due to replication lag');
