@@ -2100,7 +2100,16 @@ jobs:
         run: |
           DB=/var/lib/firebird/data/mydb.fdb
           sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
-          count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          # the row count; retried while the database answers no count (a synchronous standby being
+          # attached closes the primary's database briefly), never on a wrong number
+          count() {
+            local c
+            for n in $(seq 1 30); do
+              c=$(sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }')
+              [ -n "$c" ] && { echo "$c"; return; }
+              sleep 2
+            done
+          }
           sync_state() { kubectl get firebirdcluster sync -o jsonpath='{.status.synchronous.phase} {.status.synchronous.primary} {.status.synchronous.standby}'; }
           wait_attached() {
             timeout 600 bash -c "until [ \"\$(kubectl get firebirdcluster sync -o jsonpath='{.status.synchronous.phase} {.status.synchronous.primary}')\" = 'Attached $1' ]; do sleep 5; done" \
