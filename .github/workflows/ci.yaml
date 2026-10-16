@@ -388,6 +388,18 @@ jobs:
           timeout 300 bash -c 'until [ "$(kubectl get firebirdbackup plugin-backup -o jsonpath={.status.phase})" = Completed ]; do
             [ "$(kubectl get firebirdbackup plugin-backup -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done'
           kubectl firebird status repl | grep -qE '^plugin-backup +logical +Completed'
+          # the backups list, and a restore of the backup into a new file on the primary
+          kubectl firebird backups repl | tee /tmp/plugin-backups.txt
+          grep -qE '^plugin-backup +logical +Completed .*\(cluster\) +[^ ]*backup-plugin-backup.fbk$' /tmp/plugin-backups.txt
+          kubectl firebird restore repl plugin-backup --target plugin-restored.fdb --name plugin-restore
+          timeout 300 bash -c 'until [ "$(kubectl get firebirdrestore plugin-restore -o jsonpath={.status.phase})" = Completed ]; do
+            [ "$(kubectl get firebirdrestore plugin-restore -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done' \
+            || { kubectl get firebirdrestore plugin-restore -o jsonpath='{.status}'; echo; exit 1; }
+          echo "select 'tables=' || count(*) from rdb\$relations;" \
+            | kubectl exec -i "$primary" -c firebird -- isql -q localhost:/var/lib/firebird/data/plugin-restored.fdb | grep -q 'tables='
+          if kubectl firebird restore repl no-such-backup 2>/tmp/plugin-err.txt; then echo "a restore of a missing backup was accepted"; exit 1; fi
+          grep -q 'no FirebirdBackup no-such-backup' /tmp/plugin-err.txt
+          kubectl delete firebirdrestore plugin-restore
           # fencing a replica, and lifting it
           kubectl firebird fence on repl 2
           timeout 180 bash -c 'until kubectl get firebirdcluster repl -o jsonpath={.status.fencedInstances} | grep -q repl-2; do sleep 3; done'

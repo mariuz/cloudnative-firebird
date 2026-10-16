@@ -3,6 +3,7 @@ import { V1Pod } from '@kubernetes/client-node';
 import {
   apiErrorMessage,
   FENCED_INSTANCES_ANNOTATION,
+  formatBackups,
   formatStatus,
   nextFencedList,
   parseArgs,
@@ -61,6 +62,7 @@ describe('kubectl firebird', () => {
       listScheduledBackups: vi.fn().mockResolvedValue([]),
       listDatabases: vi.fn().mockResolvedValue([]),
       createBackup: vi.fn().mockResolvedValue(undefined),
+      createRestore: vi.fn().mockResolvedValue(undefined),
       getStatefulSet: vi.fn().mockResolvedValue({ metadata: { name: 'db', managedFields: [{ manager: 'x' }] }, spec: {} }),
       listServices: vi.fn().mockResolvedValue([{ metadata: { name: 'db' } }, { metadata: { name: 'db-replica' } }]),
       listClaims: vi.fn().mockRejectedValue(Object.assign(new Error('x'), { code: 403, body: '{"message":"persistentvolumeclaims is forbidden"}' })),
@@ -380,5 +382,64 @@ describe('kubectl firebird', () => {
     });
     expect(sanitize({ metadata: { creationTimestamp: new Date('2026-10-11T10:00:00Z') } })).toEqual({ metadata: { creationTimestamp: '2026-10-11T10:00:00.000Z' } });
     expect(operatorLogLines('{"cluster":"db"}\n{"cluster":"db2"}', 'db', 'prod')).toBe('{"cluster":"db"}\n');
+  });
+
+  const backupOf = (name: string, spec: Partial<FirebirdBackup['spec']>, status?: FirebirdBackup['status']): FirebirdBackup => ({
+    apiVersion: 'firebird.cloudnative-firebird.io/v1',
+    kind: 'FirebirdBackup',
+    metadata: { name },
+    spec: { clusterName: 'db', ...spec },
+    ...(status ? { status } : {}),
+  });
+
+  it("lists the cluster's backups, newest first", async () => {
+    const backups = [
+      backupOf('old', {}, { phase: 'Completed', startTime: '2026-10-10T12:00:00Z', completionTime: '2026-10-10T12:02:00Z', location: '/var/lib/firebird/data/backup-old.fbk', verified: true }),
+      backupOf('inc', { type: 'physical', level: 1 }, { phase: 'Failed', startTime: '2026-10-11T11:00:00Z', error: 'Job failed' }),
+      backupOf('sales', { database: 'sales' }, { phase: 'Running', startTime: '2026-10-11T11:50:00Z' }),
+      backupOf('other', { clusterName: 'x' }, { phase: 'Completed' }),
+    ];
+    const text = formatBackups(backups, 'db', new Date('2026-10-11T12:00:00Z'));
+    const lines = text.split('\n');
+    expect(lines[0]).toMatch(/^NAME +TYPE +PHASE +STARTED +DURATION +DATABASE +LOCATION$/);
+    expect(lines.slice(1).map((l) => l.split(/ {2,}/)[0])).toEqual(['sales', 'inc', 'old']);
+    expect(lines[1]).toMatch(/^sales +logical +Running +10m ago +- +sales +-$/);
+    expect(lines[2]).toMatch(/^inc +physical \(level 1\) +Failed +1h ago +- +\(cluster\) +Job failed$/);
+    expect(lines[3]).toMatch(/^old +logical +Completed \(verified\) +24h ago +2m +\(cluster\) +\/var\/lib\/firebird\/data\/backup-old.fbk$/);
+    expect(formatBackups([], 'db', new Date())).toBe('no backups of cluster db');
+
+    api.listBackups.mockResolvedValue(backups);
+    expect(await exec('backups', 'db')).toBe(0);
+    expect(out.at(-1)).toBe(formatBackups(backups, 'db', new Date('2026-10-11T12:00:00Z')));
+  });
+
+  it('restores a completed backup into a new file, and refuses the others', async () => {
+    api.listBackups.mockResolvedValue([
+      backupOf('done', {}, { phase: 'Completed' }),
+      backupOf('running', {}, { phase: 'Running' }),
+      backupOf('snap', { type: 'volumeSnapshot' }, { phase: 'Completed' }),
+      backupOf('theirs', { clusterName: 'x' }, { phase: 'Completed' }),
+    ]);
+    expect(await exec('restore', 'db', 'done', '--target', 'copy.fdb', '--name', 'r1')).toBe(0);
+    expect(api.createRestore).toHaveBeenCalledWith('prod', {
+      apiVersion: 'firebird.cloudnative-firebird.io/v1',
+      kind: 'FirebirdRestore',
+      metadata: { name: 'r1', namespace: 'prod' },
+      spec: { clusterName: 'db', backupName: 'done', targetDatabase: 'copy.fdb' },
+    });
+    expect(out.at(-1)).toContain('done into copy.fdb on the primary');
+    expect(await exec('restore', 'db', 'done')).toBe(0);
+    expect(api.createRestore.mock.calls[1][1].metadata.name).toBe('done-restore-20261011120000');
+    expect(out.at(-1)).toContain('into restore-done-restore-20261011120000.fdb');
+    for (const [backup, message] of [
+      ['running', 'only a completed backup'],
+      ['snap', 'bootstraps from it'],
+      ['theirs', 'backup of cluster x'],
+      ['missing', 'no FirebirdBackup missing'],
+    ]) {
+      expect(await exec('restore', 'db', backup)).toBe(2);
+      expect(errs.at(-1)).toContain(message);
+    }
+    expect(api.createRestore).toHaveBeenCalledTimes(2);
   });
 });

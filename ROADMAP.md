@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.101.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.102.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **kubectl plugin: backups and restore** *(v0.102.0; CloudNativePG's kubectl cnpg backup listing and restore workflow)*
+  - `backups`: a cluster's backups, newest first, with type and level, phase (verified), start, duration, database and location or error.
+  - `restore`: a `FirebirdRestore` of a completed backup into a new file on the primary (`--target`, `--name`); running, failed, other clusters' and volume snapshot backups are refused.
+  - Unit tests cover the table, the ordering and every refusal; the kind CI lists the plugin's backup, restores it into a new file and reads it.
 - [x] **Replicas-only `<name>-replica` Service** *(v0.101.0; CloudNativePG's `-ro` Service)*
   - With replication but without read-only routing, `<name>-replica` (and the managed `ro` Services) select the ready replicas only, and the primary when no replica is ready (the routing labels, decided on readiness alone with no lag limit). Before, `<name>-replica` selected every instance, so reads went to the primary as well while replicas were ready. `readOnlyRouting` still adds the lag limit and `fallbackToPrimary`.
   - Unit tests cover the readiness routing, the labels without routing and the Service selectors; the kind CI checks the replica Service's endpoints are the replica.
@@ -499,7 +503,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Managed Services** | `managed.services` (additional, disabledDefaultServices) | `managed.services` (rw / ro / r, patch / replace, disabling `ro`) | **v0.96.0 (Done)** |
 | **Image Catalogs** | `ImageCatalog` / `ClusterImageCatalog`, `imageCatalogRef` | `FirebirdImageCatalog` / `FirebirdClusterImageCatalog`, `imageCatalogRef` | **v0.95.0 (Done)** |
 | **Declarative Databases** | `Database` resource | `FirebirdDatabase` (clusters without replication) | **v0.94.0 (Done)** |
-| **kubectl Plugin** | `kubectl cnpg` (status, promote, restart, fencing, hibernate, backup, psql, logs, destroy, report) | `kubectl firebird` (status, promote, restart, fence, hibernate, reseed, backup, isql, logs, destroy, report) | **v0.93.0, v0.99.0 (Done)** |
+| **kubectl Plugin** | `kubectl cnpg` (status, promote, restart, fencing, hibernate, backup, psql, logs, destroy, report) | `kubectl firebird` (status, promote, restart, fence, hibernate, reseed, backup, backups, restore, isql, logs, destroy, report) | **v0.93.0, v0.99.0, v0.102.0 (Done)** |
 | **Volume Snapshots** | `method: volumeSnapshot` backups, bootstrap from `volumeSnapshots` | `type: volumeSnapshot` (online, nbackup lock), scheduled with retention, `bootstrap.recovery.volumeSnapshot` | **v0.92.0 (Done)** |
 | **Replica Clusters** | `replica` with `source` (object store or streaming) | `replica` following the source's journal archive in S3, promotion | **v0.91.0 (Done)** |
 | **Major Version Upgrade** | Offline `pg_upgrade` | Image check, offline `gbak` conversion per volume | **v0.89.0 (Done)** |
