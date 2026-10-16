@@ -251,11 +251,13 @@ export function primaryServiceSelector(cluster: FirebirdCluster): Record<string,
 
 /**
  * Returns the pod selector for the read-only `-replica` Service.
- * With read-only routing enabled, only pods marked read-routable receive read traffic.
+ * With replication, only pods marked read-routable receive read traffic: the replicas within the
+ * lag limit with read-only routing, the ready replicas without it, and the primary when no
+ * replica qualifies (utils/routing.ts). Without replication every instance.
  */
 export function replicaServiceSelector(cluster: FirebirdCluster): Record<string, string> {
   const labels = clusterLabels(cluster.metadata.name);
-  return readOnlyRoutingEnabled(cluster) ? { ...labels, [READ_ROUTABLE_LABEL]: 'true' } : labels;
+  return cluster.spec.replication?.enabled ? { ...labels, [READ_ROUTABLE_LABEL]: 'true' } : labels;
 }
 
 /**

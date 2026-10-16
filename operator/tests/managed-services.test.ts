@@ -27,7 +27,9 @@ const replicated = (managed?: FirebirdCluster['spec']['managed'], routing = fals
 describe('managed services', () => {
   it('selects the primary, the replicas or every instance', () => {
     expect(managedServiceSelector(replicated(), 'rw')).toMatchObject({ [ROLE]: 'primary' });
-    expect(managedServiceSelector(replicated(), 'ro')).toMatchObject({ [ROLE]: 'replica' });
+    // ro: the read-routable pods, as <name>-replica selects them, with or without read-only routing
+    expect(managedServiceSelector(replicated(), 'ro')).toMatchObject({ [ROUTABLE]: 'true' });
+    expect(managedServiceSelector(replicated(), 'ro')).not.toHaveProperty(ROLE);
     expect(managedServiceSelector(replicated(undefined, true), 'ro')).toMatchObject({ [ROUTABLE]: 'true' });
     expect(managedServiceSelector(replicated(), 'r')).not.toHaveProperty(ROLE);
     // without replication every instance is a primary of its own
@@ -166,14 +168,32 @@ describe('cluster reconcile with managed services', () => {
     expect(lastStatus(api).managedServices).toEqual(['all', 'db-lb', 'taken']);
   });
 
-  it('keeps the role label on the instances for rw and ro without read-only routing', async () => {
-    const pod = (name: string, role?: string) => ({ metadata: { name, labels: role ? { [ROLE]: role } : {} }, status: { phase: 'Running' } });
-    const { kubeConfig, api } = mockApi({
-      listNamespacedPod: vi.fn().mockResolvedValue({ items: [pod('test-cluster-0', 'primary'), pod('test-cluster-1')] }),
+  it('labels the instances for rw and ro without read-only routing: ready replicas, else the primary', async () => {
+    const pod = (name: string, ready: boolean, labels: Record<string, string> = {}) => ({
+      metadata: { name, labels },
+      status: { phase: 'Running', conditions: [{ type: 'Ready', status: ready ? 'True' : 'False' }] },
     });
-    await new FirebirdClusterController(kubeConfig).reconcile(replicated());
-    const patches = api('patchNamespacedPod').mock.calls.map((c) => c[0]).filter((p) => p.body?.metadata?.labels?.[ROLE]);
-    expect(patches).toEqual([expect.objectContaining({ name: 'test-cluster-1', body: { metadata: { labels: { [ROLE]: 'replica' } } } })]);
+    const labelsOf = async (pods: ReturnType<typeof pod>[]) => {
+      const { kubeConfig, api } = mockApi({ listNamespacedPod: vi.fn().mockResolvedValue({ items: pods }) });
+      await new FirebirdClusterController(kubeConfig).reconcile(replicated());
+      // JSON patches of the routing labels
+      return Object.fromEntries(
+        api('patchNamespacedPod').mock.calls
+          .map((c) => c[0])
+          .filter((p) => Array.isArray(p.body))
+          .map((p) => [p.name, Object.fromEntries(p.body.map((op: { path: string; value: string }) => [op.path.split('/').pop()!.replace('~1', '/'), op.value]))]),
+      );
+    };
+    // a ready replica takes the reads; the primary is labelled already and only loses read-routable
+    expect(await labelsOf([pod('test-cluster-0', true, { [ROLE]: 'primary', [ROUTABLE]: 'true' }), pod('test-cluster-1', true)])).toEqual({
+      'test-cluster-0': { [ROUTABLE]: 'false' },
+      'test-cluster-1': { [ROLE]: 'replica', [ROUTABLE]: 'true' },
+    });
+    // no ready replica: the primary
+    expect(await labelsOf([pod('test-cluster-0', true, { [ROLE]: 'primary' }), pod('test-cluster-1', false)])).toEqual({
+      'test-cluster-0': { [ROUTABLE]: 'true' },
+      'test-cluster-1': { [ROLE]: 'replica', [ROUTABLE]: 'false' },
+    });
   });
 
   it('applies a changed serviceType and serviceAnnotations to the default Services', async () => {

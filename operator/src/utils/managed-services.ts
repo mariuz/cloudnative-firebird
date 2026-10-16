@@ -7,9 +7,10 @@ import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
  * addition to the default ones (<name> read-write, <name>-replica read-only, <name>-headless), e.g.
  * a LoadBalancer for the primary or a Service over every instance.
  *
- * - selectorType "rw" selects the primary, "ro" the replicas ("ro" needs replication; with
- *   replication.readOnlyRouting the read-routable ones, as <name>-replica does), "r" every
- *   instance. With replication the operator keeps the role label on the instance pods for them.
+ * - selectorType "rw" selects the primary, "ro" the read-routable pods as <name>-replica does
+ *   (the ready replicas, within the lag limit with replication.readOnlyRouting, else the
+ *   primary; "ro" needs replication), "r" every instance. The operator keeps the role and
+ *   read-routable labels on the instance pods for them.
  * - The template's spec is taken as it is, except the selector and the Firebird port, which are
  *   the operator's (a port number and nodePort in ports[0] are kept).
  * - updateStrategy "patch" (default) merges a changed template into the Service; "replace"
@@ -41,7 +42,8 @@ export function managedServiceSelector(cluster: FirebirdCluster, selectorType: M
     case 'rw':
       return replication ? { ...labels, [ROLE_LABEL]: 'primary' } : labels;
     case 'ro':
-      return cluster.spec.replication?.readOnlyRouting?.enabled ? { ...labels, [READ_ROUTABLE_LABEL]: 'true' } : { ...labels, [ROLE_LABEL]: 'replica' };
+      // as <name>-replica: the read-routable pods
+      return { ...labels, [READ_ROUTABLE_LABEL]: 'true' };
     default:
       return labels;
   }

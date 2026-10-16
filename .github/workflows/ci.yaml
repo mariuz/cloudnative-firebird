@@ -2012,6 +2012,10 @@ jobs:
           kubectl patch firebirdcluster svc --type json -p '[{"op":"remove","path":"/spec/managed/services/additional/1"},{"op":"remove","path":"/spec/managed/services/disabledDefaultServices"}]'
           timeout 120 bash -c 'while kubectl get service svc-all >/dev/null 2>&1; do sleep 3; done'
           timeout 120 bash -c 'until kubectl get service svc-replica >/dev/null 2>&1; do sleep 3; done'
+          # without read-only routing it selects the ready replica only (the primary only when no replica is ready)
+          replica=$([ "$primary" = svc-0 ] && echo svc-1 || echo svc-0)
+          timeout 120 bash -c "until [ \"\$(kubectl get endpointslices -l kubernetes.io/service-name=svc-replica -o jsonpath='{.items[*].endpoints[?(@.conditions.ready==true)].targetRef.name}')\" = $replica ]; do sleep 3; done" \
+            || { kubectl get pods -l firebird.cloudnative-firebird.io/cluster=svc --show-labels; kubectl get endpointslices -l kubernetes.io/service-name=svc-replica -o yaml; exit 1; }
           kubectl get service svc-rw
           kubectl delete firebirdcluster svc --wait=false
 
