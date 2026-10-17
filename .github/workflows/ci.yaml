@@ -400,6 +400,15 @@ jobs:
           if kubectl firebird restore repl no-such-backup 2>/tmp/plugin-err.txt; then echo "a restore of a missing backup was accepted"; exit 1; fi
           grep -q 'no FirebirdBackup no-such-backup' /tmp/plugin-err.txt
           kubectl delete firebirdrestore plugin-restore
+          # a node maintenance window: the PodDisruptionBudget goes while it lasts, and comes back
+          kubectl get pdb repl-pdb >/dev/null
+          kubectl firebird maintenance on repl
+          timeout 120 bash -c 'while kubectl get pdb repl-pdb >/dev/null 2>&1; do sleep 3; done'
+          kubectl firebird status repl | grep -qE '^Maintenance: +node maintenance window in progress'
+          kubectl firebird maintenance off repl
+          timeout 120 bash -c 'until kubectl get pdb repl-pdb >/dev/null 2>&1; do sleep 3; done'
+          reasons=$(kubectl get events --field-selector involvedObject.name=repl -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}')
+          for reason in NodeMaintenanceStarted NodeMaintenanceEnded; do echo "$reasons" | grep -qx "$reason" || { echo "no $reason event"; exit 1; }; done
           # fencing a replica, and lifting it
           kubectl firebird fence on repl 2
           timeout 180 bash -c 'until kubectl get firebirdcluster repl -o jsonpath={.status.fencedInstances} | grep -q repl-2; do sleep 3; done'

@@ -224,6 +224,7 @@ kubectl plugin list | grep firebird
 | `kubectl firebird restart my-cluster [instance]` | Rolling restart with the primary last (`kubectl.kubernetes.io/restartedAt` on the pod template), or deletes one instance's pod. |
 | `kubectl firebird fence on\|off my-cluster 1\|all` | Edits the `fencedInstances` annotation. Lifting one instance out of `all` keeps the others fenced. |
 | `kubectl firebird hibernate on\|off my-cluster` | Sets `spec.hibernated`. |
+| `kubectl firebird maintenance on\|off my-cluster` | Opens or closes a node maintenance window (`spec.nodeMaintenanceWindow.inProgress`): the PodDisruptionBudget is removed while it lasts. Since v0.103.0. |
 | `kubectl firebird reseed my-cluster 1` | Re-seeds a replica (the `reseed` pod annotation). The primary is refused. |
 | `kubectl firebird backup my-cluster [--type logical\|physical\|volumeSnapshot] [--level n] [--snapshot-class c] [--name n] [--database d]` | Creates a `FirebirdBackup`, to the cluster's `backup.s3` when it has one; `--database` backs up a `FirebirdDatabase` (logical). |
 | `kubectl firebird backups my-cluster` | The cluster's backups, newest first: type (and nbackup level), phase (verified), start and duration, the database (a `FirebirdDatabase`'s or the cluster's) and the location or error. Since v0.102.0. |
@@ -239,7 +240,8 @@ with 1, showing the API server's message.
 **Testing.** Unit tests cover the argument parsing, the status report, every command and its
 refusals, the report's files and redaction. The kind CI puts the plugin on the PATH, reads the
 status of the replicated cluster, runs `isql` on its primary and a replica, takes a backup,
-fences and unfences a replica, lists the backups and restores one into a new file, reads the
+fences and unfences a replica, opens and closes a maintenance window, lists the backups and
+restores one into a new file, reads the
 instances' logs, writes and checks a report, and destroys a replica (the volume re-creation step).
 
 ## FirebirdCluster CRD Reference
@@ -482,6 +484,26 @@ to `false` to resume with the same volumes.
 ```bash
 kubectl patch firebirdcluster my-cluster --type merge -p '{"spec":{"hibernated":true}}'
 ```
+
+### Node Maintenance Window (v0.103.0)
+
+A cluster of several instances has a PodDisruptionBudget (`<name>-pdb`, one instance available),
+which keeps a drain from evicting the last instance. For maintenance that drains every node in
+turn, open a window, like CloudNativePG's `nodeMaintenanceWindow`:
+
+```yaml
+spec:
+  nodeMaintenanceWindow:
+    inProgress: true     # false (or removing it) ends the window
+```
+
+`kubectl firebird maintenance on|off my-cluster` sets it. While the window is open the
+PodDisruptionBudget is removed, so drains evict the instances. A replica comes back on another
+node with its volume, where the storage allows it. A primary evicted is a primary lost: with
+automatic failover a replica is promoted, otherwise the cluster waits for it. `status.nodeMaintenance`,
+the `NodeMaintenanceStarted` and `NodeMaintenanceEnded` events, and `kubectl firebird status`
+show the window. Volumes are always reused; CloudNativePG's `reusePVC: false` (a new volume on
+another node) is not supported.
 
 ### Replication (experimental)
 

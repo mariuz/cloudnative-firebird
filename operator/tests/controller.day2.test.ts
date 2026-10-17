@@ -429,6 +429,37 @@ describe('FirebirdClusterController – hibernation', () => {
   });
 });
 
+describe('FirebirdClusterController – node maintenance window', () => {
+  const reasons = (api: (m: string) => ReturnType<typeof vi.fn>) =>
+    api('createNamespacedEvent').mock.calls.map((c) => c[0].body.reason);
+
+  it('removes the PodDisruptionBudget during the window and reports its start', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig({ readNamespacedPodDisruptionBudget: vi.fn().mockResolvedValue({}) });
+    await new FirebirdClusterController(kubeConfig).reconcile(makeCluster({ instances: 2, nodeMaintenanceWindow: { inProgress: true } }));
+    expect(api('deleteNamespacedPodDisruptionBudget')).toHaveBeenCalledWith({ name: 'test-cluster-pdb', namespace: 'default' });
+    expect(api('createNamespacedPodDisruptionBudget')).not.toHaveBeenCalled();
+    expect(reasons(api)).toContain('NodeMaintenanceStarted');
+    expect(statusPatches(api).at(-1)!.nodeMaintenance).toBe(true);
+  });
+
+  it('restores the PodDisruptionBudget after the window and reports its end', async () => {
+    const cluster = { ...makeCluster({ instances: 2, nodeMaintenanceWindow: { inProgress: false } }), status: { nodeMaintenance: true } };
+    const { kubeConfig, api } = makeMockKubeConfig();
+    await new FirebirdClusterController(kubeConfig).reconcile(cluster);
+    expect(api('createNamespacedPodDisruptionBudget')).toHaveBeenCalledWith(expect.objectContaining({ body: expect.objectContaining({ spec: expect.objectContaining({ minAvailable: 1 }) }) }));
+    expect(reasons(api)).toContain('NodeMaintenanceEnded');
+    expect(statusPatches(api).at(-1)!.nodeMaintenance).toBeUndefined();
+  });
+
+  it('reports nothing while the window stays as it was', async () => {
+    const { kubeConfig, api } = makeMockKubeConfig();
+    await new FirebirdClusterController(kubeConfig).reconcile(makeCluster({ instances: 2 }));
+    expect(reasons(api)).not.toContain('NodeMaintenanceStarted');
+    expect(reasons(api)).not.toContain('NodeMaintenanceEnded');
+    expect(api('createNamespacedPodDisruptionBudget')).toHaveBeenCalled();
+  });
+});
+
 describe('FirebirdClusterController – NetworkPolicy for clones', () => {
   const source = makeCluster({ networkPolicy: { enabled: true, ingressFrom: [{ podSelector: { app: 'client' } }] } });
   const clone: FirebirdCluster = {

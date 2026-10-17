@@ -50,6 +50,8 @@ export const EventReason = {
   ImageChecked: 'ImageChecked',
   ImageRefused: 'ImageRefused',
   ImageCatalogChanged: 'ImageCatalogChanged',
+  NodeMaintenanceStarted: 'NodeMaintenanceStarted',
+  NodeMaintenanceEnded: 'NodeMaintenanceEnded',
   ImageCatalogUnresolved: 'ImageCatalogUnresolved',
   ManagedServiceConflict: 'ManagedServiceConflict',
   MajorUpgradeStarted: 'MajorUpgradeStarted',
