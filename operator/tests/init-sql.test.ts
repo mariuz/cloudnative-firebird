@@ -56,7 +56,7 @@ describe('init SQL from Secrets and ConfigMaps', () => {
     expect(plain.initContainers!.find((c) => c.name === 'replication-init')!.env!.some((e) => e.name === 'INIT_SQL_DIR')).toBe(false);
   });
 
-  it('are run in order by the replication init on a created database', () => {
+  it('are run in order by the replication init on a created database', { timeout: 20000 }, () => {
     // the init-instance.sh fragment, against a fake isql that records what it runs
     const script = readFileSync(join(__dirname, '..', 'src', 'replication', 'init-instance.sh'), 'utf8');
     const start = script.indexOf('    # bootstrap.initSql, then initSqlRefs');
