@@ -2138,6 +2138,53 @@ jobs:
           kubectl delete firebirdcluster podset --wait=false
           kubectl delete priorityclass firebird-test --wait=false
 
+      - name: Verify probe timings and the smart shutdown
+        if: matrix.track.id == 'extended'
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: stopper
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            stopDelay: 60
+            smartShutdownTimeout: 30
+            startDelay: 300
+            probes:
+              readiness: { periodSeconds: 7 }
+          EOF
+          timeout 300 bash -c 'until kubectl get pod stopper-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/stopper-0 --for=condition=Ready --timeout=600s
+          fb() { kubectl get pod stopper-0 -o jsonpath="{.spec.containers[?(@.name=='firebird')]$1}"; }
+          [ "$(kubectl get pod stopper-0 -o jsonpath={.spec.terminationGracePeriodSeconds})" = 60 ]
+          [ "$(fb .startupProbe.failureThreshold)" = 30 ]
+          [ "$(fb .readinessProbe.periodSeconds)" = 7 ]
+          fb .lifecycle.preStop.exec.command | grep -q 'smart shutdown'
+          # without clients the hook does not wait: the pod stops well within stopDelay
+          start=$(date +%s); kubectl delete pod stopper-0 --wait=true; took=$(( $(date +%s) - start ))
+          echo "stopped without clients in ${took}s"
+          [ "$took" -lt 25 ]
+          timeout 300 bash -c 'until kubectl get pod stopper-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/stopper-0 --for=condition=Ready --timeout=600s
+          # a remote client attached for 45 s: the stop waits for it (up to smartShutdownTimeout)
+          image=$(fb .image)
+          kubectl run fbclient --image="$image" --restart=Never --env=ISC_USER=SYSDBA --env=ISC_PASSWORD=masterkey --command -- \
+            sh -c "(echo 'select 1 from rdb\$database;'; sleep 45) | isql -q stopper:$DB"
+          remote() { kubectl exec stopper-0 -c firebird -- sh -c "echo \"select 'remote=' || count(*) from mon\\\$attachments where mon\\\$system_flag = 0 and mon\\\$remote_address not starting with '127.';\" | isql -q localhost:$DB" | sed -n 's/.*remote=\([0-9]*\).*/\1/p'; }
+          timeout 120 bash -c "until [ \"\$(kubectl get pod fbclient -o jsonpath={.status.phase})\" = Running ]; do sleep 2; done"
+          for i in $(seq 1 30); do [ "$(remote)" -ge 1 ] 2>/dev/null && break; sleep 2; done
+          [ "$(remote)" -ge 1 ] || { kubectl logs fbclient; exit 1; }
+          start=$(date +%s); kubectl delete pod stopper-0 --wait=true; took=$(( $(date +%s) - start ))
+          echo "stopped with a remote client in ${took}s"
+          [ "$took" -ge 20 ] || { echo "the smart shutdown did not wait for the client"; exit 1; }
+          [ "$took" -lt 60 ]
+          kubectl delete pod fbclient --wait=false
+          kubectl delete firebirdcluster stopper --wait=false
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |

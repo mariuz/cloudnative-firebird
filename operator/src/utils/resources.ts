@@ -4,6 +4,7 @@ import { instanceAffinity, instanceTopologySpreadConstraints } from './schedulin
 import { withSegmentTls } from './segment-tls-pods';
 import { withPrimaryLease } from './primary-lease';
 import { clusterPodSettings, inheritMetadata, withPodPullPolicy } from './pod-settings';
+import { instanceProbes, smartShutdownLifecycle, terminationGracePeriod } from './lifecycle';
 import { createHash } from 'crypto';
 import {
   V1StatefulSet,
@@ -355,25 +356,13 @@ export function buildStatefulSet(
           : []),
         ...(replication?.mainMounts ?? []),
       ],
-      livenessProbe: {
-        tcpSocket: { port: 3050 },
-        initialDelaySeconds: 30,
-        periodSeconds: 10,
-        failureThreshold: 5,
-      },
       // ready only while the local server answers the service manager and the database is not
-      // shut down, so a fenced instance leaves the Services (see utils/fencing.ts)
-      readinessProbe: {
-        exec: {
-          command: ['/bin/sh', '-c', databaseOnlineCheck(`${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`)],
-        },
-        // a short delay: the first checks may fail while the server starts, which only delays
-        // readiness, never a restart (the liveness probe starts later)
-        initialDelaySeconds: 5,
-        periodSeconds: 5,
-        timeoutSeconds: 5,
-        failureThreshold: 3,
-      },
+      // shut down, so a fenced instance leaves the Services (see utils/fencing.ts); timings,
+      // the startup probe and the smart shutdown from the spec (utils/lifecycle.ts)
+      ...instanceProbes(cluster, ['/bin/sh', '-c', databaseOnlineCheck(`${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`)]),
+      ...(smartShutdownLifecycle(cluster, `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`)
+        ? { lifecycle: smartShutdownLifecycle(cluster, `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`) }
+        : {}),
     },
     ...(spec.monitoring?.exporter?.enabled
       ? [
@@ -466,6 +455,7 @@ export function buildStatefulSet(
         // the pull policy last, for the sidecars too
         spec: withPodPullPolicy(cluster, withSegmentTls(cluster, withPrimaryLease(cluster, {
           ...clusterPodSettings(cluster),
+          ...terminationGracePeriod(cluster),
           securityContext: instancePodSecurityContext(cluster),
           ...(initContainers.length > 0 ? { initContainers: initContainers.map(secured) } : {}),
           ...(spec.nodeSelector ? { nodeSelector: spec.nodeSelector } : {}),
@@ -702,16 +692,27 @@ export function statefulSetNeedsUpdate(
   if (existingContainer.image !== desiredContainer.image) return true;
   if (JSON.stringify(existingContainer.resources) !== JSON.stringify(desiredContainer.resources)) return true;
   if (JSON.stringify(existingContainer.env) !== JSON.stringify(desiredContainer.env)) return true;
-  // the API server defaults other probe fields, so only the probe command is compared
+  // the API server defaults other probe fields, so the command and the fields the operator sets are compared
   if (
     JSON.stringify(existingContainer.readinessProbe?.exec?.command) !==
     JSON.stringify(desiredContainer.readinessProbe?.exec?.command)
   ) {
     return true;
   }
+  for (const probe of ['livenessProbe', 'readinessProbe', 'startupProbe'] as const) {
+    const wanted = desiredContainer[probe];
+    const current = existingContainer[probe];
+    if (!wanted !== !current) return true;
+    if (wanted && current && PROBE_TIMINGS.some((field) => wanted[field] !== undefined && current[field] !== wanted[field])) return true;
+  }
+  if (canonicalJson(existingContainer.lifecycle?.preStop ?? null) !== canonicalJson(desiredContainer.lifecycle?.preStop ?? null)) return true;
+  if ((existingPodSpec.terminationGracePeriodSeconds ?? 30) !== (desiredPodSpec.terminationGracePeriodSeconds ?? 30)) return true;
 
   return false;
 }
+
+/** Probe fields the operator sets (the API server defaults the others) */
+const PROBE_TIMINGS = ['initialDelaySeconds', 'periodSeconds', 'timeoutSeconds', 'failureThreshold', 'successThreshold'] as const;
 
 /** Namespace the operator runs in (OPERATOR_NAMESPACE, from the downward API) */
 export function operatorNamespace(): string {
@@ -743,7 +744,7 @@ export function withRemovals(existing: unknown, desired: unknown): unknown {
 }
 
 /** Scheduling fields of the instance pod template a StatefulSet update replaces rather than merges */
-const SCHEDULING_FIELDS = ['affinity', 'nodeSelector', 'tolerations', 'topologySpreadConstraints', 'priorityClassName', 'schedulerName', 'imagePullSecrets'] as const;
+const SCHEDULING_FIELDS = ['affinity', 'nodeSelector', 'tolerations', 'topologySpreadConstraints', 'priorityClassName', 'schedulerName', 'imagePullSecrets', 'terminationGracePeriodSeconds'] as const;
 
 /**
  * The StatefulSet merge patch body: the scheduling fields of the pod template as desired, with what

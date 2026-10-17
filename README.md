@@ -1212,6 +1212,27 @@ spec:
     annotations: { sidecar.istio.io/inject: "false" }
 ```
 
+**Startup, shutdown and probes** (v0.107.0, CloudNativePG `startDelay`, `stopDelay`,
+`smartShutdownTimeout` and `probes`). `stopDelay` sets the instance pods'
+`terminationGracePeriodSeconds`. `smartShutdownTimeout` adds a preStop hook to the server: a
+stopping pod is already out of the Services, and the hook waits up to that many seconds for the
+remote client attachments to end (the operator's sidecars and probes, attached through localhost,
+do not count) before the server gets its signal. A Firebird database shutdown is not used for this:
+it is recorded in the database header and is how instances are fenced. `smartShutdownTimeout` must be
+below `stopDelay` (30 seconds if unset). `startDelay` adds a startup probe on the server port, so a
+slow start (a large database after a crash) is not cut short by the liveness probe. `probes`
+overrides the timings of the liveness, readiness and startup probes. All are unset by default;
+changing them rolls the instances (primary last).
+
+```yaml
+spec:
+  stopDelay: 300
+  smartShutdownTimeout: 120
+  startDelay: 1800
+  probes:
+    readiness: { periodSeconds: 10, failureThreshold: 6 }
+```
+
 **Pausing a resource.** The annotation `firebird.cloudnative-firebird.io/reconciliationDisabled:
 "true"` on a `FirebirdBackup`, `FirebirdScheduledBackup`, `FirebirdRestore`, `FirebirdUser` or `FirebirdRole`
 (CloudNativePG 1.29 `cnpg.io/reconciliationDisabled`) makes the operator leave it, its status and

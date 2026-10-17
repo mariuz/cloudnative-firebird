@@ -1,0 +1,10 @@
+# expect: smartShutdownTimeout must be below stopDelay
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: lifecycle
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  smartShutdownTimeout: 30

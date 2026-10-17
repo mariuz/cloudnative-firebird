@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.106.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.107.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Startup, shutdown and probe tuning** *(v0.107.0; CloudNativePG's startDelay, stopDelay, smartShutdownTimeout, probes)*
+  - `stopDelay` is the instance pods' `terminationGracePeriodSeconds`; `smartShutdownTimeout` a preStop hook that waits for the remote client attachments (`MON$ATTACHMENTS`, not through localhost) to end before the server is stopped, the pod being out of the Services already. No database shutdown: that is persistent and fences the instance. Below `stopDelay` (CRD CEL rule and validation).
+  - `startDelay` adds a startup probe on the server port; `probes.liveness|readiness|startup` override the timings. Unset by default, so existing clusters do not roll; the StatefulSet update check compares the timings the operator sets (the API server defaults the others), the hook and the grace period.
+  - Unit tests run the hook's script against a fake `isql` (no clients, clients leaving, the timeout, no server) and cover the probes, the update check and validation; the kind CI stops an instance without clients (quickly) and with a remote client attached (after the client).
 - [x] **Pod settings and inherited metadata** *(v0.106.0; CloudNativePG's priorityClassName, schedulerName, imagePullPolicy, imagePullSecrets, inheritedMetadata)*
   - `priorityClassName`, `schedulerName` and `imagePullSecrets` on every pod of the cluster (instances and operator Jobs, through the shared Job pod spec), `imagePullPolicy` on each of their containers; changes roll the instances like other template changes (primary last).
   - `inheritedMetadata` labels and annotations on the StatefulSet, the instance pods and volumes, the default Services, the PodDisruptionBudget, and the Jobs and CronJobs with their pods; existing volumes and Services are patched in place. The operator's own keys win and cannot be named (CRD CEL rules and validation); keys removed stay on existing resources.
@@ -510,6 +514,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Bootstrap / Restore** | From Backup / Clone | Dedicated Restore & Bootstrap | **v0.5.0 (Done)** |
 | **Node Maintenance** | PDB / Drain Handling, `nodeMaintenanceWindow` | PDB Reconciled, `nodeMaintenanceWindow` (`inProgress`, `reusePVC`) | **v0.2.0, v0.103.0, v0.105.0 (Done)** |
 | **Pod Settings** | `priorityClassName`, `schedulerName`, `imagePullPolicy`, `imagePullSecrets`, `inheritedMetadata` | All five: on the instance and Job pods; the metadata also on the StatefulSet, volumes, Services, PDB, Jobs and CronJobs | **v0.106.0 (Done)** |
+| **Startup / Shutdown** | `startDelay`, `stopDelay`, `smartShutdownTimeout`, `probes` | Startup probe, grace period, preStop wait for remote attachments, probe timings | **v0.107.0 (Done)** |
 | **Volume Expansion** | PVC Resize | In-place PVC Expansion | **v0.6.0 (Done)** |
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | `targetPrimary` annotation | **v0.13.0 (Done)** |

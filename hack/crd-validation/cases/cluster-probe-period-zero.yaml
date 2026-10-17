@@ -1,0 +1,11 @@
+# expect: spec.probes.readiness.periodSeconds
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: lifecycle
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  probes:
+    readiness: { periodSeconds: 0 }

@@ -8,6 +8,24 @@ import type { V1PodSecurityContext, V1SecurityContext } from '@kubernetes/client
 /**
  * Specification for the Firebird superuser secret.
  */
+/** Timings of one probe (Kubernetes Probe fields) */
+export interface ProbeTimings {
+  initialDelaySeconds?: number;
+  periodSeconds?: number;
+  timeoutSeconds?: number;
+  failureThreshold?: number;
+  /** Readiness only: liveness and startup probes need 1 */
+  successThreshold?: number;
+}
+
+/** spec.probes */
+export interface InstanceProbes {
+  liveness?: ProbeTimings;
+  readiness?: ProbeTimings;
+  /** The startup probe; set without startDelay it gets these timings (30 failures of 10 s by default) */
+  startup?: ProbeTimings;
+}
+
 export interface SuperuserSecretRef {
   /** Name of the Kubernetes Secret containing the superuser password */
   name: string;
@@ -508,6 +526,24 @@ export interface FirebirdClusterSpec {
    * The operator's own keys win; keys removed here stay on existing resources.
    */
   inheritedMetadata?: { labels?: Record<string, string>; annotations?: Record<string, string> };
+  /**
+   * Seconds an instance pod may take to stop (its terminationGracePeriodSeconds; CloudNativePG
+   * stopDelay). Kubernetes' 30 seconds if unset.
+   */
+  stopDelay?: number;
+  /**
+   * Seconds a stopping instance waits for its remote client attachments to end before the server
+   * is stopped (CloudNativePG smartShutdownTimeout): a preStop hook, while the pod is already out
+   * of the Services. Below stopDelay (or 30). No wait if unset.
+   */
+  smartShutdownTimeout?: number;
+  /**
+   * Seconds an instance may take to start before it is restarted (CloudNativePG startDelay): a
+   * startup probe on the server port, which holds the liveness probe back meanwhile. None if unset.
+   */
+  startDelay?: number;
+  /** Timings of the instance probes (CloudNativePG probes), over the operator's defaults */
+  probes?: InstanceProbes;
   /**
    * Runs every instance container as the image's firebird user (uid 84) with no capabilities, on
    * a writable copy of /opt/firebird: the instance pods meet the "restricted" Pod Security
