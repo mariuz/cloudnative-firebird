@@ -2224,7 +2224,10 @@ jobs:
           # the replica was seeded from the primary: the same rows
           for n in $(seq 1 36); do [ "$(got initrepl-1)" = "1:secret,2:configmap" ] && break; sleep 5; done
           [ "$(got initrepl-1)" = "1:secret,2:configmap" ]
-          kubectl delete firebirdcluster initrefs initrepl --wait=false
+          # gone before the next steps (synchronous replication times its failover on a loaded node)
+          kubectl delete firebirdcluster initrefs initrepl --wait=true --timeout=300s
+          kubectl wait --for=delete pod -l 'firebird.cloudnative-firebird.io/cluster in (initrefs,initrepl)' --timeout=300s || true
+          kubectl delete secret init-secret --wait=false; kubectl delete configmap init-schema --wait=false
 
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
