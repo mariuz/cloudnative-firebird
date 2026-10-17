@@ -145,6 +145,17 @@ describe('FirebirdBackupController', () => {
         expect(lastStatus()).toMatchObject({ phase: 'Completed', databasePath: '/var/lib/firebird/data/sales-2026.fdb' });
       });
 
+      it('records the database path from the Job, whatever the copy of the backup it is given', async () => {
+        // a resync with a copy older than the Running write: no databasePath in its status
+        const job = {
+          ...complete,
+          spec: { template: { spec: { containers: [{ name: 'firebird-backup', env: [{ name: 'DATABASE_PATH', value: '/var/lib/firebird/data/sales-2026.fdb' }] }] } } },
+        };
+        batchApi.readNamespacedJob.mockResolvedValue(job);
+        await controller.reconcileBackup(ofSales({ phase: 'Running' }));
+        expect(lastStatus()).toMatchObject({ phase: 'Completed', databasePath: '/var/lib/firebird/data/sales-2026.fdb' });
+      });
+
       it('waits until the database is ready', async () => {
         objects['firebirddatabases/sales'] = sales('test-cluster', 'Creating');
         await controller.reconcileBackup(ofSales());
