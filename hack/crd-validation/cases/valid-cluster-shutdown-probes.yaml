@@ -1,0 +1,16 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: lifecycle
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  stopDelay: 120
+  smartShutdownTimeout: 60
+  startDelay: 600
+  probes:
+    liveness: { periodSeconds: 20, timeoutSeconds: 3 }
+    readiness: { failureThreshold: 6, successThreshold: 2, initialDelaySeconds: 0 }
+    startup: { periodSeconds: 5 }

@@ -1,3 +1,4 @@
+import { lifecycleErrors } from './lifecycle';
 import { managedServicesErrors } from './managed-services';
 import { imageCatalogRefErrors } from './image-catalog';
 import { replicaClusterErrors } from './replica-cluster';
@@ -87,6 +88,8 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
   }
 
   validatePodSettings(spec);
+  const lifecycle = lifecycleErrors(spec);
+  if (lifecycle.length > 0) throw new ValidationError(lifecycle.join('; '));
 
   if (
     spec.serviceType &&

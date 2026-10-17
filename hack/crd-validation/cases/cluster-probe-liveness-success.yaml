@@ -1,0 +1,11 @@
+# expect: spec.probes.liveness.successThreshold
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: lifecycle
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  probes:
+    liveness: { successThreshold: 2 }

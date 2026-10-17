@@ -118,6 +118,32 @@ describe('automatic failover', () => {
     expect(s.status().switchover).toMatchObject({ kind: 'failover', from: 'db-0', phase: 'Electing' });
   });
 
+  it('waits for a primary being deleted while it may still be in its smart shutdown', async () => {
+    // deleted 20 s ago with a 60 s grace period: within smartShutdownTimeout 45 (+ margin)
+    const terminating = (secondsAgo: number) => ({
+      ...pod('db-0', 'u0', false),
+      metadata: { name: 'db-0', uid: 'u0', deletionTimestamp: new Date(Date.now() + (60 - secondsAgo) * 1000), deletionGracePeriodSeconds: 60 },
+    });
+    const smart = (status?: FirebirdCluster['status']) => {
+      const c = makeCluster(status);
+      c.spec.stopDelay = 60;
+      c.spec.smartShutdownTimeout = 45;
+      return c;
+    };
+    const stopping = setup({ pods: [terminating(20), pod('db-1', 'u1'), pod('db-2', 'u2')] });
+    await stopping.controller.reconcile(smart({ primaryNotReadySince: longAgo }));
+    expect(stopping.created().some((j) => j.metadata?.name === 'db-failover')).toBe(false);
+    expect(stopping.status().primaryNotReadySince).toBeUndefined();
+    // past the timeout and margin: the delay counts from then
+    const late = setup({ pods: [terminating(58), pod('db-1', 'u1'), pod('db-2', 'u2')] });
+    await late.controller.reconcile(smart());
+    expect(late.status().primaryNotReadySince).toBeDefined();
+    // without smartShutdownTimeout a deleted primary is failed over after the delay as before
+    const plain = setup({ pods: [terminating(20), pod('db-1', 'u1'), pod('db-2', 'u2')] });
+    await plain.controller.reconcile(makeCluster({ primaryNotReadySince: longAgo }));
+    expect(plain.created().some((j) => j.metadata?.name === 'db-failover')).toBe(true);
+  });
+
   it('is off unless enabled, and never fails over a fenced primary', async () => {
     const off = setup();
     await off.controller.reconcile(makeCluster({ primaryNotReadySince: longAgo }, { enabled: false }));
