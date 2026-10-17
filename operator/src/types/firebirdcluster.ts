@@ -439,6 +439,13 @@ export interface FirebirdClusterSpec {
    */
   hibernated?: boolean;
   /**
+   * Node maintenance window (CloudNativePG's nodeMaintenanceWindow): while inProgress, the
+   * cluster's PodDisruptionBudget is removed so node drains can evict its instances (a primary
+   * evicted fails over as any primary lost, with automatic failover). Set it back to false after
+   * the maintenance.
+   */
+  nodeMaintenanceWindow?: { inProgress?: boolean };
+  /**
    * How the primary is updated during a rolling update with replication (CloudNativePG):
    * "unsupervised" (default) updates it automatically after the replicas; "supervised" waits
    * for a switchover (targetPrimary annotation) or a manual restart of the primary.
@@ -637,6 +644,8 @@ export interface FirebirdClusterStatus {
   image?: string;
   /** The managed Services the operator created (spec.managed.services.additional) */
   managedServices?: string[];
+  /** A node maintenance window is in progress: the PodDisruptionBudget is removed */
+  nodeMaintenance?: boolean;
   /** Total number of instances */
   instances?: number;
   /** Number of ready instances */

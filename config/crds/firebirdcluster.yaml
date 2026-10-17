@@ -878,6 +878,15 @@ spec:
                     operator-managed CronJobs are suspended, while PVCs, Services and
                     configuration are retained. Set back to false to resume the cluster.
                   type: boolean
+                nodeMaintenanceWindow:
+                  description: >
+                    Node maintenance window (CloudNativePG's nodeMaintenanceWindow): while
+                    inProgress, the PodDisruptionBudget is removed so node drains can evict the
+                    instances. Set inProgress back to false after the maintenance.
+                  type: object
+                  properties:
+                    inProgress:
+                      type: boolean
                 primaryUpdateStrategy:
                   description: >
                     With replication, instance pods are updated by the operator, replicas first
@@ -969,6 +978,9 @@ spec:
                   type: array
                   items:
                     type: string
+                nodeMaintenance:
+                  description: A node maintenance window is in progress (the PodDisruptionBudget is removed)
+                  type: boolean
                 image:
                   description: The Firebird image of the cluster (spec.imageName, its image catalog's entry, or the operator default)
                   type: string

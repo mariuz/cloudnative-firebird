@@ -2719,8 +2719,24 @@ export class FirebirdClusterController {
     const { name, namespace = 'default' } = cluster.metadata;
     const pdbName = `${name}-pdb`;
 
-    // A hibernated cluster has no pods to protect; drop the PDB so drains are not blocked
-    if (cluster.spec.instances > 1 && !cluster.spec.hibernated) {
+    // a node maintenance window: drains may evict the instances (reported on the transitions,
+    // recorded with the reconcile's status write)
+    const maintenance = cluster.spec.nodeMaintenanceWindow?.inProgress === true;
+    if (maintenance !== (cluster.status?.nodeMaintenance === true)) {
+      Object.assign((cluster.status ??= {}), { nodeMaintenance: maintenance || undefined });
+      await this.event(
+        cluster,
+        'Normal',
+        maintenance ? EventReason.NodeMaintenanceStarted : EventReason.NodeMaintenanceEnded,
+        maintenance
+          ? 'node maintenance window started: the PodDisruptionBudget is removed, node drains may evict the instances'
+          : 'node maintenance window ended: the PodDisruptionBudget protects the instances again',
+      );
+    }
+
+    // A hibernated cluster has no pods to protect, and a maintenance window lets drains evict
+    // them; drop the PDB so drains are not blocked
+    if (cluster.spec.instances > 1 && !cluster.spec.hibernated && !maintenance) {
       const desired = buildPodDisruptionBudget(cluster);
       try {
         const existing = await this.policyApi.readNamespacedPodDisruptionBudget({ name: pdbName, namespace });
@@ -2744,7 +2760,7 @@ export class FirebirdClusterController {
     } else {
       try {
         await this.policyApi.readNamespacedPodDisruptionBudget({ name: pdbName, namespace });
-        log.info('Deleting PodDisruptionBudget for single instance or hibernated cluster');
+        log.info('Deleting PodDisruptionBudget for single instance, hibernated cluster or maintenance window');
         await this.policyApi.deleteNamespacedPodDisruptionBudget({ name: pdbName, namespace });
       } catch {
         log.debug('PodDisruptionBudget does not exist, skipping deletion');

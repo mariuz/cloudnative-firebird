@@ -10,7 +10,7 @@ import { formatEvents, listYaml, operatorLogLines, podContainers, sanitize } fro
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.102.0';
+export const PLUGIN_VERSION = '0.103.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -70,6 +70,8 @@ Commands:
   restart <cluster> [instance]              rolling restart of the cluster (primary last), or restart one instance
   fence on|off <cluster> <instance|all>     fence (database full shutdown) or unfence instances
   hibernate on|off <cluster>                stop every instance keeping the volumes, or resume
+  maintenance on|off <cluster>              node maintenance window: drains may evict the instances
+                                            (the PodDisruptionBudget is removed), or end it
   reseed <cluster> <instance>               discard a replica's database and seed it again
   backup <cluster> [--type logical|physical|volumeSnapshot] [--level 0|1|2]
                    [--snapshot-class name] [--name backup-name] [--database firebird-database]
@@ -273,6 +275,7 @@ export function formatStatus(
   }
   if (status.majorUpgrade) field('Upgrade', `${status.majorUpgrade.phase ?? ''} ${status.majorUpgrade.from ?? ''} -> ${status.majorUpgrade.to ?? ''}`.trim());
   if (cluster.spec.hibernated) field('Hibernated', 'yes');
+  if (cluster.spec.nodeMaintenanceWindow?.inProgress) field('Maintenance', 'node maintenance window in progress (no PodDisruptionBudget)');
   if (fenced.size > 0) field('Fenced', [...fenced].join(', '));
   if (status.reseedingInstances?.length) field('Re-seeding', status.reseedingInstances.join(', '));
 
@@ -468,6 +471,19 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
         await api.getCluster(namespace, name);
         await api.patchCluster(namespace, name, { spec: { hibernated: on } });
         io.out(on ? `cluster ${name} hibernating (its volumes are kept)` : `cluster ${name} resuming`);
+        return 0;
+      }
+
+      case 'maintenance': {
+        const [mode, name] = need(parsed, 2, 'maintenance on|off <cluster>');
+        const on = onOff(mode, 'maintenance on|off <cluster>');
+        const cluster = await api.getCluster(namespace, name);
+        await api.patchCluster(namespace, name, { spec: { nodeMaintenanceWindow: { inProgress: on } } });
+        io.out(
+          on
+            ? `node maintenance window of ${name} started: node drains may evict its instances${cluster.spec.instances > 1 ? '' : ' (a single instance has no PodDisruptionBudget anyway)'}; kubectl firebird maintenance off ${name} ends it`
+            : `node maintenance window of ${name} ended: the PodDisruptionBudget protects its instances again`,
+        );
         return 0;
       }
 
