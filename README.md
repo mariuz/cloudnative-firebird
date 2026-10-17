@@ -224,7 +224,7 @@ kubectl plugin list | grep firebird
 | `kubectl firebird restart my-cluster [instance]` | Rolling restart with the primary last (`kubectl.kubernetes.io/restartedAt` on the pod template), or deletes one instance's pod. |
 | `kubectl firebird fence on\|off my-cluster 1\|all` | Edits the `fencedInstances` annotation. Lifting one instance out of `all` keeps the others fenced. |
 | `kubectl firebird hibernate on\|off my-cluster` | Sets `spec.hibernated`. |
-| `kubectl firebird maintenance on\|off my-cluster` | Opens or closes a node maintenance window (`spec.nodeMaintenanceWindow.inProgress`): the PodDisruptionBudget is removed while it lasts. Since v0.103.0. |
+| `kubectl firebird maintenance on\|off my-cluster [--no-reuse-pvc]` | Opens or closes a node maintenance window (`spec.nodeMaintenanceWindow.inProgress`): the PodDisruptionBudget is removed while it lasts. With `--no-reuse-pvc` (`reusePVC: false`, v0.105.0), an unschedulable replica gets a new volume. Since v0.103.0. |
 | `kubectl firebird reseed my-cluster 1` | Re-seeds a replica (the `reseed` pod annotation). The primary is refused. |
 | `kubectl firebird backup my-cluster [--type logical\|physical\|volumeSnapshot] [--level n] [--snapshot-class c] [--name n] [--database d]` | Creates a `FirebirdBackup`, to the cluster's `backup.s3` when it has one; `--database` backs up a `FirebirdDatabase` (logical). |
 | `kubectl firebird backups my-cluster` | The cluster's backups, newest first: type (and nbackup level), phase (verified), start and duration, the database (a `FirebirdDatabase`'s or the cluster's) and the location or error. Since v0.102.0. |
@@ -503,8 +503,19 @@ PodDisruptionBudget is removed, so drains evict the instances. A replica comes b
 node with its volume, where the storage allows it. A primary evicted is a primary lost: with
 automatic failover a replica is promoted, otherwise the cluster waits for it. `status.nodeMaintenance`,
 the `NodeMaintenanceStarted` and `NodeMaintenanceEnded` events, and `kubectl firebird status`
-show the window. Volumes are always reused; CloudNativePG's `reusePVC: false` (a new volume on
-another node) is not supported.
+show the window.
+
+**New volumes (`reusePVC: false`, v0.105.0).** A replica's volume may be tied to the node being
+drained, as with local storage, so its pod cannot be scheduled anywhere else. With
+`nodeMaintenanceWindow.reusePVC: false` (`kubectl firebird maintenance on my-cluster
+--no-reuse-pvc`), a replica pod that stays unschedulable for 30 seconds while the window is
+open gets a new volume:
+- The operator runs its volume re-creation (the `reseed=volume` annotation, see Re-seeding a
+  Replica): the claim and the pod are deleted, and the new instance is seeded from the primary.
+- The `MaintenanceVolumeRecreation` event reports it.
+- Only replicas of replication clusters are re-created. A primary fails over first, and an
+  instance without replication would come back with an empty database; the plugin refuses that.
+- The default, `true`, keeps the volumes.
 
 ### Replication (experimental)
 

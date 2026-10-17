@@ -11,7 +11,7 @@ import { BENCH_TABLE, buildBenchJob } from './bench';
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.104.0';
+export const PLUGIN_VERSION = '0.105.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -72,8 +72,10 @@ Commands:
   restart <cluster> [instance]              rolling restart of the cluster (primary last), or restart one instance
   fence on|off <cluster> <instance|all>     fence (database full shutdown) or unfence instances
   hibernate on|off <cluster>                stop every instance keeping the volumes, or resume
-  maintenance on|off <cluster>              node maintenance window: drains may evict the instances
-                                            (the PodDisruptionBudget is removed), or end it
+  maintenance on|off <cluster> [--no-reuse-pvc]
+                                            node maintenance window: drains may evict the instances
+                                            (the PodDisruptionBudget is removed), or end it; with
+                                            --no-reuse-pvc an unschedulable replica gets a new volume
   reseed <cluster> <instance>               discard a replica's database and seed it again
   backup <cluster> [--type logical|physical|volumeSnapshot] [--level 0|1|2]
                    [--snapshot-class name] [--name backup-name] [--database firebird-database]
@@ -106,7 +108,7 @@ interface Parsed {
 }
 
 const VALUE_FLAGS = new Set(['namespace', 'context', 'type', 'level', 'name', 'snapshot-class', 'instance', 'container', 'tail', 'output', 'operator-namespace', 'database', 'target', 'clients', 'transactions']);
-const BOOLEAN_FLAGS = new Set(['replica', 'help', 'follow', 'no-logs', 'keep']);
+const BOOLEAN_FLAGS = new Set(['replica', 'help', 'follow', 'no-logs', 'keep', 'no-reuse-pvc']);
 const SHORT: Record<string, string> = { n: 'namespace', f: 'follow', o: 'output' };
 
 export function parseArgs(argv: string[]): Parsed {
@@ -280,7 +282,9 @@ export function formatStatus(
   }
   if (status.majorUpgrade) field('Upgrade', `${status.majorUpgrade.phase ?? ''} ${status.majorUpgrade.from ?? ''} -> ${status.majorUpgrade.to ?? ''}`.trim());
   if (cluster.spec.hibernated) field('Hibernated', 'yes');
-  if (cluster.spec.nodeMaintenanceWindow?.inProgress) field('Maintenance', 'node maintenance window in progress (no PodDisruptionBudget)');
+  if (cluster.spec.nodeMaintenanceWindow?.inProgress) {
+    field('Maintenance', `node maintenance window in progress (no PodDisruptionBudget${cluster.spec.nodeMaintenanceWindow.reusePVC === false ? ', new volumes for unschedulable replicas' : ''})`);
+  }
   if (fenced.size > 0) field('Fenced', [...fenced].join(', '));
   if (status.reseedingInstances?.length) field('Re-seeding', status.reseedingInstances.join(', '));
 
@@ -480,13 +484,19 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
       }
 
       case 'maintenance': {
-        const [mode, name] = need(parsed, 2, 'maintenance on|off <cluster>');
-        const on = onOff(mode, 'maintenance on|off <cluster>');
+        const [mode, name] = need(parsed, 2, 'maintenance on|off <cluster> [--no-reuse-pvc]');
+        const on = onOff(mode, 'maintenance on|off <cluster> [--no-reuse-pvc]');
+        const newVolumes = parsed.flags.has('no-reuse-pvc');
+        if (newVolumes && !on) throw new UsageError('--no-reuse-pvc is for maintenance on');
         const cluster = await api.getCluster(namespace, name);
-        await api.patchCluster(namespace, name, { spec: { nodeMaintenanceWindow: { inProgress: on } } });
+        if (newVolumes && cluster.spec.replication?.enabled !== true) {
+          throw new UsageError(`cluster ${name} has no replication: an instance with a new volume would come back with an empty database`);
+        }
+        // reusePVC is set for the window it opens, and removed (the default, true) otherwise
+        await api.patchCluster(namespace, name, { spec: { nodeMaintenanceWindow: { inProgress: on, reusePVC: on && newVolumes ? false : null } } });
         io.out(
           on
-            ? `node maintenance window of ${name} started: node drains may evict its instances${cluster.spec.instances > 1 ? '' : ' (a single instance has no PodDisruptionBudget anyway)'}; kubectl firebird maintenance off ${name} ends it`
+            ? `node maintenance window of ${name} started: node drains may evict its instances${cluster.spec.instances > 1 ? '' : ' (a single instance has no PodDisruptionBudget anyway)'}${newVolumes ? '; a replica that cannot be scheduled gets a new volume' : ''}; kubectl firebird maintenance off ${name} ends it`
             : `node maintenance window of ${name} ended: the PodDisruptionBudget protects its instances again`,
         );
         return 0;

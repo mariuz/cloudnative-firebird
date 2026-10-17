@@ -887,6 +887,12 @@ spec:
                   properties:
                     inProgress:
                       type: boolean
+                    reusePVC:
+                      description: >
+                        false: a replica whose pod cannot be scheduled while the window is open
+                        (its volume on a drained node) gets a new volume, seeded again from the
+                        primary. Replication clusters only. Default true.
+                      type: boolean
                 primaryUpdateStrategy:
                   description: >
                     With replication, instance pods are updated by the operator, replicas first
