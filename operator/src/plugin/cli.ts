@@ -1,5 +1,5 @@
 import { CoreV1Event, dumpYaml, V1PersistentVolumeClaim, V1Pod, V1Service, V1StatefulSet } from '@kubernetes/client-node';
-import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdScheduledBackup } from '../types';
+import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdScheduledBackup } from '../types';
 import { isPodReady, ROLE_LABEL } from '../utils/routing';
 import { formatEvents, listYaml, operatorLogLines, podContainers, sanitize } from './report';
 
@@ -10,7 +10,7 @@ import { formatEvents, listYaml, operatorLogLines, podContainers, sanitize } fro
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.101.0';
+export const PLUGIN_VERSION = '0.102.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -36,6 +36,7 @@ export interface PluginApi {
   listScheduledBackups(namespace: string): Promise<FirebirdScheduledBackup[]>;
   listDatabases(namespace: string): Promise<FirebirdDatabase[]>;
   createBackup(namespace: string, body: FirebirdBackup): Promise<void>;
+  createRestore(namespace: string, body: FirebirdRestore): Promise<void>;
   /** report */
   getStatefulSet(namespace: string, name: string): Promise<V1StatefulSet>;
   listServices(namespace: string, labelSelector: string): Promise<V1Service[]>;
@@ -73,6 +74,10 @@ Commands:
   backup <cluster> [--type logical|physical|volumeSnapshot] [--level 0|1|2]
                    [--snapshot-class name] [--name backup-name] [--database firebird-database]
                                             take an on-demand backup (FirebirdBackup)
+  backups <cluster>                         the cluster's backups, newest first
+  restore <cluster> <backup> [--target file] [--name restore-name]
+                                            restore a completed backup into a new database file
+                                            (FirebirdRestore; the cluster database is never replaced)
   isql <cluster> [--replica | --instance i] [-- isql arguments]
                                             isql on the primary (or a replica), in the firebird container
   logs <cluster> [--instance i] [--container c] [--tail n] [-f]
@@ -93,7 +98,7 @@ interface Parsed {
   rest: string[];
 }
 
-const VALUE_FLAGS = new Set(['namespace', 'context', 'type', 'level', 'name', 'snapshot-class', 'instance', 'container', 'tail', 'output', 'operator-namespace', 'database']);
+const VALUE_FLAGS = new Set(['namespace', 'context', 'type', 'level', 'name', 'snapshot-class', 'instance', 'container', 'tail', 'output', 'operator-namespace', 'database', 'target']);
 const BOOLEAN_FLAGS = new Set(['replica', 'help', 'follow', 'no-logs']);
 const SHORT: Record<string, string> = { n: 'namespace', f: 'follow', o: 'output' };
 
@@ -182,6 +187,34 @@ function age(from: string | Date | undefined, now: Date): string {
   if (s < 3600) return `${Math.round(s / 60)}m`;
   if (s < 172800) return `${Math.round(s / 3600)}h`;
   return `${Math.round(s / 86400)}d`;
+}
+
+/** Backups of a cluster, newest first */
+function ownBackups(backups: FirebirdBackup[], cluster: string): FirebirdBackup[] {
+  const time = (b: FirebirdBackup) => new Date(b.status?.startTime ?? b.metadata.creationTimestamp ?? 0).getTime();
+  return backups.filter((b) => b.spec.clusterName === cluster).sort((a, b) => time(b) - time(a));
+}
+
+/** The backups table of a cluster (kubectl firebird backups) */
+export function formatBackups(backups: FirebirdBackup[], cluster: string, now: Date): string {
+  const own = ownBackups(backups, cluster);
+  if (own.length === 0) return `no backups of cluster ${cluster}`;
+  const rows = [['NAME', 'TYPE', 'PHASE', 'STARTED', 'DURATION', 'DATABASE', 'LOCATION']];
+  for (const b of own) {
+    const type = b.spec.type === 'physical' ? `physical (level ${b.spec.level ?? 0})` : b.spec.type ?? 'logical';
+    const started = b.status?.startTime;
+    const done = b.status?.completionTime;
+    rows.push([
+      b.metadata.name,
+      type,
+      `${b.status?.phase ?? 'Pending'}${b.status?.verified ? ' (verified)' : ''}`,
+      started ? `${age(started, now)} ago` : '-',
+      started && done ? age(started, new Date(done)) : '-',
+      b.spec.database ?? '(cluster)',
+      b.status?.location ?? b.status?.volumeSnapshot?.name ?? b.status?.error ?? '-',
+    ]);
+  }
+  return table(rows);
 }
 
 /** The status report of a cluster */
@@ -282,10 +315,7 @@ export function formatStatus(
     lines.push(table(databaseRows));
   }
 
-  const own = backups
-    .filter((b) => b.spec.clusterName === name)
-    .sort((a, b) => new Date(b.status?.startTime ?? b.metadata.creationTimestamp ?? 0).getTime() - new Date(a.status?.startTime ?? a.metadata.creationTimestamp ?? 0).getTime())
-    .slice(0, 5);
+  const own = ownBackups(backups, name).slice(0, 5);
   lines.push('', 'Backups (latest 5):');
   if (own.length === 0) {
     lines.push('(none)');
@@ -485,6 +515,42 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
         };
         await api.createBackup(namespace, body);
         io.out(`FirebirdBackup ${backupName} created (${type}${database ? ` of FirebirdDatabase ${database}` : ''}${s3 ? `, to s3://${s3.bucket}` : ''}); kubectl get firebirdbackup ${backupName} -n ${namespace} -w`);
+        return 0;
+      }
+
+      case 'backups': {
+        const [name] = need(parsed, 1, 'backups <cluster>');
+        await api.getCluster(namespace, name);
+        io.out(formatBackups(await api.listBackups(namespace), name, io.now()));
+        return 0;
+      }
+
+      case 'restore': {
+        const usage = 'restore <cluster> <backup> [--target file] [--name restore-name]';
+        const [name, backupName] = need(parsed, 2, usage);
+        await api.getCluster(namespace, name);
+        const backup = (await api.listBackups(namespace)).find((b) => b.metadata.name === backupName);
+        if (!backup) throw new UsageError(`no FirebirdBackup ${backupName} in namespace ${namespace} (kubectl firebird backups ${name})`);
+        if (backup.spec.clusterName !== name) throw new UsageError(`${backupName} is a backup of cluster ${backup.spec.clusterName}, not ${name}`);
+        if (backup.spec.type === 'volumeSnapshot') {
+          throw new UsageError(`${backupName} is a volume snapshot: a new cluster bootstraps from it (spec.bootstrap.recovery.volumeSnapshot)`);
+        }
+        if (backup.status?.phase !== 'Completed') {
+          throw new UsageError(`${backupName} is ${backup.status?.phase ?? 'Pending'}: only a completed backup can be restored`);
+        }
+        const target = parsed.flags.get('target') as string | undefined;
+        const stamp = io.now().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+        const restoreName = (parsed.flags.get('name') as string | undefined) ?? `${backupName}-restore-${stamp}`.slice(0, 253);
+        const body: FirebirdRestore = {
+          apiVersion: `${API_GROUP}/${API_VERSION}` as FirebirdRestore['apiVersion'],
+          kind: 'FirebirdRestore',
+          metadata: { name: restoreName, namespace },
+          spec: { clusterName: name, backupName, ...(target ? { targetDatabase: target } : {}) },
+        };
+        await api.createRestore(namespace, body);
+        io.out(
+          `FirebirdRestore ${restoreName} created: ${backupName} into ${target ?? `restore-${restoreName}.fdb`} on the primary; kubectl get firebirdrestore ${restoreName} -n ${namespace} -w`,
+        );
         return 0;
       }
 
