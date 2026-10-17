@@ -5,6 +5,7 @@ import { withSegmentTls } from './segment-tls-pods';
 import { withPrimaryLease } from './primary-lease';
 import { clusterPodSettings, inheritMetadata, withPodPullPolicy } from './pod-settings';
 import { instanceProbes, smartShutdownLifecycle, terminationGracePeriod } from './lifecycle';
+import { ENTRYPOINT_INIT_DIR, INIT_SQL_VOLUME, initSqlVolume } from './init-sql';
 import { createHash } from 'crypto';
 import {
   V1StatefulSet,
@@ -345,14 +346,10 @@ export function buildStatefulSet(
           mountPath: '/opt/firebird/databases.conf',
           subPath: 'system/databases.conf',
         },
-        ...(spec.bootstrap?.initSql
-          ? [
-              {
-                name: 'cluster-config',
-                mountPath: '/docker-entrypoint-initdb.d/init.sql',
-                subPath: 'init.sql',
-              },
-            ]
+        // bootstrap.initSql and initSqlRefs, run by the entrypoint when it creates the database
+        // (with replication the replication init container creates it, utils/init-sql.ts)
+        ...(initSqlVolume(cluster) && !replicationEnabled(cluster)
+          ? [{ name: INIT_SQL_VOLUME, mountPath: ENTRYPOINT_INIT_DIR, readOnly: true }]
           : []),
         ...(replication?.mainMounts ?? []),
       ],
@@ -390,6 +387,7 @@ export function buildStatefulSet(
     ...(spec.runAsFirebirdUser ? [{ name: FIREBIRD_HOME_VOLUME, emptyDir: {} }] : []),
     { name: PENDING_DROPS_VOLUME, configMap: { name: pendingDropsConfigMapName(name), optional: true } },
     ...bootstrapVolumes(cluster),
+    ...(initSqlVolume(cluster) ? [initSqlVolume(cluster)!] : []),
     ...(usesConfigVolume
       ? [
           {

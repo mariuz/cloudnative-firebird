@@ -636,6 +636,48 @@ spec:
                     initSql:
                       description: Inline DDL/DML SQL script to run on initial database creation
                       type: string
+                    initSqlRefs:
+                      description: >-
+                        SQL scripts in Secrets and ConfigMaps, run after initSql on initial database
+                        creation: the Secrets' keys first, then the ConfigMaps', each in order
+                      type: object
+                      properties:
+                        secretRefs:
+                          description: Secret keys holding SQL scripts, run in this order
+                          type: array
+                          maxItems: 50
+                          items:
+                            type: object
+                            required:
+                              - name
+                              - key
+                            properties:
+                              name:
+                                type: string
+                                maxLength: 253
+                                pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                              key:
+                                type: string
+                                maxLength: 253
+                                pattern: '^[-._a-zA-Z0-9]+$'
+                        configMapRefs:
+                          description: ConfigMap keys holding SQL scripts, run in this order
+                          type: array
+                          maxItems: 50
+                          items:
+                            type: object
+                            required:
+                              - name
+                              - key
+                            properties:
+                              name:
+                                type: string
+                                maxLength: 253
+                                pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                              key:
+                                type: string
+                                maxLength: 253
+                                pattern: '^[-._a-zA-Z0-9]+$'
                     recovery:
                       description: Cloud or file backup recovery configuration for database bootstrapping
                       type: object

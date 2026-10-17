@@ -693,9 +693,11 @@ describe('buildStatefulSet (config & bootstrap volume mounting)', () => {
     });
     const sts = buildStatefulSet(cluster);
     const container = sts.spec?.template?.spec?.containers?.[0];
-    const mount = container?.volumeMounts?.find((vm) => vm.mountPath === '/docker-entrypoint-initdb.d/init.sql');
-    expect(mount).toBeDefined();
-    expect(mount?.subPath).toBe('init.sql');
+    // the entrypoint runs the numbered scripts of the init-sql volume (utils/init-sql.ts)
+    const mount = container?.volumeMounts?.find((vm) => vm.mountPath === '/docker-entrypoint-initdb.d');
+    expect(mount).toMatchObject({ name: 'init-sql', readOnly: true });
+    const volume = sts.spec?.template?.spec?.volumes?.find((v) => v.name === 'init-sql');
+    expect(volume?.projected?.sources).toEqual([{ configMap: { name: 'test-cluster-config', items: [{ key: 'init.sql', path: '00-init.sql' }] } }]);
   });
 });
 

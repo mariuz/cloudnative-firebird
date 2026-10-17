@@ -266,8 +266,17 @@ case "$primary" in
       origin="created"
     fi
     isql -q -i "$SCRIPT_DIR/enable-publication.sql" "$work"
-    if [ "$origin" = created ] && [ -f "$SCRIPT_DIR/init.sql" ]; then
-      isql -q -i "$SCRIPT_DIR/init.sql" "$work"
+    # bootstrap.initSql, then initSqlRefs (Secrets, then ConfigMaps): numbered files, run in order
+    if [ "$origin" = created ]; then
+      if [ -n "${INIT_SQL_DIR:-}" ] && [ -d "$INIT_SQL_DIR" ]; then
+        for f in "$INIT_SQL_DIR"/*.sql; do
+          [ -f "$f" ] || continue
+          echo "running $(basename "$f")"
+          isql -q -i "$f" "$work"
+        done
+      elif [ -f "$SCRIPT_DIR/init.sql" ]; then
+        isql -q -i "$SCRIPT_DIR/init.sql" "$work"
+      fi
     fi
     write_seed "$work"
     own -R firebird:firebird "$DATA_DIR"

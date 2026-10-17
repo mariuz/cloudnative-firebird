@@ -1,3 +1,4 @@
+import { initSqlRefs } from '../utils/init-sql';
 import { smartShutdownInProgress } from '../utils/lifecycle';
 import { inheritedMetadataMissing, missingInheritedMetadata, withInheritedMetadata } from '../utils/pod-settings';
 import { segmentTlsEnabled } from '../utils/segment-tls-pods';
@@ -2112,6 +2113,27 @@ export class FirebirdClusterController {
     return undefined;
   }
 
+  /** Throws unless every Secret and ConfigMap key of bootstrap.initSqlRefs exists */
+  private async checkInitSqlRefs(cluster: FirebirdCluster): Promise<void> {
+    const namespace = cluster.metadata.namespace ?? 'default';
+    const missing: string[] = [];
+    for (const ref of initSqlRefs(cluster)) {
+      try {
+        const object =
+          ref.kind === 'Secret'
+            ? await this.coreApi.readNamespacedSecret({ name: ref.name, namespace })
+            : await this.coreApi.readNamespacedConfigMap({ name: ref.name, namespace });
+        if (object.data?.[ref.key] === undefined) missing.push(`${ref.kind} ${ref.name} has no key ${ref.key}`);
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+        missing.push(`${ref.kind} ${ref.name} does not exist`);
+      }
+    }
+    if (missing.length > 0) {
+      throw new Error(`bootstrap.initSqlRefs: ${missing.join('; ')} (the instances are created once every script exists)`);
+    }
+  }
+
   private async reconcileStatefulSet(
     cluster: FirebirdCluster,
     log: Logger,
@@ -2144,6 +2166,8 @@ export class FirebirdClusterController {
       const response = await this.appsApi.readNamespacedStatefulSet({ name, namespace });
       existing = response;
     } catch {
+      // the init SQL runs only now: every script it references must exist (utils/init-sql.ts)
+      await this.checkInitSqlRefs(cluster);
       log.info('Creating StatefulSet');
       const created = await this.appsApi.createNamespacedStatefulSet({
         namespace,

@@ -346,6 +346,28 @@ the primary instance by its headless-Service name (like backups, and updated aft
 failover) instead of mounting the instance PVC; diagnostics
 use online validation (`fbsvcmgr action_validate`), which works while clients are connected.
 
+**Init SQL from Secrets and ConfigMaps** (v0.108.0, CloudNativePG `postInitSQLRefs`).
+`bootstrap.initSqlRefs` lists keys of Secrets and ConfigMaps holding SQL scripts, so passwords
+(`CREATE USER ... PASSWORD`) and long schemas stay out of the cluster spec. When the cluster
+database is created they run after `bootstrap.initSql`: the Secrets' keys first, then the
+ConfigMaps', each list in its order. A projected volume (mode 0440) holds them as numbered files;
+without replication the image's entrypoint runs them, with replication the replication init
+container of the first primary does (the replicas are seeded from it). The operator creates the
+instances only once every referenced key exists (a `ReconcileFailed` event names the missing ones);
+the references are optional in the volume, so the Secrets and ConfigMaps may be deleted after the
+bootstrap.
+
+```yaml
+spec:
+  bootstrap:
+    initSql: "CREATE TABLE app (id INTEGER PRIMARY KEY); COMMIT;"
+    initSqlRefs:
+      secretRefs:
+        - { name: app-users, key: users.sql }    # CREATE USER app PASSWORD '...'; COMMIT;
+      configMapRefs:
+        - { name: app-schema, key: schema.sql }
+```
+
 ### Security Contexts
 
 The official image runs the Firebird server as root, so by default the instance pods meet the
