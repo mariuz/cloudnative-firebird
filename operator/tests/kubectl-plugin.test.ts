@@ -19,6 +19,12 @@ import { TARGET_PRIMARY_ANNOTATION as OPERATOR_TARGET } from '../src/utils/switc
 import { RESEED_ANNOTATION as OPERATOR_RESEED } from '../src/utils/replication';
 import { RESEED_VOLUME as OPERATOR_RESEED_VOLUME } from '../src/utils/volume-recreation';
 import { formatEvents, operatorLogLines, sanitize } from '../src/plugin/report';
+import { BENCH_UID, benchScript } from '../src/plugin/bench';
+import { FIREBIRD_UID } from '../src/utils/resources';
+import { spawnSync } from 'child_process';
+import { chmodSync, mkdtempSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { FirebirdBackup, FirebirdCluster } from '../src/types';
 
 const makeCluster = (spec: Partial<FirebirdCluster['spec']> = {}, status?: FirebirdCluster['status']): FirebirdCluster => ({
@@ -63,6 +69,7 @@ describe('kubectl firebird', () => {
       listDatabases: vi.fn().mockResolvedValue([]),
       createBackup: vi.fn().mockResolvedValue(undefined),
       createRestore: vi.fn().mockResolvedValue(undefined),
+      createJob: vi.fn().mockResolvedValue(undefined),
       getStatefulSet: vi.fn().mockResolvedValue({ metadata: { name: 'db', managedFields: [{ manager: 'x' }] }, spec: {} }),
       listServices: vi.fn().mockResolvedValue([{ metadata: { name: 'db' } }, { metadata: { name: 'db-replica' } }]),
       listClaims: vi.fn().mockRejectedValue(Object.assign(new Error('x'), { code: 403, body: '{"message":"persistentvolumeclaims is forbidden"}' })),
@@ -452,5 +459,81 @@ describe('kubectl firebird', () => {
     expect(await exec('maintenance', 'maybe', 'db')).toBe(2);
     cluster.spec.nodeMaintenanceWindow = { inProgress: true };
     expect(formatStatus(cluster, pods, [], [], new Date())).toMatch(/^Maintenance: +node maintenance window in progress/m);
+  });
+
+  it('starts a bench Job against the primary Service', async () => {
+    expect(BENCH_UID).toBe(FIREBIRD_UID);
+    cluster.spec.superuserSecret = { name: 'db-superuser' };
+    expect(await exec('bench', 'db')).toBe(0);
+    const job = api.createJob.mock.calls[0][1];
+    expect(job.metadata.name).toBe('db-bench-20261011120000');
+    expect(job.spec.backoffLimit).toBe(0);
+    const pod = job.spec.template.spec;
+    expect(pod.securityContext).toMatchObject({ runAsNonRoot: true, runAsUser: 84 });
+    const env = Object.fromEntries(pod.containers[0].env.map((e: { name: string; value?: string; valueFrom?: unknown }) => [e.name, e.value ?? e.valueFrom]));
+    expect(env).toEqual({
+      HOST: 'db',
+      DATABASE: '/var/lib/firebird/data/mydb.fdb',
+      CLIENTS: '4',
+      TRANSACTIONS: '1000',
+      KEEP: '0',
+      ISC_USER: 'SYSDBA',
+      ISC_PASSWORD: { secretKeyRef: { name: 'db-superuser', key: 'password' } },
+    });
+    expect(out.at(-1)).toContain('kubectl logs -f job/db-bench-20261011120000 -n prod');
+
+    api.listDatabases.mockResolvedValue([{ metadata: { name: 'sales' }, spec: { clusterName: 'db', databaseName: 'sales-2026.fdb' } }]);
+    expect(await exec('bench', 'db', '--clients', '8', '--transactions', '50', '--database', 'sales', '--keep', '--name', 'b1')).toBe(0);
+    const env2 = Object.fromEntries(api.createJob.mock.calls[1][1].spec.template.spec.containers[0].env.map((e: { name: string; value?: string }) => [e.name, e.value]));
+    expect(env2).toMatchObject({ DATABASE: '/var/lib/firebird/data/sales-2026.fdb', CLIENTS: '8', TRANSACTIONS: '50', KEEP: '1' });
+    expect(api.createJob.mock.calls[1][1].metadata.name).toBe('b1');
+
+    for (const args of [['--clients', '0'], ['--clients', '65'], ['--transactions', 'many'], ['--database', 'nope']]) {
+      expect(await exec('bench', 'db', ...args)).toBe(2);
+    }
+    cluster.spec.hibernated = true;
+    expect(await exec('bench', 'db')).toBe(2);
+    expect(api.createJob).toHaveBeenCalledTimes(2);
+  });
+
+  it('runs the bench script: the transactions of every client, the rate, and failures', () => {
+    // a fake isql: counts the inserts it is given, answers the row count, fails on demand
+    const dir = mkdtempSync(join(tmpdir(), 'bench-'));
+    writeFileSync(
+      join(dir, 'isql'),
+      [
+        '#!/bin/bash',
+        `state=${dir}/rows`,
+        'input=""',
+        'while [ $# -gt 0 ]; do case "$1" in -i) input=$(cat "$2"); shift 2;; *) shift;; esac; done',
+        '[ -z "$input" ] && input=$(cat)',
+        'if echo "$input" | grep -q "RECREATE TABLE"; then echo 0 > $state; exit 0; fi',
+        'if echo "$input" | grep -q "rows="; then echo "rows=$(cat $state)"; exit 0; fi',
+        'if echo "$input" | grep -q "DROP TABLE"; then echo dropped > ' + dir + '/dropped; exit 0; fi',
+        'echo "$input" > ' + dir + '/last.sql',
+        '[ "${FAIL:-0}" = 1 ] && echo "Statement failed, SQLSTATE = 23000"',
+        'n=$(echo "$input" | grep -o "INSERT INTO KF_BENCH" | wc -l)',
+        'flock $state -c "echo \\$((\\$(cat $state) + $n)) > $state"',
+      ].join('\n'),
+    );
+    chmodSync(join(dir, 'isql'), 0o755);
+    const runBench = (extra: Record<string, string>) =>
+      spawnSync('bash', ['-c', benchScript()], {
+        env: { PATH: `${dir}:${process.env.PATH}`, HOST: 'db', DATABASE: '/var/lib/firebird/data/mydb.fdb', CLIENTS: '3', TRANSACTIONS: '20', KEEP: '0', ...extra },
+        encoding: 'utf8',
+      });
+    const ok = runBench({});
+    expect(ok.status).toBe(0);
+    expect(ok.stdout).toMatch(/^transactions: 60$/m);
+    expect(ok.stdout).toMatch(/^clients: 3$/m);
+    expect(ok.stdout).toMatch(/^tps: [0-9.]+$/m);
+    expect(spawnSync('cat', [join(dir, 'dropped')]).status).toBe(0);
+    // an id past 2^31 (client 64) is printed whole, and the quote of the payload survives awk
+    const wide = runBench({ CLIENTS: '64', TRANSACTIONS: '1' });
+    expect(wide.status).toBe(0);
+    expect(spawnSync('cat', [join(dir, 'last.sql')], { encoding: 'utf8' }).stdout).toMatch(/VALUES \((\d{9,10}), \d+, 1, 'bench'\)/);
+    const failed = runBench({ FAIL: '1' });
+    expect(failed.status).toBe(1);
+    expect(failed.stdout).toContain('bench: client 1 failed');
   });
 });

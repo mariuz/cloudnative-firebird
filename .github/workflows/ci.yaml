@@ -400,6 +400,16 @@ jobs:
           if kubectl firebird restore repl no-such-backup 2>/tmp/plugin-err.txt; then echo "a restore of a missing backup was accepted"; exit 1; fi
           grep -q 'no FirebirdBackup no-such-backup' /tmp/plugin-err.txt
           kubectl delete firebirdrestore plugin-restore
+          # a load test through the primary Service: every transaction committed, the table dropped
+          kubectl firebird bench repl --clients 2 --transactions 100 --name plugin-bench
+          kubectl wait --for=condition=complete job/plugin-bench --timeout=300s \
+            || { kubectl logs job/plugin-bench || true; kubectl describe job plugin-bench | tail -20; exit 1; }
+          kubectl logs job/plugin-bench | tee /tmp/plugin-bench.txt
+          grep -qx 'transactions: 200' /tmp/plugin-bench.txt
+          grep -qE '^tps: [0-9.]+$' /tmp/plugin-bench.txt
+          echo "select 'bench=' || count(*) from rdb\$relations where rdb\$relation_name = 'KF_BENCH';" \
+            | kubectl exec -i "$primary" -c firebird -- isql -q localhost:/var/lib/firebird/data/mydb.fdb | grep -q 'bench=0'
+          kubectl delete job plugin-bench
           # a node maintenance window: the PodDisruptionBudget goes while it lasts, and comes back
           kubectl get pdb repl-pdb >/dev/null
           kubectl firebird maintenance on repl

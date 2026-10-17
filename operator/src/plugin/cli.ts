@@ -1,7 +1,8 @@
-import { CoreV1Event, dumpYaml, V1PersistentVolumeClaim, V1Pod, V1Service, V1StatefulSet } from '@kubernetes/client-node';
+import { CoreV1Event, dumpYaml, V1Job, V1PersistentVolumeClaim, V1Pod, V1Service, V1StatefulSet } from '@kubernetes/client-node';
 import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdScheduledBackup } from '../types';
 import { isPodReady, ROLE_LABEL } from '../utils/routing';
 import { formatEvents, listYaml, operatorLogLines, podContainers, sanitize } from './report';
+import { BENCH_TABLE, buildBenchJob } from './bench';
 
 /**
  * kubectl-firebird, the kubectl plugin (CloudNativePG's kubectl cnpg): status of a cluster and the
@@ -10,7 +11,7 @@ import { formatEvents, listYaml, operatorLogLines, podContainers, sanitize } fro
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.103.0';
+export const PLUGIN_VERSION = '0.104.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -37,6 +38,7 @@ export interface PluginApi {
   listDatabases(namespace: string): Promise<FirebirdDatabase[]>;
   createBackup(namespace: string, body: FirebirdBackup): Promise<void>;
   createRestore(namespace: string, body: FirebirdRestore): Promise<void>;
+  createJob(namespace: string, body: V1Job): Promise<void>;
   /** report */
   getStatefulSet(namespace: string, name: string): Promise<V1StatefulSet>;
   listServices(namespace: string, labelSelector: string): Promise<V1Service[]>;
@@ -80,6 +82,9 @@ Commands:
   restore <cluster> <backup> [--target file] [--name restore-name]
                                             restore a completed backup into a new database file
                                             (FirebirdRestore; the cluster database is never replaced)
+  bench <cluster> [--clients n] [--transactions n] [--database firebird-database] [--keep] [--name job]
+                                            load test through the primary Service: a Job of short
+                                            read/write transactions, reporting transactions per second
   isql <cluster> [--replica | --instance i] [-- isql arguments]
                                             isql on the primary (or a replica), in the firebird container
   logs <cluster> [--instance i] [--container c] [--tail n] [-f]
@@ -100,8 +105,8 @@ interface Parsed {
   rest: string[];
 }
 
-const VALUE_FLAGS = new Set(['namespace', 'context', 'type', 'level', 'name', 'snapshot-class', 'instance', 'container', 'tail', 'output', 'operator-namespace', 'database', 'target']);
-const BOOLEAN_FLAGS = new Set(['replica', 'help', 'follow', 'no-logs']);
+const VALUE_FLAGS = new Set(['namespace', 'context', 'type', 'level', 'name', 'snapshot-class', 'instance', 'container', 'tail', 'output', 'operator-namespace', 'database', 'target', 'clients', 'transactions']);
+const BOOLEAN_FLAGS = new Set(['replica', 'help', 'follow', 'no-logs', 'keep']);
 const SHORT: Record<string, string> = { n: 'namespace', f: 'follow', o: 'output' };
 
 export function parseArgs(argv: string[]): Parsed {
@@ -566,6 +571,35 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
         await api.createRestore(namespace, body);
         io.out(
           `FirebirdRestore ${restoreName} created: ${backupName} into ${target ?? `restore-${restoreName}.fdb`} on the primary; kubectl get firebirdrestore ${restoreName} -n ${namespace} -w`,
+        );
+        return 0;
+      }
+
+      case 'bench': {
+        const [name] = need(parsed, 1, 'bench <cluster> [--clients n] [--transactions n] [--database d] [--keep] [--name job]');
+        const cluster = await api.getCluster(namespace, name);
+        if (cluster.spec.hibernated) throw new UsageError(`cluster ${name} is hibernated`);
+        const count = (flag: string, fallback: number, max: number) => {
+          const raw = (parsed.flags.get(flag) as string | undefined) ?? String(fallback);
+          if (!/^\d+$/.test(raw) || Number(raw) < 1 || Number(raw) > max) throw new UsageError(`--${flag} must be a number from 1 to ${max}, got ${raw}`);
+          return Number(raw);
+        };
+        const clients = count('clients', 4, 64);
+        const transactions = count('transactions', 1000, 1000000);
+        // a FirebirdDatabase of the cluster, or the cluster database
+        const databaseName = parsed.flags.get('database') as string | undefined;
+        let databaseFile = cluster.spec.databaseName ?? 'mydb.fdb';
+        if (databaseName) {
+          const database = (await api.listDatabases(namespace)).find((d) => d.metadata.name === databaseName);
+          if (!database || database.spec.clusterName !== name) throw new UsageError(`no FirebirdDatabase ${databaseName} of cluster ${name}`);
+          databaseFile = database.spec.databaseName ?? `${database.metadata.name}.fdb`;
+        }
+        const stamp = io.now().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+        const jobName = (parsed.flags.get('name') as string | undefined) ?? `${name}-bench-${stamp}`.slice(0, 63);
+        await api.createJob(namespace, buildBenchJob(cluster, { clients, transactions, databaseFile, jobName, keep: parsed.flags.has('keep') }));
+        io.out(
+          `Job ${jobName} created: ${clients} clients x ${transactions} transactions against ${name}:/var/lib/firebird/data/${databaseFile} ` +
+            `(table ${BENCH_TABLE}${parsed.flags.has('keep') ? ', kept afterwards' : ', dropped afterwards'}); its result: kubectl logs -f job/${jobName} -n ${namespace}`,
         );
         return 0;
       }

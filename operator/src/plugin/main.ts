@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import { mkdir, writeFile } from 'fs/promises';
 import {
   AppsV1Api,
+  BatchV1Api,
   CoreV1Api,
   CustomObjectsApi,
   KubeConfig,
@@ -31,6 +32,7 @@ function kubeApi(kubeConfig: KubeConfig): PluginApi {
   const custom = kubeConfig.makeApiClient(CustomObjectsApi);
   const core = kubeConfig.makeApiClient(CoreV1Api);
   const apps = kubeConfig.makeApiClient(AppsV1Api);
+  const batch = kubeConfig.makeApiClient(BatchV1Api);
   const crd = (namespace: string, plural: string) => ({ group: API_GROUP, version: API_VERSION, namespace, plural });
   return {
     getCluster: async (namespace, name) =>
@@ -57,6 +59,9 @@ function kubeApi(kubeConfig: KubeConfig): PluginApi {
       ((await custom.listNamespacedCustomObject(crd(namespace, 'firebirddatabases'))) as { items?: FirebirdDatabase[] }).items ?? [],
     createBackup: async (namespace, body) => {
       await custom.createNamespacedCustomObject({ ...crd(namespace, 'firebirdbackups'), body });
+    },
+    createJob: async (namespace, body) => {
+      await batch.createNamespacedJob({ namespace, body });
     },
     createRestore: async (namespace, body) => {
       await custom.createNamespacedCustomObject({ ...crd(namespace, 'firebirdrestores'), body });

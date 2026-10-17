@@ -246,7 +246,6 @@ export class FirebirdBackupController {
       const jobName = `backup-${name}`;
       const fileName = onDemandBackupFileName(backup);
       const base: Partial<FirebirdBackupStatus> = { jobName, backupFileName: fileName, location: backupLocation(fileName, backup.spec.s3) };
-      if (backup.spec.database) base.databasePath = backup.status?.databasePath;
 
       let job = await this.readJob(jobName, namespace);
       if (!job) {
@@ -263,7 +262,6 @@ export class FirebirdBackupController {
           });
           return;
         }
-        if (database) base.databasePath = `${FIREBIRD_DATA_DIR}/${database.file}`;
         const instance = await this.backupInstance(cluster, backup.spec);
         const desired = buildBackupJob(backup, cluster, instance, instance !== (await this.primaryPod(cluster)), database?.file);
         log.info({ jobName }, 'Creating backup Job');
@@ -271,6 +269,15 @@ export class FirebirdBackupController {
         await this.event(backup, 'FirebirdBackup', 'Normal', EventReason.BackupStarted, `${backup.spec.type ?? 'logical'} backup of cluster ${backup.spec.clusterName} started (Job ${jobName})`);
       }
 
+      // the file the Job backs up: from the Job itself, as the copy of the backup this reconcile was
+      // given can predate the status write that recorded it
+      if (backup.spec.database) {
+        const pod = job.spec?.template?.spec;
+        const databasePath = [...(pod?.initContainers ?? []), ...(pod?.containers ?? [])]
+          .flatMap((c) => c.env ?? [])
+          .find((e) => e.name === 'DATABASE_PATH')?.value;
+        if (databasePath) base.databasePath = databasePath;
+      }
       const outcome = jobOutcome(job);
       const startTime = backup.status?.startTime ?? new Date().toISOString();
       const instance = jobInstance(job);

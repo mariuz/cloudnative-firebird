@@ -229,6 +229,7 @@ kubectl plugin list | grep firebird
 | `kubectl firebird backup my-cluster [--type logical\|physical\|volumeSnapshot] [--level n] [--snapshot-class c] [--name n] [--database d]` | Creates a `FirebirdBackup`, to the cluster's `backup.s3` when it has one; `--database` backs up a `FirebirdDatabase` (logical). |
 | `kubectl firebird backups my-cluster` | The cluster's backups, newest first: type (and nbackup level), phase (verified), start and duration, the database (a `FirebirdDatabase`'s or the cluster's) and the location or error. Since v0.102.0. |
 | `kubectl firebird restore my-cluster my-backup [--target file.fdb] [--name n]` | Creates a `FirebirdRestore` of a completed backup into a new file on the primary (`restore-<name>.fdb` unless `--target`); the cluster database is never replaced. A running, failed or another cluster's backup is refused, and so is a volume snapshot (a new cluster bootstraps from it). Since v0.102.0. |
+| `kubectl firebird bench my-cluster [--clients 4] [--transactions 1000] [--database d] [--keep] [--name n]` | A load test, like CloudNativePG's `kubectl cnpg pgbench`. A Job in the cluster's image connects through the primary Service as SYSDBA. Each client is an `isql` session running its transactions, each an insert, an update and a read on the table `KF_BENCH`. The Job then prints the transactions, the elapsed time, the transactions per second and the average latency (`kubectl logs job/<name>`). The table is created first and dropped afterwards unless `--keep`. The run fails on any failed statement or a missing row. It runs against the cluster database, or a `FirebirdDatabase` with `--database`. Since v0.104.0. |
 | `kubectl firebird isql my-cluster [--replica\|--instance 1] [-- isql args]` | Runs `isql` in the `firebird` container (`kubectl exec`; `-it` from a terminal, so a script can be piped in) as SYSDBA, through the container's credentials. |
 | `kubectl firebird logs my-cluster [--instance 1] [--container c] [--tail n] [-f]` | The logs of every instance at once, each line prefixed with its pod (`kubectl logs -l ... --prefix`), or of one instance. The `firebird` container by default; `--container` takes a sidecar or init container (`replication-init`, `segment-server`, ...). Since v0.99.0. |
 | `kubectl firebird destroy my-cluster 2` | Deletes a replica's pod and volume; the operator creates a new volume and seeds it from the primary (the `reseed=volume` annotation, see Re-seeding a Replica). The primary, clusters without replication (the instance would come back empty) and hibernated clusters are refused. Since v0.99.0. |
@@ -240,7 +241,7 @@ with 1, showing the API server's message.
 **Testing.** Unit tests cover the argument parsing, the status report, every command and its
 refusals, the report's files and redaction. The kind CI puts the plugin on the PATH, reads the
 status of the replicated cluster, runs `isql` on its primary and a replica, takes a backup,
-fences and unfences a replica, opens and closes a maintenance window, lists the backups and
+fences and unfences a replica, runs a load test, opens and closes a maintenance window, lists the backups and
 restores one into a new file, reads the
 instances' logs, writes and checks a report, and destroys a replica (the volume re-creation step).
 
