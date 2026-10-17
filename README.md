@@ -1189,6 +1189,29 @@ spec:
     s3: { bucket: firebird-backups, region: eu-west-1 }
 ```
 
+**Pod settings and inherited metadata** (v0.106.0, CloudNativePG `priorityClassName`,
+`schedulerName`, `imagePullPolicy`, `imagePullSecrets` and `inheritedMetadata`). Every pod of the
+cluster, the instances' and those of the operator's Jobs, gets the priority class, the scheduler
+and the image pull secrets, and each of its containers the pull policy. `inheritedMetadata` labels
+and annotations are copied onto the StatefulSet, the instance pods and volumes, the default
+Services, the PodDisruptionBudget, and the Jobs and CronJobs with their pods; the operator's own
+keys win (`app.kubernetes.io/name`, `component`, `managed-by` and `firebird.cloudnative-firebird.io/`
+keys cannot be inherited), and `serviceAnnotations` win over inherited annotations on the Services.
+New keys reach existing volumes and Services in place; the instance pods take them, and changed pod
+settings, with a rolling restart (primary last). Keys removed from `inheritedMetadata` stay on
+existing resources.
+
+```yaml
+spec:
+  priorityClassName: database-critical
+  imagePullPolicy: IfNotPresent
+  imagePullSecrets:
+    - name: registry-credentials
+  inheritedMetadata:
+    labels: { team: payments }
+    annotations: { sidecar.istio.io/inject: "false" }
+```
+
 **Pausing a resource.** The annotation `firebird.cloudnative-firebird.io/reconciliationDisabled:
 "true"` on a `FirebirdBackup`, `FirebirdScheduledBackup`, `FirebirdRestore`, `FirebirdUser` or `FirebirdRole`
 (CloudNativePG 1.29 `cnpg.io/reconciliationDisabled`) makes the operator leave it, its status and

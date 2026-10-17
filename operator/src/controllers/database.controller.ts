@@ -1,3 +1,4 @@
+import { withInheritedMetadata } from '../utils/pod-settings';
 import { BatchV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Job } from '@kubernetes/client-node';
 import { clusterStoppedReason } from '../utils/major-upgrade';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
@@ -175,7 +176,7 @@ export class FirebirdDatabaseController {
 
     const body = buildDatabaseJob(cluster, database, 'create', targets.map((t) => ({ name: t.name, volume: t.volume! })));
     try {
-      await this.batchApi.createNamespacedJob({ namespace, body });
+      await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, body) });
       log.info({ instances: targets.map((t) => t.name) }, 'Creating database');
     } catch (err) {
       // the previous Job is still being deleted; retried on the next reconcile
@@ -227,7 +228,7 @@ export class FirebirdDatabaseController {
     if (targets.length > 0) {
       const body = buildDatabaseJob(cluster, database, 'drop', targets.map((t) => ({ name: t.name, volume: t.volume! })));
       try {
-        await this.batchApi.createNamespacedJob({ namespace, body });
+        await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, body) });
         log.info({ instances: targets.map((i) => i.name) }, 'Dropping database');
       } catch (err) {
         if ((err as { code?: number })?.code !== 409) throw err;

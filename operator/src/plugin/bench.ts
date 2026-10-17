@@ -1,5 +1,6 @@
 import { V1Job } from '@kubernetes/client-node';
 import { API_GROUP, DEFAULT_FIREBIRD_IMAGE, FirebirdCluster } from '../types';
+import { clusterPodSettings, withInheritedMetadata, withPullPolicy } from '../utils/pod-settings';
 
 /**
  * kubectl firebird bench: a load test of a cluster (CloudNativePG's kubectl cnpg pgbench). A Job
@@ -91,7 +92,8 @@ export function buildBenchJob(cluster: FirebirdCluster, options: BenchOptions): 
     'app.kubernetes.io/managed-by': 'kubectl-firebird',
     [`${API_GROUP}/cluster`]: name,
   };
-  return {
+  // the cluster's pod settings (service account, priority class, pull secrets) and inherited metadata
+  return withInheritedMetadata(cluster, {
     apiVersion: 'batch/v1',
     kind: 'Job',
     metadata: { name: options.jobName, namespace, labels },
@@ -103,10 +105,10 @@ export function buildBenchJob(cluster: FirebirdCluster, options: BenchOptions): 
         metadata: { labels },
         spec: {
           restartPolicy: 'Never',
-          ...(cluster.spec.serviceAccountName ? { serviceAccountName: cluster.spec.serviceAccountName } : {}),
+          ...clusterPodSettings(cluster),
           securityContext: { runAsNonRoot: true, runAsUser: BENCH_UID, runAsGroup: BENCH_UID, seccompProfile: { type: 'RuntimeDefault' } },
           containers: [
-            {
+            withPullPolicy(cluster, {
               name: 'bench',
               image: benchImage(cluster),
               command: ['/bin/bash', '-c', benchScript()],
@@ -122,10 +124,10 @@ export function buildBenchJob(cluster: FirebirdCluster, options: BenchOptions): 
                   : { name: 'ISC_PASSWORD', value: 'masterkey' },
               ],
               securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } },
-            },
+            }),
           ],
         },
       },
     },
-  };
+  });
 }

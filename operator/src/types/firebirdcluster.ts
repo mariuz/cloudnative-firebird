@@ -491,6 +491,24 @@ export interface FirebirdClusterSpec {
    */
   serviceAccountName?: string;
   /**
+   * PriorityClass of every pod of the cluster: the instances and the operator's Jobs
+   * (CloudNativePG priorityClassName)
+   */
+  priorityClassName?: string;
+  /** Scheduler of every pod of the cluster (CloudNativePG schedulerName); the default scheduler if unset */
+  schedulerName?: string;
+  /** Pull policy of every container of the cluster's pods (CloudNativePG imagePullPolicy); the Kubernetes default if unset */
+  imagePullPolicy?: 'Always' | 'IfNotPresent' | 'Never';
+  /** Secrets for pulling the images of every pod of the cluster (CloudNativePG imagePullSecrets) */
+  imagePullSecrets?: Array<{ name: string }>;
+  /**
+   * Labels and annotations the operator copies onto the resources it creates for the cluster:
+   * the StatefulSet, the instance pods and volumes, the default Services, the
+   * PodDisruptionBudget, the Jobs and CronJobs and their pods (CloudNativePG inheritedMetadata).
+   * The operator's own keys win; keys removed here stay on existing resources.
+   */
+  inheritedMetadata?: { labels?: Record<string, string>; annotations?: Record<string, string> };
+  /**
    * Runs every instance container as the image's firebird user (uid 84) with no capabilities, on
    * a writable copy of /opt/firebird: the instance pods meet the "restricted" Pod Security
    * Standard. Default false (the official image runs the server as root).

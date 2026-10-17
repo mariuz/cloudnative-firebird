@@ -1,3 +1,4 @@
+import { clusterPodSettings, withPullPolicy } from './pod-settings';
 import { createHash } from 'crypto';
 import { V1EnvVar, V1Job, V1Pod } from '@kubernetes/client-node';
 import { API_GROUP, FirebirdCluster, ImageCheckStatus, MajorUpgradeStatus, RESOURCE_KIND } from '../types';
@@ -9,7 +10,6 @@ import {
   instanceSecurityContext,
   jobPodSpec,
   SECURITY_DB_PATH,
-  serviceAccount,
 } from './resources';
 import { OPERATOR_CONFIG_DIR, replicationDirectories, replicationEnabled, UPGRADE_SCRIPTS } from './replication';
 import { isPodReady } from './routing';
@@ -194,7 +194,7 @@ export function buildMajorUpgradeJob(cluster: FirebirdCluster, upgrade: MajorUpg
     { name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR },
     { name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true },
   ];
-  const step = (containerName: string, image: string, mode: string) => ({
+  const step = (containerName: string, image: string, mode: string) => withPullPolicy(cluster, {
     name: containerName,
     image,
     command: ['/bin/sh', '-c', UPGRADE_SCRIPTS['major-upgrade.sh']],
@@ -219,7 +219,7 @@ export function buildMajorUpgradeJob(cluster: FirebirdCluster, upgrade: MajorUpg
         metadata: { labels },
         spec: {
           restartPolicy: 'Never',
-          ...serviceAccount(cluster),
+          ...clusterPodSettings(cluster),
           securityContext: instancePodSecurityContext(cluster),
           initContainers: [step('backup', upgrade.from, 'backup')],
           containers: [step('restore', upgrade.to, 'restore')],

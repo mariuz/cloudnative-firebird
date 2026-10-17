@@ -1,3 +1,4 @@
+import { withInheritedMetadata } from '../utils/pod-settings';
 import { clusterStoppedReason } from '../utils/major-upgrade';
 import {
   BatchV1Api,
@@ -223,7 +224,7 @@ export class FirebirdUserController {
       targets: JSON.stringify(targets.map((t) => ({ name: t.name, volume: t.volume }))),
     });
     try {
-      await this.batchApi.createNamespacedJob({ namespace, body });
+      await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, body) });
       log.info({ instances: targets.map((t) => t.name) }, 'Applying Firebird user');
     } catch (err) {
       // the previous Job is still being deleted; retried on the next reconcile
@@ -291,7 +292,7 @@ export class FirebirdUserController {
         targets: JSON.stringify(targets.map((t) => ({ name: t.name, volume: t.volume }))),
       });
       try {
-        await this.batchApi.createNamespacedJob({ namespace, body });
+        await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, body) });
         log.info({ instances: targets.map((i) => i.name) }, 'Dropping Firebird user');
       } catch (err) {
         if ((err as { code?: number })?.code !== 409) throw err;

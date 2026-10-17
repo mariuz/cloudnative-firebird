@@ -1,3 +1,4 @@
+import { withInheritedMetadata } from '../utils/pod-settings';
 import { clusterStoppedReason } from '../utils/major-upgrade';
 import { replicaClusterFollowing } from '../utils/replica-cluster';
 import { latestCronTime } from '../utils/cron';
@@ -48,7 +49,7 @@ import {
 } from '../utils/backup';
 import { existingTargetMessage, restoreTargetExists, superuserPasswordFrom } from '../utils/restore-target';
 import { SegmentClient, segmentRequest } from '../utils/replication-lag';
-import { cronJobNeedsUpdate, databaseName, FIREBIRD_DATA_DIR, instancePodSelector } from '../utils/resources';
+import { cronJobNeedsUpdate, databaseName, FIREBIRD_DATA_DIR, instancePodSelector, withTemplateHash } from '../utils/resources';
 import { managedDatabaseName } from '../utils/databases';
 import {
   ValidationError,
@@ -265,7 +266,7 @@ export class FirebirdBackupController {
         const instance = await this.backupInstance(cluster, backup.spec);
         const desired = buildBackupJob(backup, cluster, instance, instance !== (await this.primaryPod(cluster)), database?.file);
         log.info({ jobName }, 'Creating backup Job');
-        job = await this.batchApi.createNamespacedJob({ namespace, body: desired });
+        job = await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, desired) });
         await this.event(backup, 'FirebirdBackup', 'Normal', EventReason.BackupStarted, `${backup.spec.type ?? 'logical'} backup of cluster ${backup.spec.clusterName} started (Job ${jobName})`);
       }
 
@@ -343,13 +344,13 @@ export class FirebirdBackupController {
     const instance = await this.backupInstance(cluster, scheduledBackup.spec);
     // a database not created yet: its first runs fail until it is
     const database = await this.backupDatabase(namespace, scheduledBackup.spec);
-    const desired = buildScheduledBackupCronJob(
+    const desired = withTemplateHash(withInheritedMetadata(cluster, buildScheduledBackupCronJob(
       scheduledBackup,
       cluster,
       instance,
       instance !== (await this.primaryPod(cluster)),
       database?.file,
-    );
+    )));
     const cronName = desired.metadata!.name!;
 
     let current: V1CronJob;
@@ -412,7 +413,7 @@ export class FirebirdBackupController {
         const instance = await this.primaryPod(cluster);
         await this.ensureSnapshotFinalizer(backup, true);
         log.info({ jobName: lockName, instance }, 'Locking the database for a volume snapshot');
-        lock = await this.batchApi.createNamespacedJob({ namespace, body: buildSnapshotLockJob(backup, cluster, instance, 'lock') });
+        lock = await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, buildSnapshotLockJob(backup, cluster, instance, 'lock')) });
         await this.event(
           backup,
           'FirebirdBackup',
@@ -495,7 +496,7 @@ export class FirebirdBackupController {
       let unlock = await this.readJob(unlockName, namespace);
       if (!unlock) {
         log.info({ jobName: unlockName, instance }, 'Unlocking the database');
-        unlock = await this.batchApi.createNamespacedJob({ namespace, body: buildSnapshotLockJob(backup, cluster, instance, 'unlock') });
+        unlock = await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, buildSnapshotLockJob(backup, cluster, instance, 'unlock')) });
       }
       const outcome = jobOutcome(unlock);
       if (outcome === 'Failed') {
@@ -782,7 +783,7 @@ export class FirebirdBackupController {
         }
         const desired = buildRestoreJob(restore, cluster, source, primary);
         log.info({ jobName }, 'Creating restore Job');
-        job = await this.batchApi.createNamespacedJob({ namespace, body: desired });
+        job = await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, desired) });
         await this.event(restore, 'FirebirdRestore', 'Normal', EventReason.RestoreStarted, `restoring into ${base.targetPath} (Job ${jobName})`);
       }
 
