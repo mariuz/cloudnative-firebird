@@ -3,7 +3,7 @@ import { imageCatalogRefErrors } from './image-catalog';
 import { replicaClusterErrors } from './replica-cluster';
 import { parseCron } from './cron';
 import { volumeSnapshotRecoveryErrors, volumeSnapshotSpecErrors } from './volume-snapshot';
-import { FirebirdCluster, FirebirdBackup, FirebirdRestore, PointInTimeRecovery, S3BackupConfiguration } from '../types';
+import { API_GROUP, FirebirdCluster, FirebirdBackup, FirebirdRestore, PointInTimeRecovery, S3BackupConfiguration } from '../types';
 import { parseQuantity } from './storage';
 
 export class ValidationError extends Error {
@@ -85,6 +85,8 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
   if (spec.serviceAccountName !== undefined && !/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(spec.serviceAccountName)) {
     throw new ValidationError(`Invalid serviceAccountName: "${spec.serviceAccountName}". Must be a DNS subdomain name.`);
   }
+
+  validatePodSettings(spec);
 
   if (
     spec.serviceType &&
@@ -347,6 +349,57 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
  * Physical (nbackup) backups are taken by the primary's server into its own data directory, so
  * they cannot be streamed to a Job for upload.
  */
+const DNS_SUBDOMAIN = /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/;
+const QUALIFIED_NAME = /^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$/;
+const LABEL_VALUE = /^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$/;
+
+/** A label or annotation key: an optional DNS subdomain prefix and a name of at most 63 characters */
+export function validMetadataKey(key: string): boolean {
+  const slash = key.lastIndexOf('/');
+  const prefix = slash >= 0 ? key.slice(0, slash) : undefined;
+  const name = slash >= 0 ? key.slice(slash + 1) : key;
+  if (prefix !== undefined && (prefix.length > 253 || !DNS_SUBDOMAIN.test(prefix))) return false;
+  return name.length <= 63 && QUALIFIED_NAME.test(name);
+}
+
+/** Label keys the operator sets on its resources, which inheritedMetadata may not name */
+export const RESERVED_METADATA_KEYS = ['app.kubernetes.io/name', 'app.kubernetes.io/component', 'app.kubernetes.io/managed-by'];
+
+/** Whether inheritedMetadata may not name the key: the operator's own labels and its API group's keys */
+export function reservedMetadataKey(key: string): boolean {
+  return RESERVED_METADATA_KEYS.includes(key) || key.startsWith(`${API_GROUP}/`);
+}
+
+/** priorityClassName, schedulerName, imagePullPolicy, imagePullSecrets and inheritedMetadata */
+function validatePodSettings(spec: FirebirdCluster['spec']): void {
+  if (spec.priorityClassName !== undefined && (spec.priorityClassName.length > 253 || !DNS_SUBDOMAIN.test(spec.priorityClassName))) {
+    throw new ValidationError(`Invalid priorityClassName: "${spec.priorityClassName}". Must be a DNS subdomain name.`);
+  }
+  if (spec.schedulerName !== undefined && spec.schedulerName.trim() === '') {
+    throw new ValidationError('schedulerName cannot be empty');
+  }
+  if (spec.imagePullPolicy !== undefined && !['Always', 'IfNotPresent', 'Never'].includes(spec.imagePullPolicy)) {
+    throw new ValidationError(`Invalid imagePullPolicy: ${spec.imagePullPolicy}. Must be Always, IfNotPresent or Never.`);
+  }
+  for (const secret of spec.imagePullSecrets ?? []) {
+    if (!secret?.name || secret.name.length > 253 || !DNS_SUBDOMAIN.test(secret.name)) {
+      throw new ValidationError(`Invalid imagePullSecrets name: "${secret?.name ?? ''}". Must be a DNS subdomain name.`);
+    }
+  }
+  for (const [key, value] of Object.entries(spec.inheritedMetadata?.labels ?? {})) {
+    if (!validMetadataKey(key)) throw new ValidationError(`Invalid inheritedMetadata label key: "${key}"`);
+    if (reservedMetadataKey(key)) throw new ValidationError(`inheritedMetadata label "${key}" is set by the operator`);
+    if (typeof value !== 'string' || value.length > 63 || !LABEL_VALUE.test(value)) {
+      throw new ValidationError(`Invalid inheritedMetadata label value for "${key}": "${String(value)}"`);
+    }
+  }
+  for (const [key, value] of Object.entries(spec.inheritedMetadata?.annotations ?? {})) {
+    if (!validMetadataKey(key)) throw new ValidationError(`Invalid inheritedMetadata annotation key: "${key}"`);
+    if (key.startsWith(`${API_GROUP}/`)) throw new ValidationError(`inheritedMetadata annotation "${key}" is set by the operator`);
+    if (typeof value !== 'string') throw new ValidationError(`Invalid inheritedMetadata annotation value for "${key}": must be a string`);
+  }
+}
+
 function validateBackupDestination(field: string, type?: string, verify?: boolean): void {
   if (type === 'physical' && verify) {
     throw new ValidationError(`${field}: verify is supported for logical backups only`);

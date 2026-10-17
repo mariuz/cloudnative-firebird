@@ -1,3 +1,4 @@
+import { clusterPodSettings, withPullPolicy } from './pod-settings';
 import { clusterImage } from './image-catalog';
 import { createHash } from 'crypto';
 import { V1Job, V1PersistentVolumeClaim } from '@kubernetes/client-node';
@@ -18,7 +19,6 @@ import {
   instancePodSecurityContext,
   instanceSecurityContext,
   jobPodSpec,
-  serviceAccount,
   superuserClientEnv,
 } from './resources';
 
@@ -380,12 +380,12 @@ export function buildSnapshotRecoveryJob(cluster: FirebirdCluster): V1Job {
         metadata: { labels },
         spec: {
           restartPolicy: 'Never',
-          ...serviceAccount(cluster),
+          ...clusterPodSettings(cluster),
           securityContext: instancePodSecurityContext(cluster),
           ...(cluster.spec.nodeSelector ? { nodeSelector: cluster.spec.nodeSelector } : {}),
           ...(cluster.spec.tolerations ? { tolerations: cluster.spec.tolerations } : {}),
           containers: [
-            {
+            withPullPolicy(cluster, {
               name: 'snapshot-recovery',
               image: clusterImage(cluster),
               command: ['/bin/sh', '-c'],
@@ -397,7 +397,7 @@ export function buildSnapshotRecoveryJob(cluster: FirebirdCluster): V1Job {
               ],
               securityContext: instanceSecurityContext(cluster),
               volumeMounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }],
-            },
+            }),
           ],
           volumes: [{ name: 'firebird-data', persistentVolumeClaim: { claimName: instanceDataClaimName(cluster, 0) } }],
         },

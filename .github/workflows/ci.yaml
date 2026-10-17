@@ -2077,6 +2077,67 @@ jobs:
           kubectl get service svc-rw
           kubectl delete firebirdcluster svc --wait=false
 
+      - name: Verify pod settings and inherited metadata
+        if: matrix.track.id == 'extended'
+        run: |
+          kubectl apply -f - <<'EOF'
+          apiVersion: scheduling.k8s.io/v1
+          kind: PriorityClass
+          metadata:
+            name: firebird-test
+          value: 1000
+          ---
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: podset
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            priorityClassName: firebird-test
+            schedulerName: default-scheduler
+            imagePullPolicy: IfNotPresent
+            # a Secret that does not exist: the kubelet warns and pulls anonymously
+            imagePullSecrets:
+              - name: registry-credentials
+            inheritedMetadata:
+              labels: { team: payments }
+              annotations: { example.com/owner: dba }
+            backup:
+              enabled: true
+              schedule: "0 3 * * *"
+          EOF
+          timeout 300 bash -c 'until kubectl get pod podset-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/podset-0 --for=condition=Ready --timeout=600s
+          pod() { kubectl get pod podset-0 -o jsonpath="$1"; }
+          [ "$(pod {.spec.priorityClassName})" = firebird-test ]
+          [ "$(pod {.spec.priority})" = 1000 ]
+          [ "$(pod {.spec.schedulerName})" = default-scheduler ]
+          [ "$(pod '{.spec.imagePullSecrets[*].name}')" = registry-credentials ]
+          [ -z "$(pod '{.spec.initContainers[*].imagePullPolicy} {.spec.containers[*].imagePullPolicy}' | tr ' ' '\n' | grep -vx IfNotPresent | grep .)" ]
+          [ "$(pod {.metadata.labels.team})" = payments ]
+          [ "$(pod '{.metadata.annotations.example\.com/owner}')" = dba ]
+          # the StatefulSet, the volume, the default Services and the backup CronJob carry it too
+          for object in statefulset/podset pvc/firebird-data-podset-0 service/podset service/podset-headless; do
+            [ "$(kubectl get $object -o jsonpath={.metadata.labels.team})" = payments ] || { echo "$object has no team label"; exit 1; }
+          done
+          cron=$(kubectl get cronjob -l firebird.cloudnative-firebird.io/cluster=podset -o name | head -1)
+          [ -n "$cron" ]
+          [ "$(kubectl get $cron -o jsonpath={.spec.jobTemplate.spec.template.metadata.labels.team})" = payments ]
+          [ "$(kubectl get $cron -o jsonpath={.spec.jobTemplate.spec.template.spec.priorityClassName})" = firebird-test ]
+          # a new label: patched onto the existing volume and Services, the pod restarted with it
+          kubectl patch firebirdcluster podset --type merge -p '{"spec":{"inheritedMetadata":{"labels":{"team":"payments","tier":"gold"}}}}'
+          for object in pvc/firebird-data-podset-0 service/podset service/podset-headless $cron; do
+            timeout 120 bash -c "until [ \"\$(kubectl get $object -o jsonpath={.metadata.labels.tier})\" = gold ]; do sleep 3; done" \
+              || { echo "$object did not get the tier label"; kubectl get $object -o yaml; exit 1; }
+          done
+          timeout 300 bash -c 'until [ "$(kubectl get pod podset-0 -o jsonpath={.metadata.labels.tier} 2>/dev/null)" = gold ]; do sleep 3; done'
+          kubectl wait pod/podset-0 --for=condition=Ready --timeout=600s
+          kubectl get pod podset-0 --show-labels
+          kubectl delete firebirdcluster podset --wait=false
+          kubectl delete priorityclass firebird-test --wait=false
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |

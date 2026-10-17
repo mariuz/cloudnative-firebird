@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.105.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.106.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Pod settings and inherited metadata** *(v0.106.0; CloudNativePG's priorityClassName, schedulerName, imagePullPolicy, imagePullSecrets, inheritedMetadata)*
+  - `priorityClassName`, `schedulerName` and `imagePullSecrets` on every pod of the cluster (instances and operator Jobs, through the shared Job pod spec), `imagePullPolicy` on each of their containers; changes roll the instances like other template changes (primary last).
+  - `inheritedMetadata` labels and annotations on the StatefulSet, the instance pods and volumes, the default Services, the PodDisruptionBudget, and the Jobs and CronJobs with their pods; existing volumes and Services are patched in place. The operator's own keys win and cannot be named (CRD CEL rules and validation); keys removed stay on existing resources.
+  - Unit tests cover the instance and Job pods, every object kind, the StatefulSet update check (server defaults, removals) and validation; the kind CI checks a cluster's pod, volume, Services and CronJob, then a new label added in place and through a restart.
 - [x] **Maintenance window: `reusePVC: false`** *(v0.105.0; CloudNativePG's nodeMaintenanceWindow.reusePVC)*
   - While the window is open with `reusePVC: false`, a replica pod unschedulable for 30 seconds (its volume on a drained node) gets a new volume through the operator's volume re-creation (`reseed=volume`), seeded again from the primary; `MaintenanceVolumeRecreation` reports it. Replicas of replication clusters only. `kubectl firebird maintenance on --no-reuse-pvc`.
   - Unit tests cover which pods qualify (grace period, primary, already re-created or requested, other reasons) and the reconcile; the kind CI cordons the node, deletes a replica and checks that it comes back on a new volume and follows the primary.
@@ -505,6 +509,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **PITR (Point-In-Time)** | Continuous Archiving | Journal Archiving to S3, replay onto `nbackup` chains | **v0.45.0 (Done)** |
 | **Bootstrap / Restore** | From Backup / Clone | Dedicated Restore & Bootstrap | **v0.5.0 (Done)** |
 | **Node Maintenance** | PDB / Drain Handling, `nodeMaintenanceWindow` | PDB Reconciled, `nodeMaintenanceWindow` (`inProgress`, `reusePVC`) | **v0.2.0, v0.103.0, v0.105.0 (Done)** |
+| **Pod Settings** | `priorityClassName`, `schedulerName`, `imagePullPolicy`, `imagePullSecrets`, `inheritedMetadata` | All five: on the instance and Job pods; the metadata also on the StatefulSet, volumes, Services, PDB, Jobs and CronJobs | **v0.106.0 (Done)** |
 | **Volume Expansion** | PVC Resize | In-place PVC Expansion | **v0.6.0 (Done)** |
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | `targetPrimary` annotation | **v0.13.0 (Done)** |

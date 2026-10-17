@@ -1,3 +1,4 @@
+import { withInheritedMetadata } from '../utils/pod-settings';
 import { clusterStoppedReason } from '../utils/major-upgrade';
 import { replicaClusterFollowing } from '../utils/replica-cluster';
 import { BatchV1Api, CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Job } from '@kubernetes/client-node';
@@ -208,7 +209,7 @@ export class FirebirdRoleController {
       targets: JSON.stringify(targets.map((t) => ({ name: t.name, volume: t.volume ?? '' }))),
     });
     try {
-      await this.batchApi.createNamespacedJob({ namespace, body });
+      await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, body) });
       log.info({ instances: targets.map((t) => t.name) }, 'Applying Firebird role');
     } catch (err) {
       // the previous Job is still being deleted; retried on the next reconcile
@@ -259,7 +260,7 @@ export class FirebirdRoleController {
       targets: '[]',
     });
     try {
-      await this.batchApi.createNamespacedJob({ namespace, body });
+      await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, body) });
       log.info({ instances: targets.map((i) => i.name) }, 'Dropping Firebird role');
     } catch (err) {
       if ((err as { code?: number })?.code !== 409) throw err;

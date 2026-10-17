@@ -1,0 +1,10 @@
+# expect: operator's own labels
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: pod-settings
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  inheritedMetadata: {labels: {app.kubernetes.io/name: other}}

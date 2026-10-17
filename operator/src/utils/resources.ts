@@ -3,6 +3,7 @@ import { buildArchiveFollowerContainer, replicaClusterFollowing } from './replic
 import { instanceAffinity, instanceTopologySpreadConstraints } from './scheduling';
 import { withSegmentTls } from './segment-tls-pods';
 import { withPrimaryLease } from './primary-lease';
+import { clusterPodSettings, inheritMetadata, withPodPullPolicy } from './pod-settings';
 import { createHash } from 'crypto';
 import {
   V1StatefulSet,
@@ -416,7 +417,7 @@ export function buildStatefulSet(
   const statefulSet: V1StatefulSet = {
     apiVersion: 'apps/v1',
     kind: 'StatefulSet',
-    metadata: {
+    metadata: inheritMetadata(cluster, {
       name,
       namespace,
       labels,
@@ -430,7 +431,7 @@ export function buildStatefulSet(
           blockOwnerDeletion: true,
         },
       ],
-    },
+    }),
     spec: {
       // Must reference the headless service for stable pod DNS
       serviceName: `${name}-headless`,
@@ -448,7 +449,7 @@ export function buildStatefulSet(
         matchLabels: labels,
       },
       template: {
-        metadata: {
+        metadata: inheritMetadata(cluster, {
           labels,
           annotations: {
             ...(secretHash ? { 'firebird.cloudnative-firebird.io/superuser-secret-hash': secretHash } : {}),
@@ -459,11 +460,12 @@ export function buildStatefulSet(
               ? { [REPLICATION_CONFIG_HASH_ANNOTATION]: replicationConfigHash(cluster) }
               : { [BACKUP_FILES_HASH_ANNOTATION]: backupFilesHash() }),
           },
-        },
+        }),
         // segment TLS: the proxy sidecar, the certificates, the segment server on localhost;
         // the primary Lease: its holder sidecar and token
-        spec: withSegmentTls(cluster, withPrimaryLease(cluster, {
-          ...serviceAccount(cluster),
+        // the pull policy last, for the sidecars too
+        spec: withPodPullPolicy(cluster, withSegmentTls(cluster, withPrimaryLease(cluster, {
+          ...clusterPodSettings(cluster),
           securityContext: instancePodSecurityContext(cluster),
           ...(initContainers.length > 0 ? { initContainers: initContainers.map(secured) } : {}),
           ...(spec.nodeSelector ? { nodeSelector: spec.nodeSelector } : {}),
@@ -474,14 +476,14 @@ export function buildStatefulSet(
             : {}),
           containers: containers.map(secured),
           ...(volumes.length > 0 ? { volumes } : {}),
-        }, superuserClientEnv(cluster)), true),
+        }, superuserClientEnv(cluster)), true)),
       },
       volumeClaimTemplates: [
         {
-          metadata: {
+          metadata: inheritMetadata(cluster, {
             name: 'firebird-data',
             labels,
-          },
+          }),
           spec: {
             accessModes: ['ReadWriteOnce'],
             ...(storageClassName ? { storageClassName } : {}),
@@ -540,7 +542,7 @@ export function buildService(cluster: FirebirdCluster): V1Service {
     },
   };
 
-  return service;
+  return { ...service, metadata: inheritMetadata(cluster, service.metadata) };
 }
 
 /**
@@ -586,7 +588,7 @@ export function buildHeadlessService(cluster: FirebirdCluster): V1Service {
     },
   };
 
-  return service;
+  return { ...service, metadata: inheritMetadata(cluster, service.metadata) };
 }
 
 /**
@@ -637,7 +639,7 @@ export function buildReplicaService(cluster: FirebirdCluster): V1Service {
     },
   };
 
-  return service;
+  return { ...service, metadata: inheritMetadata(cluster, service.metadata) };
 }
 
 /**
@@ -669,6 +671,16 @@ export function statefulSetNeedsUpdate(
   if (!existingPodSpec || !desiredPodSpec) return true;
 
   if ((existingPodSpec.serviceAccountName ?? 'default') !== (desiredPodSpec.serviceAccountName ?? 'default')) return true;
+  if ((existingPodSpec.priorityClassName ?? '') !== (desiredPodSpec.priorityClassName ?? '')) return true;
+  if ((existingPodSpec.schedulerName ?? 'default-scheduler') !== (desiredPodSpec.schedulerName ?? 'default-scheduler')) return true;
+  if (canonicalJson(existingPodSpec.imagePullSecrets ?? []) !== canonicalJson(desiredPodSpec.imagePullSecrets ?? [])) return true;
+  // the API server defaults the pull policy, so it is compared where the cluster sets one
+  const pullPolicies = (spec: V1PodSpec) => [...(spec.initContainers ?? []), ...(spec.containers ?? [])].map((c) => c.imagePullPolicy);
+  const existingPolicies = pullPolicies(existingPodSpec);
+  if (pullPolicies(desiredPodSpec).some((policy, i) => policy !== undefined && existingPolicies[i] !== policy)) return true;
+  // labels the operator or inheritedMetadata adds (others, and inherited ones removed since, are kept)
+  const existingLabels = existingSpec.template?.metadata?.labels ?? {};
+  if (Object.entries(desiredSpec.template?.metadata?.labels ?? {}).some(([key, value]) => existingLabels[key] !== value)) return true;
   if (JSON.stringify(existingPodSpec.securityContext ?? {}) !== JSON.stringify(desiredPodSpec.securityContext ?? {})) return true;
   const securityContexts = (spec: V1PodSpec) =>
     JSON.stringify([...(spec.initContainers ?? []), ...(spec.containers ?? [])].map((c) => c.securityContext ?? {}));
@@ -731,7 +743,7 @@ export function withRemovals(existing: unknown, desired: unknown): unknown {
 }
 
 /** Scheduling fields of the instance pod template a StatefulSet update replaces rather than merges */
-const SCHEDULING_FIELDS = ['affinity', 'nodeSelector', 'tolerations', 'topologySpreadConstraints'] as const;
+const SCHEDULING_FIELDS = ['affinity', 'nodeSelector', 'tolerations', 'topologySpreadConstraints', 'priorityClassName', 'schedulerName', 'imagePullSecrets'] as const;
 
 /**
  * The StatefulSet merge patch body: the scheduling fields of the pod template as desired, with what
@@ -813,10 +825,11 @@ export function jobPodSpec<T extends V1PodSpec>(cluster: FirebirdCluster, podSpe
     ...c,
     securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, ...(c.securityContext ?? {}) },
   });
-  // segment TLS: Jobs reach the segment servers through the proxy's client side
-  return withSegmentTls(cluster, {
+  // segment TLS: Jobs reach the segment servers through the proxy's client side (the pull policy
+  // last, for the proxy too)
+  return withPodPullPolicy(cluster, withSegmentTls(cluster, {
     ...podSpec,
-    ...serviceAccount(cluster),
+    ...clusterPodSettings(cluster),
     securityContext: {
       runAsNonRoot: true,
       runAsUser: FIREBIRD_UID,
@@ -826,15 +839,7 @@ export function jobPodSpec<T extends V1PodSpec>(cluster: FirebirdCluster, podSpe
     },
     containers: podSpec.containers.map(container),
     ...(podSpec.initContainers ? { initContainers: podSpec.initContainers.map(container) } : {}),
-  }, false);
-}
-
-/**
- * Service account of the instance pods and of every Job the operator runs for the cluster
- * (spec.serviceAccountName), e.g. for S3 access through workload identity instead of static keys.
- */
-export function serviceAccount(cluster: FirebirdCluster): { serviceAccountName?: string } {
-  return cluster.spec.serviceAccountName ? { serviceAccountName: cluster.spec.serviceAccountName } : {};
+  }, false));
 }
 
 /** Annotation carrying the hash of an operator-managed CronJob's job template */
@@ -998,7 +1003,7 @@ export function buildPodDisruptionBudget(cluster: FirebirdCluster): V1PodDisrupt
     },
   };
 
-  return pdb;
+  return { ...pdb, metadata: inheritMetadata(cluster, pdb.metadata) };
 }
 
 /**

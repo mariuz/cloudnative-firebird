@@ -862,6 +862,63 @@ spec:
                   type: string
                   maxLength: 253
                   pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                priorityClassName:
+                  description: >-
+                    PriorityClass of every pod of the cluster: the instances and the operator's Jobs
+                  type: string
+                  maxLength: 253
+                  pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                schedulerName:
+                  description: Scheduler of every pod of the cluster (the default scheduler if unset)
+                  type: string
+                  minLength: 1
+                imagePullPolicy:
+                  description: >-
+                    Pull policy of every container of the cluster's pods (the Kubernetes default if
+                    unset)
+                  type: string
+                  enum:
+                    - Always
+                    - IfNotPresent
+                    - Never
+                imagePullSecrets:
+                  description: Secrets for pulling the images of every pod of the cluster
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - name
+                    properties:
+                      name:
+                        type: string
+                        maxLength: 253
+                        pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                inheritedMetadata:
+                  description: >-
+                    Labels and annotations copied onto the resources the operator creates for the
+                    cluster: the StatefulSet, the instance pods and volumes, the default Services,
+                    the PodDisruptionBudget, the Jobs and CronJobs and their pods. The operator's
+                    own keys may not be named; keys removed here stay on existing resources.
+                  type: object
+                  properties:
+                    labels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                        maxLength: 63
+                        pattern: '^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$'
+                      x-kubernetes-validations:
+                        - rule: >-
+                            self.all(k, !(k in ['app.kubernetes.io/name', 'app.kubernetes.io/component',
+                            'app.kubernetes.io/managed-by']) && !k.startsWith('firebird.cloudnative-firebird.io/'))
+                          message: the operator's own labels (app.kubernetes.io/name, component, managed-by and firebird.cloudnative-firebird.io/) cannot be inherited
+                    annotations:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      x-kubernetes-validations:
+                        - rule: "self.all(k, !k.startsWith('firebird.cloudnative-firebird.io/'))"
+                          message: firebird.cloudnative-firebird.io/ annotations cannot be inherited
                 serviceType:
                   description: Kubernetes Service type (ClusterIP, NodePort, LoadBalancer)
                   type: string

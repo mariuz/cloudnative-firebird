@@ -1,3 +1,4 @@
+import { inheritedMetadataMissing, missingInheritedMetadata, withInheritedMetadata } from '../utils/pod-settings';
 import { segmentTlsEnabled } from '../utils/segment-tls-pods';
 import { ensureSegmentTlsSecret, reconcileSegmentTlsPeers } from '../utils/segment-tls-client';
 import { nativeSidecarsSupported, segmentTlsDefault, segmentTlsRequired } from '../utils/segment-tls-default';
@@ -164,6 +165,7 @@ import {
   replicaServiceSelector,
   statefulSetNeedsUpdate,
   statefulSetPatchBody,
+  withTemplateHash,
   withHibernation,
   CLUSTER_LABEL,
   clusterLabels,
@@ -755,7 +757,7 @@ export class FirebirdClusterController {
     }
     if (!job) {
       log.info({ job: jobName }, 'Starting the image check Job');
-      await this.batchApi.createNamespacedJob({ namespace, body: buildImageCheckJob(cluster, check.from, check.to) });
+      await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, buildImageCheckJob(cluster, check.from, check.to)) });
       return undefined;
     }
     const outcome = jobOutcome(job);
@@ -854,7 +856,7 @@ export class FirebirdClusterController {
             continue;
           }
           log.info({ pod, job: majorUpgradeJobName(cluster, ordinal) }, 'Major upgrade: converting the instance volume');
-          await this.batchApi.createNamespacedJob({ namespace, body: buildMajorUpgradeJob(cluster, upgrade, ordinal, claimName) });
+          await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, buildMajorUpgradeJob(cluster, upgrade, ordinal, claimName)) });
           running++;
           continue;
         }
@@ -1005,8 +1007,8 @@ export class FirebirdClusterController {
     const desired = buildHeadlessService(cluster);
 
     try {
-      await this.coreApi.readNamespacedService({ name: headlessName, namespace });
-      log.debug('Headless service already exists, skipping');
+      const existing = await this.coreApi.readNamespacedService({ name: headlessName, namespace });
+      await this.reconcileInheritedServiceMetadata(cluster, existing, log);
     } catch {
       log.info('Creating headless service');
       await this.coreApi.createNamespacedService({
@@ -1036,7 +1038,7 @@ export class FirebirdClusterController {
       return;
     }
     await this.reconcileServiceSelector(name, namespace, existing?.spec?.selector, primaryServiceSelector(cluster), log);
-    await this.reconcileServiceSettings(existing, desired, log);
+    await this.reconcileServiceSettings(cluster, existing, desired, log);
   }
 
   /** Reconcile the read-replica service for replication-enabled clusters */
@@ -1069,25 +1071,37 @@ export class FirebirdClusterController {
       return;
     }
     await this.reconcileServiceSelector(replicaName, namespace, existing?.spec?.selector, replicaServiceSelector(cluster), log);
-    await this.reconcileServiceSettings(existing, desired, log);
+    await this.reconcileServiceSettings(cluster, existing, desired, log);
   }
 
   /**
    * A default Service follows spec.serviceType and spec.serviceAnnotations after it was created
    * (annotations others added are kept)
    */
-  private async reconcileServiceSettings(existing: V1Service, desired: V1Service, log: Logger): Promise<void> {
+  private async reconcileServiceSettings(cluster: FirebirdCluster, existing: V1Service, desired: V1Service, log: Logger): Promise<void> {
     const name = existing.metadata?.name ?? desired.metadata!.name!;
     const namespace = existing.metadata?.namespace ?? desired.metadata?.namespace ?? 'default';
+    // desired carries spec.serviceAnnotations over spec.inheritedMetadata
     const annotations = desired.metadata?.annotations ?? {};
     const missing = Object.entries(annotations).filter(([k, v]) => existing.metadata?.annotations?.[k] !== v);
+    const missingLabels = Object.entries(missingInheritedMetadata(cluster, existing.metadata, { labels: clusterLabels(cluster.metadata.name) }).labels ?? {});
     const type = desired.spec?.type ?? 'ClusterIP';
-    if ((existing.spec?.type ?? 'ClusterIP') === type && missing.length === 0) return;
-    log.info({ service: name, type }, 'Updating service type and annotations');
-    await this.coreApi.patchNamespacedService(
-      { name, namespace, body: { metadata: { annotations: Object.fromEntries(missing) }, spec: { type } } },
-      MERGE_PATCH,
-    );
+    if ((existing.spec?.type ?? 'ClusterIP') === type && missing.length === 0 && missingLabels.length === 0) return;
+    log.info({ service: name, type }, 'Updating service type, labels and annotations');
+    const metadata = {
+      ...(missing.length > 0 ? { annotations: Object.fromEntries(missing) } : {}),
+      ...(missingLabels.length > 0 ? { labels: Object.fromEntries(missingLabels) } : {}),
+    };
+    await this.coreApi.patchNamespacedService({ name, namespace, body: { metadata, spec: { type } } }, MERGE_PATCH);
+  }
+
+  /** The inherited labels and annotations (spec.inheritedMetadata) a Service of the cluster lacks */
+  private async reconcileInheritedServiceMetadata(cluster: FirebirdCluster, existing: V1Service, log: Logger): Promise<void> {
+    const metadata = missingInheritedMetadata(cluster, existing.metadata);
+    if (Object.keys(metadata).length === 0) return;
+    const name = existing.metadata!.name!;
+    log.info({ service: name }, 'Updating service labels and annotations (inheritedMetadata)');
+    await this.coreApi.patchNamespacedService({ name, namespace: existing.metadata?.namespace ?? 'default', body: { metadata } }, MERGE_PATCH);
   }
 
   /**
@@ -1360,7 +1374,7 @@ export class FirebirdClusterController {
             startTime: now,
           });
           try {
-            await this.batchApi.createNamespacedJob({ namespace, body: buildFailoverJob(cluster, candidates) });
+            await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, buildFailoverJob(cluster, candidates)) });
           } catch (err) {
             if ((err as { code?: number })?.code !== 409) throw err;
           }
@@ -1404,12 +1418,12 @@ export class FirebirdClusterController {
       try {
         await this.batchApi.createNamespacedJob({
           namespace,
-          body: buildSwitchoverJob(cluster, {
+          body: withInheritedMetadata(cluster, buildSwitchoverJob(cluster, {
             from: primaryPod,
             target,
             replicas,
             archived: await this.journalArchiveSequence(cluster, current.status?.journalArchiveSequence),
-          }),
+          })),
         });
       } catch (err) {
         if ((err as { code?: number })?.code !== 409) throw err;
@@ -1442,7 +1456,7 @@ export class FirebirdClusterController {
         .sort();
       if (!job) {
         if (candidates.length) {
-          await this.batchApi.createNamespacedJob({ namespace, body: buildFailoverJob(cluster, candidates) });
+          await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, buildFailoverJob(cluster, candidates)) });
         }
         return result;
       }
@@ -1540,12 +1554,12 @@ export class FirebirdClusterController {
         // lost (e.g. deleted by hand): the Job is idempotent
         await this.batchApi.createNamespacedJob({
           namespace,
-          body: buildSwitchoverJob(cluster, {
+          body: withInheritedMetadata(cluster, buildSwitchoverJob(cluster, {
             from: phase.from,
             target: phase.target,
             replicas: [],
             archived: await this.journalArchiveSequence(cluster, current.status?.journalArchiveSequence),
-          }),
+          })),
         });
         return result;
       }
@@ -1565,7 +1579,7 @@ export class FirebirdClusterController {
         await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
         if (!(current.status?.fencedInstances ?? []).includes(phase.from)) {
           try {
-            await this.batchApi.createNamespacedJob({ namespace, body: buildFencingJob(cluster, phase.from, 'unfence') });
+            await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, buildFencingJob(cluster, phase.from, 'unfence')) });
           } catch (err) {
             if ((err as { code?: number })?.code !== 409) throw err;
           }
@@ -1698,7 +1712,7 @@ export class FirebirdClusterController {
         return undefined;
       }
       log.info({ target }, 'Promoting the failover target in place');
-      await this.batchApi.createNamespacedJob({ namespace, body: buildPromoteJob(cluster, target, archived) });
+      await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, buildPromoteJob(cluster, target, archived)) });
       return undefined;
     }
     const conditions = job.status?.conditions ?? [];
@@ -1941,6 +1955,12 @@ export class FirebirdClusterController {
     const pattern = new RegExp(`^firebird-data-${name}-\\d+$`);
     const statuses: VolumeStatus[] = [];
     for (const pvc of pvcs.items.filter((p) => pattern.test(p.metadata?.name ?? ''))) {
+      // spec.inheritedMetadata: the StatefulSet's claim template is immutable, so existing volumes are patched
+      const metadata = missingInheritedMetadata(cluster, pvc.metadata);
+      if (Object.keys(metadata).length > 0) {
+        log.info({ pvc: pvc.metadata?.name }, 'Updating volume labels and annotations (inheritedMetadata)');
+        await this.coreApi.patchNamespacedPersistentVolumeClaim({ name: pvc.metadata!.name!, namespace, body: { metadata } }, MERGE_PATCH);
+      }
       const plan = planVolumeExpansion(pvc, desiredSize);
       const previous = cluster.status?.volumes?.find((v) => v.name === plan.status.name)?.state;
       if (plan.expand) {
@@ -2031,7 +2051,7 @@ export class FirebirdClusterController {
     } catch (err) {
       if (!isNotFound(err)) throw err;
       log.info({ jobName }, snapshot ? 'Starting the recovery from the volume snapshot' : 'Starting point-in-time recovery');
-      await this.batchApi.createNamespacedJob({ namespace, body: snapshot ? buildSnapshotRecoveryJob(cluster) : buildRecoveryBootstrapJob(cluster) });
+      await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, snapshot ? buildSnapshotRecoveryJob(cluster) : buildRecoveryBootstrapJob(cluster)) });
       await this.event(
         cluster,
         'Normal',
@@ -2255,7 +2275,7 @@ export class FirebirdClusterController {
         if (podObj && isPodReady(podObj)) {
           const body = buildPendingDropJob(cluster, pod, drops.map((d) => d.username), !replicationEnabled(cluster));
           try {
-            await this.batchApi.createNamespacedJob({ namespace, body });
+            await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, body) });
             log.info({ pod, users: drops.map((d) => d.username) }, 'Dropping users left pending on an instance');
           } catch (err) {
             if ((err as { code?: number })?.code !== 409) throw err;
@@ -2580,7 +2600,7 @@ export class FirebirdClusterController {
     if (cluster.spec.replication?.enabled && cluster.spec.replication.journalArchiveS3) {
       const built = buildJournalArchiveCronJob(cluster, primaryPod);
       if (!built) return;
-      const desired = withHibernation(built, cluster);
+      const desired = withTemplateHash(withInheritedMetadata(cluster, withHibernation(built, cluster)));
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: cronJobName, namespace });
         if (cronJobNeedsUpdate(existing, desired)) {
@@ -2627,7 +2647,7 @@ export class FirebirdClusterController {
           ? (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items
           : [];
       const instance = chooseBackupInstance({ cluster, primaryPod, pods, ...backup });
-      const desired = withHibernation(buildBackupCronJob(cluster, instance, instance !== primaryPod), cluster);
+      const desired = withTemplateHash(withInheritedMetadata(cluster, withHibernation(buildBackupCronJob(cluster, instance, instance !== primaryPod), cluster)));
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: backupName, namespace });
         if (cronJobNeedsUpdate(existing, desired)) {
@@ -2766,7 +2786,7 @@ export class FirebirdClusterController {
       const desired = buildPodDisruptionBudget(cluster);
       try {
         const existing = await this.policyApi.readNamespacedPodDisruptionBudget({ name: pdbName, namespace });
-        if (podDisruptionBudgetNeedsUpdate(existing, desired)) {
+        if (podDisruptionBudgetNeedsUpdate(existing, desired) || inheritedMetadataMissing(cluster, existing.metadata)) {
           log.info('Updating PodDisruptionBudget');
           await this.policyApi.patchNamespacedPodDisruptionBudget({
             name: pdbName,
@@ -2856,7 +2876,7 @@ export class FirebirdClusterController {
     const sweepName = `${name}-sweep`;
 
     if (cluster.spec.autoSweep?.enabled) {
-      const desired = withHibernation(buildAutoSweepCronJob(cluster, primaryPod), cluster);
+      const desired = withTemplateHash(withInheritedMetadata(cluster, withHibernation(buildAutoSweepCronJob(cluster, primaryPod), cluster)));
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: sweepName, namespace });
         if (autoSweepCronJobNeedsUpdate(existing, desired)) {
@@ -3138,7 +3158,7 @@ export class FirebirdClusterController {
       try {
         // the standbys that stay attached are named in every sync_replica change
         const others = attachedStandbys(step.status).filter((pod) => pod !== step.standby);
-        await this.batchApi.createNamespacedJob({ namespace, body: buildSyncStandbyJob(cluster, step.action, primaryPod, step.standby, others) });
+        await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, buildSyncStandbyJob(cluster, step.action, primaryPod, step.standby, others)) });
       } catch (err) {
         if ((err as { code?: number })?.code !== 409) throw err;
       }
@@ -3276,7 +3296,7 @@ export class FirebirdClusterController {
     const cronJobName = `${name}-diagnostics`;
 
     if (cluster.spec.diagnostics?.enabled) {
-      const desired = withHibernation(buildDiagnosticsCronJob(cluster, primaryPod), cluster);
+      const desired = withTemplateHash(withInheritedMetadata(cluster, withHibernation(buildDiagnosticsCronJob(cluster, primaryPod), cluster)));
       try {
         const existing = await this.batchApi.readNamespacedCronJob({ name: cronJobName, namespace });
         if (diagnosticsCronJobNeedsUpdate(existing, desired)) {
@@ -3735,7 +3755,7 @@ export class FirebirdClusterController {
         case 'create':
           log.info({ pod, action: step.action }, 'Starting fencing Job');
           try {
-            await this.batchApi.createNamespacedJob({ namespace, body: buildFencingJob(cluster, pod, step.action) });
+            await this.batchApi.createNamespacedJob({ namespace, body: withInheritedMetadata(cluster, buildFencingJob(cluster, pod, step.action)) });
           } catch (err) {
             // the previous Job of this instance is still being deleted; retried on the next reconcile
             if ((err as { code?: number })?.code !== 409) throw err;
