@@ -455,11 +455,14 @@ describe('kubectl firebird', () => {
     expect(api.patchCluster).toHaveBeenLastCalledWith('prod', 'db', { spec: { nodeMaintenanceWindow: { inProgress: true, reusePVC: null } } });
     expect(out.at(-1)).toContain('node drains may evict its instances;');
     expect(await exec('maintenance', 'off', 'db')).toBe(0);
-    expect(api.patchCluster).toHaveBeenLastCalledWith('prod', 'db', { spec: { nodeMaintenanceWindow: { inProgress: false } } });
+    expect(api.patchCluster).toHaveBeenLastCalledWith('prod', 'db', { spec: { nodeMaintenanceWindow: { inProgress: false, reusePVC: null } } });
     expect(await exec('maintenance', 'maybe', 'db')).toBe(2);
     expect(await exec('maintenance', 'on', 'db', '--no-reuse-pvc')).toBe(0);
     expect(api.patchCluster).toHaveBeenLastCalledWith('prod', 'db', { spec: { nodeMaintenanceWindow: { inProgress: true, reusePVC: false } } });
     expect(out.at(-1)).toContain('gets a new volume');
+    // ending the window removes reusePVC, so the next window reuses volumes unless asked again
+    expect(await exec('maintenance', 'off', 'db')).toBe(0);
+    expect(api.patchCluster).toHaveBeenLastCalledWith('prod', 'db', { spec: { nodeMaintenanceWindow: { inProgress: false, reusePVC: null } } });
     expect(await exec('maintenance', 'off', 'db', '--no-reuse-pvc')).toBe(2);
     cluster.spec.replication = { enabled: false };
     expect(await exec('maintenance', 'on', 'db', '--no-reuse-pvc')).toBe(2);

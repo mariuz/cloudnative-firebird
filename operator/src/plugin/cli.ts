@@ -493,7 +493,7 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
           throw new UsageError(`cluster ${name} has no replication: an instance with a new volume would come back with an empty database`);
         }
         // reusePVC is set for the window it opens, and removed (the default, true) otherwise
-        await api.patchCluster(namespace, name, { spec: { nodeMaintenanceWindow: { inProgress: on, ...(on ? { reusePVC: newVolumes ? false : null } : {}) } } });
+        await api.patchCluster(namespace, name, { spec: { nodeMaintenanceWindow: { inProgress: on, reusePVC: on && newVolumes ? false : null } } });
         io.out(
           on
             ? `node maintenance window of ${name} started: node drains may evict its instances${cluster.spec.instances > 1 ? '' : ' (a single instance has no PodDisruptionBudget anyway)'}${newVolumes ? '; a replica that cannot be scheduled gets a new volume' : ''}; kubectl firebird maintenance off ${name} ends it`
