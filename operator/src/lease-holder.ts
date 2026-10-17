@@ -1,3 +1,4 @@
+import { stopWithServer } from './stop-with-server';
 import { CoordinationV1Api, KubeConfig, V1Lease, V1MicroTime } from '@kubernetes/client-node';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
@@ -284,6 +285,7 @@ export async function main(env = process.env): Promise<never> {
 }
 
 if (require.main === module) {
+  stopWithServer('lease holder');
   main().catch((err) => {
     console.error((err as Error).message);
     process.exit(1);

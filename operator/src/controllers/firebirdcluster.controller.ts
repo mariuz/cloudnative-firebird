@@ -1,3 +1,4 @@
+import { smartShutdownInProgress } from '../utils/lifecycle';
 import { inheritedMetadataMissing, missingInheritedMetadata, withInheritedMetadata } from '../utils/pod-settings';
 import { segmentTlsEnabled } from '../utils/segment-tls-pods';
 import { ensureSegmentTlsSecret, reconcileSegmentTlsPeers } from '../utils/segment-tls-client';
@@ -1287,14 +1288,18 @@ export class FirebirdClusterController {
     // Automatic failover: the primary has not been ready for failover.delaySeconds
     if (!inFlight && failover?.enabled) {
       const restart = current.status?.rollingUpdate?.primaryRestart;
-      const graceMs = Math.max(PRIMARY_RESTART_GRACE_SECONDS, effectiveFailoverDelaySeconds(cluster)) * 1000;
+      // a restarted primary may first wait for its clients (spec.smartShutdownTimeout)
+      const graceMs = (Math.max(PRIMARY_RESTART_GRACE_SECONDS, effectiveFailoverDelaySeconds(cluster)) + (cluster.spec.smartShutdownTimeout ?? 0)) * 1000;
       const plannedRestart = restart?.pod === primaryPod && Date.now() - Date.parse(restart.time) < graceMs;
       // a sync-standby Job keeps the primary in full shutdown while it attaches or detaches
       const syncJob =
         (sync?.phase === 'Attaching' || sync?.phase === 'Detaching') && Date.now() - Date.parse(sync.time) < graceMs;
-      if (primaryReady || fenced.includes(primaryPod) || plannedRestart || syncJob) {
-        // a fenced primary is never failed over, a primary restarted by a rolling update or shut
-        // down by a sync-standby Job not yet
+      // a primary being deleted may still serve its clients (smart shutdown): not failed over meanwhile
+      const stopping = smartShutdownInProgress(cluster, podOf(primaryPod), Date.now());
+      if (stopping) log.debug({ primary: primaryPod }, 'Primary in its smart shutdown: failover waits');
+      if (primaryReady || fenced.includes(primaryPod) || plannedRestart || syncJob || stopping) {
+        // a fenced primary is never failed over, a primary restarted by a rolling update, shut
+        // down by a sync-standby Job or in its smart shutdown not yet
         result.primaryNotReadySince = undefined;
       } else {
         const since = current.status?.primaryNotReadySince ?? now;

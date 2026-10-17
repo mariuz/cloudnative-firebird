@@ -1219,7 +1219,12 @@ stopping pod is already out of the Services, and the hook waits up to that many 
 remote client attachments to end (the operator's sidecars and probes, attached through localhost,
 do not count) before the server gets its signal. A Firebird database shutdown is not used for this:
 it is recorded in the database header and is how instances are fenced. `smartShutdownTimeout` must be
-below `stopDelay` (30 seconds if unset). `startDelay` adds a startup probe on the server port, so a
+below `stopDelay` (30 seconds if unset). The sidecars (segment server and puller, Lease holder,
+segment TLS proxy) keep running until the server has stopped, so replicas keep fetching the
+primary's segments meanwhile, and automatic failover waits for a primary being deleted until its
+smart shutdown is over (`smartShutdownTimeout` and 10 seconds after the deletion); the failover delay
+counts from then. Before v0.107.0 the sidecars ignored the stop signal and every instance took its
+whole grace period to stop. `startDelay` adds a startup probe on the server port, so a
 slow start (a large database after a crash) is not cut short by the liveness probe. `probes`
 overrides the timings of the liveness, readiness and startup probes. All are unset by default;
 changing them rolls the instances (primary last).

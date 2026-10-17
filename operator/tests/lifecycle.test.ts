@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { V1StatefulSet } from '@kubernetes/client-node';
 import { FirebirdCluster } from '../src/types';
-import { instanceProbes, lifecycleErrors, smartShutdownScript } from '../src/utils/lifecycle';
+import { instanceProbes, lifecycleErrors, smartShutdownInProgress, smartShutdownScript } from '../src/utils/lifecycle';
 import { buildStatefulSet, statefulSetNeedsUpdate, statefulSetPatchBody } from '../src/utils/resources';
 import { validateClusterSpec } from '../src/utils/validation';
 import { makeCluster } from './helpers/factories';
@@ -106,6 +106,34 @@ describe('the smart shutdown script', () => {
     const r = run(['down'], 30);
     expect(r.status).toBe(0);
     expect(r.log).toContain('does not answer');
+  });
+});
+
+describe('the smart shutdown window of a pod being deleted', () => {
+  const now = Date.parse('2026-10-17T12:00:00Z');
+  // deleted secondsAgo with a grace period of grace seconds (deletionTimestamp: when it ends)
+  const deleted = (secondsAgo: number, grace = 60) => ({
+    metadata: { name: 'db-0', deletionTimestamp: new Date(now + (grace - secondsAgo) * 1000), deletionGracePeriodSeconds: grace },
+  });
+  const cluster = makeCluster({ stopDelay: 60, smartShutdownTimeout: 30 });
+
+  it('lasts the timeout and a margin from the deletion', () => {
+    expect(smartShutdownInProgress(cluster, deleted(5), now)).toBe(true);
+    expect(smartShutdownInProgress(cluster, deleted(39), now)).toBe(true);
+    expect(smartShutdownInProgress(cluster, deleted(41), now)).toBe(false);
+  });
+
+  it('does not apply to pods not being deleted, or without a timeout', () => {
+    expect(smartShutdownInProgress(cluster, { metadata: { name: 'db-0' } }, now)).toBe(false);
+    expect(smartShutdownInProgress(cluster, undefined, now)).toBe(false);
+    expect(smartShutdownInProgress(makeCluster(), deleted(5), now)).toBe(false);
+  });
+
+  it('takes the grace period from the pod spec when the deletion does not carry it', () => {
+    const pod = { metadata: { name: 'db-0', deletionTimestamp: new Date(now + 50_000) }, spec: { containers: [], terminationGracePeriodSeconds: 60 } };
+    // deleted 10 s ago
+    expect(smartShutdownInProgress(cluster, pod, now)).toBe(true);
+    expect(smartShutdownInProgress(cluster, pod, now + 31_000)).toBe(false);
   });
 });
 

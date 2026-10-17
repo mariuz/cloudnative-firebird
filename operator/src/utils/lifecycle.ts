@@ -1,4 +1,4 @@
-import { V1Lifecycle, V1Probe } from '@kubernetes/client-node';
+import { V1Lifecycle, V1Pod, V1Probe } from '@kubernetes/client-node';
 import { FirebirdCluster, ProbeTimings } from '../types';
 
 /**
@@ -84,6 +84,24 @@ export function smartShutdownLifecycle(cluster: FirebirdCluster, databasePath: s
   const timeout = cluster.spec.smartShutdownTimeout;
   if (!timeout) return undefined;
   return { preStop: { exec: { command: ['/bin/sh', '-c', smartShutdownScript(databasePath, timeout)] } } };
+}
+
+/** Seconds past the smart shutdown timeout a stopping primary still holds automatic failover back */
+export const SMART_SHUTDOWN_FAILOVER_MARGIN = 10;
+
+/**
+ * Whether a pod being deleted may still be in its smart shutdown (spec.smartShutdownTimeout): its
+ * server may still serve the clients attached to it, so a primary's failover waits until then
+ * (its replicas keep fetching its segments, the sidecars stopping only after the server).
+ */
+export function smartShutdownInProgress(cluster: FirebirdCluster, pod: V1Pod | undefined, nowMs: number): boolean {
+  const timeout = cluster.spec.smartShutdownTimeout;
+  const deletion = pod?.metadata?.deletionTimestamp;
+  if (!timeout || !deletion) return false;
+  const grace = pod.metadata?.deletionGracePeriodSeconds ?? pod.spec?.terminationGracePeriodSeconds ?? DEFAULT_STOP_DELAY;
+  // the deletion timestamp is when the grace period ends
+  const started = new Date(deletion).getTime() - grace * 1000;
+  return nowMs < started + (timeout + SMART_SHUTDOWN_FAILOVER_MARGIN) * 1000;
 }
 
 /** Errors of stopDelay, smartShutdownTimeout, startDelay and probes */

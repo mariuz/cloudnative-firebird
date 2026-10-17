@@ -26,6 +26,7 @@
  * Without the ConfigMap, or once the switch is over, both are empty: TLS only. The operator
  * decides which instances are plain; a failed TLS handshake never falls back to plain text.
  */
+import { stopWithServer } from './stop-with-server';
 import { readFileSync, statSync } from 'fs';
 import { createServer, connect as tcpConnect, Server, Socket } from 'net';
 import { connect as tlsConnect, createServer as createTlsServer, SecureContextOptions, TLSSocket } from 'tls';
@@ -246,6 +247,7 @@ export async function main(env = process.env): Promise<Server[]> {
 }
 
 if (require.main === module) {
+  stopWithServer('segment TLS');
   main().catch((err) => {
     console.error((err as Error).message);
     process.exit(1);
