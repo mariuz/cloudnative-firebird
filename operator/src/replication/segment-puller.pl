@@ -7,6 +7,7 @@ use strict;
 use warnings;
 use IO::Socket::INET;
 #@include segment-auth.pl
+#@include stop-with-server.pl
 
 my $source   = $ENV{SOURCE_DIR}   or die "SOURCE_DIR is required\n";
 my $state    = $ENV{STATE_FILE}   or die "STATE_FILE is required\n";
@@ -126,6 +127,8 @@ sub pull_once {
 
 print "segment puller: source=$source primary-file=$primary_file\n";
 while (1) {
+  exit_when_stopped();
   eval { pull_once(); 1 } or print "pull failed: $@";
-  sleep $interval;
+  exit_when_stopped();
+  sleep($stopping ? 1 : $interval);
 }

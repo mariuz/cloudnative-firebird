@@ -74,6 +74,8 @@ spec:
                   message: bootstrap recovery and clone are mutually exclusive
                 - rule: "!has(self.imageName) || !has(self.imageCatalogRef)"
                   message: imageName and imageCatalogRef are mutually exclusive
+                - rule: "!has(self.smartShutdownTimeout) || self.smartShutdownTimeout < (has(self.stopDelay) ? self.stopDelay : 30)"
+                  message: smartShutdownTimeout must be below stopDelay (30 if unset)
                 - rule: >-
                     !has(self.bootstrap) || !has(self.bootstrap.recovery) || !has(self.bootstrap.recovery.pointInTime) ||
                     self.instances <= 1 || (has(self.replication) && has(self.replication.enabled) && self.replication.enabled)
@@ -919,6 +921,88 @@ spec:
                       x-kubernetes-validations:
                         - rule: "self.all(k, !k.startsWith('firebird.cloudnative-firebird.io/'))"
                           message: firebird.cloudnative-firebird.io/ annotations cannot be inherited
+                stopDelay:
+                  description: >-
+                    Seconds an instance pod may take to stop (its terminationGracePeriodSeconds).
+                    Kubernetes' 30 seconds if unset.
+                  type: integer
+                  minimum: 1
+                smartShutdownTimeout:
+                  description: >-
+                    Seconds a stopping instance waits for its remote client attachments to end
+                    before the server is stopped (a preStop hook). Below stopDelay (or 30). No wait
+                    if unset.
+                  type: integer
+                  minimum: 1
+                startDelay:
+                  description: >-
+                    Seconds an instance may take to start before it is restarted: a startup probe on
+                    the server port. None if unset.
+                  type: integer
+                  minimum: 1
+                probes:
+                  description: Timings of the instance probes, over the operator's defaults
+                  type: object
+                  properties:
+                    liveness:
+                      type: object
+                      properties:
+                        initialDelaySeconds:
+                          type: integer
+                          minimum: 0
+                        periodSeconds:
+                          type: integer
+                          minimum: 1
+                        timeoutSeconds:
+                          type: integer
+                          minimum: 1
+                        failureThreshold:
+                          type: integer
+                          minimum: 1
+                        successThreshold:
+                          type: integer
+                          minimum: 1
+                          maximum: 1
+                    readiness:
+                      type: object
+                      properties:
+                        initialDelaySeconds:
+                          type: integer
+                          minimum: 0
+                        periodSeconds:
+                          type: integer
+                          minimum: 1
+                        timeoutSeconds:
+                          type: integer
+                          minimum: 1
+                        failureThreshold:
+                          type: integer
+                          minimum: 1
+                        successThreshold:
+                          type: integer
+                          minimum: 1
+                    startup:
+                      description: >-
+                        The startup probe; set without startDelay it gets these timings (30
+                        failures of 10 seconds by default)
+                      type: object
+                      properties:
+                        initialDelaySeconds:
+                          type: integer
+                          minimum: 0
+                        periodSeconds:
+                          type: integer
+                          minimum: 1
+                        timeoutSeconds:
+                          type: integer
+                          minimum: 1
+                        failureThreshold:
+                          type: integer
+                          minimum: 1
+                        successThreshold:
+                          type: integer
+                          minimum: 1
+                          maximum: 1
                 serviceType:
                   description: Kubernetes Service type (ClusterIP, NodePort, LoadBalancer)
                   type: string

@@ -22,6 +22,9 @@
 # Environment: SOURCE_DIR, REPLICATION_DIR, JOURNALS (s3://bucket/prefix/journals/), S3_ENDPOINT
 # (optional), POLL_SECONDS, BATCH.
 set -u
+# as the container's PID 1, sh ignores SIGTERM without a trap; the follower can stop at once (its
+# downloads go through temporary names)
+trap 'exit 0' TERM INT
 POLL=${POLL_SECONDS:-30}
 BATCH=${BATCH:-20}
 STATE="$REPLICATION_DIR/follow.state"

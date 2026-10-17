@@ -122,6 +122,7 @@ use strict;
 use warnings;
 use IO::Socket::INET;
 #@include segment-auth.pl
+#@include stop-with-server.pl
 
 # FILES_ONLY: only the backup file commands (FILE, STORE, REMOVE, FILES) and EXISTS, for instances
 # without replication (physical backups to and restores from S3, retention of server-side backups,
@@ -796,13 +797,15 @@ start_monitor();
 
 my $last_prune = 0;
 while (1) {
+  exit_when_stopped();
   if (!$files_only && time - $last_prune > 60) { prune(); $last_prune = time; }
   # reap finished transfers (1 = WNOHANG), and restart the isolation check if it ended
   while ((my $done = waitpid(-1, 1)) > 0) {
     if (defined $monitor && $done == $monitor) { $monitor = undef; sleep 1; start_monitor(); }
     if (defined $sampler && $done == $sampler) { $sampler = undef; sleep 1; start_sampler(); }
   }
-  $server->timeout(30);
+  # stopping: the server is checked every second
+  $server->timeout($stopping ? 1 : 30);
   my $client = $server->accept or next;
   $client->timeout(600);
   my $line = <$client>;
