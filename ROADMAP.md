@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.104.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.105.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,11 +171,14 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Maintenance window: `reusePVC: false`** *(v0.105.0; CloudNativePG's nodeMaintenanceWindow.reusePVC)*
+  - While the window is open with `reusePVC: false`, a replica pod unschedulable for 30 seconds (its volume on a drained node) gets a new volume through the operator's volume re-creation (`reseed=volume`), seeded again from the primary; `MaintenanceVolumeRecreation` reports it. Replicas of replication clusters only. `kubectl firebird maintenance on --no-reuse-pvc`.
+  - Unit tests cover which pods qualify (grace period, primary, already re-created or requested, other reasons) and the reconcile; the kind CI cordons the node, deletes a replica and checks that it comes back on a new volume and follows the primary.
 - [x] **kubectl plugin: bench** *(v0.104.0; CloudNativePG's kubectl cnpg pgbench)*
   - `kubectl firebird bench`: a Job in the cluster's image runs short read/write transactions (an insert, an update and a read each) from several `isql` clients through the primary Service, and prints the transactions per second and the average latency; its own table `KF_BENCH` is dropped afterwards unless `--keep`. The cluster database or a `FirebirdDatabase`.
   - Unit tests cover the Job, the flags and refusals, and run the script itself against a fake `isql` (counts, the rate, a 64-client ID range, failures); the kind CI benches the replicated cluster and checks the count and the dropped table.
 - [x] **Node maintenance window** *(v0.103.0; CloudNativePG's nodeMaintenanceWindow)*
-  - `spec.nodeMaintenanceWindow.inProgress` removes the cluster's PodDisruptionBudget while it lasts, so node drains can evict the instances (an evicted primary fails over with automatic failover); it is restored afterwards. `status.nodeMaintenance` and the `NodeMaintenanceStarted` / `NodeMaintenanceEnded` events report it; `kubectl firebird maintenance on|off` sets it and `status` shows it. Volumes are always reused (no `reusePVC: false`).
+  - `spec.nodeMaintenanceWindow.inProgress` removes the cluster's PodDisruptionBudget while it lasts, so node drains can evict the instances (an evicted primary fails over with automatic failover); it is restored afterwards. `status.nodeMaintenance` and the `NodeMaintenanceStarted` / `NodeMaintenanceEnded` events report it; `kubectl firebird maintenance on|off` sets it and `status` shows it. Volumes are reused (`reusePVC: false` since v0.105.0).
   - Unit tests cover the PodDisruptionBudget, the events and status on both transitions, and the plugin; the kind CI opens and closes a window on the replicated cluster and checks the PodDisruptionBudget and the events.
 - [x] **kubectl plugin: backups and restore** *(v0.102.0; CloudNativePG's kubectl cnpg backup listing and restore workflow)*
   - `backups`: a cluster's backups, newest first, with type and level, phase (verified), start, duration, database and location or error.
@@ -501,7 +504,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Logical Backup** | `pg_dump` / CronJob | `gbak` CronJob & CRDs | **v0.1.0 (Done)** |
 | **PITR (Point-In-Time)** | Continuous Archiving | Journal Archiving to S3, replay onto `nbackup` chains | **v0.45.0 (Done)** |
 | **Bootstrap / Restore** | From Backup / Clone | Dedicated Restore & Bootstrap | **v0.5.0 (Done)** |
-| **Node Maintenance** | PDB / Drain Handling, `nodeMaintenanceWindow` | PDB Reconciled, `nodeMaintenanceWindow.inProgress` | **v0.2.0, v0.103.0 (Done)** |
+| **Node Maintenance** | PDB / Drain Handling, `nodeMaintenanceWindow` | PDB Reconciled, `nodeMaintenanceWindow` (`inProgress`, `reusePVC`) | **v0.2.0, v0.103.0, v0.105.0 (Done)** |
 | **Volume Expansion** | PVC Resize | In-place PVC Expansion | **v0.6.0 (Done)** |
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | `targetPrimary` annotation | **v0.13.0 (Done)** |

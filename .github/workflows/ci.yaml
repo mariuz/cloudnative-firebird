@@ -784,6 +784,33 @@ jobs:
           kubectl get events --field-selector involvedObject.name=repl,reason=VolumeRecreated -o name | grep -q .
           echo "replica runs on a new volume ($old_claim replaced) and follows the primary"
 
+      - name: Verify a maintenance window with new volumes (reusePVC false)
+        if: matrix.track.id == 'core'
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          count() { kubectl exec "$1" -c firebird -- bash -c "echo 'select count(*) from app;' | isql -q localhost:$DB" | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          primary=$(kubectl get firebirdcluster repl -o jsonpath={.status.replicationStatus.primaryPod})
+          replica=$(kubectl get pods -l firebird.cloudnative-firebird.io/cluster=repl,app.kubernetes.io/component=database -o name | sed 's|pod/||' | grep -vx "$primary" | head -1)
+          old_claim=$(kubectl get pvc "firebird-data-$replica" -o jsonpath={.metadata.uid})
+          node operator/dist/plugin/kubectl-firebird.js maintenance on repl --no-reuse-pvc
+          # the replica cannot be scheduled again (the only node cordoned, as a drained node with its volume)
+          node=$(kubectl get pod "$replica" -o jsonpath={.spec.nodeName})
+          kubectl cordon "$node"
+          kubectl delete pod "$replica"
+          # after 30 s unschedulable it gets a new volume
+          timeout 300 bash -c "until c=\$(kubectl get pvc firebird-data-$replica -o jsonpath={.metadata.uid} 2>/dev/null) && [ -n \"\$c\" ] && [ \"\$c\" != '$old_claim' ]; do sleep 5; done" \
+            || { kubectl uncordon "$node"; kubectl get pods,pvc; kubectl get firebirdcluster repl -o jsonpath='{.status.recreatingVolumes}'; exit 1; }
+          kubectl get events --field-selector involvedObject.name=repl,reason=MaintenanceVolumeRecreation -o name | grep -q .
+          kubectl uncordon "$node"
+          kubectl wait "pod/$replica" --for=condition=Ready --timeout=300s
+          timeout 120 bash -c 'while kubectl get firebirdcluster repl -o jsonpath={.status.recreatingVolumes} | grep -q .; do sleep 5; done'
+          node operator/dist/plugin/kubectl-firebird.js maintenance off repl
+          [ -z "$(kubectl get firebirdcluster repl -o jsonpath={.spec.nodeMaintenanceWindow.reusePVC})" ]
+          expected=$(count "$primary")
+          for n in $(seq 1 36); do [ "$(count "$replica")" = "$expected" ] && break; sleep 5; done
+          [ "$(count "$replica")" = "$expected" ]
+          echo "$replica got a new volume during the maintenance window ($old_claim replaced) and follows the primary"
+
       - name: Verify planned switchover
         if: matrix.track.id == 'core'
         run: |

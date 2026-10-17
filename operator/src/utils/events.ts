@@ -52,6 +52,7 @@ export const EventReason = {
   ImageCatalogChanged: 'ImageCatalogChanged',
   NodeMaintenanceStarted: 'NodeMaintenanceStarted',
   NodeMaintenanceEnded: 'NodeMaintenanceEnded',
+  MaintenanceVolumeRecreation: 'MaintenanceVolumeRecreation',
   ImageCatalogUnresolved: 'ImageCatalogUnresolved',
   ManagedServiceConflict: 'ManagedServiceConflict',
   MajorUpgradeStarted: 'MajorUpgradeStarted',

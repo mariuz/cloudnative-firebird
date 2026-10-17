@@ -103,6 +103,7 @@ import {
 import { firebirdUsername } from '../utils/users';
 import { metrics, recordClusterMetrics, recordReconcile } from '../utils/metrics';
 import { RESEED_VOLUME, dataClaimName, planVolumeRecreation } from '../utils/volume-recreation';
+import { UNSCHEDULABLE_GRACE_SECONDS, maintenanceRecreatesVolumes, maintenanceVolumeRecreations } from '../utils/maintenance';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { PRIMARY_RESTART_GRACE_SECONDS, REVISION_LABEL, planRollingUpdate, rollingUpdateTarget, staleUnschedulablePod } from '../utils/rolling-update';
 import {
@@ -425,6 +426,7 @@ export class FirebirdClusterController {
       const lag = await this.reconcileReplicationLag(cluster, primaryPod, switchover.status, log);
       // Label pods before (re)pointing service selectors at the routing labels
       const readRouting = await this.reconcileReadRouting(cluster, primaryPod, log);
+      await this.reconcileMaintenanceVolumes(cluster, primaryPod, log);
       await this.reconcileHeadlessService(cluster, log);
       await this.reconcileService(cluster, log);
       // before the StatefulSet: an instance restarted into the new mode reads it when it starts
@@ -2708,6 +2710,30 @@ export class FirebirdClusterController {
       } catch {
         log.debug('PodMonitor does not exist, skipping deletion');
       }
+    }
+  }
+
+  /**
+   * A node maintenance window with reusePVC: false: a replica unschedulable for a while gets the
+   * reseed=volume annotation, so the volume re-creation gives it a new volume (on the next
+   * reconcile, which the pod change triggers)
+   */
+  private async reconcileMaintenanceVolumes(cluster: FirebirdCluster, primaryPod: string, log: Logger): Promise<void> {
+    if (!maintenanceRecreatesVolumes(cluster)) return;
+    const { name, namespace = 'default' } = cluster.metadata;
+    const pods = instancePods((await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items, name);
+    for (const pod of maintenanceVolumeRecreations(cluster, primaryPod, pods, new Date())) {
+      log.info({ pod }, 'Replica unschedulable during the maintenance window: re-creating its volume');
+      await this.coreApi.patchNamespacedPod(
+        { name: pod, namespace, body: { metadata: { annotations: { [RESEED_ANNOTATION]: RESEED_VOLUME } } } },
+        MERGE_PATCH,
+      );
+      await this.event(
+        cluster,
+        'Normal',
+        EventReason.MaintenanceVolumeRecreation,
+        `${pod} cannot be scheduled for ${UNSCHEDULABLE_GRACE_SECONDS}s during the node maintenance window (reusePVC: false): its volume is re-created`,
+      );
     }
   }
 

@@ -442,9 +442,10 @@ export interface FirebirdClusterSpec {
    * Node maintenance window (CloudNativePG's nodeMaintenanceWindow): while inProgress, the
    * cluster's PodDisruptionBudget is removed so node drains can evict its instances (a primary
    * evicted fails over as any primary lost, with automatic failover). Set it back to false after
-   * the maintenance.
+   * the maintenance. reusePVC: false (default true) gives a replica whose pod cannot be scheduled
+   * while the window is open a new volume, seeded again from the primary (utils/maintenance.ts).
    */
-  nodeMaintenanceWindow?: { inProgress?: boolean };
+  nodeMaintenanceWindow?: { inProgress?: boolean; reusePVC?: boolean };
   /**
    * How the primary is updated during a rolling update with replication (CloudNativePG):
    * "unsupervised" (default) updates it automatically after the replicas; "supervised" waits
