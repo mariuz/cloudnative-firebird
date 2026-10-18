@@ -51,7 +51,8 @@ describe('instance probes', () => {
   });
 });
 
-describe('the smart shutdown script', () => {
+// each test runs the script in a shell, with real sleeps: slow on a loaded CI runner
+describe('the smart shutdown script', { timeout: 20000 }, () => {
   // a fake isql: answers remote=<n> with the counts listed in a file, one per call
   const run = (counts: string[], timeout: number) => {
     const dir = mkdtempSync(join(tmpdir(), 'smart-shutdown-'));

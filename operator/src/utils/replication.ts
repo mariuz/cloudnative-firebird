@@ -1,3 +1,4 @@
+import { INIT_SQL_DIR, INIT_SQL_VOLUME, initSqlVolume } from './init-sql';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { V1Container, V1EnvVar, V1VolumeMount } from '@kubernetes/client-node';
@@ -253,8 +254,13 @@ export function buildReplicationContainers(
       name: 'replication-init',
       image: options.image,
       command: ['sh', `${OPERATOR_CONFIG_DIR}/init-instance.sh`],
-      env,
-      volumeMounts: [...mounts, confMount],
+      // bootstrap.initSql and initSqlRefs, run when it creates the database (utils/init-sql.ts)
+      env: initSqlVolume(cluster) ? [...env, { name: 'INIT_SQL_DIR', value: INIT_SQL_DIR }] : env,
+      volumeMounts: [
+        ...mounts,
+        confMount,
+        ...(initSqlVolume(cluster) ? [{ name: INIT_SQL_VOLUME, mountPath: INIT_SQL_DIR, readOnly: true }] : []),
+      ],
     },
     sidecars: [
       {

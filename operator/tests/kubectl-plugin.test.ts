@@ -545,5 +545,5 @@ describe('kubectl firebird', () => {
     const failed = runBench({ FAIL: '1' });
     expect(failed.status).toBe(1);
     expect(failed.stdout).toContain('bench: client 1 failed');
-  });
+  }, 30000); // a shell script with 64 parallel clients: slow on a loaded CI runner
 });

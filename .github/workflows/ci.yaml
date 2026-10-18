@@ -2185,6 +2185,50 @@ jobs:
           kubectl delete pod fbclient --wait=false
           kubectl delete firebirdcluster stopper --wait=false
 
+      - name: Verify init SQL from Secrets and ConfigMaps
+        if: matrix.track.id == 'extended'
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          got() { kubectl exec "$1" -c firebird -- sh -c "echo \"select 'got=' || list(n || ':' || src, ',') from (select n, src from ord order by n);\" | isql -q localhost:$DB" | sed -n 's/.*got=\([^ ]*\).*/\1/p'; }
+          # initSql creates the table, the Secret's script adds row 1, the ConfigMap's row 2: the order shows
+          kubectl create secret generic init-secret --from-literal=rows.sql="INSERT INTO ord VALUES (1, 'secret'); COMMIT;"
+          kubectl create configmap init-schema --from-literal=more.sql="INSERT INTO ord SELECT COUNT(*) + 1, 'configmap' FROM ord; COMMIT;"
+          for name in initrefs initrepl; do
+            instances=1; replication=false
+            [ $name = initrepl ] && { instances=2; replication=true; }
+            kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: $name
+          spec:
+            instances: $instances
+            storage:
+              size: 1Gi
+            replication:
+              enabled: $replication
+            bootstrap:
+              initSql: "CREATE TABLE ord (n INTEGER, src VARCHAR(10)); COMMIT;"
+              initSqlRefs:
+                secretRefs: [{ name: init-secret, key: rows.sql }]
+                configMapRefs: [{ name: init-schema, key: more.sql }]
+          EOF
+          done
+          for pod in initrefs-0 initrepl-0 initrepl-1; do
+            timeout 300 bash -c "until kubectl get pod $pod >/dev/null 2>&1; do sleep 3; done"
+            kubectl wait pod/$pod --for=condition=Ready --timeout=600s
+          done
+          [ "$(got initrefs-0)" = "1:secret,2:configmap" ] || { kubectl logs initrefs-0 -c firebird | tail -30; exit 1; }
+          [ "$(got initrepl-0)" = "1:secret,2:configmap" ] || { kubectl logs initrepl-0 -c replication-init; exit 1; }
+          kubectl logs initrepl-0 -c replication-init | grep -q 'running 10-secret-00.sql'
+          # the replica was seeded from the primary: the same rows
+          for n in $(seq 1 36); do [ "$(got initrepl-1)" = "1:secret,2:configmap" ] && break; sleep 5; done
+          [ "$(got initrepl-1)" = "1:secret,2:configmap" ]
+          # gone before the next steps (synchronous replication times its failover on a loaded node)
+          kubectl delete firebirdcluster initrefs initrepl --wait=true --timeout=300s
+          kubectl wait --for=delete pod -l 'firebird.cloudnative-firebird.io/cluster in (initrefs,initrepl)' --timeout=300s || true
+          kubectl delete secret init-secret --wait=false; kubectl delete configmap init-schema --wait=false
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |

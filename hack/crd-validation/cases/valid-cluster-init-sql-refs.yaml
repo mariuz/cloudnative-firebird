@@ -1,0 +1,16 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: initrefs
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  bootstrap:
+    initSql: "CREATE TABLE t (id INTEGER); COMMIT;"
+    initSqlRefs:
+      secretRefs:
+        - { name: app-users, key: users.sql }
+      configMapRefs:
+        - { name: app-schema, key: schema.sql }

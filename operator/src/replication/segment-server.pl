@@ -531,7 +531,16 @@ sub nbackup_here {
 # promote it offline instead.
 sub promote_here {
   my ($client, $archived) = @_;
-  my $fb = sub { system('fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database, @_) == 0 };
+  # the service manager's own message goes into the reply (the operator's event) when it fails
+  my $fb_out = '';
+  my $fb = sub {
+    my $cmd = join ' ', map { "'$_'" } 'fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database, @_;
+    $fb_out = `$cmd 2>&1`;
+    my $ok = $? == 0;
+    $fb_out =~ s/\s+/ /g;
+    $fb_out =~ s/^ | $//g;
+    return $ok;
+  };
   my ($shut, $writable) = (0, 0);
   my $ok = eval {
     my $mode = live_value('MON$REPLICA_MODE');
@@ -564,7 +573,7 @@ sub promote_here {
       $lineage = "$seq $archived";
       $seq = $archived;
     }
-    $fb->('prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') or die "full shutdown failed\n";
+    $fb->('prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') or die 'full shutdown failed' . ($fb_out ne '' ? ": $fb_out" : '') . "\n";
     $shut = 1;
     system('perl', "$ENV{SCRIPT_DIR}/set-repl-seq.pl", $database, $seq) == 0 or die "cannot set the replication sequence\n";
     # the replica's journal and archive (the new journal starts empty) and the offline bootstrap
@@ -576,7 +585,7 @@ sub promote_here {
     }
     unlink $bootstrap_seed, "$base/bootstrap-seed.seq";
     system('cp', $database, "$bootstrap_seed.tmp") == 0 or die "cannot copy the bootstrap seed\n";
-    $fb->('prp_online_mode', 'prp_sm_normal') or die "cannot bring the database online\n";
+    $fb->('prp_online_mode', 'prp_sm_normal') or die 'cannot bring the database online' . ($fb_out ne '' ? ": $fb_out" : '') . "\n";
     $shut = 0;
     system('gfix', '-replica', 'none', "localhost:$database") == 0 or die "cannot set replica mode none\n";
     $writable = 1;

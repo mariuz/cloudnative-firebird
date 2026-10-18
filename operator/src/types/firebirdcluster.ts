@@ -377,6 +377,14 @@ export interface CloneConfiguration {
 export interface BootstrapConfiguration {
   /** Inline DDL/DML SQL script to run on initial database creation */
   initSql?: string;
+  /**
+   * SQL scripts in Secrets and ConfigMaps, run after initSql on initial database creation
+   * (CloudNativePG postInitSQLRefs): the Secrets' keys first, then the ConfigMaps', each in order
+   */
+  initSqlRefs?: {
+    secretRefs?: Array<{ name: string; key: string }>;
+    configMapRefs?: Array<{ name: string; key: string }>;
+  };
   /** Cloud or file backup recovery configuration for database bootstrapping */
   recovery?: BackupRecoveryConfiguration;
   /** Source cluster configuration for cluster-to-cluster database cloning */

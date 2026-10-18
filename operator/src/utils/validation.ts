@@ -1,3 +1,4 @@
+import { initSqlRefsErrors } from './init-sql';
 import { lifecycleErrors } from './lifecycle';
 import { managedServicesErrors } from './managed-services';
 import { imageCatalogRefErrors } from './image-catalog';
@@ -88,7 +89,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
   }
 
   validatePodSettings(spec);
-  const lifecycle = lifecycleErrors(spec);
+  const lifecycle = [...lifecycleErrors(spec), ...initSqlRefsErrors(cluster)];
   if (lifecycle.length > 0) throw new ValidationError(lifecycle.join('; '));
 
   if (
