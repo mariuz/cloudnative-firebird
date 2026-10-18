@@ -1,5 +1,5 @@
 import type { PointInTimeRecovery } from './backup';
-import type { V1PodSecurityContext, V1ProjectedVolumeSource, V1SecurityContext } from '@kubernetes/client-node';
+import type { V1EphemeralVolumeSource, V1PodSecurityContext, V1ProjectedVolumeSource, V1SecurityContext } from '@kubernetes/client-node';
 /**
  * Type definitions for the FirebirdCluster Custom Resource Definition.
  * Inspired by cloudnative-pg's Cluster CRD.
@@ -500,6 +500,16 @@ export interface FirebirdClusterSpec {
    * account tokens, e.g. client certificates or UDR configuration files
    */
   projectedVolumeTemplate?: V1ProjectedVolumeSource;
+  /**
+   * Size limits of the instances' ephemeral volumes (CloudNativePG ephemeralVolumesSizeLimit):
+   * temporaryData is an emptyDir for Firebird's sort and temporary files (TempDirectories)
+   */
+  ephemeralVolumesSizeLimit?: { temporaryData?: string };
+  /**
+   * A generic ephemeral volume (a PersistentVolumeClaim template, deleted with the pod) for
+   * Firebird's sort and temporary files instead of the emptyDir (CloudNativePG ephemeralVolumeSource)
+   */
+  ephemeralVolumeSource?: V1EphemeralVolumeSource;
   /** Node labels required for pod scheduling */
   nodeSelector?: Record<string, string>;
   /** Pod affinity and anti-affinity rules */

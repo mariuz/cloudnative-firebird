@@ -5,6 +5,8 @@ import { withSegmentTls } from './segment-tls-pods';
 import { withPrimaryLease } from './primary-lease';
 import { clusterPodSettings, inheritMetadata, instanceEnvFrom, projectedVolume, projectedVolumeMount, PROJECTED_VOLUME, withPodPullPolicy } from './pod-settings';
 import { instanceProbes, smartShutdownLifecycle, terminationGracePeriod } from './lifecycle';
+import { parseQuantity } from './storage';
+import { TEMP_VOLUME, tempDirectorySettings, tempVolume, tempVolumeMount } from './temp-volume';
 import { ENTRYPOINT_INIT_DIR, INIT_SQL_VOLUME, initSqlVolume } from './init-sql';
 import { createHash } from 'crypto';
 import {
@@ -151,7 +153,8 @@ export const STRICT_WIRE_CRYPT_PLUGINS = 'ChaCha64, ChaCha';
  * that offers only Arc4 (e.g. Firebird 3) is refused.
  */
 export function firebirdConfSettings(cluster: FirebirdCluster): Record<string, string> {
-  const settings = { ...(cluster.spec.config?.settings ?? {}) };
+  // the temporary volume, when there is one (utils/temp-volume.ts)
+  const settings = { ...tempDirectorySettings(cluster), ...(cluster.spec.config?.settings ?? {}) };
   if (cluster.spec.tls?.enabled) {
     settings['WireCrypt'] ??= 'Required';
     settings['WireCryptPlugin'] ??= STRICT_WIRE_CRYPT_PLUGINS;
@@ -356,6 +359,8 @@ export function buildStatefulSet(
         ...(replication?.mainMounts ?? []),
         // spec.projectedVolumeTemplate, read-only at /projected
         ...(projectedVolumeMount(cluster) ? [projectedVolumeMount(cluster)!] : []),
+        // the sort and temporary files (ephemeralVolumesSizeLimit, ephemeralVolumeSource)
+        ...(tempVolumeMount(cluster) ? [tempVolumeMount(cluster)!] : []),
       ],
       // ready only while the local server answers the service manager and the database is not
       // shut down, so a fenced instance leaves the Services (see utils/fencing.ts); timings,
@@ -393,6 +398,7 @@ export function buildStatefulSet(
     ...bootstrapVolumes(cluster),
     ...(initSqlVolume(cluster) ? [initSqlVolume(cluster)!] : []),
     ...(projectedVolume(cluster) ? [projectedVolume(cluster)!] : []),
+    ...(tempVolume(cluster) ? [tempVolume(cluster)!] : []),
     ...(usesConfigVolume
       ? [
           {
@@ -707,6 +713,17 @@ export function statefulSetNeedsUpdate(
     if (!setFieldsMatch(desiredProjected.sources ?? [], existingProjected.sources ?? [])) return true;
     if (desiredProjected.defaultMode !== undefined && existingProjected.defaultMode !== desiredProjected.defaultMode) return true;
   }
+  // the temporary volume (its kind and size; the API server defaults a claim template's fields)
+  const temp = (spec: V1PodSpec) => spec.volumes?.find((v) => v.name === TEMP_VOLUME);
+  const existingTemp = temp(existingPodSpec);
+  const desiredTemp = temp(desiredPodSpec);
+  if (!existingTemp !== !desiredTemp) return true;
+  if (existingTemp && desiredTemp) {
+    if (!existingTemp.emptyDir !== !desiredTemp.emptyDir) return true;
+    // quantities by value: the API server writes them in canonical form (2048Mi as 2Gi)
+    if (!setFieldsMatch(quantitiesByValue(desiredTemp.emptyDir ?? {}), quantitiesByValue(existingTemp.emptyDir ?? {}))) return true;
+    if (!setFieldsMatch(quantitiesByValue(desiredTemp.ephemeral ?? {}), quantitiesByValue(existingTemp.ephemeral ?? {}))) return true;
+  }
   // the API server defaults other probe fields, so the command and the fields the operator sets are compared
   if (
     JSON.stringify(existingContainer.readinessProbe?.exec?.command) !==
@@ -778,6 +795,18 @@ export function statefulSetPatchBody(existing: V1StatefulSet, desired: V1Statefu
     }
   }
   return { ...desired, spec: { ...desired.spec, template: { ...desired.spec.template, spec: pod as unknown as V1PodSpec } } };
+}
+
+/** A copy with the quantities of sizeLimit and storage fields as byte counts, to compare them by value */
+export function quantitiesByValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(quantitiesByValue);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([k, v]) => [
+      k,
+      (k === 'sizeLimit' || k === 'storage') && typeof v === 'string' ? (parseQuantity(v) ?? v) : quantitiesByValue(v),
+    ]),
+  );
 }
 
 /**
