@@ -2276,6 +2276,49 @@ jobs:
           kubectl wait --for=delete pod/extra-0 --timeout=300s || true
           kubectl delete configmap extra-settings --wait=false; kubectl delete secret extra-keys --wait=false
 
+      - name: Verify the temporary volume
+        if: matrix.track.id == 'extended'
+        run: |
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: tmpdir
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            ephemeralVolumesSizeLimit:
+              temporaryData: 512Mi
+          ---
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: tmpclaim
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            ephemeralVolumeSource:
+              volumeClaimTemplate:
+                spec:
+                  accessModes: [ReadWriteOnce]
+                  resources: { requests: { storage: 1Gi } }
+          EOF
+          for pod in tmpdir-0 tmpclaim-0; do
+            timeout 300 bash -c "until kubectl get pod $pod >/dev/null 2>&1; do sleep 3; done"
+            kubectl wait pod/$pod --for=condition=Ready --timeout=600s
+            # the server's TempDirectories is the volume, mounted in the Firebird container
+            kubectl exec $pod -c firebird -- sh -c 'grep -E "^[[:space:]]*TempDirectories[[:space:]]*=" /opt/firebird/firebird.conf' | tee /dev/stderr | grep -q '/firebird-temp'
+            kubectl exec $pod -c firebird -- sh -c 'touch /firebird-temp/probe && rm /firebird-temp/probe && df -h /firebird-temp'
+          done
+          [ "$(kubectl get pod tmpdir-0 -o jsonpath="{.spec.volumes[?(@.name=='temp-data')].emptyDir.sizeLimit}")" = 512Mi ]
+          # the generic ephemeral volume: a claim of the pod, bound, deleted with it
+          [ "$(kubectl get pvc tmpclaim-0-temp-data -o jsonpath={.status.phase})" = Bound ]
+          [ "$(kubectl get pvc tmpclaim-0-temp-data -o jsonpath={.metadata.ownerReferences[0].kind})" = Pod ]
+          kubectl delete firebirdcluster tmpdir tmpclaim --wait=true --timeout=300s
+          kubectl wait --for=delete pod/tmpdir-0 pod/tmpclaim-0 --timeout=300s || true
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |

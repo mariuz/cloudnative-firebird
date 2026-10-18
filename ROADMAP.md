@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.110.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.111.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Temporary space for sorts** *(v0.111.0; CloudNativePG's ephemeralVolumesSizeLimit, ephemeralVolumeSource)*
+  - `ephemeralVolumesSizeLimit.temporaryData` (an emptyDir with a size limit) or `ephemeralVolumeSource` (a generic ephemeral volume) at `/firebird-temp` in the Firebird container, with `TempDirectories` pointing there unless `config.settings` sets it. The StatefulSet update check compares the volume with quantities by value (the API server writes them in canonical form).
+  - Unit tests cover both kinds, the setting, the update check and validation (CEL rule for the mutual exclusion); the kind CI checks the mount, the server's TempDirectories and the bound ephemeral claim.
 - [x] **In-place promotion retries its full shutdown** *(v0.110.0)*
   - The in-place promotion (switchover, failover, synchronous standby) puts the target's database into a short full shutdown to write its header; a busy server sometimes refused it (seen in CI under load) and the promotion fell back to a restart. It is now tried up to five times, three seconds apart (`PROMOTE_SHUTDOWN_ATTEMPTS`, `PROMOTE_SHUTDOWN_PAUSE`), a database left in full shutdown despite an error counts as shut down, and the reply lists every attempt's message. Unit tests run the script's retry block against a stubbed service manager.
 - [x] **envFrom and projected volumes** *(v0.109.0; CloudNativePG's envFrom, projectedVolumeTemplate)*
@@ -526,6 +529,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 | **Startup / Shutdown** | `startDelay`, `stopDelay`, `smartShutdownTimeout`, `probes` | Startup probe, grace period, preStop wait for remote attachments, probe timings | **v0.107.0 (Done)** |
 | **Init SQL** | `postInitSQL`, `postInitSQLRefs` | `bootstrap.initSql`, `bootstrap.initSqlRefs` (Secrets, ConfigMaps) | **v0.108.0 (Done)** |
 | **Extra Environment / Files** | `envFrom`, `projectedVolumeTemplate` | `spec.envFrom`, `spec.projectedVolumeTemplate` (`/projected`) | **v0.109.0 (Done)** |
+| **Ephemeral Volumes** | `ephemeralVolumesSizeLimit`, `ephemeralVolumeSource` | `temporaryData` emptyDir or generic ephemeral volume for TempDirectories | **v0.111.0 (Done)** |
 | **Volume Expansion** | PVC Resize | In-place PVC Expansion | **v0.6.0 (Done)** |
 | **Hibernation** | Declarative Hibernation | `spec.hibernated` | **v0.7.0 (Done)** |
 | **Switchover** | `kubectl cnpg promote` | `targetPrimary` annotation | **v0.13.0 (Done)** |

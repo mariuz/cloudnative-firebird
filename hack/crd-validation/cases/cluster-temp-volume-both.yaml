@@ -1,0 +1,12 @@
+# expect: mutually exclusive
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: temp
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  ephemeralVolumesSizeLimit: { temporaryData: 1Gi }
+  ephemeralVolumeSource:
+    volumeClaimTemplate: { spec: { resources: { requests: { storage: 1Gi } } } }

@@ -74,6 +74,8 @@ spec:
                   message: bootstrap recovery and clone are mutually exclusive
                 - rule: "!has(self.imageName) || !has(self.imageCatalogRef)"
                   message: imageName and imageCatalogRef are mutually exclusive
+                - rule: "!has(self.ephemeralVolumeSource) || !has(self.ephemeralVolumesSizeLimit) || !has(self.ephemeralVolumesSizeLimit.temporaryData)"
+                  message: ephemeralVolumeSource and ephemeralVolumesSizeLimit.temporaryData are mutually exclusive
                 - rule: "!has(self.smartShutdownTimeout) || self.smartShutdownTimeout < (has(self.stopDelay) ? self.stopDelay : 30)"
                   message: smartShutdownTimeout must be below stopDelay (30 if unset)
                 - rule: >-
@@ -874,6 +876,29 @@ spec:
                       prefix:
                         type: string
                         pattern: '^[A-Za-z_][A-Za-z0-9_]*$'
+                ephemeralVolumesSizeLimit:
+                  description: Size limits of the instances' ephemeral volumes
+                  type: object
+                  properties:
+                    temporaryData:
+                      description: >-
+                        Size limit of an emptyDir for Firebird's sort and temporary files
+                        (TempDirectories points there), instead of the container's writable layer
+                      type: string
+                      pattern: '^[0-9]+(\.[0-9]+)?([KMGTPE]i?|[mk])?$'
+                ephemeralVolumeSource:
+                  description: >-
+                    A generic ephemeral volume (a PersistentVolumeClaim template, deleted with the
+                    pod) for Firebird's sort and temporary files, instead of the emptyDir
+                  type: object
+                  required:
+                    - volumeClaimTemplate
+                  properties:
+                    volumeClaimTemplate:
+                      type: object
+                      required:
+                        - spec
+                      x-kubernetes-preserve-unknown-fields: true
                 projectedVolumeTemplate:
                   description: >-
                     A projected volume (Kubernetes ProjectedVolumeSource) mounted read-only at

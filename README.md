@@ -1237,6 +1237,28 @@ spec:
     annotations: { sidecar.istio.io/inject: "false" }
 ```
 
+**Temporary space** (v0.111.0, CloudNativePG `ephemeralVolumesSizeLimit` and `ephemeralVolumeSource`).
+Firebird writes the sort and temporary files that do not fit in memory to `TempDirectories`
+(`/tmp`, the container's writable layer, by default). With `ephemeralVolumesSizeLimit.temporaryData`
+they go to an emptyDir of that size, or with `ephemeralVolumeSource` to a generic ephemeral volume
+(a PersistentVolumeClaim of the pod, deleted with it, e.g. on a fast storage class), mounted at
+`/firebird-temp` with `TempDirectories` pointing there (a `TempDirectories` in `config.settings`
+wins). A large sort then neither fills the node's disk nor gets the pod evicted for it. The two are
+mutually exclusive; changing them rolls the instances.
+
+```yaml
+spec:
+  ephemeralVolumesSizeLimit:
+    temporaryData: 4Gi
+  # or
+  ephemeralVolumeSource:
+    volumeClaimTemplate:
+      spec:
+        storageClassName: fast-local
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 20Gi } }
+```
+
 **Environment and extra files** (v0.109.0, CloudNativePG `envFrom` and `projectedVolumeTemplate`).
 `spec.envFrom` turns the keys of ConfigMaps and Secrets into environment variables of the Firebird
 container (a `prefix` each, `optional` references); `spec.env` and the operator's own variables
