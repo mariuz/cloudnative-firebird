@@ -1,4 +1,4 @@
-import { V1Container, V1CronJob, V1Job, V1ObjectMeta, V1PodSpec } from '@kubernetes/client-node';
+import { V1Container, V1CronJob, V1EnvFromSource, V1Job, V1ObjectMeta, V1PodSpec, V1Volume, V1VolumeMount } from '@kubernetes/client-node';
 import { FirebirdCluster } from '../types';
 
 /**
@@ -101,4 +101,55 @@ export function withInheritedMetadata<T extends V1Job | V1CronJob>(cluster: Fire
     metadata: inheritMetadata(cluster, job.metadata),
     spec: job.spec && { ...job.spec, template: { ...job.spec.template, metadata: inheritMetadata(cluster, job.spec.template.metadata) } },
   } as T;
+}
+
+/** The projected volume of spec.projectedVolumeTemplate and where the Firebird container mounts it */
+export const PROJECTED_VOLUME = 'projected';
+export const PROJECTED_DIR = '/projected';
+
+/** spec.projectedVolumeTemplate as a volume, or none */
+export function projectedVolume(cluster: FirebirdCluster): V1Volume | undefined {
+  const template = cluster.spec.projectedVolumeTemplate;
+  return template && (template.sources ?? []).length > 0 ? { name: PROJECTED_VOLUME, projected: template } : undefined;
+}
+
+/** Its read-only mount in the Firebird container, or none */
+export function projectedVolumeMount(cluster: FirebirdCluster): V1VolumeMount | undefined {
+  return projectedVolume(cluster) ? { name: PROJECTED_VOLUME, mountPath: PROJECTED_DIR, readOnly: true } : undefined;
+}
+
+/** spec.envFrom for the Firebird container, or none */
+export function instanceEnvFrom(cluster: FirebirdCluster): V1EnvFromSource[] | undefined {
+  const envFrom = cluster.spec.envFrom;
+  return envFrom && envFrom.length > 0 ? envFrom : undefined;
+}
+
+const PROJECTION_KINDS = ['secret', 'configMap', 'downwardAPI', 'serviceAccountToken', 'clusterTrustBundle'] as const;
+
+/** Errors of spec.envFrom and spec.projectedVolumeTemplate */
+export function extraConfigErrors(spec: FirebirdCluster['spec']): string[] {
+  const errors: string[] = [];
+  const dnsName = (name: unknown) => typeof name === 'string' && name.length <= 253 && /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(name);
+  (spec.envFrom ?? []).forEach((source, i) => {
+    const refs = [source?.configMapRef, source?.secretRef].filter((r) => r !== undefined);
+    if (refs.length !== 1) errors.push(`envFrom[${i}] needs exactly one of configMapRef and secretRef`);
+    else if (!dnsName(refs[0]!.name)) errors.push(`envFrom[${i}]: the ConfigMap or Secret name must be a DNS subdomain name`);
+    if (source?.prefix !== undefined && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(source.prefix)) {
+      errors.push(`envFrom[${i}].prefix must be a valid environment variable name prefix`);
+    }
+  });
+  const template = spec.projectedVolumeTemplate;
+  if (template !== undefined) {
+    if (!Array.isArray(template.sources)) errors.push('projectedVolumeTemplate.sources must be a list');
+    else {
+      template.sources.forEach((source, i) => {
+        const kinds = PROJECTION_KINDS.filter((k) => (source as Record<string, unknown>)?.[k] !== undefined);
+        if (kinds.length !== 1) errors.push(`projectedVolumeTemplate.sources[${i}] needs exactly one of ${PROJECTION_KINDS.join(', ')}`);
+      });
+    }
+    if (template.defaultMode !== undefined && (!Number.isInteger(template.defaultMode) || template.defaultMode < 0 || template.defaultMode > 0o777)) {
+      errors.push('projectedVolumeTemplate.defaultMode must be a file mode between 0 and 0777');
+    }
+  }
+  return errors;
 }

@@ -1234,6 +1234,26 @@ spec:
     annotations: { sidecar.istio.io/inject: "false" }
 ```
 
+**Environment and extra files** (v0.109.0, CloudNativePG `envFrom` and `projectedVolumeTemplate`).
+`spec.envFrom` turns the keys of ConfigMaps and Secrets into environment variables of the Firebird
+container (a `prefix` each, `optional` references); `spec.env` and the operator's own variables
+take precedence. Firebird settings can come this way too (`FIREBIRD_CONF_<key>`, as with
+`config.settings`). `spec.projectedVolumeTemplate` (a Kubernetes projected volume: Secrets,
+ConfigMaps, the downward API, service account tokens) is mounted read-only at `/projected` in the
+Firebird container, e.g. for client certificates or UDR configuration. The sidecars get neither.
+Changing either rolls the instances (primary last).
+
+```yaml
+spec:
+  envFrom:
+    - configMapRef: { name: app-settings }
+    - secretRef: { name: app-keys }
+      prefix: KEY_
+  projectedVolumeTemplate:
+    sources:
+      - secret: { name: client-certs, items: [{ key: tls.crt, path: certs/client.crt }] }
+```
+
 **Startup, shutdown and probes** (v0.107.0, CloudNativePG `startDelay`, `stopDelay`,
 `smartShutdownTimeout` and `probes`). `stopDelay` sets the instance pods'
 `terminationGracePeriodSeconds`. `smartShutdownTimeout` adds a preStop hook to the server: a

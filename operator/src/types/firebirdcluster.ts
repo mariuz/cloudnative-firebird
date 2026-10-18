@@ -1,5 +1,5 @@
 import type { PointInTimeRecovery } from './backup';
-import type { V1PodSecurityContext, V1SecurityContext } from '@kubernetes/client-node';
+import type { V1PodSecurityContext, V1ProjectedVolumeSource, V1SecurityContext } from '@kubernetes/client-node';
 /**
  * Type definitions for the FirebirdCluster Custom Resource Definition.
  * Inspired by cloudnative-pg's Cluster CRD.
@@ -485,6 +485,21 @@ export interface FirebirdClusterSpec {
   primaryUpdateMethod?: 'restart' | 'switchover';
   /** Additional environment variables to pass to the Firebird container */
   env?: Array<{ name: string; value?: string; valueFrom?: object }>;
+  /**
+   * ConfigMaps and Secrets whose keys become environment variables of the Firebird container
+   * (CloudNativePG envFrom); spec.env and the operator's own variables take precedence
+   */
+  envFrom?: Array<{
+    configMapRef?: { name: string; optional?: boolean };
+    secretRef?: { name: string; optional?: boolean };
+    prefix?: string;
+  }>;
+  /**
+   * A projected volume mounted read-only at /projected in the Firebird container
+   * (CloudNativePG projectedVolumeTemplate): Secrets, ConfigMaps, the downward API, service
+   * account tokens, e.g. client certificates or UDR configuration files
+   */
+  projectedVolumeTemplate?: V1ProjectedVolumeSource;
   /** Node labels required for pod scheduling */
   nodeSelector?: Record<string, string>;
   /** Pod affinity and anti-affinity rules */

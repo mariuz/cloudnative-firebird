@@ -2229,6 +2229,49 @@ jobs:
           kubectl wait --for=delete pod -l 'firebird.cloudnative-firebird.io/cluster in (initrefs,initrepl)' --timeout=300s || true
           kubectl delete secret init-secret --wait=false; kubectl delete configmap init-schema --wait=false
 
+      - name: Verify envFrom and the projected volume
+        if: matrix.track.id == 'extended'
+        run: |
+          kubectl create configmap extra-settings --from-literal=APP_MODE=demo --from-literal=settings.conf='answer = 42'
+          kubectl create secret generic extra-keys --from-literal=TOKEN=s3cret
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: extra
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            envFrom:
+              - configMapRef: { name: extra-settings }
+              - secretRef: { name: extra-keys }
+                prefix: KEY_
+            projectedVolumeTemplate:
+              sources:
+                - configMap: { name: extra-settings, items: [{ key: settings.conf, path: app/settings.conf }] }
+                - downwardAPI: { items: [{ path: labels, fieldRef: { fieldPath: metadata.labels } }] }
+          EOF
+          timeout 300 bash -c 'until kubectl get pod extra-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/extra-0 --for=condition=Ready --timeout=600s
+          fb() { kubectl exec extra-0 -c firebird -- sh -c "$1"; }
+          [ "$(fb 'printenv APP_MODE')" = demo ]
+          [ "$(fb 'printenv KEY_TOKEN')" = s3cret ]
+          [ "$(fb 'cat /projected/app/settings.conf')" = 'answer = 42' ]
+          fb 'cat /projected/labels' | grep -q 'firebird.cloudnative-firebird.io/cluster="extra"'
+          # read-only, and only in the Firebird container
+          if fb 'touch /projected/x' 2>/dev/null; then echo "/projected is writable"; exit 1; fi
+          if kubectl exec extra-0 -c backup-files -- printenv APP_MODE; then echo "the sidecar got envFrom"; exit 1; fi
+          # a changed prefix rolls the instance
+          uid=$(kubectl get pod extra-0 -o jsonpath={.metadata.uid})
+          kubectl patch firebirdcluster extra --type json -p '[{"op":"replace","path":"/spec/envFrom/1/prefix","value":"SECRET_"}]'
+          timeout 300 bash -c "until [ -n \"\$(kubectl get pod extra-0 -o jsonpath={.metadata.uid} 2>/dev/null)\" ] && [ \"\$(kubectl get pod extra-0 -o jsonpath={.metadata.uid} 2>/dev/null)\" != '$uid' ]; do sleep 3; done"
+          kubectl wait pod/extra-0 --for=condition=Ready --timeout=600s
+          [ "$(fb 'printenv SECRET_TOKEN')" = s3cret ]
+          kubectl delete firebirdcluster extra --wait=true --timeout=300s
+          kubectl wait --for=delete pod/extra-0 --timeout=300s || true
+          kubectl delete configmap extra-settings --wait=false; kubectl delete secret extra-keys --wait=false
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |

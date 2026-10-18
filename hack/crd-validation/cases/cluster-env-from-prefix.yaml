@@ -1,0 +1,11 @@
+# expect: spec.envFrom[0].prefix
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: extra
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  envFrom:
+    - { secretRef: { name: a }, prefix: 1BAD }

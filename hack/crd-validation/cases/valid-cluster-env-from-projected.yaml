@@ -1,0 +1,17 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: extra
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  envFrom:
+    - configMapRef: { name: app-settings }
+    - secretRef: { name: app-keys, optional: true }
+      prefix: APP_
+  projectedVolumeTemplate:
+    sources:
+      - secret: { name: client-certs, items: [{ key: tls.crt, path: certs/client.crt }] }
+      - serviceAccountToken: { audience: vault, path: token }
