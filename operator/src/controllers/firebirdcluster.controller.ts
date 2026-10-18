@@ -1,5 +1,6 @@
 import { initSqlRefs } from '../utils/init-sql';
 import { smartShutdownInProgress } from '../utils/lifecycle';
+import { reconciliationPaused } from '../utils/suspension';
 import { inheritMetadata, inheritedMetadataMissing, missingInheritedMetadata, withInheritedMetadata } from '../utils/pod-settings';
 import {
   CUSTOM_QUERIES_ERRORS_ANNOTATION,
@@ -349,25 +350,31 @@ export class FirebirdClusterController {
     log.info('Reconciling FirebirdCluster');
 
     try {
-      validateClusterSpec(cluster);
-      desiredFencedInstances(cluster); // rejects a malformed fencedInstances annotation
-
-      if (cluster.spec.suspended) {
-        log.info('Cluster reconciliation is suspended');
-        await this.updateStatus(cluster, {
+      // paused (spec.suspended or the reconciliationLoop annotation, utils/suspension.ts): nothing
+      // is changed, not even for an invalid spec; the status is written once, with an event
+      const paused = reconciliationPaused(cluster);
+      if (paused) {
+        if (cluster.status?.phase === 'Paused' && cluster.status.phaseReason === paused) {
+          log.debug('Cluster reconciliation is paused');
+          return;
+        }
+        log.info({ reason: paused }, 'Cluster reconciliation paused');
+        if (await this.updateStatus(cluster, {
           phase: 'Paused',
-          phaseReason: 'Reconciliation suspended by spec.suspended',
-          conditions: [
-            this.makeCondition(
-              'Paused',
-              'True',
-              'ClusterSuspended',
-              'Reconciliation is suspended',
-            ),
-          ],
-        });
+          phaseReason: paused,
+          conditions: [this.makeCondition('Paused', 'True', 'ReconciliationPaused', paused)],
+        })) {
+          await this.event(cluster, 'Normal', EventReason.ReconciliationPaused, `${paused}: the operator changes nothing of the cluster until it is resumed`);
+        }
         return;
       }
+      if (cluster.status?.phase === 'Paused') {
+        log.info('Cluster reconciliation resumed');
+        await this.event(cluster, 'Normal', EventReason.ReconciliationResumed, 'Reconciliation resumed');
+      }
+
+      validateClusterSpec(cluster);
+      desiredFencedInstances(cluster); // rejects a malformed fencedInstances annotation
 
       // Only a new cluster starts as Creating: rewriting the phase of a running cluster on every
       // reconcile made it read Creating until the end of the reconcile (e.g. every resync). An

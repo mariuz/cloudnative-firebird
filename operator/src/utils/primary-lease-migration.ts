@@ -2,6 +2,7 @@ import { V1Pod } from '@kubernetes/client-node';
 import { FirebirdCluster } from '../types';
 import { isPodReady } from './routing';
 import { PRIMARY_LEASE_ANNOTATION, PRIMARY_LEASE_CONTAINER, primaryLeaseEnabled } from './primary-lease';
+import { reconciliationPaused } from './suspension';
 
 /**
  * Moving clusters pinned to the operator-moved Lease over to the primary Lease
@@ -45,7 +46,7 @@ export function notMigratingToPrimaryLease(cluster: FirebirdCluster, mode: Prima
   if (annotation(cluster) !== 'pinned') return `annotation ${annotation(cluster) ?? 'missing'}`;
   if (cluster.spec.replication?.failover?.primaryLease?.enabled !== undefined) return 'the owner decided';
   if (nativeSidecars !== true) return 'Kubernetes without native sidecars (1.29 or later)';
-  if (cluster.spec.hibernated || cluster.spec.suspended) return 'hibernated or suspended';
+  if (cluster.spec.hibernated || reconciliationPaused(cluster)) return 'hibernated or paused';
   const status = cluster.status ?? {};
   if (status.phase !== 'Running') return `phase ${status.phase ?? 'unknown'}`;
   if (status.rollingUpdate) return 'rolling update in progress';

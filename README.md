@@ -1356,7 +1356,15 @@ spec:
 its Jobs / CronJob alone until the annotation is removed; a new backup or restore created with it
 does not start. Deleting a paused `FirebirdUser` or `FirebirdRole` keeps the Firebird user or role
 (as with `retain`).
-Clusters are paused with `spec.suspended`.
+**Pausing a cluster** (since v0.113.0 also by annotation, CloudNativePG's `cnpg.io/reconciliationLoop`).
+`spec.suspended: true`, the annotation `firebird.cloudnative-firebird.io/reconciliationLoop: disabled`
+(`kubectl firebird reconcile off <cluster>`, and `reconcile on` to resume) or
+`firebird.cloudnative-firebird.io/reconciliationDisabled: "true"` stop the operator from changing
+anything of the cluster, for manual maintenance: no rolling update, switchover, failover, re-seed or
+resource update, even for an invalid spec. What already runs keeps running (the instances, their
+Services, the scheduled CronJobs). The phase is `Paused` with a `Paused` condition naming the cause,
+and `ReconciliationPaused` / `ReconciliationResumed` events mark the transitions; spec changes made
+meanwhile are applied when it resumes.
 
 With replication enabled, only the primary bootstraps; replicas are then seeded by replication.
 With `replication.journalArchiveS3`, a CronJob copies archived journal segments from the

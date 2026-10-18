@@ -2,6 +2,7 @@ import { V1Pod } from '@kubernetes/client-node';
 import { API_GROUP, FirebirdCluster } from '../types';
 import { isPodReady } from './routing';
 import { SEGMENT_TLS_CONTAINER } from './segment-tls-pods';
+import { reconciliationPaused } from './suspension';
 
 /**
  * Moving existing clusters to segment TLS (SEGMENT_TLS_MIGRATE), one at a time.
@@ -55,7 +56,7 @@ export function notMigrating(cluster: FirebirdCluster, mode: MigrationMode, nati
   if (marked === 'skip' || marked === 'done') return `annotation ${marked}`;
   if (mode === 'pinned' && marked !== 'pinned') return 'not pinned by the operator';
   if (nativeSidecars !== true) return 'Kubernetes without native sidecars (1.29 or later)';
-  if (cluster.spec.hibernated || cluster.spec.suspended) return 'hibernated or suspended';
+  if (cluster.spec.hibernated || reconciliationPaused(cluster)) return 'hibernated or paused';
   const status = cluster.status ?? {};
   if (status.phase !== 'Running') return `phase ${status.phase ?? 'unknown'}`;
   if (status.rollingUpdate) return 'rolling update in progress';

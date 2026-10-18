@@ -1,8 +1,9 @@
 import { CoreV1Event, dumpYaml, V1Job, V1PersistentVolumeClaim, V1Pod, V1Service, V1StatefulSet } from '@kubernetes/client-node';
-import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdScheduledBackup } from '../types';
+import { API_GROUP, API_VERSION, RECONCILIATION_DISABLED_ANNOTATION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdScheduledBackup } from '../types';
 import { isPodReady, ROLE_LABEL } from '../utils/routing';
 import { formatEvents, listYaml, operatorLogLines, podContainers, sanitize } from './report';
 import { BENCH_TABLE, buildBenchJob } from './bench';
+import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/suspension';
 
 /**
  * kubectl-firebird, the kubectl plugin (CloudNativePG's kubectl cnpg): status of a cluster and the
@@ -11,7 +12,7 @@ import { BENCH_TABLE, buildBenchJob } from './bench';
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.112.1';
+export const PLUGIN_VERSION = '0.113.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -72,6 +73,8 @@ Commands:
   restart <cluster> [instance]              rolling restart of the cluster (primary last), or restart one instance
   fence on|off <cluster> <instance|all>     fence (database full shutdown) or unfence instances
   hibernate on|off <cluster>                stop every instance keeping the volumes, or resume
+  reconcile on|off <cluster>                resume, or pause the operator's reconciliation of the cluster
+                                            (manual maintenance: nothing of it is changed meanwhile)
   maintenance on|off <cluster> [--no-reuse-pvc]
                                             node maintenance window: drains may evict the instances
                                             (the PodDisruptionBudget is removed), or end it; with
@@ -282,6 +285,7 @@ export function formatStatus(
   }
   if (status.majorUpgrade) field('Upgrade', `${status.majorUpgrade.phase ?? ''} ${status.majorUpgrade.from ?? ''} -> ${status.majorUpgrade.to ?? ''}`.trim());
   if (cluster.spec.hibernated) field('Hibernated', 'yes');
+  field('Paused', reconciliationPaused(cluster));
   if (cluster.spec.nodeMaintenanceWindow?.inProgress) {
     field('Maintenance', `node maintenance window in progress (no PodDisruptionBudget${cluster.spec.nodeMaintenanceWindow.reusePVC === false ? ', new volumes for unschedulable replicas' : ''})`);
   }
@@ -480,6 +484,26 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
         await api.getCluster(namespace, name);
         await api.patchCluster(namespace, name, { spec: { hibernated: on } });
         io.out(on ? `cluster ${name} hibernating (its volumes are kept)` : `cluster ${name} resuming`);
+        return 0;
+      }
+
+      case 'reconcile': {
+        const [mode, name] = need(parsed, 2, 'reconcile on|off <cluster>');
+        const on = onOff(mode, 'reconcile on|off <cluster>');
+        const cluster = await api.getCluster(namespace, name);
+        // on: both pausing annotations go (reconciliationDisabled pauses a cluster as it does the other resources)
+        await api.patchCluster(namespace, name, {
+          metadata: {
+            annotations: on ? { [RECONCILIATION_LOOP_ANNOTATION]: null, [RECONCILIATION_DISABLED_ANNOTATION]: null } : { [RECONCILIATION_LOOP_ANNOTATION]: 'disabled' },
+          },
+        });
+        if (!on) {
+          io.out(`reconciliation of ${name} paused: the operator changes nothing of it until kubectl firebird reconcile on ${name}`);
+        } else if (cluster.spec.suspended) {
+          io.out(`the annotation is removed, but ${name} stays paused by spec.suspended`);
+        } else {
+          io.out(`reconciliation of ${name} resumed`);
+        }
         return 0;
       }
 

@@ -17,6 +17,7 @@ import {
 import { FENCED_INSTANCES_ANNOTATION as OPERATOR_FENCED } from '../src/utils/fencing';
 import { TARGET_PRIMARY_ANNOTATION as OPERATOR_TARGET } from '../src/utils/switchover';
 import { RESEED_ANNOTATION as OPERATOR_RESEED } from '../src/utils/replication';
+import { RECONCILIATION_LOOP_ANNOTATION } from '../src/utils/suspension';
 import { RESEED_VOLUME as OPERATOR_RESEED_VOLUME } from '../src/utils/volume-recreation';
 import { formatEvents, operatorLogLines, sanitize } from '../src/plugin/report';
 import { BENCH_UID, benchScript } from '../src/plugin/bench';
@@ -240,6 +241,26 @@ describe('kubectl firebird', () => {
     expect(await exec('fence', 'on', 'db', 'all')).toBe(0);
     expect(api.patchCluster).toHaveBeenLastCalledWith('prod', 'db', { metadata: { annotations: { [FENCED_INSTANCES_ANNOTATION]: '["*"]' } } });
     expect(await exec('fence', 'maybe', 'db', '0')).toBe(2);
+  });
+
+  it('pauses and resumes the reconciliation with the reconciliationLoop annotation', async () => {
+    expect(await exec('reconcile', 'off', 'db')).toBe(0);
+    expect(api.patchCluster).toHaveBeenLastCalledWith('prod', 'db', { metadata: { annotations: { [RECONCILIATION_LOOP_ANNOTATION]: 'disabled' } } });
+    expect(out.pop()).toContain('reconciliation of db paused');
+    expect(await exec('reconcile', 'on', 'db')).toBe(0);
+    expect(api.patchCluster).toHaveBeenLastCalledWith('prod', 'db', {
+      metadata: { annotations: { [RECONCILIATION_LOOP_ANNOTATION]: null, 'firebird.cloudnative-firebird.io/reconciliationDisabled': null } },
+    });
+    expect(out.pop()).toBe('reconciliation of db resumed');
+    cluster = makeCluster({ suspended: true });
+    expect(await exec('reconcile', 'on', 'db')).toBe(0);
+    expect(out.pop()).toBe('the annotation is removed, but db stays paused by spec.suspended');
+    expect(await exec('reconcile', 'maybe', 'db')).toBe(2);
+    expect(await exec('reconcile', 'off', 'nope')).not.toBe(0);
+
+    const paused = { ...makeCluster(), metadata: { ...makeCluster().metadata, annotations: { [RECONCILIATION_LOOP_ANNOTATION]: 'disabled' } } };
+    expect(formatStatus(paused, pods, [], [], new Date())).toMatch(/^Paused: +Reconciliation disabled by the firebird\.cloudnative-firebird\.io\/reconciliationLoop annotation$/m);
+    expect(formatStatus(makeCluster(), pods, [], [], new Date())).not.toMatch(/^Paused:/m);
   });
 
   it('hibernates, restarts and re-seeds', async () => {

@@ -56,6 +56,8 @@ export const EventReason = {
   ImageCatalogUnresolved: 'ImageCatalogUnresolved',
   ManagedServiceConflict: 'ManagedServiceConflict',
   CustomQueriesInvalid: 'CustomQueriesInvalid',
+  ReconciliationPaused: 'ReconciliationPaused',
+  ReconciliationResumed: 'ReconciliationResumed',
   MajorUpgradeStarted: 'MajorUpgradeStarted',
   MajorUpgradeConverting: 'MajorUpgradeConverting',
   MajorUpgradeStarting: 'MajorUpgradeStarting',
