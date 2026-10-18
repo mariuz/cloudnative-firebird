@@ -3,7 +3,7 @@ import { buildArchiveFollowerContainer, replicaClusterFollowing } from './replic
 import { instanceAffinity, instanceTopologySpreadConstraints } from './scheduling';
 import { withSegmentTls } from './segment-tls-pods';
 import { withPrimaryLease } from './primary-lease';
-import { clusterPodSettings, inheritMetadata, withPodPullPolicy } from './pod-settings';
+import { clusterPodSettings, inheritMetadata, instanceEnvFrom, projectedVolume, projectedVolumeMount, PROJECTED_VOLUME, withPodPullPolicy } from './pod-settings';
 import { instanceProbes, smartShutdownLifecycle, terminationGracePeriod } from './lifecycle';
 import { ENTRYPOINT_INIT_DIR, INIT_SQL_VOLUME, initSqlVolume } from './init-sql';
 import { createHash } from 'crypto';
@@ -333,6 +333,8 @@ export function buildStatefulSet(
         },
       ],
       env,
+      // spec.envFrom: spec.env and the operator's variables take precedence (Kubernetes' order)
+      ...(instanceEnvFrom(cluster) ? { envFrom: instanceEnvFrom(cluster) } : {}),
       resources: spec.resources,
       volumeMounts: [
         {
@@ -352,6 +354,8 @@ export function buildStatefulSet(
           ? [{ name: INIT_SQL_VOLUME, mountPath: ENTRYPOINT_INIT_DIR, readOnly: true }]
           : []),
         ...(replication?.mainMounts ?? []),
+        // spec.projectedVolumeTemplate, read-only at /projected
+        ...(projectedVolumeMount(cluster) ? [projectedVolumeMount(cluster)!] : []),
       ],
       // ready only while the local server answers the service manager and the database is not
       // shut down, so a fenced instance leaves the Services (see utils/fencing.ts); timings,
@@ -388,6 +392,7 @@ export function buildStatefulSet(
     { name: PENDING_DROPS_VOLUME, configMap: { name: pendingDropsConfigMapName(name), optional: true } },
     ...bootstrapVolumes(cluster),
     ...(initSqlVolume(cluster) ? [initSqlVolume(cluster)!] : []),
+    ...(projectedVolume(cluster) ? [projectedVolume(cluster)!] : []),
     ...(usesConfigVolume
       ? [
           {
@@ -690,6 +695,18 @@ export function statefulSetNeedsUpdate(
   if (existingContainer.image !== desiredContainer.image) return true;
   if (JSON.stringify(existingContainer.resources) !== JSON.stringify(desiredContainer.resources)) return true;
   if (JSON.stringify(existingContainer.env) !== JSON.stringify(desiredContainer.env)) return true;
+  if (canonicalJson(existingContainer.envFrom ?? []) !== canonicalJson(desiredContainer.envFrom ?? [])) return true;
+  // spec.projectedVolumeTemplate: its sources (the API server defaults the mode when unset)
+  const projected = (spec: V1PodSpec) => spec.volumes?.find((v) => v.name === PROJECTED_VOLUME)?.projected;
+  const existingProjected = projected(existingPodSpec);
+  const desiredProjected = projected(desiredPodSpec);
+  if (!existingProjected !== !desiredProjected) return true;
+  if (existingProjected && desiredProjected) {
+    // what the spec sets must match: the API server adds defaults (a token's expirationSeconds,
+    // a field reference's apiVersion)
+    if (!setFieldsMatch(desiredProjected.sources ?? [], existingProjected.sources ?? [])) return true;
+    if (desiredProjected.defaultMode !== undefined && existingProjected.defaultMode !== desiredProjected.defaultMode) return true;
+  }
   // the API server defaults other probe fields, so the command and the fields the operator sets are compared
   if (
     JSON.stringify(existingContainer.readinessProbe?.exec?.command) !==
@@ -761,6 +778,23 @@ export function statefulSetPatchBody(existing: V1StatefulSet, desired: V1Statefu
     }
   }
   return { ...desired, spec: { ...desired.spec, template: { ...desired.spec.template, spec: pod as unknown as V1PodSpec } } };
+}
+
+/**
+ * Whether every field desired sets has that value in existing (which may have more, e.g. API
+ * server defaults); lists match element by element and in length
+ */
+export function setFieldsMatch(desired: unknown, existing: unknown): boolean {
+  if (Array.isArray(desired)) {
+    return Array.isArray(existing) && existing.length === desired.length && desired.every((d, i) => setFieldsMatch(d, existing[i]));
+  }
+  if (desired !== null && typeof desired === 'object') {
+    if (existing === null || typeof existing !== 'object' || Array.isArray(existing)) return false;
+    return Object.entries(desired as Record<string, unknown>).every(
+      ([k, v]) => v === undefined || setFieldsMatch(v, (existing as Record<string, unknown>)[k]),
+    );
+  }
+  return desired === existing;
 }
 
 /** JSON with object keys sorted at every level, to compare objects whatever their key order */

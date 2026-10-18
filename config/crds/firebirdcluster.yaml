@@ -838,6 +838,59 @@ spec:
                       valueFrom:
                         type: object
                         x-kubernetes-preserve-unknown-fields: true
+                envFrom:
+                  description: >-
+                    ConfigMaps and Secrets whose keys become environment variables of the Firebird
+                    container; env and the operator's own variables take precedence
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-validations:
+                      - rule: "has(self.configMapRef) != has(self.secretRef)"
+                        message: each envFrom entry needs exactly one of configMapRef and secretRef
+                    properties:
+                      configMapRef:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 253
+                            pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                          optional:
+                            type: boolean
+                      secretRef:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 253
+                            pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                          optional:
+                            type: boolean
+                      prefix:
+                        type: string
+                        pattern: '^[A-Za-z_][A-Za-z0-9_]*$'
+                projectedVolumeTemplate:
+                  description: >-
+                    A projected volume (Kubernetes ProjectedVolumeSource) mounted read-only at
+                    /projected in the Firebird container
+                  type: object
+                  required:
+                    - sources
+                  properties:
+                    defaultMode:
+                      type: integer
+                      minimum: 0
+                      maximum: 511
+                    sources:
+                      type: array
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
                 nodeSelector:
                   description: Node labels required for pod scheduling
                   type: object
