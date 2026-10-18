@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.112.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.112.1):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Pods gone mid-reconcile are skipped** *(v0.112.1)*
+  - A reconcile lists the instance pods first and changes some later: the replication lag annotation (after measuring every replica over the network), the read-routing labels, the in-place resize markers and the maintenance window's volume re-creation. A pod deleted in between (a rolling update or re-seed re-creating it) failed the whole reconcile with a 404 (seen in the kind CI); those changes now skip a pod that is gone, and the next reconcile sees its new pod. Other errors still fail the reconcile. A unit test reproduces the 404 on the lag annotation.
 - [x] **Custom metrics queries** *(v0.112.0; CloudNativePG's monitoring.customQueriesConfigMap, customQueriesSecret)*
   - SQL queries in CloudNativePG's format from ConfigMap and Secret keys, served by a `metrics-exporter` sidecar on every instance (port 9187, `isql` against the local server): GAUGE, COUNTER, LABEL and DISCARD columns, `primary` queries only where the database is not a replica, plus `firebird_up` and per-query error and duration metrics. The operator merges and validates the sources into a rendered Secret the sidecar reads on each scrape, so changed queries need no restart; missing sources and invalid queries are reported with a `CustomQueriesInvalid` event. The PodMonitor scrapes the sidecar.
   - Unit tests cover parsing, merging, rendering, the pod, the PodMonitor, the controller's Secret and events, and the exporter script against a stand-in `isql`; CRD cases for the references; the kind CI scrapes a cluster's sidecar, checks the event of a missing source, and changes a query without a restart.
