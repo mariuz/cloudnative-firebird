@@ -1,0 +1,15 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: queries
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  monitoring:
+    enablePodMonitor: true
+    customQueriesConfigMap:
+      - { name: firebird-queries, key: queries.yaml }
+    customQueriesSecret:
+      - { name: private-queries, key: queries.yaml }

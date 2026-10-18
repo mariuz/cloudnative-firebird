@@ -1,6 +1,16 @@
 import { initSqlRefs } from '../utils/init-sql';
 import { smartShutdownInProgress } from '../utils/lifecycle';
-import { inheritedMetadataMissing, missingInheritedMetadata, withInheritedMetadata } from '../utils/pod-settings';
+import { inheritMetadata, inheritedMetadataMissing, missingInheritedMetadata, withInheritedMetadata } from '../utils/pod-settings';
+import {
+  CUSTOM_QUERIES_ERRORS_ANNOTATION,
+  CUSTOM_QUERIES_KEY,
+  buildCustomQueriesSecret,
+  customQueriesEnabled,
+  customQueriesSecretName,
+  customQueryRefs,
+  mergeCustomQueries,
+  parseCustomQueries,
+} from '../utils/custom-queries';
 import { segmentTlsEnabled } from '../utils/segment-tls-pods';
 import { ensureSegmentTlsSecret, reconcileSegmentTlsPeers } from '../utils/segment-tls-client';
 import { nativeSidecarsSupported, segmentTlsDefault, segmentTlsRequired } from '../utils/segment-tls-default';
@@ -57,6 +67,7 @@ import {
   V1Pod,
   V1PodTemplateSpec,
   V1Service,
+  V1Secret,
   V1StatefulSet,
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
@@ -482,6 +493,7 @@ export class FirebirdClusterController {
       await this.reconcileDiagnosticsCronJob(cluster, primaryPod, log);
       await this.reconcilePodMonitor(cluster, log);
       await this.reconcileGrafanaDashboard(cluster, log);
+      await this.reconcileCustomQueries(cluster, log);
 
       if (cluster.spec.hibernated && image.upgrading) {
         const upgrading: Partial<FirebirdClusterStatus> = {
@@ -3393,6 +3405,83 @@ export class FirebirdClusterController {
       } catch {
         log.debug('Grafana Dashboard ConfigMap does not exist, skipping deletion');
       }
+    }
+  }
+
+  /**
+   * The custom metrics queries (monitoring.customQueriesConfigMap / customQueriesSecret): read from
+   * their sources on every reconcile, merged and validated into the rendered Secret the instances'
+   * metrics-exporter sidecars read on each scrape. A missing source or an invalid query is left out
+   * and reported with a Warning event when the problems change (the Secret's annotation keeps them).
+   */
+  private async reconcileCustomQueries(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    const namespace = cluster.metadata.namespace ?? 'default';
+    const secretName = customQueriesSecretName(cluster);
+    if (!customQueriesEnabled(cluster)) {
+      try {
+        await this.coreApi.readNamespacedSecret({ name: secretName, namespace });
+        log.info('Deleting the custom queries Secret (no custom queries)');
+        await this.coreApi.deleteNamespacedSecret({ name: secretName, namespace });
+      } catch {
+        log.debug('No custom queries Secret to delete');
+      }
+      return;
+    }
+    let existing: V1Secret | undefined;
+    try {
+      existing = await this.coreApi.readNamespacedSecret({ name: secretName, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+    const lists = [];
+    const errors: string[] = [];
+    for (const ref of customQueryRefs(cluster)) {
+      const source = `${ref.kind} ${ref.name} key ${ref.key}`;
+      let text: string | undefined;
+      try {
+        if (ref.kind === 'Secret') {
+          const secret = await this.coreApi.readNamespacedSecret({ name: ref.name, namespace });
+          const data = secret.data?.[ref.key];
+          text = data === undefined ? undefined : Buffer.from(data, 'base64').toString('utf8');
+        } else {
+          const configMap = await this.coreApi.readNamespacedConfigMap({ name: ref.name, namespace });
+          text = configMap.data?.[ref.key];
+        }
+      } catch (err) {
+        if (!isNotFound(err)) throw err;
+        errors.push(`${ref.kind} ${ref.name} does not exist`);
+        continue;
+      }
+      if (text === undefined) {
+        errors.push(`${ref.kind} ${ref.name} has no key ${ref.key}`);
+        continue;
+      }
+      const parsed = parseCustomQueries(text, source);
+      lists.push(parsed.queries);
+      errors.push(...parsed.errors);
+    }
+    const queries = mergeCustomQueries(lists);
+    const desired = buildCustomQueriesSecret(cluster, queries, errors, inheritMetadata(cluster, { labels: clusterLabels(cluster.metadata.name) }).labels ?? {});
+    const rendered = desired.stringData![CUSTOM_QUERIES_KEY];
+    const message = errors.join('; ');
+    const previous = existing?.metadata?.annotations?.[CUSTOM_QUERIES_ERRORS_ANNOTATION];
+    if (!existing) {
+      log.info({ queries: queries.length }, 'Creating the custom queries Secret');
+      await this.coreApi.createNamespacedSecret({ namespace, body: desired });
+    } else if (
+      Buffer.from(existing.data?.[CUSTOM_QUERIES_KEY] ?? '', 'base64').toString('utf8') !== rendered ||
+      previous !== message
+    ) {
+      log.info({ queries: queries.length }, 'Updating the custom queries Secret');
+      await this.coreApi.replaceNamespacedSecret({
+        name: secretName,
+        namespace,
+        body: { ...desired, metadata: { ...desired.metadata, resourceVersion: existing.metadata?.resourceVersion } },
+      });
+    }
+    if (message !== '' && message !== previous) {
+      log.warn({ errors }, 'Custom queries left out');
+      await this.event(cluster, 'Warning', EventReason.CustomQueriesInvalid, `custom queries left out: ${message}`);
     }
   }
 

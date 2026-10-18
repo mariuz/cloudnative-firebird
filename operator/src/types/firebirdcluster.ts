@@ -184,6 +184,13 @@ export interface MonitoringConfiguration {
   enableGrafanaDashboard?: boolean;
   /** Metrics exporter sidecar configuration */
   exporter?: ExporterConfiguration;
+  /**
+   * Custom metrics queries (CloudNativePG's format) in ConfigMap keys: the metrics-exporter sidecar
+   * of every instance runs them on each scrape (port 9187, /metrics; utils/custom-queries.ts)
+   */
+  customQueriesConfigMap?: Array<{ name: string; key: string }>;
+  /** The same in Secret keys (queries of the same name: the last source wins, Secrets after ConfigMaps) */
+  customQueriesSecret?: Array<{ name: string; key: string }>;
 }
 
 /**

@@ -8,6 +8,7 @@ import { instanceProbes, smartShutdownLifecycle, terminationGracePeriod } from '
 import { parseQuantity } from './storage';
 import { TEMP_VOLUME, tempDirectorySettings, tempVolume, tempVolumeMount } from './temp-volume';
 import { ENTRYPOINT_INIT_DIR, INIT_SQL_VOLUME, initSqlVolume } from './init-sql';
+import { buildMetricsExporterContainer, customQueriesEnabled, customQueriesVolume, METRICS_EXPORTER_PORT_NAME } from './custom-queries';
 import { createHash } from 'crypto';
 import {
   V1StatefulSet,
@@ -387,6 +388,16 @@ export function buildStatefulSet(
           },
         ]
       : []),
+    // monitoring.customQueriesConfigMap / customQueriesSecret (utils/custom-queries.ts)
+    ...(customQueriesEnabled(cluster)
+      ? [
+          buildMetricsExporterContainer(cluster, {
+            image,
+            databasePath: `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`,
+            credentials: superuserClientEnv(cluster),
+          })!,
+        ]
+      : []),
     ...(replication?.sidecars ?? [buildBackupFilesContainer(cluster, image)]),
     // a replica cluster following its source: the segments come from the source's journal archive
     ...(replication && replicaClusterFollowing(cluster) ? [buildArchiveFollowerContainer(cluster)] : []),
@@ -399,6 +410,7 @@ export function buildStatefulSet(
     ...(initSqlVolume(cluster) ? [initSqlVolume(cluster)!] : []),
     ...(projectedVolume(cluster) ? [projectedVolume(cluster)!] : []),
     ...(tempVolume(cluster) ? [tempVolume(cluster)!] : []),
+    ...(customQueriesVolume(cluster) ? [customQueriesVolume(cluster)!] : []),
     ...(usesConfigVolume
       ? [
           {
@@ -954,21 +966,27 @@ export function buildPodMonitor(cluster: FirebirdCluster): Record<string, unknow
   const labels = clusterLabels(name);
   const exporterEnabled = cluster.spec.monitoring?.exporter?.enabled;
 
-  const podMetricsEndpoints = exporterEnabled
-    ? [
-        {
-          port: 'metrics',
-          path: '/metrics',
-          interval: '30s',
-        },
-      ]
-    : [
-        {
-          port: 'firebird',
-          path: '/metrics',
-          interval: '30s',
-        },
-      ];
+  const podMetricsEndpoints = [
+    ...(exporterEnabled
+      ? [
+          {
+            port: 'metrics',
+            path: '/metrics',
+            interval: '30s',
+          },
+        ]
+      : customQueriesEnabled(cluster)
+        ? []
+        : [
+            {
+              port: 'firebird',
+              path: '/metrics',
+              interval: '30s',
+            },
+          ]),
+    // the custom queries' metrics exporter sidecar
+    ...(customQueriesEnabled(cluster) ? [{ port: METRICS_EXPORTER_PORT_NAME, path: '/metrics', interval: '30s' }] : []),
+  ];
 
   return {
     apiVersion: 'monitoring.coreos.com/v1',

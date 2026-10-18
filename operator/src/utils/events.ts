@@ -55,6 +55,7 @@ export const EventReason = {
   MaintenanceVolumeRecreation: 'MaintenanceVolumeRecreation',
   ImageCatalogUnresolved: 'ImageCatalogUnresolved',
   ManagedServiceConflict: 'ManagedServiceConflict',
+  CustomQueriesInvalid: 'CustomQueriesInvalid',
   MajorUpgradeStarted: 'MajorUpgradeStarted',
   MajorUpgradeConverting: 'MajorUpgradeConverting',
   MajorUpgradeStarting: 'MajorUpgradeStarting',
