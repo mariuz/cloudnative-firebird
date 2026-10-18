@@ -699,7 +699,10 @@ kubectl get firebirdcluster my-cluster -o jsonpath='{.status.switchover}'
 3. **Completed** once the target is ready and the old primary is ready as a new pod.
 
 Writes are unavailable from the start of step 1 until the target is promoted, about the Job's
-run time, without pod restarts. If the in-place promotion fails, the target stays a replica:
+run time, without pod restarts. The promotion's short full shutdown of the target's database is
+tried up to five times, three seconds apart, as a busy server can refuse it (since v0.110.0; the
+operator's event carries the server's messages if every attempt fails). If the in-place promotion
+fails, the target stays a replica:
 the operator then restarts it, and its init container promotes it offline in the same way,
 which is slower (a pod restart). If the Job fails (for example a replica does not catch up
 within five minutes) the old primary is brought back online and stays primary, unless the target

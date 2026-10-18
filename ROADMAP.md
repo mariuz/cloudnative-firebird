@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.109.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.110.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **In-place promotion retries its full shutdown** *(v0.110.0)*
+  - The in-place promotion (switchover, failover, synchronous standby) puts the target's database into a short full shutdown to write its header; a busy server sometimes refused it (seen in CI under load) and the promotion fell back to a restart. It is now tried up to five times, three seconds apart (`PROMOTE_SHUTDOWN_ATTEMPTS`, `PROMOTE_SHUTDOWN_PAUSE`), a database left in full shutdown despite an error counts as shut down, and the reply lists every attempt's message. Unit tests run the script's retry block against a stubbed service manager.
 - [x] **envFrom and projected volumes** *(v0.109.0; CloudNativePG's envFrom, projectedVolumeTemplate)*
   - `spec.envFrom` (ConfigMaps and Secrets as environment, with prefixes) and `spec.projectedVolumeTemplate` (read-only at `/projected`) on the Firebird container only; changes roll the instances. The StatefulSet update check compares the fields the spec sets, so the API server's defaults (a token's expiration, a field reference's version, the mode) do not roll them.
   - Unit tests cover the container and volume, the update check with server defaults, and validation; CRD CEL rules; the kind CI checks the variables, the files (read-only, not in the sidecars) and a rolled instance after a changed prefix.
