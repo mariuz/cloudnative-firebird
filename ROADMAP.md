@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.111.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.111.1):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Recovery Jobs stop a hung server** *(v0.111.1)*
+  - The point-in-time recovery Job (also bootstrapping replica clusters) stopped the Firebird server it replays the journal with by SIGTERM and waited for it; a Firebird 4 server sometimes never exited (seen in the kind CI), so the Job hung and the cluster was never created. The server now gets 30 seconds (`SERVER_STOP_TIMEOUT`) before SIGKILL. Unit tests run the script's stop function against a server ignoring SIGTERM.
 - [x] **Temporary space for sorts** *(v0.111.0; CloudNativePG's ephemeralVolumesSizeLimit, ephemeralVolumeSource)*
   - `ephemeralVolumesSizeLimit.temporaryData` (an emptyDir with a size limit) or `ephemeralVolumeSource` (a generic ephemeral volume) at `/firebird-temp` in the Firebird container, with `TempDirectories` pointing there unless `config.settings` sets it. The StatefulSet update check compares the volume with quantities by value (the API server writes them in canonical form).
   - Unit tests cover both kinds, the setting, the update check and validation (CEL rule for the mutual exclusion); the kind CI checks the mount, the server's TempDirectories and the bound ephemeral claim.

@@ -1367,7 +1367,9 @@ recovery point is within about a second of the target. Segments without points (
 v0.60.0, or by a primary of an older version) are applied whole, so the recovery point is then up
 to `replication.archiveTimeoutSeconds` (plus the archive delay) before the target. Transactions
 not committed by the recovery point are rolled back. `targetSegment` and the latest point apply
-whole segments. A target before
+whole segments. Once a replay is done the Job stops its Firebird server with SIGTERM and, when it
+has not exited within 30 seconds (`SERVER_STOP_TIMEOUT`), with SIGKILL (since v0.111.1: a Firebird 4
+server sometimes hung on SIGTERM there, and the Job with it). A target before
 the backup fails the restore. The Job pod needs room for the database twice (scratch database and
 its level-0 copy) plus the chain and the segments. Segments uploaded before v0.45.0 have no
 marker: their upload time stands in for the archive time, which only makes `targetTime` more
