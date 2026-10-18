@@ -306,6 +306,53 @@ spec:
                           type: array
                           items:
                             type: object
+                    customQueriesConfigMap:
+                      description: >-
+                        Custom metrics queries in CloudNativePG's format (a map of queries by name, each
+                        with query, primary and metrics) in ConfigMap keys. The metrics-exporter sidecar
+                        of every instance runs them on each scrape (port 9187, /metrics).
+                      type: array
+                      maxItems: 32
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - key
+                        properties:
+                          name:
+                            description: Name of the ConfigMap in the cluster's namespace
+                            type: string
+                            minLength: 1
+                            maxLength: 253
+                          key:
+                            description: Key of the ConfigMap holding the queries (YAML)
+                            type: string
+                            minLength: 1
+                            maxLength: 253
+                            pattern: '^[-._a-zA-Z0-9]+$'
+                    customQueriesSecret:
+                      description: >-
+                        The same in Secret keys. A query of the same name in a later source replaces an
+                        earlier one; Secrets come after ConfigMaps.
+                      type: array
+                      maxItems: 32
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - key
+                        properties:
+                          name:
+                            description: Name of the Secret in the cluster's namespace
+                            type: string
+                            minLength: 1
+                            maxLength: 253
+                          key:
+                            description: Key of the Secret holding the queries (YAML)
+                            type: string
+                            minLength: 1
+                            maxLength: 253
+                            pattern: '^[-._a-zA-Z0-9]+$'
                 tls:
                   description: >-
                     Encryption of client connections. Firebird has no TLS listener: connections are

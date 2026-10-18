@@ -1,0 +1,12 @@
+# expect: spec.monitoring.customQueriesSecret[0].name
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: queries
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  monitoring:
+    customQueriesSecret:
+      - { key: queries.yaml }

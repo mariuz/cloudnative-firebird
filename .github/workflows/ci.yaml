@@ -2335,6 +2335,87 @@ jobs:
           kubectl delete firebirdcluster tmpdir tmpclaim --wait=true --timeout=300s
           kubectl wait --for=delete pod/tmpdir-0 pod/tmpclaim-0 --timeout=300s || true
 
+      - name: Verify custom metrics queries
+        if: matrix.track.id == 'extended'
+        run: |
+          kubectl apply -f - <<'EOF'
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: fb-queries
+          data:
+            queries.yaml: |
+              attachments:
+                query: "SELECT TRIM(MON$USER) AS USERNAME, COUNT(*) AS TOTAL FROM MON$ATTACHMENTS GROUP BY 1"
+                metrics:
+                  - username: { usage: LABEL, description: "User" }
+                  - total: { usage: GAUGE, description: "Attachments per user" }
+              database:
+                query: "SELECT MON$PAGE_SIZE AS PAGE_SIZE, MON$NEXT_TRANSACTION AS NEXT_TRANSACTION FROM MON$DATABASE"
+                primary: true
+                metrics:
+                  - page_size: { usage: GAUGE, description: "Page size" }
+                  - next_transaction: { usage: COUNTER, description: "Next transaction" }
+          ---
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: fb-private-queries
+          stringData:
+            q.yaml: |
+              broken:
+                query: "SELECT X AS A FROM NO_SUCH_TABLE"
+                metrics: [ { a: { usage: GAUGE } } ]
+          ---
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: metrics
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            monitoring:
+              customQueriesConfigMap:
+                - { name: fb-queries, key: queries.yaml }
+                - { name: missing-queries, key: queries.yaml }
+              customQueriesSecret:
+                - { name: fb-private-queries, key: q.yaml }
+          EOF
+          timeout 300 bash -c 'until kubectl get pod metrics-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/metrics-0 --for=condition=Ready --timeout=600s
+          scrape() { kubectl get --raw /api/v1/namespaces/default/pods/metrics-0:9187/proxy/metrics; }
+          # the rendered Secret reaches the pod's volume within the kubelet's sync period
+          timeout 180 bash -c 'until kubectl get --raw /api/v1/namespaces/default/pods/metrics-0:9187/proxy/metrics 2>/dev/null | grep -q "^firebird_attachments_total"; do sleep 5; done' \
+            || { scrape || true; kubectl logs metrics-0 -c metrics-exporter --tail=30; kubectl get secret metrics-custom-queries -o yaml; exit 1; }
+          scrape | tee /tmp/metrics.txt | grep -v '^#'
+          grep -qx 'firebird_up 1' /tmp/metrics.txt
+          # the exporter's own attachment is one of them
+          grep -Eq '^firebird_attachments_total\{username="SYSDBA"\} [1-9][0-9]*$' /tmp/metrics.txt
+          grep -q '^# TYPE firebird_attachments_total gauge$' /tmp/metrics.txt
+          # primary-only: this instance is not a replica
+          grep -Eq '^firebird_database_page_size [0-9]+$' /tmp/metrics.txt
+          grep -q '^# TYPE firebird_database_next_transaction counter$' /tmp/metrics.txt
+          grep -qx 'firebird_exporter_query_error{query="broken"} 1' /tmp/metrics.txt
+          grep -qx 'firebird_exporter_query_error{query="attachments"} 0' /tmp/metrics.txt
+          kubectl logs metrics-0 -c metrics-exporter | grep 'query broken:'
+          # the missing source is reported
+          kubectl get events --field-selector involvedObject.name=metrics,reason=CustomQueriesInvalid -o jsonpath='{.items[*].message}' | tee /dev/stderr | grep -q 'ConfigMap missing-queries does not exist'
+          # a changed query applies without restarting the instance
+          uid=$(kubectl get pod metrics-0 -o jsonpath={.metadata.uid})
+          kubectl patch configmap fb-queries --type merge -p '{"data":{"queries.yaml":"sweep:\n  query: \"SELECT MON$SWEEP_INTERVAL AS EVERY FROM MON$DATABASE\"\n  metrics:\n    - every: { usage: GAUGE, description: \"Sweep interval\" }\n"}}'
+          timeout 240 bash -c 'until kubectl get --raw /api/v1/namespaces/default/pods/metrics-0:9187/proxy/metrics 2>/dev/null | grep -Eq "^firebird_sweep_every [0-9]+$"; do sleep 5; done' \
+            || { scrape || true; kubectl get secret metrics-custom-queries -o jsonpath='{.data.queries}' | base64 -d; exit 1; }
+          if scrape | grep -q '^firebird_attachments_total'; then echo 'the removed query still runs'; exit 1; fi
+          [ "$(kubectl get pod metrics-0 -o jsonpath={.metadata.uid})" = "$uid" ]
+          [ "$(kubectl get pod metrics-0 -o jsonpath='{.status.containerStatuses[?(@.name=="metrics-exporter")].restartCount}')" = 0 ]
+          kubectl delete firebirdcluster metrics --wait=true --timeout=300s
+          kubectl wait --for=delete pod/metrics-0 --timeout=300s || true
+          # the rendered Secret goes with the cluster (owner reference)
+          timeout 120 bash -c 'until ! kubectl get secret metrics-custom-queries >/dev/null 2>&1; do sleep 3; done'
+          kubectl delete configmap fb-queries
+          kubectl delete secret fb-private-queries
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |

@@ -150,7 +150,8 @@ rules:
       - update
       - patch
       - delete
-  # Secrets (superuser password; segment TLS certificates, <cluster>-segment-tls)
+  # Secrets (superuser password; segment TLS certificates, <cluster>-segment-tls; the rendered
+  # custom metrics queries, <cluster>-custom-queries, deleted when the queries are removed)
   - apiGroups:
       - ""
     resources:
@@ -161,6 +162,7 @@ rules:
       - watch
       - create
       - update
+      - delete
   # Events
   - apiGroups:
       - ""

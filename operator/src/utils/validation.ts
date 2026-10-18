@@ -1,4 +1,5 @@
 import { tempVolumeErrors } from './temp-volume';
+import { customQueriesErrors } from './custom-queries';
 import { extraConfigErrors } from './pod-settings';
 import { initSqlRefsErrors } from './init-sql';
 import { lifecycleErrors } from './lifecycle';
@@ -91,7 +92,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
   }
 
   validatePodSettings(spec);
-  const lifecycle = [...lifecycleErrors(spec), ...initSqlRefsErrors(cluster), ...extraConfigErrors(spec), ...tempVolumeErrors(spec)];
+  const lifecycle = [...lifecycleErrors(spec), ...initSqlRefsErrors(cluster), ...extraConfigErrors(spec), ...tempVolumeErrors(spec), ...customQueriesErrors(spec)];
   if (lifecycle.length > 0) throw new ValidationError(lifecycle.join('; '));
 
   if (

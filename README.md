@@ -673,6 +673,51 @@ generated Grafana dashboard has ready-instance and replication-lag panels. For e
   for: 5m
 ```
 
+### Custom Metrics Queries
+
+`monitoring.customQueriesConfigMap` and `monitoring.customQueriesSecret` (CloudNativePG's fields
+and query format, since v0.112.0) list ConfigMap and Secret keys holding SQL queries as YAML. Every
+instance then runs a `metrics-exporter` sidecar (the Firebird image, `isql` against the local
+server) serving them on port 9187 (`custom-metrics`, `/metrics`):
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: firebird-queries
+data:
+  queries.yaml: |
+    attachments:
+      query: "SELECT TRIM(MON$USER) AS USERNAME, COUNT(*) AS TOTAL FROM MON$ATTACHMENTS GROUP BY 1"
+      metrics:
+        - username: { usage: LABEL, description: "User" }
+        - total: { usage: GAUGE, description: "Attachments per user" }
+    database:
+      query: "SELECT MON$NEXT_TRANSACTION AS NEXT_TRANSACTION FROM MON$DATABASE"
+      primary: true
+      metrics:
+        - next_transaction: { usage: COUNTER, description: "Next transaction" }
+---
+# in the FirebirdCluster
+spec:
+  monitoring:
+    enablePodMonitor: true
+    customQueriesConfigMap:
+      - { name: firebird-queries, key: queries.yaml }
+```
+
+gives `firebird_attachments_total{username="SYSDBA"} 2` and `firebird_database_next_transaction`.
+Each column is a `GAUGE`, `COUNTER`, `LABEL` (a label of the row's metrics) or `DISCARD`. Queries
+with `primary: true` run only where the database is not a replica. A query of the same name in a
+later source replaces an earlier one (Secrets after ConfigMaps). The operator re-reads the sources
+on every reconcile and renders them into the `<cluster>-custom-queries` Secret, which the sidecar
+reads on each scrape: changed queries apply within a minute or two, without restarting anything.
+A missing source or an invalid query is left out and reported with a `CustomQueriesInvalid`
+event. Besides the queries' metrics, the sidecar serves `firebird_up` and, per query,
+`firebird_exporter_query_error` and `firebird_exporter_query_duration_seconds`; a failing query's
+error is in the sidecar's log. With `enablePodMonitor`, the PodMonitor scrapes the `custom-metrics`
+port.
+
 ### Planned Switchover
 
 Promote a replica with the `targetPrimary` annotation (CloudNativePG's `kubectl cnpg promote`):
