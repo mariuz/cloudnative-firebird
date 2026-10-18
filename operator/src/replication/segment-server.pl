@@ -529,6 +529,10 @@ sub nbackup_here {
 # has the database closed then, so its header can be written. Until the promotion is complete the
 # replica control file is kept and any failure restores the replica, so the operator can still
 # promote it offline instead.
+# Attempts at the in-place promotion's full shutdown, and the seconds between them
+my $promote_shutdown_attempts = ($ENV{PROMOTE_SHUTDOWN_ATTEMPTS} // '') =~ /^[1-9]\d*$/ ? $ENV{PROMOTE_SHUTDOWN_ATTEMPTS} : 5;
+my $promote_shutdown_pause = ($ENV{PROMOTE_SHUTDOWN_PAUSE} // '') =~ /^\d+$/ ? $ENV{PROMOTE_SHUTDOWN_PAUSE} : 3;
+
 sub promote_here {
   my ($client, $archived) = @_;
   # the service manager's own message goes into the reply (the operator's event) when it fails
@@ -573,8 +577,18 @@ sub promote_here {
       $lineage = "$seq $archived";
       $seq = $archived;
     }
-    $fb->('prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') or die 'full shutdown failed' . ($fb_out ne '' ? ": $fb_out" : '') . "\n";
-    $shut = 1;
+    # the full shutdown can fail while the server is busy (seen under load): it is tried a few
+    # times before the operator falls back to the offline promotion (a restart)
+    my @failures;
+    for my $attempt (1 .. $promote_shutdown_attempts) {
+      if ($fb->('prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0')) { $shut = 1; last }
+      push @failures, $fb_out ne '' ? $fb_out : 'no message';
+      # a shutdown that went through despite the error
+      if ((database_state() // '') eq 'shutdown') { $shut = 1; last }
+      print "full shutdown attempt $attempt of $promote_shutdown_attempts failed: $failures[-1]\n";
+      sleep $promote_shutdown_pause if $attempt < $promote_shutdown_attempts;
+    }
+    $shut or die 'full shutdown failed after ' . scalar(@failures) . ' attempts: ' . join('; ', @failures) . "\n";
     system('perl', "$ENV{SCRIPT_DIR}/set-repl-seq.pl", $database, $seq) == 0 or die "cannot set the replication sequence\n";
     # the replica's journal and archive (the new journal starts empty) and the offline bootstrap
     # seed new replicas can start from, taken while nothing has the database open
