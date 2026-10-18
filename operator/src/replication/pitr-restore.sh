@@ -263,6 +263,18 @@ echo "ALTER DATABASE DISABLE PUBLICATION; COMMIT;" | "$FB/isql" -q -user SYSDBA 
 "$FB/gfix" -user SYSDBA -replica read_only "$DB"
 printf '%s\n' 'database' '{' '}' "database = $DB" '{' "    journal_source_directory = $SRC" \
   '    apply_idle_timeout = 1' '    verbose_logging = true' '}' > "$W/fb/replication.conf"
+# stops the server started for a replay: SIGTERM, then SIGKILL when it has not exited within
+# SERVER_STOP_TIMEOUT seconds (a Firebird 4 server can hang on SIGTERM once the journal is applied;
+# the replayed changes are on disk by then, the database is closed by a kill as by a crash)
+stop_server() { # <pid>
+  kill "$1" 2>/dev/null || true
+  ( sleep "${SERVER_STOP_TIMEOUT:-30}"; kill -9 "$1" ) >/dev/null 2>&1 &
+  watchdog=$!
+  rc=0
+  wait "$1" || rc=$?
+  kill "$watchdog" 2>/dev/null || true
+  if [ "$rc" -eq 137 ]; then echo "the Firebird server did not stop within ${SERVER_STOP_TIMEOUT:-30}s of SIGTERM: killed"; fi
+}
 replay() { # <last segment>: replays the segments in $SRC up to it, then stops the server
   "$FB/firebird" &
   server=$!
@@ -278,8 +290,7 @@ replay() { # <last segment>: replays the segments in $SRC up to it, then stops t
     sleep 2
   done
   grep -E 'is (replayed|replicated)' "$W/fb/replication.log" || true
-  kill "$server"
-  wait "$server" || true
+  stop_server "$server"
 }
 if [ "$L1" -gt "$S" ]; then replay "$L1"; fi
 while read -r p u end; do
