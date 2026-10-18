@@ -962,8 +962,10 @@ jobs:
               kubectl logs "$old" -c segment-server 2>/dev/null | tee /tmp/cut-off-primary.log | grep 'neither the operator nor any replica has reached this primary'; then
               self_fenced=yes
             fi
-            kubectl get firebirdcluster repl -o jsonpath='{.status.switchover.kind} {.status.switchover.phase}' | grep -q 'failover Completed' &&
-              [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})" != "$last_failover" ] && break
+            # kind, phase and start time in one read: read apart, the previous failover's "Completed"
+            # and the start time of the one just begun pass together while it is still electing
+            state=$(kubectl get firebirdcluster repl -o jsonpath='{.status.switchover.kind} {.status.switchover.phase} {.status.switchover.startTime}')
+            case "$state" in "failover Completed $last_failover") ;; "failover Completed "?*) break ;; esac
             sleep 5
           done
           kubectl get firebirdcluster repl -o jsonpath='{.status.switchover.kind} {.status.switchover.phase}' | grep -q 'failover Completed' \
@@ -1119,8 +1121,10 @@ jobs:
               fenced=yes
               kubectl logs "$primary" -c segment-server > /tmp/lease-segment-server.log 2>/dev/null || true
             fi
-            kubectl get firebirdcluster repl -o jsonpath='{.status.switchover.kind} {.status.switchover.phase}' | grep -q 'failover Completed' &&
-              [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})" != "$last_failover" ] && break
+            # kind, phase and start time in one read: read apart, the previous failover's "Completed"
+            # and the start time of the one just begun pass together while it is still electing
+            state=$(kubectl get firebirdcluster repl -o jsonpath='{.status.switchover.kind} {.status.switchover.phase} {.status.switchover.startTime}')
+            case "$state" in "failover Completed $last_failover") ;; "failover Completed "?*) break ;; esac
             sleep 5
           done
           kubectl get firebirdcluster repl -o jsonpath='{.status.switchover.kind} {.status.switchover.phase}' | grep -q 'failover Completed' \
