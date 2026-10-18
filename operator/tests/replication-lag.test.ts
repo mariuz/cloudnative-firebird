@@ -303,12 +303,13 @@ describe('replication lag reconciliation', () => {
     status: { phase: 'Running', conditions: [{ type: 'Ready', status: 'True' }] },
   });
 
-  function setup(pods: V1Pod[], replies: Record<string, string[] | Error>) {
+  function setup(pods: V1Pod[], replies: Record<string, string[] | Error>, overrides: Record<string, Mock> = {}) {
     const notFound = Object.assign(new Error('Not Found'), { code: 404 });
     const api: Record<string, Mock> = {
       listNamespacedPod: vi.fn().mockResolvedValue({ items: pods }),
       readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: 'db-0' } }),
       readNamespacedConfigMap: vi.fn().mockResolvedValue({ data: {} }),
+      ...overrides,
     };
     const calls: Record<string, Mock> = {};
     const fn = (m: string): Mock =>
@@ -401,6 +402,21 @@ describe('replication lag reconciliation', () => {
     const patch = s.fn('patchNamespacedPod').mock.calls.find((c) => c[0].body?.metadata?.annotations);
     expect(patch?.[0]).toMatchObject({ name: 'db-1', body: { metadata: { annotations: { [REPLICATION_LAG_ANNOTATION]: null } } } });
     expect(s.status().replicationStatus.replicas).toEqual([{ name: 'db-1', error: 'connect ECONNREFUSED' }]);
+  });
+
+  it('skips a replica deleted while it was measured (re-created by a restart), but not other errors', async () => {
+    const replies = { 'db-0 ARCHIVED': ['20 5'], 'db-1 POSITION': ['OK 20 0 0'] };
+    // the pod was listed, then deleted before its annotation was written: every pod patch is a 404
+    const gone = vi.fn().mockRejectedValue(Object.assign(new Error('pods "db-1" not found'), { code: 404 }));
+    const s = setup([pod('db-0'), pod('db-1', { [REPLICATION_LAG_ANNOTATION]: '7' })], replies, { patchNamespacedPod: gone });
+    await s.controller.reconcile({ ...cluster, spec: { ...cluster.spec, instances: 2 } });
+    expect(gone.mock.calls.some((c) => c[0].name === 'db-1' && c[0].body?.metadata?.annotations)).toBe(true);
+    expect(s.fn('createNamespacedEvent').mock.calls.some((c) => c[0].body.reason === 'ReconcileFailed')).toBe(false);
+    expect(s.status().replicationStatus.replicas).toMatchObject([{ name: 'db-1', appliedSequence: 20 }]);
+
+    const forbidden = vi.fn().mockRejectedValue(Object.assign(new Error('forbidden'), { code: 403 }));
+    const t = setup([pod('db-0'), pod('db-1', { [REPLICATION_LAG_ANNOTATION]: '7' })], replies, { patchNamespacedPod: forbidden });
+    await expect(t.controller.reconcile({ ...cluster, spec: { ...cluster.spec, instances: 2 } })).rejects.toThrow('forbidden');
   });
 
   it('does not patch an unchanged annotation, and skips measuring without replicas', async () => {

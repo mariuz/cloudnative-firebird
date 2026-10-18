@@ -1932,7 +1932,7 @@ export class FirebirdClusterController {
       const patch = podRoutingLabelPatch(pod, decision);
       if (patch.length === 0) continue;
       log.info({ pod: decision.name, role: decision.role, readRoutable: decision.readRoutable }, 'Updating pod routing labels');
-      await this.coreApi.patchNamespacedPod({ name: decision.name, namespace, body: patch });
+      await this.ifPodExists(this.coreApi.patchNamespacedPod({ name: decision.name, namespace, body: patch }), decision.name, log);
     }
     if (!routed) return undefined;
 
@@ -2470,9 +2470,10 @@ export class FirebirdClusterController {
       const resizes = source ? inPlaceResize(source, target) : undefined;
       if (!resizes) continue;
       const setMetadata = (labels: Record<string, string | null>, annotations: Record<string, string | null>) =>
-        this.coreApi.patchNamespacedPod(
-          { name: podName, namespace, body: { metadata: { labels, annotations } } },
-          MERGE_PATCH,
+        this.ifPodExists(
+          this.coreApi.patchNamespacedPod({ name: podName, namespace, body: { metadata: { labels, annotations } } }, MERGE_PATCH),
+          podName,
+          log,
         );
       const [requested, since] = marker.split(' ');
       if (requested === revision) {
@@ -2500,12 +2501,28 @@ export class FirebirdClusterController {
         await setMetadata({}, { [RESIZE_ANNOTATION]: `failed ${revision}` });
         continue;
       }
-      await setMetadata({}, { [RESIZE_ANNOTATION]: `${revision} ${Date.now()}` });
+      if (!(await setMetadata({}, { [RESIZE_ANNOTATION]: `${revision} ${Date.now()}` }))) continue;
       log.info({ pod: podName, revision, containers: resizes.map((r) => r.name) }, 'Rolling update: resizing in place');
       await this.event(cluster, 'Normal', EventReason.RollingUpdate, `resizing ${podName} in place (${resizes.map((r) => r.name).join(', ')})`);
       handled.add(podName);
     }
     return handled;
+  }
+
+  /**
+   * A change to an instance pod listed earlier in the reconcile: false when the pod is gone by now
+   * (deleted or being re-created, e.g. by a rolling update or a re-seed), which is not an error;
+   * the next reconcile sees its new pod.
+   */
+  private async ifPodExists(change: Promise<unknown>, pod: string, log: Logger): Promise<boolean> {
+    try {
+      await change;
+      return true;
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+      log.debug({ pod }, 'Pod gone before its change; skipped');
+      return false;
+    }
   }
 
   /** The SYSDBA password, which is also the segment servers' token */
@@ -2588,9 +2605,14 @@ export class FirebirdClusterController {
       replicas.push(entry);
       const annotation = entry.lagSeconds === undefined ? null : String(entry.lagSeconds);
       if ((pod.metadata?.annotations?.[REPLICATION_LAG_ANNOTATION] ?? null) !== annotation) {
-        await this.coreApi.patchNamespacedPod(
-          { name: podName, namespace, body: { metadata: { annotations: { [REPLICATION_LAG_ANNOTATION]: annotation } } } },
-          MERGE_PATCH,
+        // measuring takes a while: a replica restarted meanwhile is gone (its new pod has no annotation)
+        await this.ifPodExists(
+          this.coreApi.patchNamespacedPod(
+            { name: podName, namespace, body: { metadata: { annotations: { [REPLICATION_LAG_ANNOTATION]: annotation } } } },
+            MERGE_PATCH,
+          ),
+          podName,
+          log,
         );
       }
     }
@@ -2785,10 +2807,15 @@ export class FirebirdClusterController {
     const pods = instancePods((await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items, name);
     for (const pod of maintenanceVolumeRecreations(cluster, primaryPod, pods, new Date())) {
       log.info({ pod }, 'Replica unschedulable during the maintenance window: re-creating its volume');
-      await this.coreApi.patchNamespacedPod(
-        { name: pod, namespace, body: { metadata: { annotations: { [RESEED_ANNOTATION]: RESEED_VOLUME } } } },
-        MERGE_PATCH,
-      );
+      if (
+        !(await this.ifPodExists(
+          this.coreApi.patchNamespacedPod({ name: pod, namespace, body: { metadata: { annotations: { [RESEED_ANNOTATION]: RESEED_VOLUME } } } }, MERGE_PATCH),
+          pod,
+          log,
+        ))
+      ) {
+        continue;
+      }
       await this.event(
         cluster,
         'Normal',
