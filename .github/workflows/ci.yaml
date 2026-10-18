@@ -869,10 +869,26 @@ jobs:
             for n in $(seq 1 36); do [ "$(count "$1")" = "$2" ] && return 0; sleep 5; done
             echo "$1 has $(count "$1") rows, expected $2"; return 1
           }
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"replication":{"failover":{"enabled":true,"delaySeconds":20}}}}'
+          # enabling failover changes the pod template (isolation check): wait for the rolling update
+          # it starts to finish, or a later step of it restarts the elected primary under this step
+          timeout 120 bash -c 'until kubectl get statefulset repl -o json | grep -q ISOLATION_TIMEOUT_SECONDS &&
+            [ "$(kubectl get statefulset repl -o jsonpath={.status.observedGeneration})" = "$(kubectl get statefulset repl -o jsonpath={.metadata.generation})" ]; do sleep 3; done'
+          rev=$(kubectl get statefulset repl -o jsonpath={.status.updateRevision})
+          SEL=firebird.cloudnative-firebird.io/cluster=repl,app.kubernetes.io/component=database
+          updated() {
+            kubectl get pods -l "$SEL" \
+              -o jsonpath='{range .items[*]}{.metadata.labels.controller-revision-hash} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+              | grep -c "^$rev True$"
+          }
+          for n in $(seq 1 120); do
+            [ "$(updated)" = 3 ] && [ -z "$(kubectl get firebirdcluster repl -o jsonpath={.status.rollingUpdate})" ] && break
+            sleep 5
+          done
+          [ "$(updated)" = 3 ] || { kubectl get pods -l "$SEL" -L controller-revision-hash; kubectl get firebirdcluster repl -o jsonpath='{.status.rollingUpdate}'; exit 1; }
+          echo "instances at $rev"
           old=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
           before=$(count "$old")
-          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"replication":{"failover":{"enabled":true,"delaySeconds":20}}}}'
-          sleep 10
           # the primary's database stops answering (not fenced): its pod stays up but not ready
           kubectl exec "$old" -c firebird -- bash -c \
             "fbsvcmgr localhost:service_mgr action_properties dbname $DB prp_shutdown_mode prp_sm_full prp_force_shutdown 0"
