@@ -2,10 +2,12 @@ name: Release
 
 # Publishes the operator image, ghcr.io/mariuz/cloudnative-firebird (linux/amd64 and arm64), once
 # CI passed on a push to main: :latest and :sha-<commit> every time, and :<version> plus the git
-# tag v<version> when the operator's version (PLUGIN_VERSION in operator/src/plugin/cli.ts, the
-# tag config/deploy/deployment.yaml deploys; hack/release/version.sh) has no tag yet. A version is
-# never built twice: bump it to publish a new one. Pull requests only build the image. Run on
-# demand for a tag or main to publish its version again (a failed push), latest included.
+# tag v<version> and a GitHub Release with the install manifest (hack/release/bundle.sh) when the
+# operator's version (PLUGIN_VERSION in operator/src/plugin/cli.ts, the tag
+# config/deploy/deployment.yaml deploys; hack/release/version.sh) has no tag yet. A version is
+# never built twice: bump it to publish a new one. Pull requests only build the image and the
+# manifest. Run on demand for a tag or main to publish its version again (a failed push), latest
+# and the Release's manifest included.
 on:
   workflow_run:
     workflows: ["CI"]
@@ -15,7 +17,8 @@ on:
     branches: ["main"]
     paths:
       - "operator/**"
-      - "config/deploy/deployment.yaml"
+      - "config/crds/**"
+      - "config/deploy/**"
       - "hack/release/**"
       - ".github/workflows/release.yaml"
   workflow_dispatch:
@@ -120,17 +123,51 @@ jobs:
           git tag -a "v$VERSION" -m "cloudnative-firebird v$VERSION"
           git push origin "refs/tags/v$VERSION"
 
+      - name: Install manifest
+        id: bundle
+        run: echo "file=$(hack/release/bundle.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Release v${{ steps.version.outputs.version }}
+        if: steps.version.outputs.version_tag == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          FILE: ${{ steps.bundle.outputs.file }}
+        run: |
+          # the versioned manifest, and the same under a fixed name for releases/latest/download
+          cp "$FILE" cloudnative-firebird.yaml
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release upload "v$VERSION" "$FILE" cloudnative-firebird.yaml --clobber
+          else
+            gh release create "v$VERSION" "$FILE" cloudnative-firebird.yaml --title "v$VERSION" --notes "$(cat <<NOTES
+          Operator image: \`$IMAGE:$VERSION\` (linux/amd64, linux/arm64).
+
+          Install or upgrade (the CRDs and the operator):
+
+          \`\`\`bash
+          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/v$VERSION/$FILE
+          \`\`\`
+
+          What changed: [ROADMAP.md](https://github.com/${{ github.repository }}/blob/v$VERSION/ROADMAP.md), upgrading: [README](https://github.com/${{ github.repository }}/blob/v$VERSION/README.md#upgrading-the-operator).
+          NOTES
+          )"
+          fi
+
       - name: Summary
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
           PUBLISH: ${{ steps.version.outputs.publish }}
           GIT_TAG: ${{ steps.version.outputs.git_tag }}
+          VERSION_TAG: ${{ steps.version.outputs.version_tag }}
           VERSION: ${{ steps.version.outputs.version }}
+          FILE: ${{ steps.bundle.outputs.file }}
         run: |
           {
             if [ "$PUBLISH" = true ]; then echo "Published:"; else echo "Built (not published):"; fi
             echo
             echo "$TAGS" | sed 's/^/- `/; s/$/`/'
+            echo "- \`$FILE\` ($(wc -c < "$FILE") bytes)"
             [ "$GIT_TAG" = true ] && echo && echo "Tagged \`v$VERSION\`."
+            [ "$VERSION_TAG" = true ] && echo && echo "Release v$VERSION: https://github.com/${{ github.repository }}/releases/tag/v$VERSION"
             true
           } >> "$GITHUB_STEP_SUMMARY"

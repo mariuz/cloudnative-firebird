@@ -135,6 +135,24 @@ replayed onto a database in the new ODS. The kind CI upgrades a replicated clust
 failover from Firebird 5 to the 6 snapshot and checks the data, a user, replication and the
 refusal to go back.
 
+### Install from a Release
+
+Every release carries one install manifest, like CloudNativePG's `cnpg-<version>.yaml`: the CRDs,
+the namespace `cloudnative-firebird-system`, the ServiceAccount and RBAC, the admission webhook
+and the operator Deployment pinned to the release's image. One apply installs or upgrades it all:
+
+```bash
+# the latest release
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
+# a release by version
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.116.0/cloudnative-firebird-0.116.0.yaml
+```
+
+The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
+PodMonitor stays out, it needs the Prometheus operator) and attached to the GitHub Release the
+Release workflow creates for each version (see Operator images below); the kind CI checks it
+applies as a whole. From a checkout, the same in two steps:
+
 ### Install the CRDs
 
 ```bash
@@ -191,7 +209,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.115.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>`. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test). |
+| `<version>` (e.g. `0.116.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -199,7 +217,7 @@ The git tag is created by the workflow, not by hand: a change to the operator bu
 (and the manifest's tag), and the merge to `main` publishes it. A version that is tagged already is
 not built again, so a push to `main` without a bump only moves `latest`. Pull requests build the
 image for both platforms without publishing it. Running the workflow on demand (for a tag, or
-`main`) publishes that version's image again, `latest` included. The image is pulled with
+`main`) publishes that version's image again, `latest` and the Release's manifest included. The image is pulled with
 `imagePullPolicy: IfNotPresent`; the kind CI builds `cloudnative-firebird:ci` from the checkout and
 substitutes it. The sidecars the operator runs from its own image (segment TLS, the primary Lease)
 use the image of the running operator, whatever tag it was deployed with.
