@@ -841,6 +841,19 @@ jobs:
           [ "$(remote)" -ge 1 ] || { kubectl logs swclient; exit 1; }
           start=$(date +%s)
           kubectl annotate firebirdcluster repl firebird.cloudnative-firebird.io/targetPrimary=repl-1
+          # while the Job waits for the client, the primary leaves the primary Service (role label
+          # "stopping"): a new client is refused, the attached one keeps its connection
+          for i in $(seq 1 30); do [ "$(kubectl get pod repl-0 -o jsonpath='{.metadata.labels.firebird\.cloudnative-firebird\.io/role}')" = "stopping" ] && break; sleep 1; done
+          kubectl get pod repl-0 -o jsonpath='{.metadata.labels.firebird\.cloudnative-firebird\.io/role}' | grep -qx stopping
+          kubectl get firebirdcluster repl -o jsonpath='{.status.switchover.message}' | grep -q 'new clients are refused; its clients have up to 30s to finish'
+          endpoints=$(kubectl get endpointslices -l kubernetes.io/service-name=repl -o jsonpath='{.items[*].endpoints[*].addresses[*]}')
+          echo "primary Service endpoints while stopping: '$endpoints'"
+          [ -z "$endpoints" ]
+          new_client=$(kubectl run swnew --image="$image" --restart=Never --rm -i --env=ISC_USER=SYSDBA --env=ISC_PASSWORD=masterkey --command -- \
+            sh -c "echo 'select 1 from rdb\$database;' | isql -q repl:$DB" 2>&1 || true)
+          echo "$new_client"
+          echo "$new_client" | grep -qi 'unable to complete network request'
+          [ "$(remote)" -ge 1 ] || { echo "the attached client was disconnected"; exit 1; }
           # the Job's log is read while it runs (the operator deletes the Job once the target is promoted)
           timeout 600 bash -c \
             'until [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.phase})" = "Completed" ]; do
@@ -861,6 +874,9 @@ jobs:
           kubectl delete pod swclient --wait=false
           kubectl patch firebirdcluster repl --type merge -p '{"spec":{"switchoverDelay":null}}'
           [ "$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})" = "repl-1" ]
+          # the primary Service routes to the new primary alone
+          [ "$(kubectl get endpointslices -l kubernetes.io/service-name=repl -o jsonpath='{.items[*].endpoints[*].targetRef.name}')" = "repl-1" ]
+          [ "$(kubectl get pod repl-0 -o jsonpath='{.metadata.labels.firebird\.cloudnative-firebird\.io/role}')" = "replica" ]
           # promoted in place: the target kept its pod (only the old primary restarted)
           [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.promotedInPlace})" = "true" ]
           [ "$(kubectl get pod repl-1 -o jsonpath={.metadata.uid})" = "$target_uid" ]

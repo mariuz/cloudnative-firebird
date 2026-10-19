@@ -88,7 +88,26 @@ describe('planned switchover', () => {
     await s.controller.reconcile({ ...makeCluster('db-1'), spec: { ...makeCluster().spec, switchoverDelay: 45 } });
     const job = s.created().find((j) => j.metadata?.name === 'db-switchover')!;
     expect(job.spec!.template.spec!.containers[0].env).toContainEqual({ name: 'SWITCHOVER_DELAY_SECONDS', value: '45' });
-    expect(s.status().switchover).toMatchObject({ phase: 'Stopping', message: 'stopping writes on the primary (its clients have up to 45s to finish)' });
+    expect(s.status().switchover).toMatchObject({ phase: 'Stopping', message: 'stopping writes on the primary (new clients are refused; its clients have up to 45s to finish)' });
+  });
+
+  it('takes the primary out of the primary Service while it is being stopped, back in if the switchover fails', async () => {
+    const labels = (s: ReturnType<typeof setup>, pod: string) =>
+      s.fn('patchNamespacedPod').mock.calls.filter((c) => c[0].name === pod).map((c) => c[0].body);
+    // starting: the same reconcile labels the primary "stopping" (the Service selects role=primary)
+    const s = setup();
+    await s.controller.reconcile({ ...makeCluster('db-1'), spec: { ...makeCluster().spec, switchoverDelay: 45 } });
+    expect(labels(s, 'db-0')).toEqual([[{ op: 'add', path: '/metadata/labels', value: { 'firebird.cloudnative-firebird.io/role': 'stopping', 'firebird.cloudnative-firebird.io/read-routable': 'false' } }]]);
+    expect(labels(s, 'db-1')[0][0].value['firebird.cloudnative-firebird.io/role']).toBe('replica');
+    // still stopping (the Job runs): stays out, and gets no read-only traffic either
+    const stopping = setup({ job: {}, stored: makeCluster('db-1', { switchover: { target: 'db-1', from: 'db-0', phase: 'Stopping' } }) });
+    await stopping.controller.reconcile(makeCluster('db-1', { switchover: { target: 'db-1', from: 'db-0', phase: 'Stopping' } }));
+    expect(labels(stopping, 'db-0')[0][0].value['firebird.cloudnative-firebird.io/role']).toBe('stopping');
+    // the Job failed: the old primary is back as the primary
+    const failed = setup({ job: done('Failed'), stored: makeCluster('db-1', { switchover: { target: 'db-1', from: 'db-0', phase: 'Stopping' } }) });
+    await failed.controller.reconcile(makeCluster('db-1', { switchover: { target: 'db-1', from: 'db-0', phase: 'Stopping' } }));
+    expect(failed.status().switchover.phase).toBe('Failed');
+    expect(labels(failed, 'db-0')[0][0].value['firebird.cloudnative-firebird.io/role']).toBe('primary');
   });
 
   it('does nothing when the target is already the primary', async () => {

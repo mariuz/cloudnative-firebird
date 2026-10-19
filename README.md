@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.116.0/cloudnative-firebird-0.116.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.117.0/cloudnative-firebird-0.117.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -209,7 +209,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.116.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test). |
+| `<version>` (e.g. `0.117.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -791,7 +791,9 @@ kubectl annotate firebirdcluster my-cluster firebird.cloudnative-firebird.io/tar
 kubectl get firebirdcluster my-cluster -o jsonpath='{.status.switchover}'
 ```
 
-1. **Stopping**: a Job puts the primary's database into full shutdown (no more writes; clients are
+1. **Stopping**: the primary leaves the primary Service (its role label becomes `stopping`, so new
+   clients are refused while open connections stay; it is `primary` again if the switchover
+   fails). A Job puts the primary's database into full shutdown (no more writes; clients are
    disconnected), reads its last replication sequence *S*, and waits until segment *S* is archived
    and every ready replica, the target included, has applied it (the segment servers report each
    replica's control file position with a `POSITION` query). It then promotes the target **in
@@ -813,10 +815,11 @@ open transactions are rolled back). `spec.switchoverDelay` (seconds, CloudNative
 `switchoverDelay`, since v0.114.0) gives them that long to finish first: the Job polls the
 primary's remote client attachments (`MON$ATTACHMENTS`, every 2 s, as the smart shutdown does; the
 operator's sidecars do not count) and stops writes as soon as none is attached, or after the
-delay, when the clients still attached are disconnected. Unlike CloudNativePG's smart shutdown,
-new attachments are not refused while it waits (Firebird's own shutdown timeouts do not wait for
-idle clients, so the Job waits itself); the primary Service still routes to the old primary until
-the target is promoted. The same applies to the switchovers a rolling update makes with
+delay, when the clients still attached are disconnected. New clients are refused meanwhile, as by
+CloudNativePG's smart shutdown: the primary has left the primary Service (since v0.117.0), while
+the connections already open stay until they end or the delay passes (Firebird's own shutdown
+timeouts do not wait for idle clients, so the Job waits itself). A client connecting to the primary
+pod by name, past the Service, is still admitted. The same applies to the switchovers a rolling update makes with
 `primaryUpdateMethod: switchover`. `status.switchover.message` and the Job's log say how long the
 clients have; automatic failover does not start while the switchover is in progress. The promotion's short full shutdown of the target's database is
 tried up to five times, three seconds apart, as a busy server can refuse it (since v0.110.0; the

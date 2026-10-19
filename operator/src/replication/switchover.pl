@@ -7,7 +7,8 @@
 #      smart shutdown does; the sidecars attach through localhost and do not count), then shuts
 #      the database down, disconnecting the clients still attached. The wait is the Job's own:
 #      Firebird's shutdown modes with a timeout do not wait for idle attachments (observed with
-#      Firebird 5 and 6). New attachments are not refused meanwhile.
+#      Firebird 5 and 6). New clients are refused meanwhile by the operator, which takes the
+#      primary out of the primary Service (its role label) while this Job runs.
 #   2. read its final replication sequence S from the header (through its segment server when the
 #      server refuses header statistics in full shutdown, as Firebird 6 does);
 #   3. wait until the target and every other ready replica has applied everything up to S
