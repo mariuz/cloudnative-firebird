@@ -2416,6 +2416,45 @@ jobs:
           kubectl delete configmap fb-queries
           kubectl delete secret fb-private-queries
 
+      - name: Verify pausing the reconciliation
+        if: matrix.track.id == 'extended'
+        run: |
+          (cd operator && npm run build >/dev/null)
+          chmod +x operator/dist/plugin/kubectl-firebird.js
+          mkdir -p /tmp/plugin-bin && ln -sf "$PWD/operator/dist/plugin/kubectl-firebird.js" /tmp/plugin-bin/kubectl-firebird
+          export PATH=/tmp/plugin-bin:$PATH
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: paused
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+          EOF
+          timeout 300 bash -c 'until kubectl get pod paused-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/paused-0 --for=condition=Ready --timeout=600s
+          timeout 120 bash -c 'until [ "$(kubectl get firebirdcluster paused -o jsonpath={.status.phase})" = Running ]; do sleep 3; done'
+          # paused with the annotation (kubectl firebird reconcile off): the phase, an event, the status line
+          kubectl firebird reconcile off paused
+          timeout 60 bash -c 'until [ "$(kubectl get firebirdcluster paused -o jsonpath={.status.phase})" = Paused ]; do sleep 2; done'
+          kubectl get events --field-selector involvedObject.name=paused,reason=ReconciliationPaused -o name | grep -q .
+          kubectl firebird status paused | tee /dev/stderr | grep -q '^Paused: .*reconciliationLoop annotation'
+          # a spec change is not applied while paused, across several resyncs
+          kubectl patch firebirdcluster paused --type merge -p '{"spec":{"env":[{"name":"PAUSE_TEST","value":"1"}]}}'
+          sleep 75
+          if kubectl get statefulset paused -o jsonpath='{.spec.template.spec.containers[0].env}' | grep -q PAUSE_TEST; then echo "a paused cluster was reconciled"; exit 1; fi
+          [ "$(kubectl get firebirdcluster paused -o jsonpath={.status.phase})" = Paused ]
+          [ "$(kubectl get events --field-selector involvedObject.name=paused,reason=ReconciliationPaused -o name | wc -l)" = 1 ]
+          # resumed: the change is applied
+          kubectl firebird reconcile on paused
+          timeout 180 bash -c 'until kubectl get statefulset paused -o jsonpath="{.spec.template.spec.containers[0].env}" | grep -q PAUSE_TEST; do sleep 3; done'
+          kubectl get events --field-selector involvedObject.name=paused,reason=ReconciliationResumed -o name | grep -q .
+          if kubectl firebird status paused | grep -q '^Paused:'; then echo "still reported paused"; exit 1; fi
+          kubectl delete firebirdcluster paused --wait=true --timeout=300s
+          kubectl wait --for=delete pod/paused-0 --timeout=300s || true
+
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
         run: |
