@@ -245,6 +245,27 @@ fences and unfences a replica, runs a load test, opens and closes a maintenance 
 restores one into a new file, reads the
 instances' logs, writes and checks a report, and destroys a replica (the volume re-creation step).
 
+### Web Administration with fbadmin
+
+[fbadmin](https://github.com/mariuz/fbadmin), a web UI for Firebird, has an example that runs it
+next to a cluster this operator manages: [`deploy/k8s-operator`](https://github.com/mariuz/fbadmin/tree/main/deploy/k8s-operator).
+It contains a `FirebirdCluster` (one Firebird 5 instance with a superuser Secret and the database
+`demo.fdb`) and an fbadmin Deployment. fbadmin registers the cluster's primary Service at startup
+from a ConfigMap, reading the password from the cluster's `superuserSecret`, so the database is
+ready to browse without typing anything into the UI. The replica Service (`<cluster>-replica`)
+can be registered as a second, read-only server.
+
+```bash
+# the operator, as in Deploy the Operator above, then from a checkout of fbadmin:
+kubectl apply -k deploy/k8s-operator
+kubectl -n fbadmin-demo wait pod/fbcluster-0 --for=condition=Ready --timeout=300s
+kubectl -n fbadmin-demo port-forward svc/fbadmin 5050:80   # http://127.0.0.1:5050
+```
+
+fbadmin's CI (`.github/workflows/k8s-operator.yml`) runs the example end to end on kind against
+this operator built at a pinned commit. The operator creates the cluster, and fbadmin connects,
+creates a table and reads it back.
+
 ## FirebirdCluster CRD Reference
 
 Invalid specs are rejected when they are applied: the CRDs carry OpenAPI constraints and CEL
