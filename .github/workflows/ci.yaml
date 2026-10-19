@@ -103,7 +103,7 @@ jobs:
           kubectl apply -f config/deploy/rbac.yaml
           kubectl apply -f config/deploy/webhook.yaml
           # Patch deployment to use the locally built image and avoid pulling from registry
-          sed 's|image: ghcr.io/mariuz/cloudnative-firebird:latest|image: cloudnative-firebird:ci|;s|imagePullPolicy: Always|imagePullPolicy: Never|' \
+          sed 's|image: ghcr.io/mariuz/cloudnative-firebird:.*|image: cloudnative-firebird:ci|;s|imagePullPolicy: IfNotPresent|imagePullPolicy: Never|' \
             config/deploy/deployment.yaml | kubectl apply -f -
           # a short resync: the waits below move on at the next reconcile
           kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system \

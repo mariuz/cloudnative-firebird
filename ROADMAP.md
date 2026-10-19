@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.114.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.115.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Operator image publishing** *(v0.115.0)*
+  - The Release workflow publishes `ghcr.io/mariuz/cloudnative-firebird` (`linux/amd64`, `linux/arm64`) once CI passed on a push to `main`: `latest` and `sha-<commit>` every time, and `<version>` with the git tag `v<version>` when the operator's version (`PLUGIN_VERSION`) has no tag yet, so a release needs no manual step beyond the version bump. `config/deploy/deployment.yaml` pins the version's image (`imagePullPolicy: IfNotPresent`) instead of `latest`, checked by `hack/release/version.sh` and a unit test; pull requests build both platforms without publishing. fbadmin's example can deploy a published tag instead of building the operator from a pinned commit.
 - [x] **Switchover delay** *(v0.114.0; CloudNativePG's switchoverDelay)*
   - `spec.switchoverDelay`: when a planned switchover stops the primary, its clients get that many seconds to finish: the switchover Job polls the primary's remote attachments (`MON$ATTACHMENTS`, as the smart shutdown does) and stops writes once none is attached or the delay passed, disconnecting the clients still attached (Firebird's shutdown timeouts do not wait for idle attachments, found with Firebird 5 and 6, so the Job waits itself; new attachments are not refused meanwhile). 0, the default, disconnects them at once, as before. `status.switchover.message` and the Job's log say how long the clients have and how many were waited for.
   - Unit tests cover validation, the Job's environment and status message, and `switchover.pl` against a stubbed service manager (the delay, and none); the kind CI switches over with a client attached and `switchoverDelay: 30`, checking the primary stopped after the delay.

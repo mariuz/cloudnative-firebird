@@ -37,8 +37,10 @@ spec:
         runAsGroup: 65532
       containers:
         - name: operator
-          image: ghcr.io/mariuz/cloudnative-firebird:latest
-          imagePullPolicy: Always
+          # the release image of this version (.github/workflows/release.yaml): a checkout deploys its
+          # own version, and an upgrade applies the new version's manifests (README, Upgrading the operator)
+          image: ghcr.io/mariuz/cloudnative-firebird:0.115.0
+          imagePullPolicy: IfNotPresent
           ports:
             # /healthz, /readyz and the Prometheus /metrics
             - name: http

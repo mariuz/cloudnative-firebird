@@ -151,6 +151,9 @@ kubectl apply -f config/deploy/webhook.yaml
 kubectl apply -f config/deploy/deployment.yaml
 ```
 
+The Deployment runs the operator image of the checked-out version,
+`ghcr.io/mariuz/cloudnative-firebird:<version>` (see Operator images below).
+
 The operator runs **two replicas** with leader election, like CloudNativePG's operator:
 - **The leader:** only the replica holding the Lease `cloudnative-firebird-operator` in the
   operator's namespace watches and reconciles. The metric `cloudnative_firebird_operator_leader`
@@ -179,6 +182,27 @@ v0.77.0, moved with `SEGMENT_TLS_MIGRATE`) and a Lease moved by the operator rat
 the primary (pinned since v0.87.0; set `failover.primaryLease.enabled: true` to move one, a
 rolling update, or `PRIMARY_LEASE_MIGRATE=pinned` on the operator to move them one at a time), and no pod anti-affinity among their instances (pinned since v0.90.0; set
 `podAntiAffinity.enabled: true` to add it, a rolling update).
+
+#### Operator images
+
+The operator image is published to `ghcr.io/mariuz/cloudnative-firebird` for `linux/amd64` and
+`linux/arm64` by the Release workflow (`.github/workflows/release.yaml`), once CI passed on a
+push to `main`:
+
+| Tag | What it is |
+|-----|------------|
+| `<version>` (e.g. `0.115.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>`. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test). |
+| `latest` | The current `main`, published on every push that passed CI. |
+| `sha-<commit>` | The build of one commit of `main`. |
+
+The git tag is created by the workflow, not by hand: a change to the operator bumps the version
+(and the manifest's tag), and the merge to `main` publishes it. A version that is tagged already is
+not built again, so a push to `main` without a bump only moves `latest`. Pull requests build the
+image for both platforms without publishing it. Running the workflow on demand (for a tag, or
+`main`) publishes that version's image again, `latest` included. The image is pulled with
+`imagePullPolicy: IfNotPresent`; the kind CI builds `cloudnative-firebird:ci` from the checkout and
+substitutes it. The sidecars the operator runs from its own image (segment TLS, the primary Lease)
+use the image of the running operator, whatever tag it was deployed with.
 
 ### Create a Firebird Cluster
 
@@ -263,8 +287,9 @@ kubectl -n fbadmin-demo port-forward svc/fbadmin 5050:80   # http://127.0.0.1:50
 ```
 
 fbadmin's CI (`.github/workflows/k8s-operator.yml`) runs the example end to end on kind against
-this operator built at a pinned commit. The operator creates the cluster, and fbadmin connects,
-creates a table and reads it back.
+this operator (built at a pinned commit; the published `ghcr.io/mariuz/cloudnative-firebird:<version>`
+images, see Operator images, can replace that build). The operator creates the cluster, and
+fbadmin connects, creates a table and reads it back.
 
 ## FirebirdCluster CRD Reference
 

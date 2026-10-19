@@ -1,0 +1,136 @@
+name: Release
+
+# Publishes the operator image, ghcr.io/mariuz/cloudnative-firebird (linux/amd64 and arm64), once
+# CI passed on a push to main: :latest and :sha-<commit> every time, and :<version> plus the git
+# tag v<version> when the operator's version (PLUGIN_VERSION in operator/src/plugin/cli.ts, the
+# tag config/deploy/deployment.yaml deploys; hack/release/version.sh) has no tag yet. A version is
+# never built twice: bump it to publish a new one. Pull requests only build the image. Run on
+# demand for a tag or main to publish its version again (a failed push), latest included.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "operator/**"
+      - "config/deploy/deployment.yaml"
+      - "hack/release/**"
+      - ".github/workflows/release.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/mariuz/cloudnative-firebird
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Operator image
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success')
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Version
+        id: version
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          version="$(hack/release/version.sh)"
+          publish=false; version_tag=false; git_tag=false
+          if [ "$EVENT" != pull_request ]; then
+            publish=true
+            if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null; then
+              if [ "$EVENT" = workflow_dispatch ]; then
+                version_tag=true
+                echo "v$version is tagged already: publishing $IMAGE:$version again"
+              else
+                echo "v$version is tagged already: publishing latest only (bump PLUGIN_VERSION for a new version)"
+              fi
+            else
+              version_tag=true; git_tag=true
+            fi
+          fi
+          echo "operator version $version (publish=$publish, version tag=$version_tag, git tag=$git_tag)"
+          {
+            echo "version=$version"
+            echo "publish=$publish"
+            echo "version_tag=$version_tag"
+            echo "git_tag=$git_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        if: steps.version.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest,enable=${{ steps.version.outputs.publish }}
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ steps.version.outputs.version_tag }}
+            type=sha
+          labels: |
+            org.opencontainers.image.title=cloudnative-firebird
+            org.opencontainers.image.description=Kubernetes operator for Firebird
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+
+      - name: Build${{ steps.version.outputs.publish == 'true' && ' and push' || '' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: operator
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.version.outputs.publish == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # no attestation manifests: they list as unknown/unknown platforms
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Tag v${{ steps.version.outputs.version }}
+        if: steps.version.outputs.git_tag == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "cloudnative-firebird v$VERSION"
+          git push origin "refs/tags/v$VERSION"
+
+      - name: Summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          PUBLISH: ${{ steps.version.outputs.publish }}
+          GIT_TAG: ${{ steps.version.outputs.git_tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          {
+            if [ "$PUBLISH" = true ]; then echo "Published:"; else echo "Built (not published):"; fi
+            echo
+            echo "$TAGS" | sed 's/^/- `/; s/$/`/'
+            [ "$GIT_TAG" = true ] && echo && echo "Tagged \`v$VERSION\`."
+            true
+          } >> "$GITHUB_STEP_SUMMARY"
