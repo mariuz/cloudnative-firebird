@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.113.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.114.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Switchover delay** *(v0.114.0; CloudNativePG's switchoverDelay)*
+  - `spec.switchoverDelay`: when a planned switchover stops the primary, its clients get that many seconds to finish: the switchover Job polls the primary's remote attachments (`MON$ATTACHMENTS`, as the smart shutdown does) and stops writes once none is attached or the delay passed, disconnecting the clients still attached (Firebird's shutdown timeouts do not wait for idle attachments, found with Firebird 5 and 6, so the Job waits itself; new attachments are not refused meanwhile). 0, the default, disconnects them at once, as before. `status.switchover.message` and the Job's log say how long the clients have and how many were waited for.
+  - Unit tests cover validation, the Job's environment and status message, and `switchover.pl` against a stubbed service manager (the delay, and none); the kind CI switches over with a client attached and `switchoverDelay: 30`, checking the primary stopped after the delay.
 - [x] **Pausing a cluster by annotation** *(v0.113.0; CloudNativePG's cnpg.io/reconciliationLoop)*
   - Besides `spec.suspended`, the `reconciliationLoop: disabled` annotation (`kubectl firebird reconcile off|on`) and `reconciliationDisabled: "true"` (as on the other resources) pause a cluster without a spec change. A paused cluster is not validated or changed at all, its `Paused` status is written once instead of on every resync, `ReconciliationPaused` / `ReconciliationResumed` events mark the transitions, and the segment TLS and primary Lease migrations leave it alone. `kubectl firebird status` shows why it is paused.
   - Unit tests cover the causes, the untouched resources (also with an invalid spec), the single status write and event, resuming, the migrations and the plugin; the kind CI pauses a cluster with the plugin, checks a spec change stays unapplied across resyncs, and resumes it.

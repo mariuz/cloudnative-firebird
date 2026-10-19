@@ -823,12 +823,36 @@ jobs:
           }
           before=$(count repl-0)
           target_uid=$(kubectl get pod repl-1 -o jsonpath={.metadata.uid})
+          # switchoverDelay: a client attached to the primary gets up to 30 s to finish before it is
+          # cut off (no pod template change: nothing restarts)
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"switchoverDelay":30}}'
+          image=$(kubectl get pod repl-0 -o jsonpath="{.spec.containers[?(@.name=='firebird')].image}")
+          kubectl run swclient --image="$image" --restart=Never --env=ISC_USER=SYSDBA --env=ISC_PASSWORD=masterkey --command -- \
+            sh -c "(echo 'select 1 from rdb\$database;'; sleep 120) | isql -q repl:$DB"
+          remote() { kubectl exec repl-0 -c firebird -- sh -c "echo \"select 'remote=' || count(*) from mon\\\$attachments where mon\\\$system_flag = 0 and mon\\\$remote_address not starting with '127.';\" | isql -q localhost:$DB" | sed -n 's/.*remote=\([0-9]*\).*/\1/p'; }
+          for i in $(seq 1 45); do [ "$(remote)" -ge 1 ] 2>/dev/null && break; sleep 2; done
+          [ "$(remote)" -ge 1 ] || { kubectl logs swclient; exit 1; }
+          start=$(date +%s)
           kubectl annotate firebirdcluster repl firebird.cloudnative-firebird.io/targetPrimary=repl-1
+          # the Job's log is read while it runs (the operator deletes the Job once the target is promoted)
           timeout 600 bash -c \
             'until [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.phase})" = "Completed" ]; do
-               p=$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.phase}); [ "$p" = "Failed" ] && exit 1; sleep 5; done' \
+               p=$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.phase}); [ "$p" = "Failed" ] && exit 1
+               if [ "$p" = "Stopping" ]; then kubectl logs job/repl-switchover > /tmp/switchover.log.new 2>/dev/null && mv /tmp/switchover.log.new /tmp/switchover.log; echo "$(date +%s)" > /tmp/switchover.stopping; fi
+               sleep 2; done' \
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo; kubectl logs job/repl-switchover || true; exit 1; }
           kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo
+          cat /tmp/switchover.log
+          grep -q 'its clients have up to 30s to finish' /tmp/switchover.log
+          # the client stays attached: the Job waited the whole delay (the sidecars do not count), then disconnected it
+          grep -Eq '^1 client\(s\) attached to repl-0.repl-headless, waiting' /tmp/switchover.log
+          grep -q '1 client(s) still attached to repl-0.repl-headless after 30s: disconnecting them' /tmp/switchover.log
+          grep -Eq 'writes stopped: repl-0.repl-headless is in full shutdown after (2[8-9]|3[0-9]|4[0-9])s \(1 client\(s\) disconnected\)' /tmp/switchover.log
+          stopping=$(( $(cat /tmp/switchover.stopping) - start ))
+          echo "the primary stopped after ${stopping}s (switchoverDelay 30, a client attached)"
+          [ "$stopping" -ge 25 ]
+          kubectl delete pod swclient --wait=false
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"switchoverDelay":null}}'
           [ "$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})" = "repl-1" ]
           # promoted in place: the target kept its pod (only the old primary restarted)
           [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.promotedInPlace})" = "true" ]

@@ -1,0 +1,10 @@
+# expect: spec.switchoverDelay
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: swdelay
+spec:
+  instances: 2
+  storage:
+    size: 1Gi
+  switchoverDelay: -1

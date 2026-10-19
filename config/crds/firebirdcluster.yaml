@@ -1101,6 +1101,15 @@ spec:
                     if unset.
                   type: integer
                   minimum: 1
+                switchoverDelay:
+                  description: >-
+                    Seconds the primary's clients get to finish their work when a planned
+                    switchover stops it: writes are stopped once no remote client is attached,
+                    or after this long, when the clients still attached are disconnected. New
+                    attachments are not refused meanwhile. 0 (the default) disconnects them at
+                    once.
+                  type: integer
+                  minimum: 0
                 startDelay:
                   description: >-
                     Seconds an instance may take to start before it is restarted: a startup probe on

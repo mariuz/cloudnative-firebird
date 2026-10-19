@@ -104,7 +104,7 @@ export function smartShutdownInProgress(cluster: FirebirdCluster, pod: V1Pod | u
   return nowMs < started + (timeout + SMART_SHUTDOWN_FAILOVER_MARGIN) * 1000;
 }
 
-/** Errors of stopDelay, smartShutdownTimeout, startDelay and probes */
+/** Errors of stopDelay, smartShutdownTimeout, switchoverDelay, startDelay and probes */
 export function lifecycleErrors(spec: FirebirdCluster['spec']): string[] {
   const errors: string[] = [];
   const positive = (field: string, value: unknown, min = 1) => {
@@ -120,6 +120,7 @@ export function lifecycleErrors(spec: FirebirdCluster['spec']): string[] {
     const stop = spec.stopDelay ?? DEFAULT_STOP_DELAY;
     if (spec.smartShutdownTimeout >= stop) errors.push(`smartShutdownTimeout (${spec.smartShutdownTimeout}) must be below stopDelay (${stop}): the server needs time to stop after it`);
   }
+  positive('switchoverDelay', spec.switchoverDelay, 0);
   positive('startDelay', spec.startDelay);
   for (const kind of ['liveness', 'readiness', 'startup'] as const) {
     const timings = spec.probes?.[kind];

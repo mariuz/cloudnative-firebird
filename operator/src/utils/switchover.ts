@@ -28,6 +28,11 @@ export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 /** How long the switchover Job waits for the last segment to be archived and applied */
 export const SWITCHOVER_TIMEOUT_SECONDS = 300;
 
+/** spec.switchoverDelay: how long the old primary's clients get to finish before they are cut off */
+export function switchoverDelaySeconds(cluster: FirebirdCluster): number {
+  return cluster.spec.switchoverDelay ?? 0;
+}
+
 export function switchoverJobName(cluster: FirebirdCluster): string {
   return `${cluster.metadata.name}-switchover`;
 }
@@ -70,6 +75,7 @@ export function buildSwitchoverJob(
                 { name: 'DATABASE_PATH', value: `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}` },
                 { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
                 { name: 'TIMEOUT_SECONDS', value: String(SWITCHOVER_TIMEOUT_SECONDS) },
+                { name: 'SWITCHOVER_DELAY_SECONDS', value: String(switchoverDelaySeconds(cluster)) },
                 // promote the target without a restart (segment server PROMOTE), after every
                 // segment the journal archive may hold
                 { name: 'PROMOTE_IN_PLACE', value: 'true' },

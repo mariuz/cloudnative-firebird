@@ -78,7 +78,17 @@ describe('planned switchover', () => {
     expect(env.OLD_PRIMARY).toBe('db-0.db-headless');
     expect(env.TARGET).toBe('db-1.db-headless');
     expect(env.REPLICAS).toBe('db-2.db-headless');
-    expect(s.status().switchover).toMatchObject({ target: 'db-1', from: 'db-0', phase: 'Stopping' });
+    // no switchoverDelay: the clients are disconnected at once
+    expect(env.SWITCHOVER_DELAY_SECONDS).toBe('0');
+    expect(s.status().switchover).toMatchObject({ target: 'db-1', from: 'db-0', phase: 'Stopping', message: 'stopping writes on the primary' });
+  });
+
+  it('gives the clients spec.switchoverDelay to finish, and says so', async () => {
+    const s = setup();
+    await s.controller.reconcile({ ...makeCluster('db-1'), spec: { ...makeCluster().spec, switchoverDelay: 45 } });
+    const job = s.created().find((j) => j.metadata?.name === 'db-switchover')!;
+    expect(job.spec!.template.spec!.containers[0].env).toContainEqual({ name: 'SWITCHOVER_DELAY_SECONDS', value: '45' });
+    expect(s.status().switchover).toMatchObject({ phase: 'Stopping', message: 'stopping writes on the primary (its clients have up to 45s to finish)' });
   });
 
   it('does nothing when the target is already the primary', async () => {
@@ -390,6 +400,80 @@ describe('switchover.pl with Firebird 6', () => {
     expect(out.text).toContain('final replication sequence of 127.0.0.1: 53');
     expect(out.text).toContain('switchover ready: promote 127.0.0.1 after segment 53');
     expect(requests).toEqual(['HEADER', 'POSITION']);
+  });
+
+  it('waits for the clients of the old primary up to the switchover delay before stopping writes', { timeout: 30000 }, async () => {
+    if (!hasPerl) return;
+    // the stub isql answers the attachment count query with the counts given, one per call (the
+    // last one repeating): [2, 1, 0] clients leaving, [1] a client that stays
+    const run = async (delay: string | undefined, counts: number[] = [1]) => {
+      const dir = mkdtempSync(join(tmpdir(), 'fb-swd-'));
+      // online before the shutdown, so step 1 runs it; the shutdown requests are recorded
+      const fbsvcmgr = join(dir, 'fbsvcmgr');
+      writeFileSync(fbsvcmgr, '#!/bin/sh\necho "$*" >> "$(dirname "$0")/calls"\ncase "$*" in *action_properties*) exit 0 ;; esac\necho "Attributes force write"\necho "Replication sequence: 53"\n');
+      chmodSync(fbsvcmgr, 0o755);
+      const isql = join(dir, 'isql');
+      // the query arrives on stdin: a $ sign eaten by the shell (MON$ATTACHMENTS) is a failed statement
+      writeFileSync(
+        isql,
+        `#!/bin/sh\n# the switchover Job counts the remote attachments: "$@" is -q <host:database>, the query on stdin\necho "$*" >> "$(dirname "$0")/isql-calls"\nsql=$(cat)\ncase "$sql" in *'FROM MON$ATTACHMENTS WHERE MON$SYSTEM_FLAG = 0'*"NOT STARTING WITH '127.'"*) ;; *) echo "Statement failed, SQLSTATE = 42000"; echo "$sql"; exit 1 ;; esac\nn=$(cat "$(dirname "$0")/isql-calls" | wc -l)\nset -- ${counts.join(' ')}\nwhile [ $# -gt 1 ] && [ "$n" -gt 1 ]; do shift; n=$((n - 1)); done\necho "remote=$1"\n`,
+      );
+      chmodSync(isql, 0o755);
+      const server = fakeSegmentServer((request, sock) => sock.end(request === 'POSITION' ? 'OK 53 0 0\n' : 'ERR unknown\n'), 'tok');
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const script = join(dir, 'switchover.pl');
+      writeFileSync(script, REPLICATION_SCRIPTS['switchover.pl']);
+      const out = await new Promise<{ code: number | null; text: string }>((resolve) => {
+        const child = spawn('perl', [script], {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            OLD_PRIMARY: '127.0.0.1',
+            TARGET: '127.0.0.1',
+            DATABASE_PATH: '/var/lib/firebird/data/mydb.fdb',
+            ISC_PASSWORD: 'tok',
+            SEGMENT_PORT: String((server.address() as { port: number }).port),
+            TIMEOUT_SECONDS: '10',
+            SWITCHOVER_POLL_SECONDS: '1',
+            ...(delay !== undefined ? { SWITCHOVER_DELAY_SECONDS: delay } : {}),
+          },
+        });
+        let text = '';
+        child.stdout.on('data', (d) => (text += d));
+        child.stderr.on('data', (d) => (text += d));
+        child.on('exit', (code) => resolve({ code, text }));
+      });
+      server.close();
+      const isqlCalls = (() => { try { return readFileSync(join(dir, 'isql-calls'), 'utf8'); } catch { return ''; } })();
+      return { ...out, calls: readFileSync(join(dir, 'calls'), 'utf8'), isqlCalls };
+    };
+    // a client that stays: the whole delay, then it is disconnected
+    const stays = await run('3');
+    expect(stays.code).toBe(0);
+    expect(stays.isqlCalls).toContain('-q 127.0.0.1:/var/lib/firebird/data/mydb.fdb');
+    expect(stays.text).not.toContain('cannot count');
+    expect(stays.calls.trim().split('\n').filter((c) => c.includes('action_properties'))).toEqual([expect.stringContaining('prp_shutdown_mode prp_sm_full prp_force_shutdown 0')]);
+    expect(stays.text).toContain('stopping writes on 127.0.0.1: its clients have up to 3s to finish');
+    expect(stays.text).toMatch(/1 client\(s\) attached to 127\.0\.0\.1, waiting \(\ds left\)/);
+    expect(stays.text).toContain('1 client(s) still attached to 127.0.0.1 after 3s: disconnecting them');
+    expect(stays.text).toMatch(/writes stopped: 127\.0\.0\.1 is in full shutdown after [34]s \(1 client\(s\) disconnected\)/);
+    expect(stays.text).toContain('switchover ready: promote 127.0.0.1 after segment 53');
+    // the clients leave: writes stop as soon as none is attached, well within the delay
+    const leave = await run('30', [2, 1, 0]);
+    expect(leave.code).toBe(0);
+    expect(leave.text).toContain('2 client(s) attached to 127.0.0.1, waiting');
+    expect(leave.text).toContain('no client attached to 127.0.0.1');
+    expect(leave.text).toMatch(/writes stopped: 127\.0\.0\.1 is in full shutdown after [0-4]s \(its clients disconnected by themselves\)/);
+    expect(leave.calls).toContain('prp_force_shutdown 0');
+    // unset, or not a number: at once, as before, without counting anything
+    for (const value of [undefined, 'soon']) {
+      const immediate = await run(value);
+      expect(immediate.code).toBe(0);
+      expect(immediate.isqlCalls).toBe('');
+      expect(immediate.calls).toContain('prp_force_shutdown 0');
+      expect(immediate.text).not.toContain('clients have up to');
+      expect(immediate.text).toContain('writes stopped: 127.0.0.1 is in full shutdown\n');
+    }
   });
 
   it('promotes the target in place and reports it, or reports why not', async () => {

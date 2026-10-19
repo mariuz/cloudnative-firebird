@@ -1,7 +1,13 @@
 #!/usr/bin/perl
 # Planned switchover, first phase (run as a Job by the operator):
 #
-#   1. stop writes on the old primary: full shutdown through its service manager (idempotent);
+#   1. stop writes on the old primary: full shutdown through its service manager (idempotent).
+#      With SWITCHOVER_DELAY_SECONDS (spec.switchoverDelay) this Job first waits up to that long
+#      for the primary's remote client attachments to end (MON$ATTACHMENTS every 2 s, as the
+#      smart shutdown does; the sidecars attach through localhost and do not count), then shuts
+#      the database down, disconnecting the clients still attached. The wait is the Job's own:
+#      Firebird's shutdown modes with a timeout do not wait for idle attachments (observed with
+#      Firebird 5 and 6). New attachments are not refused meanwhile.
 #   2. read its final replication sequence S from the header (through its segment server when the
 #      server refuses header statistics in full shutdown, as Firebird 6 does);
 #   3. wait until the target and every other ready replica has applied everything up to S
@@ -17,7 +23,8 @@
 # On failure the operator brings the old primary back online.
 #
 # Environment: OLD_PRIMARY, TARGET, REPLICAS (space separated hosts), DATABASE_PATH,
-# ISC_USER / ISC_PASSWORD, SEGMENT_PORT, TIMEOUT_SECONDS, PROMOTE_IN_PLACE, ARCHIVED, RESULT_FILE.
+# ISC_USER / ISC_PASSWORD, SEGMENT_PORT, TIMEOUT_SECONDS, SWITCHOVER_DELAY_SECONDS,
+# PROMOTE_IN_PLACE, ARCHIVED, RESULT_FILE.
 use strict;
 use warnings;
 use IO::Socket::INET;
@@ -30,7 +37,23 @@ my $db      = $ENV{DATABASE_PATH} or die "DATABASE_PATH is required\n";
 my $token   = $ENV{ISC_PASSWORD} // '';
 my $port    = $ENV{SEGMENT_PORT} // 3051;
 my $timeout = $ENV{TIMEOUT_SECONDS} // 300;
+my $delay   = $ENV{SWITCHOVER_DELAY_SECONDS} // 0;
+$delay = 0 unless $delay =~ /^\d+$/;
+my $poll    = $ENV{SWITCHOVER_POLL_SECONDS} // 2;
 $| = 1;
+
+# The old primary's remote client attachments (not this Job's, not the sidecars' through
+# localhost), or undef and isql's output when they cannot be counted
+sub remote_attachments {
+  my $sql = "SELECT 'remote=' || COUNT(*) FROM MON\$ATTACHMENTS WHERE MON\$SYSTEM_FLAG = 0"
+    . " AND MON\$ATTACHMENT_ID <> CURRENT_CONNECTION AND MON\$REMOTE_ADDRESS IS NOT NULL"
+    . " AND MON\$REMOTE_ADDRESS NOT STARTING WITH '127.' AND MON\$REMOTE_ADDRESS <> '::1'"
+    . " AND MON\$REMOTE_ADDRESS NOT STARTING WITH '::ffff:127.';";
+  # single-quoted for the shell (its $ signs must reach isql); the query's own quotes as '\''
+  (my $quoted = $sql) =~ s/'/'\\''/g;
+  my $out = `echo '$quoted' | isql -q '$old:$db' 2>&1`;
+  return $out =~ /remote=(\d+)/ ? ($1, undef) : (undef, $out);
+}
 
 # Header statistics of the old primary through its service manager; undef when the server refuses
 # them because the database is in full shutdown (Firebird 6: "database ... shutdown")
@@ -66,10 +89,30 @@ my $before = header();
 if (!defined $before || $before =~ /full shutdown/) {
   print "$old already shut down\n";
 } else {
+  my $started = time;
+  my $left;
+  if ($delay > 0) {
+    print "stopping writes on $old: its clients have up to ${delay}s to finish\n";
+    my $deadline = $started + $delay;
+    while (1) {
+      my $error;
+      ($left, $error) = remote_attachments();
+      if (!defined $left) { (my $why = $error // '') =~ s/\s+/ /g; print "cannot count the clients of $old ($why); waiting\n"; }
+      elsif ($left == 0) { print "no client attached to $old\n"; last; }
+      my $remaining = $deadline - time;
+      if ($remaining <= 0) {
+        print(defined $left ? "$left client(s) still attached to $old after ${delay}s: disconnecting them\n" : "the clients of $old could not be counted for ${delay}s: stopping writes\n");
+        last;
+      }
+      print "$left client(s) attached to $old, waiting (${remaining}s left)\n" if defined $left;
+      sleep($remaining < $poll ? $remaining : $poll);
+    }
+  }
   system('fbsvcmgr', "$old:service_mgr", 'action_properties', 'dbname', $db,
     'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') == 0
     or die "cannot shut down $old\n";
-  print "writes stopped: $old is in full shutdown\n";
+  my $outcome = !defined $left ? 'its clients were not counted' : $left ? "$left client(s) disconnected" : 'its clients disconnected by themselves';
+  print "writes stopped: $old is in full shutdown" . ($delay > 0 ? " after " . (time - $started) . "s ($outcome)" : '') . "\n";
 }
 
 # 2. final sequence (no header entry while it is 0); from the header page on disk, through the old
