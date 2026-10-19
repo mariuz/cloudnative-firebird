@@ -1,7 +1,10 @@
 #!/usr/bin/perl
 # Planned switchover, first phase (run as a Job by the operator):
 #
-#   1. stop writes on the old primary: full shutdown through its service manager (idempotent);
+#   1. stop writes on the old primary: forced full shutdown through its service manager
+#      (idempotent). With SWITCHOVER_DELAY_SECONDS the server refuses new attachments and
+#      transactions at once and gives the existing attachments that long to finish before it
+#      disconnects them (spec.switchoverDelay); 0 disconnects them at once.
 #   2. read its final replication sequence S from the header (through its segment server when the
 #      server refuses header statistics in full shutdown, as Firebird 6 does);
 #   3. wait until the target and every other ready replica has applied everything up to S
@@ -17,7 +20,8 @@
 # On failure the operator brings the old primary back online.
 #
 # Environment: OLD_PRIMARY, TARGET, REPLICAS (space separated hosts), DATABASE_PATH,
-# ISC_USER / ISC_PASSWORD, SEGMENT_PORT, TIMEOUT_SECONDS, PROMOTE_IN_PLACE, ARCHIVED, RESULT_FILE.
+# ISC_USER / ISC_PASSWORD, SEGMENT_PORT, TIMEOUT_SECONDS, SWITCHOVER_DELAY_SECONDS,
+# PROMOTE_IN_PLACE, ARCHIVED, RESULT_FILE.
 use strict;
 use warnings;
 use IO::Socket::INET;
@@ -30,6 +34,8 @@ my $db      = $ENV{DATABASE_PATH} or die "DATABASE_PATH is required\n";
 my $token   = $ENV{ISC_PASSWORD} // '';
 my $port    = $ENV{SEGMENT_PORT} // 3051;
 my $timeout = $ENV{TIMEOUT_SECONDS} // 300;
+my $delay   = $ENV{SWITCHOVER_DELAY_SECONDS} // 0;
+$delay = 0 unless $delay =~ /^\d+$/;
 $| = 1;
 
 # Header statistics of the old primary through its service manager; undef when the server refuses
@@ -66,10 +72,12 @@ my $before = header();
 if (!defined $before || $before =~ /full shutdown/) {
   print "$old already shut down\n";
 } else {
+  print "stopping writes on $old: its clients have up to ${delay}s to finish (new attachments and transactions are refused meanwhile)\n" if $delay > 0;
+  my $started = time;
   system('fbsvcmgr', "$old:service_mgr", 'action_properties', 'dbname', $db,
-    'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') == 0
+    'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', $delay) == 0
     or die "cannot shut down $old\n";
-  print "writes stopped: $old is in full shutdown\n";
+  print "writes stopped: $old is in full shutdown" . ($delay > 0 ? " after " . (time - $started) . "s" : '') . "\n";
 }
 
 # 2. final sequence (no header entry while it is 0); from the header page on disk, through the old

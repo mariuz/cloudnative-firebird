@@ -142,6 +142,7 @@ import {
   buildSwitchoverJob,
   failoverJobName,
   parseElection,
+  switchoverDelaySeconds,
   switchoverJobName,
   promoteJobName,
 } from '../utils/switchover';
@@ -1439,7 +1440,14 @@ export class FirebirdClusterController {
         .map((p) => p.metadata!.name!)
         .sort();
       log.info({ from: primaryPod, target, replicas }, 'Starting planned switchover');
-      await persist({ target, from: primaryPod, phase: 'Stopping', message: 'stopping writes on the primary', startTime: now });
+      const delay = switchoverDelaySeconds(cluster);
+      await persist({
+        target,
+        from: primaryPod,
+        phase: 'Stopping',
+        message: delay > 0 ? `stopping writes on the primary (its clients have up to ${delay}s to finish)` : 'stopping writes on the primary',
+        startTime: now,
+      });
       try {
         await this.batchApi.createNamespacedJob({
           namespace,

@@ -78,7 +78,17 @@ describe('planned switchover', () => {
     expect(env.OLD_PRIMARY).toBe('db-0.db-headless');
     expect(env.TARGET).toBe('db-1.db-headless');
     expect(env.REPLICAS).toBe('db-2.db-headless');
-    expect(s.status().switchover).toMatchObject({ target: 'db-1', from: 'db-0', phase: 'Stopping' });
+    // no switchoverDelay: the clients are disconnected at once
+    expect(env.SWITCHOVER_DELAY_SECONDS).toBe('0');
+    expect(s.status().switchover).toMatchObject({ target: 'db-1', from: 'db-0', phase: 'Stopping', message: 'stopping writes on the primary' });
+  });
+
+  it('gives the clients spec.switchoverDelay to finish, and says so', async () => {
+    const s = setup();
+    await s.controller.reconcile({ ...makeCluster('db-1'), spec: { ...makeCluster().spec, switchoverDelay: 45 } });
+    const job = s.created().find((j) => j.metadata?.name === 'db-switchover')!;
+    expect(job.spec!.template.spec!.containers[0].env).toContainEqual({ name: 'SWITCHOVER_DELAY_SECONDS', value: '45' });
+    expect(s.status().switchover).toMatchObject({ phase: 'Stopping', message: 'stopping writes on the primary (its clients have up to 45s to finish)' });
   });
 
   it('does nothing when the target is already the primary', async () => {
@@ -390,6 +400,56 @@ describe('switchover.pl with Firebird 6', () => {
     expect(out.text).toContain('final replication sequence of 127.0.0.1: 53');
     expect(out.text).toContain('switchover ready: promote 127.0.0.1 after segment 53');
     expect(requests).toEqual(['HEADER', 'POSITION']);
+  });
+
+  it('shuts the old primary down with the switchover delay for its clients', async () => {
+    if (!hasPerl) return;
+    const run = async (delay: string | undefined) => {
+      const dir = mkdtempSync(join(tmpdir(), 'fb-swd-'));
+      // online before the shutdown, so step 1 runs it; the shutdown request is recorded
+      const fbsvcmgr = join(dir, 'fbsvcmgr');
+      writeFileSync(fbsvcmgr, '#!/bin/sh\necho "$*" >> "$(dirname "$0")/calls"\ncase "$*" in *action_properties*) exit 0 ;; esac\necho "Attributes force write"\necho "Replication sequence: 53"\n');
+      chmodSync(fbsvcmgr, 0o755);
+      const server = fakeSegmentServer((request, sock) => sock.end(request === 'POSITION' ? 'OK 53 0 0\n' : 'ERR unknown\n'), 'tok');
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const script = join(dir, 'switchover.pl');
+      writeFileSync(script, REPLICATION_SCRIPTS['switchover.pl']);
+      const out = await new Promise<{ code: number | null; text: string }>((resolve) => {
+        const child = spawn('perl', [script], {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            OLD_PRIMARY: '127.0.0.1',
+            TARGET: '127.0.0.1',
+            DATABASE_PATH: '/var/lib/firebird/data/mydb.fdb',
+            ISC_PASSWORD: 'tok',
+            SEGMENT_PORT: String((server.address() as { port: number }).port),
+            TIMEOUT_SECONDS: '10',
+            ...(delay !== undefined ? { SWITCHOVER_DELAY_SECONDS: delay } : {}),
+          },
+        });
+        let text = '';
+        child.stdout.on('data', (d) => (text += d));
+        child.stderr.on('data', (d) => (text += d));
+        child.on('exit', (code) => resolve({ code, text }));
+      });
+      server.close();
+      return { ...out, calls: readFileSync(join(dir, 'calls'), 'utf8') };
+    };
+    const delayed = await run('7');
+    expect(delayed.code).toBe(0);
+    expect(delayed.calls).toContain('prp_shutdown_mode prp_sm_full prp_force_shutdown 7');
+    expect(delayed.text).toContain('stopping writes on 127.0.0.1: its clients have up to 7s to finish');
+    expect(delayed.text).toMatch(/writes stopped: 127\.0\.0\.1 is in full shutdown after \d+s/);
+    expect(delayed.text).toContain('switchover ready: promote 127.0.0.1 after segment 53');
+    // unset, or not a number: at once, as before
+    for (const value of [undefined, 'soon']) {
+      const immediate = await run(value);
+      expect(immediate.code).toBe(0);
+      expect(immediate.calls).toContain('prp_force_shutdown 0');
+      expect(immediate.text).not.toContain('clients have up to');
+      expect(immediate.text).toContain('writes stopped: 127.0.0.1 is in full shutdown\n');
+    }
   });
 
   it('promotes the target in place and reports it, or reports why not', async () => {

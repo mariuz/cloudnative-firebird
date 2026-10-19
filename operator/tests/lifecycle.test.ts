@@ -185,6 +185,7 @@ describe('StatefulSet updates for probes and shutdown', () => {
 describe('probe and shutdown validation', () => {
   it('accepts valid settings', () => {
     expect(lifecycleErrors(makeCluster({ stopDelay: 120, smartShutdownTimeout: 60, startDelay: 600, probes: { readiness: { successThreshold: 2, initialDelaySeconds: 0 } } }).spec)).toEqual([]);
+    for (const switchoverDelay of [0, 30, 3600]) expect(lifecycleErrors(makeCluster({ switchoverDelay }).spec)).toEqual([]);
     expect(() => validateClusterSpec(makeCluster({ smartShutdownTimeout: 20 }))).not.toThrow();
   });
 
@@ -194,6 +195,8 @@ describe('probe and shutdown validation', () => {
     [{ smartShutdownTimeout: 30 }, 'must be below stopDelay (30)'],
     [{ stopDelay: 60, smartShutdownTimeout: 90 }, 'must be below stopDelay (60)'],
     [{ startDelay: -1 }, 'startDelay must be an integer'],
+    [{ switchoverDelay: -1 }, 'switchoverDelay must be an integer of at least 0'],
+    [{ switchoverDelay: 2.5 }, 'switchoverDelay must be an integer of at least 0'],
     [{ probes: { liveness: { periodSeconds: 0 } } }, 'probes.liveness.periodSeconds'],
     [{ probes: { readiness: { initialDelaySeconds: -1 } } }, 'probes.readiness.initialDelaySeconds'],
     [{ probes: { liveness: { successThreshold: 2 } } }, 'probes.liveness.successThreshold must be 1'],

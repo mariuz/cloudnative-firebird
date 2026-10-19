@@ -578,6 +578,13 @@ export interface FirebirdClusterSpec {
    */
   smartShutdownTimeout?: number;
   /**
+   * Seconds the clients of the primary get to finish their work when a planned switchover stops
+   * it (CloudNativePG switchoverDelay): the forced full shutdown refuses new attachments and
+   * transactions at once, waits up to this long for the existing attachments to end, then
+   * disconnects them. 0 (the default) disconnects them at once.
+   */
+  switchoverDelay?: number;
+  /**
    * Seconds an instance may take to start before it is restarted (CloudNativePG startDelay): a
    * startup probe on the server port, which holds the liveness probe back meanwhile. None if unset.
    */
