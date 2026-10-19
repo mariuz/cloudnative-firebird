@@ -413,9 +413,10 @@ describe('switchover.pl with Firebird 6', () => {
       writeFileSync(fbsvcmgr, '#!/bin/sh\necho "$*" >> "$(dirname "$0")/calls"\ncase "$*" in *action_properties*) exit 0 ;; esac\necho "Attributes force write"\necho "Replication sequence: 53"\n');
       chmodSync(fbsvcmgr, 0o755);
       const isql = join(dir, 'isql');
+      // the query arrives on stdin: a $ sign eaten by the shell (MON$ATTACHMENTS) is a failed statement
       writeFileSync(
         isql,
-        `#!/bin/sh\n# the switchover Job counts the remote attachments: "$@" is -q <host:database>\necho "$*" >> "$(dirname "$0")/isql-calls"\nn=$(cat "$(dirname "$0")/isql-calls" | wc -l)\nset -- ${counts.join(' ')}\nwhile [ $# -gt 1 ] && [ "$n" -gt 1 ]; do shift; n=$((n - 1)); done\necho "remote=$1"\n`,
+        `#!/bin/sh\n# the switchover Job counts the remote attachments: "$@" is -q <host:database>, the query on stdin\necho "$*" >> "$(dirname "$0")/isql-calls"\nsql=$(cat)\ncase "$sql" in *'FROM MON$ATTACHMENTS WHERE MON$SYSTEM_FLAG = 0'*"NOT STARTING WITH '127.'"*) ;; *) echo "Statement failed, SQLSTATE = 42000"; echo "$sql"; exit 1 ;; esac\nn=$(cat "$(dirname "$0")/isql-calls" | wc -l)\nset -- ${counts.join(' ')}\nwhile [ $# -gt 1 ] && [ "$n" -gt 1 ]; do shift; n=$((n - 1)); done\necho "remote=$1"\n`,
       );
       chmodSync(isql, 0o755);
       const server = fakeSegmentServer((request, sock) => sock.end(request === 'POSITION' ? 'OK 53 0 0\n' : 'ERR unknown\n'), 'tok');
@@ -450,6 +451,7 @@ describe('switchover.pl with Firebird 6', () => {
     const stays = await run('3');
     expect(stays.code).toBe(0);
     expect(stays.isqlCalls).toContain('-q 127.0.0.1:/var/lib/firebird/data/mydb.fdb');
+    expect(stays.text).not.toContain('cannot count');
     expect(stays.calls.trim().split('\n').filter((c) => c.includes('action_properties'))).toEqual([expect.stringContaining('prp_shutdown_mode prp_sm_full prp_force_shutdown 0')]);
     expect(stays.text).toContain('stopping writes on 127.0.0.1: its clients have up to 3s to finish');
     expect(stays.text).toMatch(/1 client\(s\) attached to 127\.0\.0\.1, waiting \(\ds left\)/);

@@ -43,14 +43,16 @@ my $poll    = $ENV{SWITCHOVER_POLL_SECONDS} // 2;
 $| = 1;
 
 # The old primary's remote client attachments (not this Job's, not the sidecars' through
-# localhost), or undef when they cannot be counted
+# localhost), or undef and isql's output when they cannot be counted
 sub remote_attachments {
   my $sql = "SELECT 'remote=' || COUNT(*) FROM MON\$ATTACHMENTS WHERE MON\$SYSTEM_FLAG = 0"
     . " AND MON\$ATTACHMENT_ID <> CURRENT_CONNECTION AND MON\$REMOTE_ADDRESS IS NOT NULL"
     . " AND MON\$REMOTE_ADDRESS NOT STARTING WITH '127.' AND MON\$REMOTE_ADDRESS <> '::1'"
     . " AND MON\$REMOTE_ADDRESS NOT STARTING WITH '::ffff:127.';";
-  my $out = `echo "$sql" | isql -q "$old:$db" 2>&1`;
-  return $out =~ /remote=(\d+)/ ? $1 : undef;
+  # single-quoted for the shell (its $ signs must reach isql); the query's own quotes as '\''
+  (my $quoted = $sql) =~ s/'/'\\''/g;
+  my $out = `echo '$quoted' | isql -q '$old:$db' 2>&1`;
+  return $out =~ /remote=(\d+)/ ? ($1, undef) : (undef, $out);
 }
 
 # Header statistics of the old primary through its service manager; undef when the server refuses
@@ -93,11 +95,15 @@ if (!defined $before || $before =~ /full shutdown/) {
     print "stopping writes on $old: its clients have up to ${delay}s to finish\n";
     my $deadline = $started + $delay;
     while (1) {
-      $left = remote_attachments();
-      if (!defined $left) { print "cannot count the clients of $old; waiting\n"; }
+      my $error;
+      ($left, $error) = remote_attachments();
+      if (!defined $left) { (my $why = $error // '') =~ s/\s+/ /g; print "cannot count the clients of $old ($why); waiting\n"; }
       elsif ($left == 0) { print "no client attached to $old\n"; last; }
       my $remaining = $deadline - time;
-      if ($remaining <= 0) { print "$left client(s) still attached to $old after ${delay}s: disconnecting them\n"; last; }
+      if ($remaining <= 0) {
+        print(defined $left ? "$left client(s) still attached to $old after ${delay}s: disconnecting them\n" : "the clients of $old could not be counted for ${delay}s: stopping writes\n");
+        last;
+      }
       print "$left client(s) attached to $old, waiting (${remaining}s left)\n" if defined $left;
       sleep($remaining < $poll ? $remaining : $poll);
     }
@@ -105,8 +111,8 @@ if (!defined $before || $before =~ /full shutdown/) {
   system('fbsvcmgr', "$old:service_mgr", 'action_properties', 'dbname', $db,
     'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') == 0
     or die "cannot shut down $old\n";
-  print "writes stopped: $old is in full shutdown"
-    . ($delay > 0 ? " after " . (time - $started) . "s (" . ($left ? "$left client(s) disconnected" : 'its clients disconnected by themselves') . ")" : '') . "\n";
+  my $outcome = !defined $left ? 'its clients were not counted' : $left ? "$left client(s) disconnected" : 'its clients disconnected by themselves';
+  print "writes stopped: $old is in full shutdown" . ($delay > 0 ? " after " . (time - $started) . "s ($outcome)" : '') . "\n";
 }
 
 # 2. final sequence (no header entry while it is 0); from the header page on disk, through the old
