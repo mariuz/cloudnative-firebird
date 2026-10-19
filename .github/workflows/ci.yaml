@@ -109,6 +109,13 @@ jobs:
           kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system \
             RESYNC_INTERVAL_SECONDS=10 FIREBIRD_DEFAULT_IMAGE="${{ matrix.firebird.image }}"
 
+      - name: Verify the release install manifest
+        run: |
+          # the manifest of hack/release/bundle.sh (a GitHub Release asset) applies as a whole: a
+          # server-side dry run against what the steps above installed changes nothing
+          bundle="$(hack/release/bundle.sh "$RUNNER_TEMP/cloudnative-firebird.yaml")"
+          kubectl apply --dry-run=server -f "$bundle"
+
       - name: Wait for operator to be ready
         run: |
           kubectl rollout status deployment/cloudnative-firebird-operator \

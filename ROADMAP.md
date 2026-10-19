@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.115.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.116.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Release install manifest** *(v0.116.0; CloudNativePG's cnpg-<version>.yaml)*
+  - `hack/release/bundle.sh` writes one manifest from `config/crds` and `config/deploy` (CRDs, namespace, ServiceAccount, RBAC, webhook, Deployment pinned to the version's image; not the PodMonitor), and the Release workflow creates a GitHub Release `v<version>` with it (`cloudnative-firebird-<version>.yaml`, and `cloudnative-firebird.yaml` for `releases/latest/download`) when it publishes a new version, so `kubectl apply -f <release URL>` installs or upgrades the operator. A unit test checks the manifest's contents and order; the kind CI applies it as a server-side dry run against the installed operator.
 - [x] **Operator image publishing** *(v0.115.0)*
   - The Release workflow publishes `ghcr.io/mariuz/cloudnative-firebird` (`linux/amd64`, `linux/arm64`) once CI passed on a push to `main`: `latest` and `sha-<commit>` every time, and `<version>` with the git tag `v<version>` when the operator's version (`PLUGIN_VERSION`) has no tag yet, so a release needs no manual step beyond the version bump. `config/deploy/deployment.yaml` pins the version's image (`imagePullPolicy: IfNotPresent`) instead of `latest`, checked by `hack/release/version.sh` and a unit test; pull requests build both platforms without publishing. fbadmin's example can deploy a published tag instead of building the operator from a pinned commit.
 - [x] **Switchover delay** *(v0.114.0; CloudNativePG's switchoverDelay)*
