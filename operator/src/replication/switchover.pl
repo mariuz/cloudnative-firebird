@@ -2,11 +2,12 @@
 # Planned switchover, first phase (run as a Job by the operator):
 #
 #   1. stop writes on the old primary: full shutdown through its service manager (idempotent).
-#      With SWITCHOVER_DELAY_SECONDS (spec.switchoverDelay) the server first refuses new
-#      attachments and waits that long for the existing ones to disconnect by themselves (the
-#      "attachments" shutdown mode, which fails when some remain); the remaining ones are then
-#      disconnected by a forced shutdown. 0 disconnects them at once (forced shutdown; its own
-#      timeout does not wait for idle attachments, so it is not used for the delay).
+#      With SWITCHOVER_DELAY_SECONDS (spec.switchoverDelay) this Job first waits up to that long
+#      for the primary's remote client attachments to end (MON$ATTACHMENTS every 2 s, as the
+#      smart shutdown does; the sidecars attach through localhost and do not count), then shuts
+#      the database down, disconnecting the clients still attached. The wait is the Job's own:
+#      Firebird's shutdown modes with a timeout do not wait for idle attachments (observed with
+#      Firebird 5 and 6). New attachments are not refused meanwhile.
 #   2. read its final replication sequence S from the header (through its segment server when the
 #      server refuses header statistics in full shutdown, as Firebird 6 does);
 #   3. wait until the target and every other ready replica has applied everything up to S
@@ -38,7 +39,19 @@ my $port    = $ENV{SEGMENT_PORT} // 3051;
 my $timeout = $ENV{TIMEOUT_SECONDS} // 300;
 my $delay   = $ENV{SWITCHOVER_DELAY_SECONDS} // 0;
 $delay = 0 unless $delay =~ /^\d+$/;
+my $poll    = $ENV{SWITCHOVER_POLL_SECONDS} // 2;
 $| = 1;
+
+# The old primary's remote client attachments (not this Job's, not the sidecars' through
+# localhost), or undef when they cannot be counted
+sub remote_attachments {
+  my $sql = "SELECT 'remote=' || COUNT(*) FROM MON\$ATTACHMENTS WHERE MON\$SYSTEM_FLAG = 0"
+    . " AND MON\$ATTACHMENT_ID <> CURRENT_CONNECTION AND MON\$REMOTE_ADDRESS IS NOT NULL"
+    . " AND MON\$REMOTE_ADDRESS NOT STARTING WITH '127.' AND MON\$REMOTE_ADDRESS <> '::1'"
+    . " AND MON\$REMOTE_ADDRESS NOT STARTING WITH '::ffff:127.';";
+  my $out = `echo "$sql" | isql -q "$old:$db" 2>&1`;
+  return $out =~ /remote=(\d+)/ ? $1 : undef;
+}
 
 # Header statistics of the old primary through its service manager; undef when the server refuses
 # them because the database is in full shutdown (Firebird 6: "database ... shutdown")
@@ -75,20 +88,25 @@ if (!defined $before || $before =~ /full shutdown/) {
   print "$old already shut down\n";
 } else {
   my $started = time;
-  my $waited = 0;
+  my $left;
   if ($delay > 0) {
-    print "stopping writes on $old: new attachments are refused, its clients have up to ${delay}s to finish\n";
-    $waited = system('fbsvcmgr', "$old:service_mgr", 'action_properties', 'dbname', $db,
-      'prp_shutdown_mode', 'prp_sm_full', 'prp_attachments_shutdown', $delay) == 0;
-    print "clients still attached to $old after ${delay}s: disconnecting them\n" unless $waited;
+    print "stopping writes on $old: its clients have up to ${delay}s to finish\n";
+    my $deadline = $started + $delay;
+    while (1) {
+      $left = remote_attachments();
+      if (!defined $left) { print "cannot count the clients of $old; waiting\n"; }
+      elsif ($left == 0) { print "no client attached to $old\n"; last; }
+      my $remaining = $deadline - time;
+      if ($remaining <= 0) { print "$left client(s) still attached to $old after ${delay}s: disconnecting them\n"; last; }
+      print "$left client(s) attached to $old, waiting (${remaining}s left)\n" if defined $left;
+      sleep($remaining < $poll ? $remaining : $poll);
+    }
   }
-  if (!$waited) {
-    system('fbsvcmgr', "$old:service_mgr", 'action_properties', 'dbname', $db,
-      'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') == 0
-      or die "cannot shut down $old\n";
-  }
+  system('fbsvcmgr', "$old:service_mgr", 'action_properties', 'dbname', $db,
+    'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') == 0
+    or die "cannot shut down $old\n";
   print "writes stopped: $old is in full shutdown"
-    . ($delay > 0 ? " after " . (time - $started) . "s (" . ($waited ? 'its clients disconnected by themselves' : 'the remaining clients were disconnected') . ")" : '') . "\n";
+    . ($delay > 0 ? " after " . (time - $started) . "s (" . ($left ? "$left client(s) disconnected" : 'its clients disconnected by themselves') . ")" : '') . "\n";
 }
 
 # 2. final sequence (no header entry while it is 0); from the header page on disk, through the old

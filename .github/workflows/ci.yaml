@@ -843,10 +843,11 @@ jobs:
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo; kubectl logs job/repl-switchover || true; exit 1; }
           kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo
           cat /tmp/switchover.log
-          grep -q 'new attachments are refused, its clients have up to 30s to finish' /tmp/switchover.log
-          # the client stays attached: the shutdown waited the whole delay, then disconnected it
-          grep -q 'clients still attached to repl-0.repl-headless after 30s: disconnecting them' /tmp/switchover.log
-          grep -Eq 'writes stopped: repl-0.repl-headless is in full shutdown after (2[8-9]|3[0-9]|4[0-9])s \(the remaining clients were disconnected\)' /tmp/switchover.log
+          grep -q 'its clients have up to 30s to finish' /tmp/switchover.log
+          # the client stays attached: the Job waited the whole delay (the sidecars do not count), then disconnected it
+          grep -Eq '^1 client\(s\) attached to repl-0.repl-headless, waiting' /tmp/switchover.log
+          grep -q '1 client(s) still attached to repl-0.repl-headless after 30s: disconnecting them' /tmp/switchover.log
+          grep -Eq 'writes stopped: repl-0.repl-headless is in full shutdown after (2[8-9]|3[0-9]|4[0-9])s \(1 client\(s\) disconnected\)' /tmp/switchover.log
           stopping=$(( $(cat /tmp/switchover.stopping) - start ))
           echo "the primary stopped after ${stopping}s (switchoverDelay 30, a client attached)"
           [ "$stopping" -ge 25 ]

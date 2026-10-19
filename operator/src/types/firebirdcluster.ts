@@ -579,9 +579,9 @@ export interface FirebirdClusterSpec {
   smartShutdownTimeout?: number;
   /**
    * Seconds the clients of the primary get to finish their work when a planned switchover stops
-   * it (CloudNativePG switchoverDelay): new attachments are refused at once, the attached clients
-   * keep working until they disconnect, and the ones still attached after this long are
-   * disconnected. 0 (the default) disconnects them at once.
+   * it (CloudNativePG switchoverDelay): the switchover Job waits up to this long for the primary's
+   * remote client attachments to end before it stops writes, disconnecting the clients still
+   * attached. New attachments are not refused meanwhile. 0 (the default) disconnects them at once.
    */
   switchoverDelay?: number;
   /**

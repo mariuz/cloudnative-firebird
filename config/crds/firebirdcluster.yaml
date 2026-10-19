@@ -1104,9 +1104,10 @@ spec:
                 switchoverDelay:
                   description: >-
                     Seconds the primary's clients get to finish their work when a planned
-                    switchover stops it: new attachments are refused at once, the attached
-                    clients keep working until they disconnect, and the ones still attached
-                    after this long are disconnected. 0 (the default) disconnects them at once.
+                    switchover stops it: writes are stopped once no remote client is attached,
+                    or after this long, when the clients still attached are disconnected. New
+                    attachments are not refused meanwhile. 0 (the default) disconnects them at
+                    once.
                   type: integer
                   minimum: 0
                 startDelay:
