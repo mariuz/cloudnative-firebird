@@ -404,11 +404,16 @@ describe('switchover.pl with Firebird 6', () => {
 
   it('shuts the old primary down with the switchover delay for its clients', async () => {
     if (!hasPerl) return;
-    const run = async (delay: string | undefined) => {
+    // attached: the attachments shutdown fails after the delay (clients still attached), so the
+    // remaining ones are forced off; otherwise it completes once they disconnected
+    const run = async (delay: string | undefined, attached = true) => {
       const dir = mkdtempSync(join(tmpdir(), 'fb-swd-'));
-      // online before the shutdown, so step 1 runs it; the shutdown request is recorded
+      // online before the shutdown, so step 1 runs it; the shutdown requests are recorded
       const fbsvcmgr = join(dir, 'fbsvcmgr');
-      writeFileSync(fbsvcmgr, '#!/bin/sh\necho "$*" >> "$(dirname "$0")/calls"\ncase "$*" in *action_properties*) exit 0 ;; esac\necho "Attributes force write"\necho "Replication sequence: 53"\n');
+      writeFileSync(
+        fbsvcmgr,
+        `#!/bin/sh\necho "$*" >> "$(dirname "$0")/calls"\ncase "$*" in *prp_attachments_shutdown*) exit ${attached ? 1 : 0} ;; *action_properties*) exit 0 ;; esac\necho "Attributes force write"\necho "Replication sequence: 53"\n`,
+      );
       chmodSync(fbsvcmgr, 0o755);
       const server = fakeSegmentServer((request, sock) => sock.end(request === 'POSITION' ? 'OK 53 0 0\n' : 'ERR unknown\n'), 'tok');
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -436,16 +441,26 @@ describe('switchover.pl with Firebird 6', () => {
       server.close();
       return { ...out, calls: readFileSync(join(dir, 'calls'), 'utf8') };
     };
-    const delayed = await run('7');
-    expect(delayed.code).toBe(0);
-    expect(delayed.calls).toContain('prp_shutdown_mode prp_sm_full prp_force_shutdown 7');
-    expect(delayed.text).toContain('stopping writes on 127.0.0.1: its clients have up to 7s to finish');
-    expect(delayed.text).toMatch(/writes stopped: 127\.0\.0\.1 is in full shutdown after \d+s/);
-    expect(delayed.text).toContain('switchover ready: promote 127.0.0.1 after segment 53');
+    const forced = await run('7');
+    expect(forced.code).toBe(0);
+    expect(forced.calls.trim().split('\n').filter((c) => c.includes('action_properties'))).toEqual([
+      expect.stringContaining('prp_shutdown_mode prp_sm_full prp_attachments_shutdown 7'),
+      expect.stringContaining('prp_shutdown_mode prp_sm_full prp_force_shutdown 0'),
+    ]);
+    expect(forced.text).toContain('stopping writes on 127.0.0.1: new attachments are refused, its clients have up to 7s to finish');
+    expect(forced.text).toContain('clients still attached to 127.0.0.1 after 7s: disconnecting them');
+    expect(forced.text).toMatch(/writes stopped: 127\.0\.0\.1 is in full shutdown after \d+s \(the remaining clients were disconnected\)/);
+    expect(forced.text).toContain('switchover ready: promote 127.0.0.1 after segment 53');
+    const gone = await run('7', false);
+    expect(gone.code).toBe(0);
+    expect(gone.calls).toContain('prp_attachments_shutdown 7');
+    expect(gone.calls).not.toContain('prp_force_shutdown');
+    expect(gone.text).toMatch(/writes stopped: 127\.0\.0\.1 is in full shutdown after \d+s \(its clients disconnected by themselves\)/);
     // unset, or not a number: at once, as before
     for (const value of [undefined, 'soon']) {
       const immediate = await run(value);
       expect(immediate.code).toBe(0);
+      expect(immediate.calls).not.toContain('prp_attachments_shutdown');
       expect(immediate.calls).toContain('prp_force_shutdown 0');
       expect(immediate.text).not.toContain('clients have up to');
       expect(immediate.text).toContain('writes stopped: 127.0.0.1 is in full shutdown\n');

@@ -768,9 +768,10 @@ Writes are unavailable from the start of step 1 until the target is promoted, ab
 run time, without pod restarts. By default the primary's clients are disconnected at once (their
 open transactions are rolled back). `spec.switchoverDelay` (seconds, CloudNativePG's
 `switchoverDelay`, since v0.114.0) gives them that long to finish first: from the start of step 1
-the server refuses new attachments and transactions, the attached clients keep working, and the
-shutdown completes as soon as they have all disconnected, or after the delay, when the rest are
-disconnected. The same applies to the switchovers a rolling update makes with
+the server refuses new attachments, the attached clients keep working, and the shutdown completes
+as soon as they have all disconnected, or after the delay, when the ones still attached are
+disconnected (Firebird's `attachments` shutdown mode, then a forced one; a forced shutdown's own
+timeout would not wait for idle clients). The same applies to the switchovers a rolling update makes with
 `primaryUpdateMethod: switchover`. `status.switchover.message` and the Job's log say how long the
 clients have; automatic failover does not start while the switchover is in progress. The promotion's short full shutdown of the target's database is
 tried up to five times, three seconds apart, as a busy server can refuse it (since v0.110.0; the

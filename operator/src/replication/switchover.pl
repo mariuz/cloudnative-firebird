@@ -1,10 +1,12 @@
 #!/usr/bin/perl
 # Planned switchover, first phase (run as a Job by the operator):
 #
-#   1. stop writes on the old primary: forced full shutdown through its service manager
-#      (idempotent). With SWITCHOVER_DELAY_SECONDS the server refuses new attachments and
-#      transactions at once and gives the existing attachments that long to finish before it
-#      disconnects them (spec.switchoverDelay); 0 disconnects them at once.
+#   1. stop writes on the old primary: full shutdown through its service manager (idempotent).
+#      With SWITCHOVER_DELAY_SECONDS (spec.switchoverDelay) the server first refuses new
+#      attachments and waits that long for the existing ones to disconnect by themselves (the
+#      "attachments" shutdown mode, which fails when some remain); the remaining ones are then
+#      disconnected by a forced shutdown. 0 disconnects them at once (forced shutdown; its own
+#      timeout does not wait for idle attachments, so it is not used for the delay).
 #   2. read its final replication sequence S from the header (through its segment server when the
 #      server refuses header statistics in full shutdown, as Firebird 6 does);
 #   3. wait until the target and every other ready replica has applied everything up to S
@@ -72,12 +74,21 @@ my $before = header();
 if (!defined $before || $before =~ /full shutdown/) {
   print "$old already shut down\n";
 } else {
-  print "stopping writes on $old: its clients have up to ${delay}s to finish (new attachments and transactions are refused meanwhile)\n" if $delay > 0;
   my $started = time;
-  system('fbsvcmgr', "$old:service_mgr", 'action_properties', 'dbname', $db,
-    'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', $delay) == 0
-    or die "cannot shut down $old\n";
-  print "writes stopped: $old is in full shutdown" . ($delay > 0 ? " after " . (time - $started) . "s" : '') . "\n";
+  my $waited = 0;
+  if ($delay > 0) {
+    print "stopping writes on $old: new attachments are refused, its clients have up to ${delay}s to finish\n";
+    $waited = system('fbsvcmgr', "$old:service_mgr", 'action_properties', 'dbname', $db,
+      'prp_shutdown_mode', 'prp_sm_full', 'prp_attachments_shutdown', $delay) == 0;
+    print "clients still attached to $old after ${delay}s: disconnecting them\n" unless $waited;
+  }
+  if (!$waited) {
+    system('fbsvcmgr', "$old:service_mgr", 'action_properties', 'dbname', $db,
+      'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') == 0
+      or die "cannot shut down $old\n";
+  }
+  print "writes stopped: $old is in full shutdown"
+    . ($delay > 0 ? " after " . (time - $started) . "s (" . ($waited ? 'its clients disconnected by themselves' : 'the remaining clients were disconnected') . ")" : '') . "\n";
 }
 
 # 2. final sequence (no header entry while it is 0); from the header page on disk, through the old
