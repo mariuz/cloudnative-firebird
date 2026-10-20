@@ -1,0 +1,206 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: firebirdrestores.firebird.cloudnative-firebird.io
+spec:
+  group: firebird.cloudnative-firebird.io
+  names:
+    kind: FirebirdRestore
+    listKind: FirebirdRestoreList
+    plural: firebirdrestores
+    singular: firebirdrestore
+    shortNames:
+      - fbr
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterName
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          description: FirebirdRestore is the Schema for the firebirdrestores API
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: FirebirdRestoreSpec defines the desired state of a FirebirdRestore
+              type: object
+              x-kubernetes-validations:
+                - rule: has(self.backupName) != has(self.backupPath)
+                  message: exactly one of backupName and backupPath is required
+                - rule: >-
+                    !has(self.backupPath) || has(self.s3) ||
+                    (!self.backupPath.matches('(^|/)[.][.](/|$)') &&
+                    (!self.backupPath.startsWith('/') || self.backupPath.startsWith('/var/lib/firebird/data/')))
+                  message: backupPath must be inside /var/lib/firebird/data and must not contain ".."
+                - rule: >-
+                    !has(self.incrementalBackupPaths) || size(self.incrementalBackupPaths) == 0 ||
+                    (has(self.restoreType) && self.restoreType == 'physical' && !has(self.backupName))
+                  message: incrementalBackupPaths applies to physical restores from backupPath only
+                - rule: "!has(self.pointInTime) || !has(self.restoreType) || self.restoreType == 'physical'"
+                  message: pointInTime applies to physical restores only
+              required:
+                - clusterName
+              properties:
+                clusterName:
+                  description: Target FirebirdCluster name to restore into (immutable)
+                  type: string
+                  minLength: 1
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: clusterName is immutable
+                backupName:
+                  description: FirebirdBackup custom resource name (a completed backup)
+                  type: string
+                backupPath:
+                  description: >-
+                    Backup file to restore from when backupName is not set: a path in the
+                    primary's data directory (relative, or absolute within it), or the object key
+                    relative to s3.prefix
+                  type: string
+                  maxLength: 1024
+                incrementalBackupPaths:
+                  description: nbackup level 1 and 2 files applied on top of backupPath by a physical restore (paths like backupPath, or object keys with s3)
+                  type: array
+                  maxItems: 16
+                  items:
+                    type: string
+                    maxLength: 1024
+                    x-kubernetes-validations:
+                      - rule: "!self.matches('(^|/)[.][.](/|$)')"
+                        message: backup paths must not contain ".."
+                      - rule: "!self.startsWith('/') || self.startsWith('/var/lib/firebird/data/')"
+                        message: backup paths must be inside /var/lib/firebird/data
+                restoreType:
+                  description: Restore strategy ('logical' or 'physical')
+                  type: string
+                  enum:
+                    - logical
+                    - physical
+                targetDatabase:
+                  description: >-
+                    New database file created in the primary's data directory (default
+                    restore-<name>.fdb). It must not exist yet and cannot be the cluster database.
+                  type: string
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+                s3:
+                  type: object
+                  required:
+                    - bucket
+                  properties:
+                    endpoint:
+                      type: string
+                    bucket:
+                      type: string
+                      minLength: 1
+                    region:
+                      type: string
+                    prefix:
+                      type: string
+                    clientImage:
+                      description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                      type: string
+                    secretRef:
+                      description: >-
+                        Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                        credentials of its environment (workload identity through serviceAccountName, instance profile)
+                      type: object
+                      required:
+                        - name
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+                pointInTime:
+                  description: >-
+                    Point-in-time recovery (physical restores): the journal segments archived after the
+                    backup are replayed on top of it, up to the target (every archived segment without one).
+                    The backup must have been taken on the primary.
+                  type: object
+                  x-kubernetes-validations:
+                    - rule: "!(has(self.targetTime) && has(self.targetSegment))"
+                      message: targetTime and targetSegment are mutually exclusive
+                  properties:
+                    targetTime:
+                      description: >-
+                        Recover the changes of every journal segment archived at or before this time
+                        (RFC 3339). Segments are applied whole: the recovery point is the end of the last
+                        such segment, at most replication.archiveTimeoutSeconds before the target.
+                      type: string
+                      format: date-time
+                    targetSegment:
+                      description: Recover up to the end of this journal segment
+                      type: integer
+                      format: int64
+                      minimum: 1
+                    journalS3:
+                      description: Journal archive to replay (defaults to the cluster's spec.replication.journalArchiveS3)
+                      type: object
+                      required:
+                        - bucket
+                      properties:
+                        endpoint:
+                          type: string
+                        bucket:
+                          type: string
+                          minLength: 1
+                        region:
+                          type: string
+                        prefix:
+                          type: string
+                        clientImage:
+                          description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                          type: string
+                        secretRef:
+                          description: >-
+                            Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                            credentials of its environment (workload identity through serviceAccountName, instance profile)
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
+                              minLength: 1
+            status:
+              description: FirebirdRestoreStatus defines the observed state of FirebirdRestore
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Restoring
+                    - Completed
+                    - Failed
+                startTime:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+                targetPath:
+                  type: string
+                jobName:
+                  type: string
+                error:
+                  type: string

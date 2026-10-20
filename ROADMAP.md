@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.117.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.118.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Helm chart** *(v0.118.0; CloudNativePG's cloudnative-pg chart)*
+  - `charts/cloudnative-firebird`: the CRDs (`crds/`, copied from `config/crds`), the ServiceAccount, RBAC, webhook, Deployment, PodDisruptionBudget and an optional PodMonitor, with values for the image, replicas, the environment (`logLevel`, `firebirdDefaultImage`, `segmentTLS`, `primaryLease`, `leaderElection`, `extraEnv`), resources and scheduling; the names are fixed (the operator's Lease, webhook Service and certificate Secret carry them), the namespace is the release's. `hack/release/chart.sh` syncs the CRDs, checks the chart (lint, CRDs equal, the default rendering equal to the install manifest) and packages it; the Release workflow attaches the package to the GitHub Release and pushes it to `oci://ghcr.io/mariuz/charts`. The unit test job runs the check; the kind CI replaces the manifest-installed operator with the chart, checks it reconciles and the webhook refuses an invalid spec, and upgrades the release.
 - [x] **New clients refused during a switchover** *(v0.117.0)*
   - While a planned switchover stops the primary (the Job waiting `spec.switchoverDelay` for its clients to finish), the primary's role label is `stopping` instead of `primary`, so the primary Service (and the managed `rw` Services, which select `role=primary`) has no endpoint: new clients are refused, as by CloudNativePG's smart shutdown, while the connections already open stay; nor does it take read-only traffic. The label is `primary` again if the switchover fails, and the target's once it is promoted. `status.switchover.message` says so. Unit tests cover the routing decision and the controller through the Stopping and Failed phases; the kind CI checks the empty endpoints, a refused new client and the attached one's connection during the delay, and the endpoints after the switchover.
 - [x] **Release install manifest** *(v0.116.0; CloudNativePG's cnpg-<version>.yaml)*

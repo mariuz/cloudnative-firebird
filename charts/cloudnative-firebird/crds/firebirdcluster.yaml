@@ -1,0 +1,1655 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: firebirdclusters.firebird.cloudnative-firebird.io
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.16.0
+spec:
+  group: firebird.cloudnative-firebird.io
+  names:
+    kind: FirebirdCluster
+    listKind: FirebirdClusterList
+    plural: firebirdclusters
+    singular: firebirdcluster
+    shortNames:
+      - fb
+      - fbc
+    categories:
+      - all
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+        scale:
+          specReplicasPath: .spec.instances
+          statusReplicasPath: .status.instances
+          # lets the HorizontalPodAutoscaler / VerticalPodAutoscaler map the cluster to its pods
+          labelSelectorPath: .status.selector
+      additionalPrinterColumns:
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+        - name: Instances
+          type: integer
+          jsonPath: .spec.instances
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyInstances
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Image
+          type: string
+          jsonPath: .spec.imageName
+          priority: 1
+      schema:
+        openAPIV3Schema:
+          description: FirebirdCluster is the Schema for the firebirdclusters API
+          type: object
+          x-kubernetes-validations:
+            - rule: >-
+                !has(self.spec.bootstrap) || !has(self.spec.bootstrap.clone) ||
+                self.spec.bootstrap.clone.sourceCluster != self.metadata.name
+              message: bootstrap clone sourceCluster cannot be the cluster itself
+          required:
+            - spec
+          properties:
+            apiVersion:
+              description: >
+                APIVersion defines the versioned schema of this representation of an object.
+              type: string
+            kind:
+              description: Kind is a string value representing the REST resource this object represents.
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: FirebirdClusterSpec defines the desired state of a FirebirdCluster
+              type: object
+              x-kubernetes-validations:
+                - rule: "!has(self.bootstrap) || !has(self.bootstrap.clone) || !has(self.bootstrap.recovery)"
+                  message: bootstrap recovery and clone are mutually exclusive
+                - rule: "!has(self.imageName) || !has(self.imageCatalogRef)"
+                  message: imageName and imageCatalogRef are mutually exclusive
+                - rule: "!has(self.ephemeralVolumeSource) || !has(self.ephemeralVolumesSizeLimit) || !has(self.ephemeralVolumesSizeLimit.temporaryData)"
+                  message: ephemeralVolumeSource and ephemeralVolumesSizeLimit.temporaryData are mutually exclusive
+                - rule: "!has(self.smartShutdownTimeout) || self.smartShutdownTimeout < (has(self.stopDelay) ? self.stopDelay : 30)"
+                  message: smartShutdownTimeout must be below stopDelay (30 if unset)
+                - rule: >-
+                    !has(self.bootstrap) || !has(self.bootstrap.recovery) || !has(self.bootstrap.recovery.pointInTime) ||
+                    self.instances <= 1 || (has(self.replication) && has(self.replication.enabled) && self.replication.enabled)
+                  message: bootstrap.recovery.pointInTime with more than one instance needs replication
+                - rule: >-
+                    !has(self.replication) || !self.replication.enabled || !has(self.replication.mode) ||
+                    self.replication.mode != 'sync' || self.instances >= 2
+                  message: replication mode 'sync' needs at least 2 instances
+                - rule: >-
+                    !has(self.replication) || !self.replication.enabled || !has(self.replication.mode) ||
+                    self.replication.mode != 'sync' || !has(self.replication.synchronous) ||
+                    !has(self.replication.synchronous.number) || self.replication.synchronous.number < self.instances
+                  message: replication synchronous.number needs more instances (a primary and the standbys)
+              required:
+                - instances
+                - storage
+              properties:
+                instances:
+                  description: Number of Firebird instances to run in this cluster
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                imageName:
+                  description: >
+                    Full name of the Firebird Docker image to use.
+                    Defaults to the operator's FIREBIRD_DEFAULT_IMAGE, or firebirdsql/firebird:latest
+                  type: string
+                imageCatalogRef:
+                  description: >-
+                    Image catalog entry (CloudNativePG's imageCatalogRef): the cluster runs the catalog's image of
+                    this Firebird major version; a changed entry updates the cluster like a new imageName.
+                    Mutually exclusive with imageName.
+                  type: object
+                  required:
+                    - name
+                    - major
+                  properties:
+                    kind:
+                      type: string
+                      enum: [FirebirdImageCatalog, FirebirdClusterImageCatalog]
+                    name:
+                      type: string
+                      minLength: 1
+                    major:
+                      type: integer
+                      minimum: 1
+                      maximum: 99
+                superuserSecret:
+                  description: Reference to the Secret containing the SYSDBA password
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      description: Name of the Secret resource
+                      type: string
+                      minLength: 1
+                databaseName:
+                  description: >
+                    Database file created in each instance's data directory
+                    (/var/lib/firebird/data). Defaults to "mydb.fdb".
+                  type: string
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+                storage:
+                  description: Storage configuration for Firebird data files
+                  type: object
+                  required:
+                    - size
+                  properties:
+                    size:
+                      description: >
+                        Size of the PersistentVolumeClaim (e.g. "1Gi"). Increasing this value
+                        expands existing PVCs in place (requires a StorageClass with
+                        allowVolumeExpansion); shrinking is not supported.
+                      type: string
+                      x-kubernetes-validations:
+                        - rule: isQuantity(self) && quantity(self).isGreaterThan(quantity('0'))
+                          message: storage size must be a positive quantity (e.g. "10Gi")
+                        - rule: "!isQuantity(oldSelf) || !isQuantity(self) || !quantity(self).isLessThan(quantity(oldSelf))"
+                          message: storage size cannot be decreased (PVCs cannot shrink)
+                    storageClass:
+                      description: Optional StorageClass name for the PVC
+                      type: string
+                resources:
+                  description: Resource requirements for each Firebird container
+                  type: object
+                  properties:
+                    limits:
+                      type: object
+                      properties:
+                        cpu:
+                          type: string
+                        memory:
+                          type: string
+                    requests:
+                      type: object
+                      properties:
+                        cpu:
+                          type: string
+                        memory:
+                          type: string
+                backup:
+                  description: Backup configuration
+                  type: object
+                  x-kubernetes-validations:
+                    - rule: "!has(self.verify) || !self.verify || !has(self.type) || self.type != 'physical'"
+                      message: verify is supported for logical backups only
+                  required:
+                    - enabled
+                  properties:
+                    enabled:
+                      description: Whether backups are enabled
+                      type: boolean
+                    type:
+                      description: Backup strategy ('logical' via gbak or 'physical' via nbackup)
+                      type: string
+                      enum:
+                        - logical
+                        - physical
+                    level:
+                      description: nbackup physical backup level (0 for full base backup, 1 or 2 for incremental)
+                      type: integer
+                      minimum: 0
+                      maximum: 2
+                    schedule:
+                      description: Cron schedule for backups (e.g. "0 2 * * *")
+                      type: string
+                      pattern: '^\s*\S+(\s+\S+){4}\s*$'
+                    retentionPolicy:
+                      description: >-
+                        How long scheduled backups are kept: <n>d, <n>w or <n>m (30 days). Enforced for backups
+                        to S3 and server-side backups (expired backups of the schedule are deleted
+                        after each backup, the newest is always kept; an nbackup file stays while a kept backup's chain
+                        needs it).
+                      type: string
+                      pattern: '^[1-9][0-9]*[dwm]$'
+                    verify:
+                      description: >-
+                        Restore each backup into a scratch database and validate it (gbak -c, then a full
+                        validation); the backup fails when it does not restore or validate. Logical backups only.
+                      type: boolean
+                    target:
+                      description: >-
+                        Where the backup runs: primary (default) or prefer-standby, a ready, unfenced and
+                        non-lagging replica when one exists (backups to S3 only; server-side backups use the primary)
+                      type: string
+                      enum: [primary, prefer-standby]
+                    s3:
+                      description: Cloud object storage configuration for backup archive export
+                      type: object
+                      required:
+                        - bucket
+                      properties:
+                        endpoint:
+                          type: string
+                        bucket:
+                          type: string
+                          minLength: 1
+                        region:
+                          type: string
+                        prefix:
+                          type: string
+                        clientImage:
+                          description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                          type: string
+                        secretRef:
+                          description: >-
+                            Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                            credentials of its environment (workload identity through serviceAccountName, instance profile)
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
+                              minLength: 1
+                networkPolicy:
+                  description: NetworkPolicy configuration for database isolation
+                  type: object
+                  required:
+                    - enabled
+                  properties:
+                    enabled:
+                      description: Whether to enable NetworkPolicy for port 3050
+                      type: boolean
+                    ingressFrom:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          podSelector:
+                            type: object
+                            additionalProperties:
+                              type: string
+                          namespaceSelector:
+                            type: object
+                            additionalProperties:
+                              type: string
+                monitoring:
+                  description: Monitoring configuration
+                  type: object
+                  properties:
+                    enablePodMonitor:
+                      description: Whether to enable Prometheus PodMonitor
+                      type: boolean
+                    enableGrafanaDashboard:
+                      description: Whether to reconcile a Grafana dashboard ConfigMap
+                      type: boolean
+                    exporter:
+                      description: Prometheus exporter sidecar configuration
+                      type: object
+                      required:
+                        - enabled
+                      properties:
+                        enabled:
+                          type: boolean
+                        image:
+                          type: string
+                        port:
+                          type: integer
+                          minimum: 1024
+                          maximum: 65535
+                        resources:
+                          type: object
+                        env:
+                          type: array
+                          items:
+                            type: object
+                    customQueriesConfigMap:
+                      description: >-
+                        Custom metrics queries in CloudNativePG's format (a map of queries by name, each
+                        with query, primary and metrics) in ConfigMap keys. The metrics-exporter sidecar
+                        of every instance runs them on each scrape (port 9187, /metrics).
+                      type: array
+                      maxItems: 32
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - key
+                        properties:
+                          name:
+                            description: Name of the ConfigMap in the cluster's namespace
+                            type: string
+                            minLength: 1
+                            maxLength: 253
+                          key:
+                            description: Key of the ConfigMap holding the queries (YAML)
+                            type: string
+                            minLength: 1
+                            maxLength: 253
+                            pattern: '^[-._a-zA-Z0-9]+$'
+                    customQueriesSecret:
+                      description: >-
+                        The same in Secret keys. A query of the same name in a later source replaces an
+                        earlier one; Secrets come after ConfigMaps.
+                      type: array
+                      maxItems: 32
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - key
+                        properties:
+                          name:
+                            description: Name of the Secret in the cluster's namespace
+                            type: string
+                            minLength: 1
+                            maxLength: 253
+                          key:
+                            description: Key of the Secret holding the queries (YAML)
+                            type: string
+                            minLength: 1
+                            maxLength: 253
+                            pattern: '^[-._a-zA-Z0-9]+$'
+                tls:
+                  description: >-
+                    Encryption of client connections. Firebird has no TLS listener: connections are
+                    encrypted by its wire protocol (WireCrypt), which Firebird 4 and later require by
+                    default.
+                  type: object
+                  required:
+                    - enabled
+                  properties:
+                    enabled:
+                      description: >-
+                        Strict wire encryption: WireCrypt = Required and only the ChaCha64 / ChaCha
+                        plugins (not Arc4), so a client that cannot use ChaCha is refused
+                      type: boolean
+                    secretName:
+                      description: Deprecated and ignored (no certificate is used)
+                      type: string
+                    issuerRef:
+                      description: Deprecated and ignored (no certificate is used)
+                      type: object
+                      required:
+                        - name
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+                        kind:
+                          type: string
+                        group:
+                          type: string
+                segmentTLS:
+                  description: >
+                    Mutual TLS for the segment servers (journal segments, seed copies, backup files)
+                    and their clients, with a CA the operator manages for the cluster
+                    (<cluster>-segment-tls Secret), through a proxy sidecar from the operator image.
+                    Needs native sidecars (Kubernetes 1.29 or later). Switching it restarts the
+                    instances. Written by the operator on a new cluster's first reconcile when unset:
+                    true from Kubernetes 1.29 (operator setting SEGMENT_TLS_DEFAULT), false for
+                    clusters created by an earlier version.
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                replication:
+                  description: >
+                    Journal-based asynchronous replication (Firebird 4.0+). Instance 0 is the
+                    bootstrap primary; the other instances are read-only replicas seeded from a
+                    ready replica or the primary's offline bootstrap seed. See ISSUES.md.
+                  type: object
+                  required:
+                    - enabled
+                  properties:
+                    enabled:
+                      description: Whether replication is enabled
+                      type: boolean
+                    mode:
+                      description: >
+                        Replication mode (defaults to 'async'): 'async' ships journal segments to every
+                        replica; 'sync' also makes one replica the synchronous standby, which applies
+                        every change before the primary's commit completes. Needs 2 instances or more.
+                      type: string
+                      enum:
+                        - sync
+                        - async
+                    synchronous:
+                      description: Synchronous replication settings (mode sync)
+                      type: object
+                      properties:
+                        dataDurability:
+                          description: >
+                            required (default): while the standby is unavailable, the primary's writes
+                            fail rather than commit without it. preferred: a standby not ready for
+                            standbyUnavailableSeconds is detached and writes continue asynchronously.
+                          type: string
+                          enum:
+                            - required
+                            - preferred
+                        standbyUnavailableSeconds:
+                          description: dataDurability preferred, seconds before an unavailable standby is detached (default 30)
+                          type: integer
+                          minimum: 1
+                        detachForUpdates:
+                          description: >
+                            dataDurability required: a rolling update may detach the standby before
+                            restarting it when no other replica can take over (default false: it is
+                            restarted attached and writes wait). Commits during its restart are then
+                            asynchronous; it is attached again once ready.
+                          type: boolean
+                        number:
+                          description: >-
+                            How many synchronous standbys (default 1, at most instances - 1;
+                            CloudNativePG's number): every commit is applied on all of them before
+                            it completes
+                          type: integer
+                          minimum: 1
+                    journalDirectory:
+                      description: >
+                        Base directory for replication files on each instance's volume; journal,
+                        archive and source directories are created below it. Must be below
+                        /var/lib/firebird/data (defaults to "/var/lib/firebird/data/replication").
+                      type: string
+                      pattern: '^/var/lib/firebird/data/[A-Za-z0-9._/-]+$'
+                    archiveTimeoutSeconds:
+                      description: Seconds after which a partially filled journal segment is archived and shipped (defaults to 10)
+                      type: integer
+                      minimum: 1
+                    segmentRetentionHours:
+                      description: Hours archived segments are kept on the primary for replicas to fetch (defaults to 24)
+                      type: integer
+                      minimum: 1
+                    maxSegmentRetentionHours:
+                      description: >-
+                        Hours archived segments a replica has not applied yet are kept past
+                        segmentRetentionHours, so a slow or stopped replica can catch up without being
+                        re-seeded (defaults to 168; never less than segmentRetentionHours)
+                      type: integer
+                      minimum: 1
+                    pruneAppliedSegments:
+                      description: >-
+                        Delete archived segments on the primary as soon as every replica has applied
+                        them (and, with journalArchiveS3, they are uploaded) instead of keeping them for
+                        segmentRetentionHours (defaults to false)
+                      type: boolean
+                    failover:
+                      description: >-
+                        Automatic failover: when the primary pod has not been ready for delaySeconds,
+                        the most advanced ready replica is promoted and the old primary is re-seeded.
+                        Asynchronous replication: transactions the replicas had not received are lost.
+                      type: object
+                      properties:
+                        enabled:
+                          type: boolean
+                        delaySeconds:
+                          description: Seconds the primary must be unavailable before a failover (default 30)
+                          type: integer
+                          minimum: 1
+                        isolationCheck:
+                          description: >-
+                            The primary puts its database into full shutdown when it has reached neither
+                            the Kubernetes API server nor any other instance for timeoutSeconds, so that
+                            clients cut off with it cannot write while a replica is promoted. The operator
+                            brings it back online if it is still the primary. Enabled by default.
+                          type: object
+                          properties:
+                            enabled:
+                              type: boolean
+                            timeoutSeconds:
+                              description: Seconds the primary may be isolated before it fences itself (default 20)
+                              type: integer
+                              minimum: 5
+                              maximum: 3600
+                            fenceWhenUnreached:
+                              description: >-
+                                Also fence a primary that still reaches the API server when neither the
+                                operator nor any replica has reached it for contactTimeoutSeconds (cut off
+                                on the other side of a partition; only with replicas). Default true.
+                              type: boolean
+                            contactTimeoutSeconds:
+                              description: fenceWhenUnreached, seconds nothing may have reached the primary (default 60)
+                              type: integer
+                              minimum: 45
+                              maximum: 3600
+                        primaryLease:
+                          description: >-
+                            The primary holds the cluster Lease itself (a promotion mutex): a sidecar
+                            renews it while the primary's database is online and fences the database
+                            when the Lease names another instance or cannot be renewed for its duration;
+                            the operator promotes a replica only once the Lease has expired. Default false.
+                          type: object
+                          properties:
+                            enabled:
+                              type: boolean
+                            durationSeconds:
+                              description: Seconds a renewal keeps the Lease valid (default 15); renewed every third of it
+                              type: integer
+                              minimum: 5
+                              maximum: 120
+                    allowLiveSeedFromPrimary:
+                      description: >
+                        Allow seeding a replica with a locked copy of the live primary when no ready
+                        replica and no usable offline bootstrap seed exist (default true). The copy's
+                        in-flight transactions, including those of the commit/TIP window (ISSUES.md,
+                        issue 2), are replayed on the new replica. false never locks the primary: a new
+                        replica then waits for a ready replica or a fresh offline seed.
+                      type: boolean
+                    archiveSchedule:
+                      description: Cron schedule for archiving completed journal files to object storage
+                      type: string
+                    readOnlyRouting:
+                      description: >
+                        Replication lag and readiness-aware routing of read-only traffic.
+                        When enabled, the -replica Service only selects ready replicas whose
+                        reported replication lag (pod annotation
+                        firebird.cloudnative-firebird.io/replication-lag-seconds) is within
+                        maxLagSeconds, and the primary Service only selects the primary pod.
+                      type: object
+                      required:
+                        - enabled
+                      properties:
+                        enabled:
+                          description: Whether lag-aware read-only routing is enabled
+                          type: boolean
+                        maxLagSeconds:
+                          description: Maximum replication lag in seconds for a replica to receive read traffic (defaults to 30)
+                          type: integer
+                          minimum: 0
+                        fallbackToPrimary:
+                          description: Route read-only traffic to the primary when no replica is eligible (defaults to true)
+                          type: boolean
+                    journalArchiveS3:
+                      description: Cloud S3 storage configuration for continuous journal archiving (PITR)
+                      type: object
+                      required:
+                        - bucket
+                      properties:
+                        endpoint:
+                          type: string
+                        bucket:
+                          type: string
+                          minLength: 1
+                        region:
+                          type: string
+                        prefix:
+                          type: string
+                        clientImage:
+                          description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                          type: string
+                        secretRef:
+                          description: >-
+                            Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                            credentials of its environment (workload identity through serviceAccountName, instance profile)
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
+                              minLength: 1
+                autoSweep:
+                  description: AutoSweep configuration for periodic gfix database sweeping
+                  type: object
+                  required:
+                    - enabled
+                  properties:
+                    enabled:
+                      description: Whether database sweeping is enabled
+                      type: boolean
+                    schedule:
+                      description: Cron schedule for sweep execution (defaults to "0 3 * * *")
+                      type: string
+                      pattern: '^\s*\S+(\s+\S+){4}\s*$'
+                    databaseName:
+                      description: Database file name to sweep (defaults to spec.databaseName)
+                      type: string
+                diagnostics:
+                  description: Diagnostics configuration for online database integrity checks (gfix -v -full)
+                  type: object
+                  required:
+                    - enabled
+                  properties:
+                    enabled:
+                      description: Whether online database diagnostics are enabled
+                      type: boolean
+                    schedule:
+                      description: Cron schedule for diagnostic execution (defaults to "0 4 * * 0")
+                      type: string
+                      pattern: '^\s*\S+(\s+\S+){4}\s*$'
+                    databaseName:
+                      description: Database file name to check (defaults to spec.databaseName)
+                      type: string
+                config:
+                  description: Custom firebird.conf configuration settings
+                  type: object
+                  properties:
+                    settings:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      x-kubernetes-validations:
+                        - rule: self.all(k, k.lowerAscii() != 'securitydatabase')
+                          message: SecurityDatabase is managed by the operator (the security database is kept on the instance volume)
+                replica:
+                  description: Replica cluster, following another cluster's journal archive in S3 as a read-only replica; enabled false promotes it
+                  type: object
+                  required:
+                    - enabled
+                    - journalS3
+                  properties:
+                    enabled:
+                      description: true follows the source; false promotes this cluster to a primary of its own (once)
+                      type: boolean
+                    journalS3:
+                      description: The source cluster's journal archive (its replication.journalArchiveS3)
+                      type: object
+                      required:
+                        - bucket
+                      properties:
+                        endpoint:
+                          type: string
+                        bucket:
+                          type: string
+                          minLength: 1
+                        region:
+                          type: string
+                        prefix:
+                          type: string
+                        clientImage:
+                          description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                          type: string
+                        secretRef:
+                          description: >-
+                            Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                            credentials of its environment (workload identity through serviceAccountName, instance profile)
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
+                              minLength: 1
+                    pollIntervalSeconds:
+                      description: Seconds between two looks at the archive (default 30)
+                      type: integer
+                      minimum: 5
+                      maximum: 3600
+                bootstrap:
+                  description: Bootstrap options for initial database creation
+                  type: object
+                  properties:
+                    initSql:
+                      description: Inline DDL/DML SQL script to run on initial database creation
+                      type: string
+                    initSqlRefs:
+                      description: >-
+                        SQL scripts in Secrets and ConfigMaps, run after initSql on initial database
+                        creation: the Secrets' keys first, then the ConfigMaps', each in order
+                      type: object
+                      properties:
+                        secretRefs:
+                          description: Secret keys holding SQL scripts, run in this order
+                          type: array
+                          maxItems: 50
+                          items:
+                            type: object
+                            required:
+                              - name
+                              - key
+                            properties:
+                              name:
+                                type: string
+                                maxLength: 253
+                                pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                              key:
+                                type: string
+                                maxLength: 253
+                                pattern: '^[-._a-zA-Z0-9]+$'
+                        configMapRefs:
+                          description: ConfigMap keys holding SQL scripts, run in this order
+                          type: array
+                          maxItems: 50
+                          items:
+                            type: object
+                            required:
+                              - name
+                              - key
+                            properties:
+                              name:
+                                type: string
+                                maxLength: 253
+                                pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                              key:
+                                type: string
+                                maxLength: 253
+                                pattern: '^[-._a-zA-Z0-9]+$'
+                    recovery:
+                      description: Cloud or file backup recovery configuration for database bootstrapping
+                      type: object
+                      x-kubernetes-validations:
+                        - rule: has(self.volumeSnapshot) || has(self.s3) || (has(self.sourcePath) && self.sourcePath != '')
+                          message: bootstrap recovery requires sourcePath, s3 or volumeSnapshot
+                        - rule: "!has(self.volumeSnapshot) || (!has(self.s3) && !has(self.sourcePath) && !has(self.pointInTime))"
+                          message: bootstrap.recovery.volumeSnapshot is mutually exclusive with sourcePath, s3 and pointInTime
+                        - rule: "!has(self.incrementalPaths) || size(self.incrementalPaths) == 0 || has(self.pointInTime)"
+                          message: bootstrap.recovery.incrementalPaths applies to point-in-time recovery only
+                        - rule: "!has(self.pointInTime) || (has(self.s3) && has(self.sourcePath) && has(self.pointInTime.journalS3))"
+                          message: bootstrap.recovery.pointInTime needs s3, sourcePath and pointInTime.journalS3
+                      properties:
+                        sourcePath:
+                          description: >-
+                            gbak backup to restore: the object key relative to s3.prefix (default
+                            backup.fbk) when s3 is set, otherwise a file path readable from the
+                            init container
+                          type: string
+                        s3:
+                          type: object
+                          required:
+                            - bucket
+                          properties:
+                            endpoint:
+                              type: string
+                            bucket:
+                              type: string
+                              minLength: 1
+                            region:
+                              type: string
+                            prefix:
+                              type: string
+                            clientImage:
+                              description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                              type: string
+                            secretRef:
+                              description: >-
+                                Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                                credentials of its environment (workload identity through serviceAccountName, instance profile)
+                              type: object
+                              required:
+                                - name
+                              properties:
+                                name:
+                                  type: string
+                                  minLength: 1
+                        volumeSnapshot:
+                          description: >-
+                            Bootstrap from a VolumeSnapshot (a volumeSnapshot FirebirdBackup, or a snapshot of an
+                            instance volume taken while its database was locked for backup): the first instance's
+                            volume is created from it and a Job turns its database into this cluster's, as of the lock
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              description: Name of the VolumeSnapshot, in the cluster's namespace
+                              type: string
+                              minLength: 1
+                            databaseName:
+                              description: Database file name on the snapshot's volume (defaults to databaseName)
+                              type: string
+                              pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+                        incrementalPaths:
+                          description: nbackup level 1 and 2 object keys applied on top of sourcePath (pointInTime only)
+                          type: array
+                          maxItems: 16
+                          items:
+                            type: string
+                            maxLength: 1024
+                        pointInTime:
+                          description: >-
+                            Point-in-time recovery: sourcePath is an nbackup level 0 object key (with
+                            incrementalPaths on top), and the journal archive in journalS3 (required)
+                            is replayed on it up to the target, by a Job that prepares the first
+                            instance's volume before the instances start.
+                          type: object
+                          x-kubernetes-validations:
+                            - rule: "!(has(self.targetTime) && has(self.targetSegment))"
+                              message: targetTime and targetSegment are mutually exclusive
+                          properties:
+                            targetTime:
+                              description: >-
+                                Recover the changes of every journal segment archived at or before this time
+                                (RFC 3339). Segments are applied whole: the recovery point is the end of the last
+                                such segment, at most replication.archiveTimeoutSeconds before the target.
+                              type: string
+                              format: date-time
+                            targetSegment:
+                              description: Recover up to the end of this journal segment
+                              type: integer
+                              format: int64
+                              minimum: 1
+                            journalS3:
+                              description: Journal archive to replay (defaults to the cluster's spec.replication.journalArchiveS3)
+                              type: object
+                              required:
+                                - bucket
+                              properties:
+                                endpoint:
+                                  type: string
+                                bucket:
+                                  type: string
+                                  minLength: 1
+                                region:
+                                  type: string
+                                prefix:
+                                  type: string
+                                clientImage:
+                                  description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                                  type: string
+                                secretRef:
+                                  description: >-
+                                    Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                                    credentials of its environment (workload identity through serviceAccountName, instance profile)
+                                  type: object
+                                  required:
+                                    - name
+                                  properties:
+                                    name:
+                                      type: string
+                                      minLength: 1
+                    clone:
+                      description: Target source cluster configuration for cluster-to-cluster cloning
+                      type: object
+                      required:
+                        - sourceCluster
+                      properties:
+                        sourceCluster:
+                          type: string
+                          minLength: 1
+                        namespace:
+                          type: string
+                        databaseName:
+                          description: Database file name in the source cluster (defaults to this cluster's databaseName)
+                          type: string
+                        superuserSecret:
+                          description: Secret (key "password") in this namespace with the source cluster's SYSDBA password; defaults to superuserSecret
+                          type: object
+                          required:
+                            - name
+                          properties:
+                            name:
+                              type: string
+                env:
+                  description: Additional environment variables for the Firebird container
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - name
+                    properties:
+                      name:
+                        type: string
+                      value:
+                        type: string
+                      valueFrom:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                envFrom:
+                  description: >-
+                    ConfigMaps and Secrets whose keys become environment variables of the Firebird
+                    container; env and the operator's own variables take precedence
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-validations:
+                      - rule: "has(self.configMapRef) != has(self.secretRef)"
+                        message: each envFrom entry needs exactly one of configMapRef and secretRef
+                    properties:
+                      configMapRef:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 253
+                            pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                          optional:
+                            type: boolean
+                      secretRef:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 253
+                            pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                          optional:
+                            type: boolean
+                      prefix:
+                        type: string
+                        pattern: '^[A-Za-z_][A-Za-z0-9_]*$'
+                ephemeralVolumesSizeLimit:
+                  description: Size limits of the instances' ephemeral volumes
+                  type: object
+                  properties:
+                    temporaryData:
+                      description: >-
+                        Size limit of an emptyDir for Firebird's sort and temporary files
+                        (TempDirectories points there), instead of the container's writable layer
+                      type: string
+                      pattern: '^[0-9]+(\.[0-9]+)?([KMGTPE]i?|[mk])?$'
+                ephemeralVolumeSource:
+                  description: >-
+                    A generic ephemeral volume (a PersistentVolumeClaim template, deleted with the
+                    pod) for Firebird's sort and temporary files, instead of the emptyDir
+                  type: object
+                  required:
+                    - volumeClaimTemplate
+                  properties:
+                    volumeClaimTemplate:
+                      type: object
+                      required:
+                        - spec
+                      x-kubernetes-preserve-unknown-fields: true
+                projectedVolumeTemplate:
+                  description: >-
+                    A projected volume (Kubernetes ProjectedVolumeSource) mounted read-only at
+                    /projected in the Firebird container
+                  type: object
+                  required:
+                    - sources
+                  properties:
+                    defaultMode:
+                      type: integer
+                      minimum: 0
+                      maximum: 511
+                    sources:
+                      type: array
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                nodeSelector:
+                  description: Node labels required for pod scheduling
+                  type: object
+                  additionalProperties:
+                    type: string
+                affinity:
+                  description: Pod affinity and anti-affinity rules
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                tolerations:
+                  description: Node taint tolerations
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                podAntiAffinity:
+                  description: Anti-affinity among the cluster's instance pods (on by default for new clusters, preferred on kubernetes.io/hostname)
+                  type: object
+                  properties:
+                    enabled:
+                      description: Unset, on for clusters created since v0.90.0 (the pod-anti-affinity annotation) and off before
+                      type: boolean
+                    type:
+                      description: preferred (default) lets instances share a node when no other fits; required leaves them pending instead
+                      type: string
+                      enum:
+                        - preferred
+                        - required
+                    topologyKey:
+                      description: Node label whose values the instances spread over (default kubernetes.io/hostname)
+                      type: string
+                      minLength: 1
+                topologySpreadConstraints:
+                  description: Topology spread constraints of the instance pods; one without a labelSelector selects the cluster's instance pods
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                runAsFirebirdUser:
+                  description: >-
+                    Run every instance container as the image's firebird user (uid 84) with no
+                    capabilities, on a writable copy of /opt/firebird, so the instance pods meet
+                    the restricted Pod Security Standard (default false: the official image runs
+                    the server as root)
+                  type: boolean
+                podSecurityContext:
+                  description: >-
+                    Pod security context of the instance pods (a Kubernetes PodSecurityContext),
+                    merged over the defaults fsGroup 999 and seccompProfile RuntimeDefault
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                securityContext:
+                  description: >-
+                    Security context of every instance container (a Kubernetes SecurityContext),
+                    merged over the defaults: allowPrivilegeEscalation false, all capabilities
+                    dropped except CHOWN, DAC_OVERRIDE and FOWNER (the official image runs the
+                    server as root)
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                serviceAccountName:
+                  description: >-
+                    Existing ServiceAccount for the instance pods and every Job of the cluster
+                    (backups, restores, journal archiving, maintenance), e.g. for S3 access through
+                    workload identity instead of static keys. Defaults to the namespace's default
+                    ServiceAccount.
+                  type: string
+                  maxLength: 253
+                  pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                priorityClassName:
+                  description: >-
+                    PriorityClass of every pod of the cluster: the instances and the operator's Jobs
+                  type: string
+                  maxLength: 253
+                  pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                schedulerName:
+                  description: Scheduler of every pod of the cluster (the default scheduler if unset)
+                  type: string
+                  minLength: 1
+                imagePullPolicy:
+                  description: >-
+                    Pull policy of every container of the cluster's pods (the Kubernetes default if
+                    unset)
+                  type: string
+                  enum:
+                    - Always
+                    - IfNotPresent
+                    - Never
+                imagePullSecrets:
+                  description: Secrets for pulling the images of every pod of the cluster
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - name
+                    properties:
+                      name:
+                        type: string
+                        maxLength: 253
+                        pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                inheritedMetadata:
+                  description: >-
+                    Labels and annotations copied onto the resources the operator creates for the
+                    cluster: the StatefulSet, the instance pods and volumes, the default Services,
+                    the PodDisruptionBudget, the Jobs and CronJobs and their pods. The operator's
+                    own keys may not be named; keys removed here stay on existing resources.
+                  type: object
+                  properties:
+                    labels:
+                      type: object
+                      additionalProperties:
+                        type: string
+                        maxLength: 63
+                        pattern: '^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$'
+                      x-kubernetes-validations:
+                        - rule: >-
+                            self.all(k, !(k in ['app.kubernetes.io/name', 'app.kubernetes.io/component',
+                            'app.kubernetes.io/managed-by']) && !k.startsWith('firebird.cloudnative-firebird.io/'))
+                          message: the operator's own labels (app.kubernetes.io/name, component, managed-by and firebird.cloudnative-firebird.io/) cannot be inherited
+                    annotations:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      x-kubernetes-validations:
+                        - rule: "self.all(k, !k.startsWith('firebird.cloudnative-firebird.io/'))"
+                          message: firebird.cloudnative-firebird.io/ annotations cannot be inherited
+                stopDelay:
+                  description: >-
+                    Seconds an instance pod may take to stop (its terminationGracePeriodSeconds).
+                    Kubernetes' 30 seconds if unset.
+                  type: integer
+                  minimum: 1
+                smartShutdownTimeout:
+                  description: >-
+                    Seconds a stopping instance waits for its remote client attachments to end
+                    before the server is stopped (a preStop hook). Below stopDelay (or 30). No wait
+                    if unset.
+                  type: integer
+                  minimum: 1
+                switchoverDelay:
+                  description: >-
+                    Seconds the primary's clients get to finish their work when a planned
+                    switchover stops it: writes are stopped once no remote client is attached,
+                    or after this long, when the clients still attached are disconnected. New
+                    attachments are not refused meanwhile. 0 (the default) disconnects them at
+                    once.
+                  type: integer
+                  minimum: 0
+                startDelay:
+                  description: >-
+                    Seconds an instance may take to start before it is restarted: a startup probe on
+                    the server port. None if unset.
+                  type: integer
+                  minimum: 1
+                probes:
+                  description: Timings of the instance probes, over the operator's defaults
+                  type: object
+                  properties:
+                    liveness:
+                      type: object
+                      properties:
+                        initialDelaySeconds:
+                          type: integer
+                          minimum: 0
+                        periodSeconds:
+                          type: integer
+                          minimum: 1
+                        timeoutSeconds:
+                          type: integer
+                          minimum: 1
+                        failureThreshold:
+                          type: integer
+                          minimum: 1
+                        successThreshold:
+                          type: integer
+                          minimum: 1
+                          maximum: 1
+                    readiness:
+                      type: object
+                      properties:
+                        initialDelaySeconds:
+                          type: integer
+                          minimum: 0
+                        periodSeconds:
+                          type: integer
+                          minimum: 1
+                        timeoutSeconds:
+                          type: integer
+                          minimum: 1
+                        failureThreshold:
+                          type: integer
+                          minimum: 1
+                        successThreshold:
+                          type: integer
+                          minimum: 1
+                    startup:
+                      description: >-
+                        The startup probe; set without startDelay it gets these timings (30
+                        failures of 10 seconds by default)
+                      type: object
+                      properties:
+                        initialDelaySeconds:
+                          type: integer
+                          minimum: 0
+                        periodSeconds:
+                          type: integer
+                          minimum: 1
+                        timeoutSeconds:
+                          type: integer
+                          minimum: 1
+                        failureThreshold:
+                          type: integer
+                          minimum: 1
+                        successThreshold:
+                          type: integer
+                          minimum: 1
+                          maximum: 1
+                serviceType:
+                  description: Kubernetes Service type (ClusterIP, NodePort, LoadBalancer)
+                  type: string
+                  enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                suspended:
+                  description: Whether reconciliation is suspended for this cluster
+                  type: boolean
+                hibernated:
+                  description: >
+                    Declarative hibernation. When true the StatefulSet is scaled to zero and
+                    operator-managed CronJobs are suspended, while PVCs, Services and
+                    configuration are retained. Set back to false to resume the cluster.
+                  type: boolean
+                nodeMaintenanceWindow:
+                  description: >
+                    Node maintenance window (CloudNativePG's nodeMaintenanceWindow): while
+                    inProgress, the PodDisruptionBudget is removed so node drains can evict the
+                    instances. Set inProgress back to false after the maintenance.
+                  type: object
+                  properties:
+                    inProgress:
+                      type: boolean
+                    reusePVC:
+                      description: >
+                        false: a replica whose pod cannot be scheduled while the window is open
+                        (its volume on a drained node) gets a new volume, seeded again from the
+                        primary. Replication clusters only. Default true.
+                      type: boolean
+                primaryUpdateStrategy:
+                  description: >
+                    With replication, instance pods are updated by the operator, replicas first
+                    and the primary last. unsupervised (default) updates the primary
+                    automatically; supervised waits for a switchover (targetPrimary annotation)
+                    or a manual restart of the primary.
+                  type: string
+                  enum: [unsupervised, supervised]
+                primaryUpdateMethod:
+                  description: >
+                    How an unsupervised rolling update updates the primary: restart (default)
+                    restarts it in place, switchover promotes an updated replica first.
+                  type: string
+                  enum: [restart, switchover]
+                serviceAnnotations:
+                  description: Custom annotations to apply to primary and replica services
+                  type: object
+                  additionalProperties:
+                    type: string
+                managed:
+                  description: Resources the operator manages besides the cluster's own (CloudNativePG's spec.managed)
+                  type: object
+                  properties:
+                    services:
+                      description: Additional Services built from templates, and default Services turned off
+                      type: object
+                      properties:
+                        disabledDefaultServices:
+                          description: Default Services not to create (ro, the <name>-replica Service)
+                          type: array
+                          items:
+                            type: string
+                            enum: [ro]
+                        additional:
+                          type: array
+                          maxItems: 16
+                          x-kubernetes-validations:
+                            - rule: "self.all(a, self.exists_one(b, b.serviceTemplate.metadata.name == a.serviceTemplate.metadata.name))"
+                              message: each managed Service name is listed once
+                          items:
+                            type: object
+                            required:
+                              - selectorType
+                              - serviceTemplate
+                            properties:
+                              selectorType:
+                                description: rw the primary, ro the replicas, r every instance
+                                type: string
+                                enum: [rw, ro, r]
+                              updateStrategy:
+                                description: patch (default) updates the Service in place, replace recreates it
+                                type: string
+                                enum: [patch, replace]
+                              serviceTemplate:
+                                type: object
+                                required:
+                                  - metadata
+                                properties:
+                                  metadata:
+                                    type: object
+                                    required:
+                                      - name
+                                    properties:
+                                      name:
+                                        type: string
+                                        maxLength: 63
+                                        pattern: '^[a-z]([-a-z0-9]*[a-z0-9])?$'
+                                      labels:
+                                        type: object
+                                        additionalProperties:
+                                          type: string
+                                      annotations:
+                                        type: object
+                                        additionalProperties:
+                                          type: string
+                                  spec:
+                                    description: >-
+                                      Service spec fields (type, loadBalancerIP, loadBalancerSourceRanges,
+                                      externalTrafficPolicy, ...); the selector and the Firebird port are set by the
+                                      operator (ports[0].port and nodePort are kept)
+                                    type: object
+                                    x-kubernetes-preserve-unknown-fields: true
+            status:
+              description: FirebirdClusterStatus defines the observed state of a FirebirdCluster
+              type: object
+              properties:
+                managedServices:
+                  description: The managed Services the operator created
+                  type: array
+                  items:
+                    type: string
+                nodeMaintenance:
+                  description: A node maintenance window is in progress (the PodDisruptionBudget is removed)
+                  type: boolean
+                image:
+                  description: The Firebird image of the cluster (spec.imageName, its image catalog's entry, or the operator default)
+                  type: string
+                instances:
+                  description: Total number of configured instances
+                  type: integer
+                readyInstances:
+                  description: Number of ready instances
+                  type: integer
+                phase:
+                  description: Current phase of the cluster
+                  type: string
+                  enum:
+                    - Creating
+                    - Running
+                    - Updating
+                    - Upgrading
+                    - Degraded
+                    - Deleting
+                    - Paused
+                    - Hibernated
+                phaseReason:
+                  description: Human-readable message about the current phase
+                  type: string
+                superuserSecretHash:
+                  description: SHA-256 hash digest of superuser secret for password rotation tracking
+                  type: string
+                selector:
+                  description: Label selector of the instance pods (scale subresource)
+                  type: string
+                fencedInstances:
+                  description: Instances whose database is fenced (full shutdown), applied from the fencedInstances annotation
+                  type: array
+                  items:
+                    type: string
+                rollingUpdate:
+                  description: Rolling update in progress (replication clusters, primary last)
+                  type: object
+                  properties:
+                    revision:
+                      description: StatefulSet revision the instances are updated to
+                      type: string
+                    outdatedInstances:
+                      type: array
+                      items:
+                        type: string
+                    message:
+                      type: string
+                    primaryRestart:
+                      description: Primary pod restarted by the update (failover waits for it)
+                      type: object
+                      properties:
+                        pod:
+                          type: string
+                        uid:
+                          type: string
+                        time:
+                          type: string
+                recreatingVolumes:
+                  description: Replicas whose volume is being re-created (reseed=volume annotation)
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      pod:
+                        type: string
+                      claimUid:
+                        description: UID of the claim being replaced
+                        type: string
+                reseedingInstances:
+                  description: Replicas being re-seeded (reseed pod annotation)
+                  type: array
+                  items:
+                    type: string
+                primaryNotReadySince:
+                  description: Since when the primary pod has not been ready (automatic failover)
+                  type: string
+                journalArchiveSequence:
+                  description: >-
+                    Highest journal segment sequence the journal archive Job listed for upload
+                    (journalArchiveS3); a promoted replica's journal continues after it
+                  type: integer
+                  format: int64
+                replicaCluster:
+                  description: Replica cluster (spec.replica) following its source, or promoted
+                  type: object
+                  properties:
+                    phase:
+                      type: string
+                      enum:
+                        - Following
+                        - Promoting
+                        - Promoted
+                    appliedSegment:
+                      type: integer
+                    archivedSegment:
+                      type: integer
+                    message:
+                      type: string
+                    promotingPodUid:
+                      type: string
+                    promotionTime:
+                      type: string
+                imageCheck:
+                  description: Check of a new spec.imageName against the image the instances run (on-disk structure and server version of each)
+                  type: object
+                  properties:
+                    from:
+                      type: string
+                    to:
+                      type: string
+                    phase:
+                      type: string
+                      enum:
+                        - Checking
+                        - Compatible
+                        - Upgrade
+                        - Refused
+                        - Failed
+                    fromOds:
+                      type: string
+                    toOds:
+                      type: string
+                    fromVersion:
+                      type: string
+                    toVersion:
+                      type: string
+                    message:
+                      type: string
+                majorUpgrade:
+                  description: Major version upgrade in progress, or the last one (the databases converted offline with gbak)
+                  type: object
+                  properties:
+                    from:
+                      type: string
+                    to:
+                      type: string
+                    fromOds:
+                      type: string
+                    toOds:
+                      type: string
+                    fromVersion:
+                      type: string
+                    toVersion:
+                      type: string
+                    primary:
+                      type: string
+                    phase:
+                      type: string
+                      enum:
+                        - Stopping
+                        - Converting
+                        - Starting
+                        - Completed
+                        - Failed
+                    converted:
+                      type: array
+                      items:
+                        type: string
+                    message:
+                      type: string
+                    startTime:
+                      type: string
+                    completionTime:
+                      type: string
+                switchover:
+                  description: Planned switchover or automatic failover in progress, or the last one
+                  type: object
+                  properties:
+                    kind:
+                      type: string
+                      enum:
+                        - switchover
+                        - failover
+                    target:
+                      type: string
+                    from:
+                      type: string
+                    phase:
+                      type: string
+                      enum:
+                        - Electing
+                        - Stopping
+                        - Promoting
+                        - Completed
+                        - Failed
+                    message:
+                      type: string
+                    startTime:
+                      type: string
+                    completionTime:
+                      type: string
+                    targetToken:
+                      type: string
+                    fromToken:
+                      type: string
+                    reseed:
+                      description: Replicas that were not ready when the primary moved (pod UIDs), re-seeded
+                      type: object
+                      additionalProperties:
+                        type: string
+                    promotedInPlace:
+                      description: The target was promoted without a restart (planned switchover)
+                      type: boolean
+                synchronous:
+                  description: Synchronous replication (replication.mode sync), the standby and its state
+                  type: object
+                  properties:
+                    standby:
+                      type: string
+                    primary:
+                      type: string
+                    phase:
+                      type: string
+                      enum:
+                        - Attaching
+                        - Attached
+                        - Detaching
+                        - Detached
+                        - Failed
+                    message:
+                      type: string
+                    time:
+                      type: string
+                    standbys:
+                      description: Every standby attached to the primary
+                      type: array
+                      items:
+                        type: string
+                    unavailable:
+                      description: Since when each attached standby has not been ready
+                      type: object
+                      additionalProperties:
+                        type: string
+                    unavailableSince:
+                      type: string
+                    retryAfter:
+                      type: string
+                replicationStatus:
+                  description: Detailed replication status details
+                  type: object
+                  properties:
+                    primaryPod:
+                      type: string
+                    activeReplicas:
+                      type: integer
+                    readRoutablePods:
+                      description: Pods currently selected by the read-only -replica Service
+                      type: array
+                      items:
+                        type: string
+                    laggingReplicas:
+                      description: Replicas excluded from read-only routing because of replication lag
+                      type: array
+                      items:
+                        type: string
+                    lastArchivedSequence:
+                      description: Last journal segment archived on the primary
+                      type: integer
+                    replicas:
+                      description: Replication position and lag of each ready replica, measured from the segment servers
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          appliedSequence:
+                            description: Journal segment applied by the replica
+                            type: integer
+                          pendingSegments:
+                            description: Segments received but not applied yet
+                            type: integer
+                          lagSegments:
+                            description: Segments archived on the primary after the applied one
+                            type: integer
+                          lagSeconds:
+                            description: Age of the oldest archived segment not applied yet (0 when up to date)
+                            type: integer
+                          error:
+                            type: string
+                    segmentRetention:
+                      description: Archived segments the primary keeps for the replicas past segmentRetentionHours
+                      type: object
+                      properties:
+                        floorSequence:
+                          description: Lowest segment applied by a replica; every archived segment after it is kept
+                          type: integer
+                        replicas:
+                          description: Last applied segment known for each replica, including replicas not ready now
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              name:
+                                type: string
+                              appliedSequence:
+                                type: integer
+                volumes:
+                  description: Per-instance PVC storage and volume expansion status
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - state
+                    properties:
+                      name:
+                        type: string
+                      requestedSize:
+                        type: string
+                      capacity:
+                        type: string
+                      state:
+                        type: string
+                        enum:
+                          - Ready
+                          - Resizing
+                          - ResizeFailed
+                          - ShrinkRejected
+                      message:
+                        type: string
+                conditions:
+                  description: List of status conditions
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                      - reason
+                      - message
+                      - lastTransitionTime
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                        format: date-time

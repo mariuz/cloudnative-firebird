@@ -1,0 +1,124 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: firebirddatabases.firebird.cloudnative-firebird.io
+spec:
+  group: firebird.cloudnative-firebird.io
+  names:
+    kind: FirebirdDatabase
+    listKind: FirebirdDatabaseList
+    plural: firebirddatabases
+    singular: firebirddatabase
+    shortNames:
+      - fbdb
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterName
+        - name: Path
+          type: string
+          jsonPath: .status.path
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          description: >-
+            FirebirdDatabase manages another database file of a cluster without replication (after
+            CloudNativePG's Database): created on every instance, and dropped with reclaimPolicy delete.
+          type: object
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - clusterName
+              x-kubernetes-validations:
+                - rule: "has(self.databaseName) == has(oldSelf.databaseName) && (!has(self.databaseName) || self.databaseName == oldSelf.databaseName)"
+                  message: databaseName is immutable
+                - rule: "has(self.pageSize) == has(oldSelf.pageSize) && (!has(self.pageSize) || self.pageSize == oldSelf.pageSize)"
+                  message: pageSize is immutable
+                - rule: "has(self.characterSet) == has(oldSelf.characterSet) && (!has(self.characterSet) || self.characterSet == oldSelf.characterSet)"
+                  message: characterSet is immutable
+              properties:
+                clusterName:
+                  description: Name of the FirebirdCluster (immutable)
+                  type: string
+                  minLength: 1
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: clusterName is immutable
+                databaseName:
+                  description: >-
+                    Database file in each instance's data directory (immutable); defaults to
+                    "<resource name>.fdb". Not the cluster database.
+                  type: string
+                  pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+                  maxLength: 253
+                pageSize:
+                  description: Page size of the new database (immutable)
+                  type: integer
+                  enum: [4096, 8192, 16384, 32768]
+                characterSet:
+                  description: Default character set of the new database (default UTF8) (immutable)
+                  type: string
+                  pattern: '^[A-Za-z][A-Za-z0-9_]*$'
+                initSql:
+                  description: SQL run once, right after the database is created on an instance
+                  type: string
+                reclaimPolicy:
+                  description: >-
+                    retain (default) keeps the database files when this resource is deleted; delete
+                    drops the database on every instance
+                  type: string
+                  enum: [retain, delete]
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Creating, Ready, Failed, Dropping]
+                message:
+                  type: string
+                path:
+                  description: Path of the database on the instances (clients connect to <service>:<path>)
+                  type: string
+                instances:
+                  description: Instances (and volumes) the database exists on
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      volume:
+                        type: string
+                jobName:
+                  type: string
+                lastFailureTime:
+                  type: string
+                  format: date-time
+                droppedFrom:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      volume:
+                        type: string

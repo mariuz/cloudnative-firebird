@@ -21,4 +21,13 @@ if [ "$deployed" != "$version" ]; then
   exit 1
 fi
 
+chart="$root/charts/cloudnative-firebird/Chart.yaml"
+for field in version appVersion; do
+  value="$(sed -n "s/^$field: //p" "$chart" | tr -d '"')"
+  if [ "$value" != "$version" ]; then
+    echo "$chart has $field $value, but the operator's version is $version" >&2
+    exit 1
+  fi
+done
+
 echo "$version"

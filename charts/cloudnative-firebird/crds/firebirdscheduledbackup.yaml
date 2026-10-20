@@ -1,0 +1,182 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: firebirdscheduledbackups.firebird.cloudnative-firebird.io
+spec:
+  group: firebird.cloudnative-firebird.io
+  names:
+    kind: FirebirdScheduledBackup
+    listKind: FirebirdScheduledBackupList
+    plural: firebirdscheduledbackups
+    singular: firebirdscheduledbackup
+    shortNames:
+      - fsb
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterName
+        - name: Schedule
+          type: string
+          jsonPath: .spec.schedule
+        - name: Suspend
+          type: boolean
+          jsonPath: .spec.suspend
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          description: FirebirdScheduledBackup is the Schema for the firebirdscheduledbackups API
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: FirebirdScheduledBackupSpec defines the desired state of a FirebirdScheduledBackup
+              type: object
+              x-kubernetes-validations:
+                - rule: "!has(self.verify) || !self.verify || !has(self.type) || self.type != 'physical'"
+                  message: verify is supported for logical backups only
+                - rule: "!has(self.type) || self.type != 'volumeSnapshot' || (!has(self.s3) && !has(self.level))"
+                  message: a volumeSnapshot backup copies the primary's whole volume (no s3 or level)
+                - rule: "!has(self.database) || !has(self.type) || self.type == 'logical'"
+                  message: only logical backups are taken of a FirebirdDatabase (spec.database)
+              required:
+                - clusterName
+                - schedule
+              properties:
+                clusterName:
+                  description: Target FirebirdCluster name (immutable)
+                  type: string
+                  minLength: 1
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: clusterName is immutable
+                schedule:
+                  description: Cron schedule expression (e.g. "0 2 * * *")
+                  type: string
+                  pattern: '^\s*\S+(\s+\S+){4}\s*$'
+                suspend:
+                  description: Whether scheduled backup execution is suspended
+                  type: boolean
+                type:
+                  description: >-
+                    Backup type: logical (gbak), physical (nbackup) or volumeSnapshot (a VolumeSnapshot of the
+                    primary's volume taken while the database is locked for backup)
+                  type: string
+                  enum:
+                    - logical
+                    - physical
+                    - volumeSnapshot
+                volumeSnapshot:
+                  description: VolumeSnapshot settings (type volumeSnapshot)
+                  type: object
+                  properties:
+                    className:
+                      description: VolumeSnapshotClass (the default class when unset)
+                      type: string
+                    labels:
+                      description: Labels added to the VolumeSnapshot
+                      type: object
+                      additionalProperties:
+                        type: string
+                    annotations:
+                      description: Annotations added to the VolumeSnapshot
+                      type: object
+                      additionalProperties:
+                        type: string
+                    lockTimeoutSeconds:
+                      description: >-
+                        How long the database may stay locked for backup while the snapshot is being cut
+                        (default 600); past it the database is unlocked and the backup fails
+                      type: integer
+                      minimum: 30
+                      maximum: 86400
+                level:
+                  description: Physical backup level (0, 1, 2)
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                retentionPolicy:
+                  description: >-
+                    How long scheduled backups are kept: <n>d, <n>w or <n>m (30 days). Enforced for backups
+                    to S3, server-side backups and volume snapshots (expired backups of the schedule are deleted
+                    after each backup, the newest is always kept; an nbackup file stays while a kept backup's chain
+                    needs it).
+                  type: string
+                  pattern: '^[1-9][0-9]*[dwm]$'
+                verify:
+                  description: >-
+                    Restore each backup into a scratch database and validate it (gbak -c, then a full
+                    validation); the backup fails when it does not restore or validate. Logical backups only.
+                  type: boolean
+                database:
+                  description: >-
+                    A FirebirdDatabase of the cluster (its name) to back up instead of the cluster
+                    database. Logical backups only; restore it with a FirebirdRestore, into a new
+                    database file.
+                  type: string
+                  maxLength: 253
+                  pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                target:
+                  description: >-
+                    Where the backup runs: primary (default) or prefer-standby, a ready, unfenced and
+                    non-lagging replica when one exists (backups to S3 only; server-side backups use the primary)
+                  type: string
+                  enum: [primary, prefer-standby]
+                s3:
+                  type: object
+                  required:
+                    - bucket
+                  properties:
+                    endpoint:
+                      type: string
+                    bucket:
+                      type: string
+                      minLength: 1
+                    region:
+                      type: string
+                    prefix:
+                      type: string
+                    clientImage:
+                      description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                      type: string
+                    secretRef:
+                      description: >-
+                        Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                        credentials of its environment (workload identity through serviceAccountName, instance profile)
+                      type: object
+                      required:
+                        - name
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+            status:
+              description: FirebirdScheduledBackupStatus defines the observed state of FirebirdScheduledBackup
+              type: object
+              properties:
+                lastScheduleTime:
+                  type: string
+                  format: date-time
+                lastSuccessfulTime:
+                  type: string
+                  format: date-time
+                cronJobName:
+                  type: string
+                lastBackupName:
+                  description: The last FirebirdBackup created by the operator (volume snapshots)
+                  type: string

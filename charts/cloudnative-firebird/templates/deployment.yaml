@@ -1,0 +1,137 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudnative-firebird-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloudnative-firebird.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cloudnative-firebird.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cloudnative-firebird.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: cloudnative-firebird-operator
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      containers:
+        - name: operator
+          image: {{ include "cloudnative-firebird.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            # /healthz, /readyz and the Prometheus /metrics
+            - name: http
+              containerPort: 8080
+            # validating admission webhook
+            - name: webhook
+              containerPort: 9443
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: LOG_LEVEL
+              value: {{ .Values.logLevel | quote }}
+            {{- with .Values.firebirdDefaultImage }}
+            - name: FIREBIRD_DEFAULT_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
+            - name: WEBHOOK_ENABLED
+              value: {{ .Values.webhook.enabled | quote }}
+            - name: SEGMENT_TLS_DEFAULT
+              value: {{ .Values.segmentTLS.default | quote }}
+            {{- with .Values.segmentTLS.migrate }}
+            - name: SEGMENT_TLS_MIGRATE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.segmentTLS.required }}
+            - name: SEGMENT_TLS_REQUIRED
+              value: "true"
+            {{- end }}
+            - name: PRIMARY_LEASE_DEFAULT
+              value: {{ .Values.primaryLease.default | quote }}
+            {{- with .Values.primaryLease.migrate }}
+            - name: PRIMARY_LEASE_MIGRATE
+              value: {{ . | quote }}
+            {{- end }}
+            - name: OPERATOR_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # leader election identity
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- if not .Values.leaderElection }}
+            - name: LEADER_ELECTION
+              value: "false"
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      terminationGracePeriodSeconds: 10
+{{- if .Values.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cloudnative-firebird-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloudnative-firebird.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "cloudnative-firebird.selectorLabels" . | nindent 6 }}
+{{- end }}

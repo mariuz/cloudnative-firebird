@@ -1,0 +1,214 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: firebirdbackups.firebird.cloudnative-firebird.io
+spec:
+  group: firebird.cloudnative-firebird.io
+  names:
+    kind: FirebirdBackup
+    listKind: FirebirdBackupList
+    plural: firebirdbackups
+    singular: firebirdbackup
+    shortNames:
+      - fbb
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterName
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Location
+          type: string
+          jsonPath: .status.location
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          description: FirebirdBackup is the Schema for the firebirdbackups API
+          type: object
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: FirebirdBackupSpec defines the desired state of a FirebirdBackup
+              type: object
+              x-kubernetes-validations:
+                - rule: "!has(self.verify) || !self.verify || !has(self.type) || self.type != 'physical'"
+                  message: verify is supported for logical backups only
+                - rule: "!has(self.type) || self.type != 'volumeSnapshot' || (!has(self.s3) && !has(self.level))"
+                  message: a volumeSnapshot backup copies the primary's whole volume (no s3 or level)
+                - rule: "!has(self.database) || !has(self.type) || self.type == 'logical'"
+                  message: only logical backups are taken of a FirebirdDatabase (spec.database)
+              required:
+                - clusterName
+              properties:
+                clusterName:
+                  description: Target FirebirdCluster name (immutable)
+                  type: string
+                  minLength: 1
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: clusterName is immutable
+                type:
+                  description: >-
+                    Backup type: logical (gbak), physical (nbackup) or volumeSnapshot (a VolumeSnapshot of the
+                    primary's volume taken while the database is locked for backup)
+                  type: string
+                  enum:
+                    - logical
+                    - physical
+                    - volumeSnapshot
+                volumeSnapshot:
+                  description: VolumeSnapshot settings (type volumeSnapshot)
+                  type: object
+                  properties:
+                    className:
+                      description: VolumeSnapshotClass (the default class when unset)
+                      type: string
+                    labels:
+                      description: Labels added to the VolumeSnapshot
+                      type: object
+                      additionalProperties:
+                        type: string
+                    annotations:
+                      description: Annotations added to the VolumeSnapshot
+                      type: object
+                      additionalProperties:
+                        type: string
+                    lockTimeoutSeconds:
+                      description: >-
+                        How long the database may stay locked for backup while the snapshot is being cut
+                        (default 600); past it the database is unlocked and the backup fails
+                      type: integer
+                      minimum: 30
+                      maximum: 86400
+                level:
+                  description: Physical backup level (0, 1, 2)
+                  type: integer
+                  minimum: 0
+                  maximum: 2
+                verify:
+                  description: >-
+                    Restore each backup into a scratch database and validate it (gbak -c, then a full
+                    validation); the backup fails when it does not restore or validate. Logical backups only.
+                  type: boolean
+                database:
+                  description: >-
+                    A FirebirdDatabase of the cluster (its name) to back up instead of the cluster
+                    database. Logical backups only; restore it with a FirebirdRestore, into a new
+                    database file.
+                  type: string
+                  maxLength: 253
+                  pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+                target:
+                  description: >-
+                    Where the backup runs: primary (default) or prefer-standby, a ready, unfenced and
+                    non-lagging replica when one exists (backups to S3 only; server-side backups use the primary)
+                  type: string
+                  enum: [primary, prefer-standby]
+                s3:
+                  description: Upload the backup to S3 instead of the primary's data directory
+                  type: object
+                  required:
+                    - bucket
+                  properties:
+                    endpoint:
+                      type: string
+                    bucket:
+                      type: string
+                      minLength: 1
+                    region:
+                      type: string
+                    prefix:
+                      type: string
+                    clientImage:
+                      description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                      type: string
+                    secretRef:
+                      description: >-
+                        Secret with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY; without it the S3 client uses the
+                        credentials of its environment (workload identity through serviceAccountName, instance profile)
+                      type: object
+                      required:
+                        - name
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+            status:
+              description: FirebirdBackupStatus defines the observed state of FirebirdBackup
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Running
+                    - Completed
+                    - Failed
+                startTime:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+                backupFileName:
+                  description: Backup file name (in the primary's data directory, or the object key relative to s3.prefix)
+                  type: string
+                location:
+                  description: Full location of the backup, a path on the primary or an s3:// URI
+                  type: string
+                verified:
+                  description: The backup was restored into a scratch database and validated (spec.verify)
+                  type: boolean
+                instance:
+                  description: Instance the backup was taken from
+                  type: string
+                databasePath:
+                  description: The database file backed up (spec.database)
+                  type: string
+                jobName:
+                  type: string
+                volumeSnapshot:
+                  description: The VolumeSnapshot taken (type volumeSnapshot)
+                  type: object
+                  properties:
+                    name:
+                      type: string
+                    claimName:
+                      description: PersistentVolumeClaim it was taken of
+                      type: string
+                    lockedAt:
+                      description: When the database was locked for backup
+                      type: string
+                      format: date-time
+                    unlockedAt:
+                      description: When the database was unlocked again
+                      type: string
+                      format: date-time
+                    creationTime:
+                      description: When the snapshot was cut
+                      type: string
+                      format: date-time
+                    restoreSize:
+                      description: Size a volume restored from it needs at least
+                      type: string
+                    readyToUse:
+                      type: boolean
+                error:
+                  type: string

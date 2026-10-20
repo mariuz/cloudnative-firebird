@@ -38,6 +38,10 @@ jobs:
       - name: Run unit tests
         run: npm test -- --coverage
 
+      - name: Verify the Helm chart renders the deploy manifests
+        working-directory: .
+        run: hack/release/chart.sh check
+
   integration-tests:
     # one run per Firebird version: the operator's FIREBIRD_DEFAULT_IMAGE (unset: latest, Firebird 5)
     # applies to every cluster below; only the major upgrade check sets spec.imageName
@@ -2797,6 +2801,39 @@ jobs:
           if echo "$logs" | grep -E '"msg":"(Reconciliation failed|Failed to update cluster status)"'; then
             echo "Operator reported reconcile/status errors"; exit 1
           fi
+
+      - name: Verify the Helm chart installs the operator
+        if: matrix.track.id == 'extended'
+        run: |
+          NS=cloudnative-firebird-system
+          # the chart replaces the operator the manifests installed (its CRDs exist: Helm leaves them)
+          kubectl delete -f config/deploy/webhook.yaml -f config/deploy/deployment.yaml -f config/deploy/rbac.yaml -f config/deploy/serviceaccount.yaml
+          helm install cloudnative-firebird charts/cloudnative-firebird -n $NS --wait --timeout 180s \
+            --set image.repository=cloudnative-firebird --set image.tag=ci --set image.pullPolicy=Never \
+            --set-string firebirdDefaultImage="${{ matrix.firebird.image }}" \
+            --set-string extraEnv[0].name=RESYNC_INTERVAL_SECONDS --set-string extraEnv[0].value=10
+          helm list -n $NS
+          kubectl get pods -n $NS -o wide
+          [ "$(kubectl get pods -n $NS -l app.kubernetes.io/name=cloudnative-firebird --field-selector=status.phase=Running -o name | wc -l)" = 2 ]
+          # the operator from the chart reconciles the existing clusters: a spec change is applied
+          n=$(kubectl get firebirdcluster test-cluster -o jsonpath={.spec.instances}); want=$(( n == 1 ? 2 : 1 ))
+          kubectl patch firebirdcluster test-cluster --type merge -p "{\"spec\":{\"instances\":$want}}"
+          timeout 120 bash -c "until [ \"\$(kubectl get statefulset test-cluster -o jsonpath={.spec.replicas})\" = $want ]; do sleep 3; done"
+          # the webhook configuration the chart recreated gets the caBundle back and refuses a
+          # restore over the cluster database (failurePolicy Ignore: retried until the API server
+          # calls the webhook with the new caBundle)
+          timeout 120 bash -c "until [ -n \"\$(kubectl get validatingwebhookconfiguration cloudnative-firebird-validating-webhook -o jsonpath='{.webhooks[0].clientConfig.caBundle}')\" ]; do sleep 3; done"
+          printf 'apiVersion: firebird.cloudnative-firebird.io/v1\nkind: FirebirdRestore\nmetadata:\n  name: helm-webhook-check\n  namespace: default\nspec:\n  clusterName: test-cluster\n  backupPath: x.fbk\n  targetDatabase: mydb.fdb\n' > /tmp/helm-over.yaml
+          for i in $(seq 1 40); do
+            out=$(kubectl apply --dry-run=server -f /tmp/helm-over.yaml 2>&1 || true)
+            echo "$out" | grep -q 'is the cluster database' && break
+            sleep 3
+          done
+          echo "$out"
+          echo "$out" | grep -q 'denied the request'
+          helm upgrade cloudnative-firebird charts/cloudnative-firebird -n $NS --reuse-values --set logLevel=debug --wait --timeout 180s
+          [ "$(helm get values cloudnative-firebird -n $NS -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["logLevel"])')" = debug ]
+          echo "the chart installed and upgraded the operator"
 
       - name: Show cluster resources on failure
         if: failure()

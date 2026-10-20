@@ -5,9 +5,10 @@ name: Release
 # tag v<version> and a GitHub Release with the install manifest (hack/release/bundle.sh) when the
 # operator's version (PLUGIN_VERSION in operator/src/plugin/cli.ts, the tag
 # config/deploy/deployment.yaml deploys; hack/release/version.sh) has no tag yet. A version is
-# never built twice: bump it to publish a new one. Pull requests only build the image and the
-# manifest. Run on demand for a tag or main to publish its version again (a failed push), latest
-# and the Release's manifest included.
+# never built twice: bump it to publish a new one. The Release also carries the Helm chart
+# (charts/cloudnative-firebird), pushed to oci://ghcr.io/<owner>/charts as well. Pull requests only
+# build the image, the manifest and the chart. Run on demand for a tag or main to publish its
+# version again (a failed push), latest, the Release's assets and the chart included.
 on:
   workflow_run:
     workflows: ["CI"]
@@ -19,6 +20,7 @@ on:
       - "operator/**"
       - "config/crds/**"
       - "config/deploy/**"
+      - "charts/**"
       - "hack/release/**"
       - ".github/workflows/release.yaml"
   workflow_dispatch:
@@ -127,25 +129,46 @@ jobs:
         id: bundle
         run: echo "file=$(hack/release/bundle.sh)" >> "$GITHUB_OUTPUT"
 
+      - name: Helm chart
+        id: chart
+        run: |
+          hack/release/chart.sh check
+          echo "file=$(hack/release/chart.sh package)" >> "$GITHUB_OUTPUT"
+
+      - name: Push the chart to oci://ghcr.io/${{ github.repository_owner }}/charts
+        if: steps.version.outputs.version_tag == 'true'
+        env:
+          FILE: ${{ steps.chart.outputs.file }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+          helm push "$FILE" "oci://ghcr.io/${{ github.repository_owner }}/charts"
+
       - name: Release v${{ steps.version.outputs.version }}
         if: steps.version.outputs.version_tag == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
           FILE: ${{ steps.bundle.outputs.file }}
+          CHART: ${{ steps.chart.outputs.file }}
         run: |
           # the versioned manifest, and the same under a fixed name for releases/latest/download
           cp "$FILE" cloudnative-firebird.yaml
           if gh release view "v$VERSION" >/dev/null 2>&1; then
-            gh release upload "v$VERSION" "$FILE" cloudnative-firebird.yaml --clobber
+            gh release upload "v$VERSION" "$FILE" cloudnative-firebird.yaml "$CHART" --clobber
           else
-            gh release create "v$VERSION" "$FILE" cloudnative-firebird.yaml --title "v$VERSION" --notes "$(cat <<NOTES
+            gh release create "v$VERSION" "$FILE" cloudnative-firebird.yaml "$CHART" --title "v$VERSION" --notes "$(cat <<NOTES
           Operator image: \`$IMAGE:$VERSION\` (linux/amd64, linux/arm64).
 
           Install or upgrade (the CRDs and the operator):
 
           \`\`\`bash
           kubectl apply -f https://github.com/${{ github.repository }}/releases/download/v$VERSION/$FILE
+          \`\`\`
+
+          Or with Helm (the chart, \`$(basename "$CHART")\`, is also pushed to \`oci://ghcr.io/${{ github.repository_owner }}/charts/cloudnative-firebird\`):
+
+          \`\`\`bash
+          helm install cloudnative-firebird oci://ghcr.io/${{ github.repository_owner }}/charts/cloudnative-firebird --version $VERSION -n cloudnative-firebird-system --create-namespace
           \`\`\`
 
           What changed: [ROADMAP.md](https://github.com/${{ github.repository }}/blob/v$VERSION/ROADMAP.md), upgrading: [README](https://github.com/${{ github.repository }}/blob/v$VERSION/README.md#upgrading-the-operator).
@@ -161,12 +184,14 @@ jobs:
           VERSION_TAG: ${{ steps.version.outputs.version_tag }}
           VERSION: ${{ steps.version.outputs.version }}
           FILE: ${{ steps.bundle.outputs.file }}
+          CHART: ${{ steps.chart.outputs.file }}
         run: |
           {
             if [ "$PUBLISH" = true ]; then echo "Published:"; else echo "Built (not published):"; fi
             echo
             echo "$TAGS" | sed 's/^/- `/; s/$/`/'
             echo "- \`$FILE\` ($(wc -c < "$FILE") bytes)"
+            echo "- \`$CHART\` (the Helm chart)"
             [ "$GIT_TAG" = true ] && echo && echo "Tagged \`v$VERSION\`."
             [ "$VERSION_TAG" = true ] && echo && echo "Release v$VERSION: https://github.com/${{ github.repository }}/releases/tag/v$VERSION"
             true
