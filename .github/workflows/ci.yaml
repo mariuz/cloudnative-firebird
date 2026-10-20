@@ -2886,3 +2886,173 @@ jobs:
             --tail=200 || true
           echo "=== Operator pod events ==="
           kubectl get events -n cloudnative-firebird-system || true
+
+  operator-upgrade:
+    # the documented upgrade path (README, Upgrading the operator) on every change: the latest
+    # release's install manifest and image, a replicated cluster with data on it, then this
+    # build's CRDs and manifests; the cluster must come through with its data and its replication
+    name: Operator upgrade (from the latest release)
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: operator/package-lock.json
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: firebird-upgrade
+
+      - name: Build operator image
+        run: |
+          cd operator
+          npm ci
+          for attempt in 1 2 3 4; do
+            docker build -t cloudnative-firebird:ci . && break
+            [ "$attempt" = 4 ] && exit 1
+            echo "build attempt $attempt failed; retrying in 30s"; sleep 30
+          done
+
+      - name: Load operator image into kind
+        run: kind load docker-image cloudnative-firebird:ci --name firebird-upgrade
+
+      - name: Install the latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NS=cloudnative-firebird-system
+          tag=$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name)
+          echo "upgrading from $tag"
+          echo "$tag" > /tmp/from-tag
+          curl -fsSL -o /tmp/from.yaml "https://github.com/${{ github.repository }}/releases/download/$tag/cloudnative-firebird.yaml"
+          head -3 /tmp/from.yaml
+          kubectl apply -f /tmp/from.yaml
+          # a short resync, as the integration tests use
+          kubectl set env deployment/cloudnative-firebird-operator -n $NS RESYNC_INTERVAL_SECONDS=10
+          kubectl rollout status deployment/cloudnative-firebird-operator -n $NS --timeout=300s
+          kubectl get pods -n $NS -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\n"}{end}'
+          kubectl get pods -n $NS -o jsonpath='{.items[0].spec.containers[0].image}' | grep -q "cloudnative-firebird:${tag#v}$"
+
+      - name: Create a replicated cluster on the release
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: repl
+            namespace: default
+          spec:
+            instances: 3
+            storage:
+              size: 1Gi
+            bootstrap:
+              initSql: "CREATE TABLE app (id INTEGER PRIMARY KEY, note VARCHAR(20)); COMMIT;"
+            replication:
+              enabled: true
+              archiveTimeoutSeconds: 3
+              failover:
+                enabled: true
+          EOF
+          for p in repl-0 repl-1 repl-2; do
+            timeout 300 bash -c "until kubectl get pod $p >/dev/null 2>&1; do sleep 3; done"
+            kubectl wait pod/$p --for=condition=Ready --timeout=300s
+          done
+          timeout 120 bash -c 'until [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.phase})" = Running ]; do sleep 3; done'
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB"; }
+          count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          wait_count() {
+            for n in $(seq 1 36); do [ "$(count "$1")" = "$2" ] && return 0; sleep 5; done
+            echo "$1 has $(count "$1") rows, expected $2"; return 1
+          }
+          primary=$(kubectl get firebirdcluster repl -o jsonpath={.status.replicationStatus.primaryPod})
+          echo "primary on the release: $primary"
+          for i in $(seq 1 20); do sql "$primary" "insert into app values ($i, 'before'); commit;" >/dev/null; done
+          for p in repl-0 repl-1 repl-2; do wait_count $p 20; done
+          kubectl get pods -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.uid}{"\n"}{end}' | grep '^repl-' > /tmp/uids-before
+          kubectl get firebirdcluster repl -o jsonpath='{.status.replicationStatus}'; echo
+          echo "$primary" > /tmp/primary-before
+
+      - name: Upgrade the operator to this build
+        run: |
+          NS=cloudnative-firebird-system
+          # as documented: the new version's CRDs and manifests, RBAC first
+          kubectl apply -f config/crds/
+          kubectl apply -f config/deploy/namespace.yaml
+          kubectl apply -f config/deploy/serviceaccount.yaml
+          kubectl apply -f config/deploy/rbac.yaml
+          kubectl apply -f config/deploy/webhook.yaml
+          sed 's|image: ghcr.io/mariuz/cloudnative-firebird:.*|image: cloudnative-firebird:ci|;s|imagePullPolicy: IfNotPresent|imagePullPolicy: Never|' \
+            config/deploy/deployment.yaml | kubectl apply -f -
+          kubectl set env deployment/cloudnative-firebird-operator -n $NS RESYNC_INTERVAL_SECONDS=10
+          kubectl rollout status deployment/cloudnative-firebird-operator -n $NS --timeout=300s
+          # the old replicas may still be terminating (phase Running) right after the rollout
+          timeout 120 bash -c "until [ \"\$(kubectl get pods -n $NS -o jsonpath='{.items[*].spec.containers[0].image}' | tr ' ' '\\n' | sort -u)\" = cloudnative-firebird:ci ]; do sleep 3; done"
+          kubectl get pods -n $NS -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\n"}{end}'
+
+      - name: Verify the cluster after the upgrade
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB"; }
+          count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          wait_count() {
+            for n in $(seq 1 36); do [ "$(count "$1")" = "$2" ] && return 0; sleep 5; done
+            echo "$1 has $(count "$1") rows, expected $2"; return 1
+          }
+          state() { kubectl get firebirdcluster repl -o jsonpath='{.status.phase} {.status.rollingUpdate.phase} {.status.switchover.phase}'; }
+          # the new operator takes the cluster over: a rolling update onto the new scripts when the
+          # instances' template changed (replicas first, the primary last), then Running again
+          sleep 30
+          timeout 900 bash -c 'until [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.phase})" = Running ] && [ -z "$(kubectl get firebirdcluster repl -o jsonpath={.status.rollingUpdate})" ]; do echo "$(date +%T) $(kubectl get firebirdcluster repl -o jsonpath="{.status.phase} {.status.phaseReason}")"; sleep 10; done'
+          for p in repl-0 repl-1 repl-2; do kubectl wait pod/$p --for=condition=Ready --timeout=300s; done
+          kubectl get firebirdcluster repl -o jsonpath='{.status}' | python3 -m json.tool | head -60
+          # which instances restarted, and the primary last if it did
+          kubectl get pods -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.uid}{"\n"}{end}' | grep '^repl-' > /tmp/uids-after
+          restarted=$(diff /tmp/uids-before /tmp/uids-after | sed -n 's/^> \(repl-[0-9]*\) .*/\1/p' | tr '\n' ' ')
+          echo "instances restarted by the upgrade: ${restarted:-none}"
+          primary=$(kubectl get firebirdcluster repl -o jsonpath={.status.replicationStatus.primaryPod})
+          echo "primary after the upgrade: $primary (before: $(cat /tmp/primary-before))"
+          if echo " $restarted " | grep -q " $(cat /tmp/primary-before) "; then
+            started() { kubectl get pod $1 -o jsonpath='{.status.startTime}'; }
+            for p in $restarted; do
+              [ "$p" = "$(cat /tmp/primary-before)" ] && continue
+              [ "$(started "$(cat /tmp/primary-before)")" \> "$(started $p)" ] || [ "$(started "$(cat /tmp/primary-before)")" = "$(started $p)" ] || { echo "the primary restarted before $p"; exit 1; }
+            done
+          fi
+          # the data came through, and replication continues on the new version
+          for p in repl-0 repl-1 repl-2; do wait_count $p 20; done
+          for i in $(seq 21 30); do sql "$primary" "insert into app values ($i, 'after'); commit;" >/dev/null; done
+          for p in repl-0 repl-1 repl-2; do wait_count $p 30; done
+          # the new plugin reads the upgraded cluster
+          (cd operator && npm run build >/dev/null)
+          chmod +x operator/dist/plugin/kubectl-firebird.js
+          mkdir -p /tmp/plugin-bin && ln -sf "$PWD/operator/dist/plugin/kubectl-firebird.js" /tmp/plugin-bin/kubectl-firebird
+          PATH=/tmp/plugin-bin:$PATH kubectl firebird status repl | tee /tmp/status.txt
+          grep -qE "^Primary: +$primary$" /tmp/status.txt
+          [ "$(grep -cE '^repl-[0-9]+ +(primary|replica) +true +Running' /tmp/status.txt)" = 3 ]
+          # and reconciled it without API errors
+          logs=$(kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1)
+          if echo "$logs" | grep -E '"msg":"(Reconciliation failed|Failed to update cluster status)"'; then
+            echo "the upgraded operator reported reconcile/status errors"; exit 1
+          fi
+          echo "upgraded from $(cat /tmp/from-tag) to this build: data and replication intact"
+
+      - name: Show resources on failure
+        if: failure()
+        run: |
+          kubectl get firebirdcluster repl -o yaml || true
+          kubectl get pods -o wide || true
+          kubectl get events --sort-by=.lastTimestamp | tail -40 || true
+          for p in repl-0 repl-1 repl-2; do
+            for c in replication-init segment-server segment-puller firebird; do
+              echo "--- $p/$c"; kubectl logs $p -c $c --tail=30 2>/dev/null || true
+            done
+          done
+          echo "=== Operator logs ==="
+          kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=200 || true
