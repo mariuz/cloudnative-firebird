@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, Mock } from 'vitest';
-import { spawn, spawnSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'fs';
 import { createServer } from 'net';
 import { fakeSegmentServer } from './helpers/segment-auth';
+import { startSegmentServer } from './helpers/segment-server';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { KubeConfig, V1Pod } from '@kubernetes/client-node';
@@ -140,25 +141,16 @@ describe.skipIf(!hasPerl)('segment-server.pl ARCHIVED', () => {
     const script = join(root, 'segment-server.pl');
     writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
-    const port = 20000 + Math.floor(Math.random() * 20000);
-    const child = spawn('perl', [script], {
-      env: {
-        ...process.env,
-        ARCHIVE_DIR: join(root, 'archive'),
-        DATABASE_PATH: join(root, 'mydb.fdb'),
-        SOURCE_DIR: join(root, 'source'),
-        REPLICATION_DIR: join(root, 'repl'),
-        PRIMARY_FILE: join(root, 'repl', 'primary'),
-        POD_NAME: 'db-0',
-        ISC_PASSWORD: 'tok',
-        SEGMENT_PORT: String(port),
-      },
+    const { child, port } = await startSegmentServer(script, {
+      ARCHIVE_DIR: join(root, 'archive'),
+      DATABASE_PATH: join(root, 'mydb.fdb'),
+      SOURCE_DIR: join(root, 'source'),
+      REPLICATION_DIR: join(root, 'repl'),
+      PRIMARY_FILE: join(root, 'repl', 'primary'),
+      POD_NAME: 'db-0',
+      ISC_PASSWORD: 'tok',
     });
     try {
-      await new Promise<void>((resolve, reject) => {
-        child.stdout.on('data', (d) => d.toString().includes('listening') && resolve());
-        child.once('exit', (code) => reject(new Error(`segment server exited ${code}`)));
-      });
       const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
         '../src/utils/replication-lag',
       );
@@ -196,27 +188,18 @@ describe.skipIf(!hasPerl)('segment-server.pl RETAIN and pruning', () => {
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
     const script = join(root, 'segment-server.pl');
     writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
-    const port = 20000 + Math.floor(Math.random() * 20000);
-    const child = spawn('perl', [script], {
-      env: {
-        ...process.env,
-        ARCHIVE_DIR: join(root, 'archive'),
-        DATABASE_PATH: join(root, 'mydb.fdb'),
-        SOURCE_DIR: join(root, 'source'),
-        REPLICATION_DIR: join(root, 'repl'),
-        PRIMARY_FILE: join(root, 'repl', 'primary'),
-        POD_NAME: 'db-0',
-        ISC_PASSWORD: 'tok',
-        SEGMENT_PORT: String(port),
-        SEGMENT_RETENTION_SECONDS: '60',
-        SEGMENT_MAX_RETENTION_SECONDS: '3600',
-      },
+    const { child, port } = await startSegmentServer(script, {
+      ARCHIVE_DIR: join(root, 'archive'),
+      DATABASE_PATH: join(root, 'mydb.fdb'),
+      SOURCE_DIR: join(root, 'source'),
+      REPLICATION_DIR: join(root, 'repl'),
+      PRIMARY_FILE: join(root, 'repl', 'primary'),
+      POD_NAME: 'db-0',
+      ISC_PASSWORD: 'tok',
+      SEGMENT_RETENTION_SECONDS: '60',
+      SEGMENT_MAX_RETENTION_SECONDS: '3600',
     });
     try {
-      await new Promise<void>((resolve, reject) => {
-        child.stdout.on('data', (d) => d.toString().includes('listening') && resolve());
-        child.once('exit', (code) => reject(new Error(`segment server exited ${code}`)));
-      });
       const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
         '../src/utils/replication-lag',
       );
@@ -259,27 +242,18 @@ describe.skipIf(!hasPerl)('segment-server.pl keeps the segments after the offlin
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
     const script = join(root, 'segment-server.pl');
     writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
-    const port = 20000 + Math.floor(Math.random() * 20000);
-    const child = spawn('perl', [script], {
-      env: {
-        ...process.env,
-        ARCHIVE_DIR: join(root, 'archive'),
-        DATABASE_PATH: join(root, 'mydb.fdb'),
-        SOURCE_DIR: join(root, 'source'),
-        REPLICATION_DIR: join(root, 'repl'),
-        PRIMARY_FILE: join(root, 'repl', 'primary'),
-        POD_NAME: 'db-0',
-        ISC_PASSWORD: 'tok',
-        SEGMENT_PORT: String(port),
-        SEGMENT_RETENTION_SECONDS: '60',
-        SEGMENT_MAX_RETENTION_SECONDS: '3600',
-      },
+    const { child, port } = await startSegmentServer(script, {
+      ARCHIVE_DIR: join(root, 'archive'),
+      DATABASE_PATH: join(root, 'mydb.fdb'),
+      SOURCE_DIR: join(root, 'source'),
+      REPLICATION_DIR: join(root, 'repl'),
+      PRIMARY_FILE: join(root, 'repl', 'primary'),
+      POD_NAME: 'db-0',
+      ISC_PASSWORD: 'tok',
+      SEGMENT_RETENTION_SECONDS: '60',
+      SEGMENT_MAX_RETENTION_SECONDS: '3600',
     });
     try {
-      await new Promise<void>((resolve, reject) => {
-        child.stdout.on('data', (d) => d.toString().includes('listening') && resolve());
-        child.once('exit', (code) => reject(new Error(`segment server exited ${code}`)));
-      });
       const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
         '../src/utils/replication-lag',
       );
@@ -450,28 +424,19 @@ describe.skipIf(!hasPerl)('segment-server.pl pruneAppliedSegments', () => {
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
     const script = join(root, 'segment-server.pl');
     writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
-    const port = 20000 + Math.floor(Math.random() * 20000);
-    const child = spawn('perl', [script], {
-      env: {
-        ...process.env,
-        ARCHIVE_DIR: join(root, 'archive'),
-        DATABASE_PATH: join(root, 'mydb.fdb'),
-        SOURCE_DIR: join(root, 'source'),
-        REPLICATION_DIR: join(root, 'repl'),
-        PRIMARY_FILE: join(root, 'repl', 'primary'),
-        POD_NAME: 'db-0',
-        ISC_PASSWORD: 'tok',
-        SEGMENT_PORT: String(port),
-        SEGMENT_RETENTION_SECONDS: '86400',
-        SEGMENT_MAX_RETENTION_SECONDS: '604800',
-        ...options.env,
-      },
+    const { child, port } = await startSegmentServer(script, {
+      ARCHIVE_DIR: join(root, 'archive'),
+      DATABASE_PATH: join(root, 'mydb.fdb'),
+      SOURCE_DIR: join(root, 'source'),
+      REPLICATION_DIR: join(root, 'repl'),
+      PRIMARY_FILE: join(root, 'repl', 'primary'),
+      POD_NAME: 'db-0',
+      ISC_PASSWORD: 'tok',
+      SEGMENT_RETENTION_SECONDS: '86400',
+      SEGMENT_MAX_RETENTION_SECONDS: '604800',
+      ...options.env,
     });
     try {
-      await new Promise<void>((resolve, reject) => {
-        child.stdout.on('data', (d) => d.toString().includes('listening') && resolve());
-        child.once('exit', (code) => reject(new Error(`segment server exited ${code}`)));
-      });
       const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
         '../src/utils/replication-lag',
       );
@@ -533,25 +498,16 @@ describe.skipIf(!hasPerl)('segment-server.pl HEADER', () => {
     const script = join(root, 'segment-server.pl');
     writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
-    const port = 20000 + Math.floor(Math.random() * 20000);
-    const child = spawn('perl', [script], {
-      env: {
-        ...process.env,
-        ARCHIVE_DIR: join(root, 'archive'),
-        DATABASE_PATH: db,
-        SOURCE_DIR: join(root, 'source'),
-        REPLICATION_DIR: join(root, 'repl'),
-        PRIMARY_FILE: join(root, 'repl', 'primary'),
-        POD_NAME: 'db-0',
-        ISC_PASSWORD: 'tok',
-        SEGMENT_PORT: String(port),
-      },
+    const { child, port } = await startSegmentServer(script, {
+      ARCHIVE_DIR: join(root, 'archive'),
+      DATABASE_PATH: db,
+      SOURCE_DIR: join(root, 'source'),
+      REPLICATION_DIR: join(root, 'repl'),
+      PRIMARY_FILE: join(root, 'repl', 'primary'),
+      POD_NAME: 'db-0',
+      ISC_PASSWORD: 'tok',
     });
     try {
-      await new Promise<void>((resolve, reject) => {
-        child.stdout.on('data', (d) => d.toString().includes('listening') && resolve());
-        child.once('exit', (code) => reject(new Error(`segment server exited ${code}`)));
-      });
       const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
         '../src/utils/replication-lag',
       );
@@ -599,25 +555,16 @@ describe.skipIf(!hasPerl)('segment-server.pl PLAN', () => {
     const script = join(root, 'segment-server.pl');
     writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
-    const port = 20000 + Math.floor(Math.random() * 20000);
-    const child = spawn('perl', [script], {
-      env: {
-        ...process.env,
-        ARCHIVE_DIR: join(root, 'archive'),
-        DATABASE_PATH: join(root, 'db.fdb'),
-        SOURCE_DIR: join(root, 'source'),
-        REPLICATION_DIR: join(root, 'repl'),
-        PRIMARY_FILE: join(root, 'repl', 'primary'),
-        POD_NAME: 'db-0',
-        ISC_PASSWORD: 'tok',
-        SEGMENT_PORT: String(port),
-      },
+    const { child, port } = await startSegmentServer(script, {
+      ARCHIVE_DIR: join(root, 'archive'),
+      DATABASE_PATH: join(root, 'db.fdb'),
+      SOURCE_DIR: join(root, 'source'),
+      REPLICATION_DIR: join(root, 'repl'),
+      PRIMARY_FILE: join(root, 'repl', 'primary'),
+      POD_NAME: 'db-0',
+      ISC_PASSWORD: 'tok',
     });
     try {
-      await new Promise<void>((resolve, reject) => {
-        child.stdout.on('data', (d) => d.toString().includes('listening') && resolve());
-        child.once('exit', (code) => reject(new Error(`segment server exited ${code}`)));
-      });
       const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
         '../src/utils/replication-lag',
       );
