@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.116.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.117.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **New clients refused during a switchover** *(v0.117.0)*
+  - While a planned switchover stops the primary (the Job waiting `spec.switchoverDelay` for its clients to finish), the primary's role label is `stopping` instead of `primary`, so the primary Service (and the managed `rw` Services, which select `role=primary`) has no endpoint: new clients are refused, as by CloudNativePG's smart shutdown, while the connections already open stay; nor does it take read-only traffic. The label is `primary` again if the switchover fails, and the target's once it is promoted. `status.switchover.message` says so. Unit tests cover the routing decision and the controller through the Stopping and Failed phases; the kind CI checks the empty endpoints, a refused new client and the attached one's connection during the delay, and the endpoints after the switchover.
 - [x] **Release install manifest** *(v0.116.0; CloudNativePG's cnpg-<version>.yaml)*
   - `hack/release/bundle.sh` writes one manifest from `config/crds` and `config/deploy` (CRDs, namespace, ServiceAccount, RBAC, webhook, Deployment pinned to the version's image; not the PodMonitor), and the Release workflow creates a GitHub Release `v<version>` with it (`cloudnative-firebird-<version>.yaml`, and `cloudnative-firebird.yaml` for `releases/latest/download`) when it publishes a new version, so `kubectl apply -f <release URL>` installs or upgrades the operator. A unit test checks the manifest's contents and order; the kind CI applies it as a server-side dry run against the installed operator.
 - [x] **Operator image publishing** *(v0.115.0)*

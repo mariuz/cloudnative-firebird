@@ -447,8 +447,10 @@ export class FirebirdClusterController {
       }
       // lag is published as pod annotations before read-only routing evaluates them
       const lag = await this.reconcileReplicationLag(cluster, primaryPod, switchover.status, log);
-      // Label pods before (re)pointing service selectors at the routing labels
-      const readRouting = await this.reconcileReadRouting(cluster, primaryPod, log);
+      // Label pods before (re)pointing service selectors at the routing labels (a primary being
+      // stopped by a planned switchover leaves the primary Service: new clients are refused)
+      const stoppingPrimary = switchover.status?.phase === 'Stopping' && switchover.status.from === primaryPod;
+      const readRouting = await this.reconcileReadRouting(cluster, primaryPod, log, stoppingPrimary);
       await this.reconcileMaintenanceVolumes(cluster, primaryPod, log);
       await this.reconcileHeadlessService(cluster, log);
       await this.reconcileService(cluster, log);
@@ -1445,7 +1447,7 @@ export class FirebirdClusterController {
         target,
         from: primaryPod,
         phase: 'Stopping',
-        message: delay > 0 ? `stopping writes on the primary (its clients have up to ${delay}s to finish)` : 'stopping writes on the primary',
+        message: delay > 0 ? `stopping writes on the primary (new clients are refused; its clients have up to ${delay}s to finish)` : 'stopping writes on the primary',
         startTime: now,
       });
       try {
@@ -1927,6 +1929,7 @@ export class FirebirdClusterController {
     cluster: FirebirdCluster,
     primaryPod: string,
     log: Logger,
+    stoppingPrimary = false,
   ): Promise<ReadRoutingResult | undefined> {
     if (!cluster.spec.replication?.enabled || cluster.spec.hibernated) return undefined;
     // without readOnlyRouting the labels still route <name>, <name>-replica and the managed
@@ -1940,7 +1943,7 @@ export class FirebirdClusterController {
         name,
       ),
     };
-    const plan = computeReadRouting(pods.items, primaryPod, routed ? cluster.spec.replication!.readOnlyRouting! : READINESS_ROUTING);
+    const plan = computeReadRouting(pods.items, primaryPod, routed ? cluster.spec.replication!.readOnlyRouting! : READINESS_ROUTING, { stoppingPrimary });
 
     for (const decision of plan.decisions) {
       const pod = pods.items.find((p) => p.metadata?.name === decision.name)!;

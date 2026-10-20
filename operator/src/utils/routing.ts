@@ -20,10 +20,16 @@ export const DEFAULT_MAX_LAG_SECONDS = 30;
  */
 export const READINESS_ROUTING: ReadOnlyRoutingConfiguration = { enabled: true, maxLagSeconds: Infinity, fallbackToPrimary: true };
 
-/** Desired routing labels for a single pod */
+/**
+ * Desired routing labels for a single pod. The role "stopping" is the primary while a planned
+ * switchover stops it (its Job waits spec.switchoverDelay for the clients to finish): the primary
+ * Service selects role=primary, so it has no endpoint and new clients are refused, while the
+ * connections already open stay (as CloudNativePG's smart shutdown refuses new connections). It
+ * is "primary" again if the switchover fails.
+ */
 export interface PodRoutingDecision {
   name: string;
-  role: 'primary' | 'replica';
+  role: 'primary' | 'replica' | 'stopping';
   readRoutable: boolean;
 }
 
@@ -64,6 +70,7 @@ export function computeReadRouting(
   pods: V1Pod[],
   primaryPod: string,
   config: ReadOnlyRoutingConfiguration,
+  options: { stoppingPrimary?: boolean } = {},
 ): ReadRoutingPlan {
   const maxLag = config.maxLagSeconds ?? DEFAULT_MAX_LAG_SECONDS;
   const fallbackToPrimary = config.fallbackToPrimary ?? true;
@@ -74,7 +81,7 @@ export function computeReadRouting(
     .map((pod) => {
       const name = pod.metadata!.name!;
       if (name === primaryPod) {
-        return { name, role: 'primary' as const, readRoutable: false };
+        return { name, role: options.stoppingPrimary ? ('stopping' as const) : ('primary' as const), readRoutable: false };
       }
       const lag = replicationLagSeconds(pod);
       const lagging = lag !== null && lag > maxLag;
@@ -82,7 +89,8 @@ export function computeReadRouting(
       return { name, role: 'replica' as const, readRoutable: isPodReady(pod) && !lagging };
     });
 
-  if (fallbackToPrimary && !decisions.some((d) => d.readRoutable)) {
+  // a primary being stopped takes no new clients, read-only ones included
+  if (fallbackToPrimary && !options.stoppingPrimary && !decisions.some((d) => d.readRoutable)) {
     const primary = decisions.find((d) => d.role === 'primary');
     const primaryPodObj = pods.find((p) => p.metadata?.name === primaryPod);
     if (primary && primaryPodObj && isPodReady(primaryPodObj)) {

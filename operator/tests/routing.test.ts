@@ -112,6 +112,15 @@ describe('computeReadRouting', () => {
     expect(plan.readRoutablePods).toEqual([]);
   });
 
+  it('labels a primary being stopped by a switchover "stopping", with no read traffic', () => {
+    const plan = computeReadRouting([makePod('db-0'), makePod('db-1', { ready: false })], 'db-0', { enabled: true }, { stoppingPrimary: true });
+    expect(plan.decisions).toEqual([
+      { name: 'db-0', role: 'stopping', readRoutable: false },
+      { name: 'db-1', role: 'replica', readRoutable: false },
+    ]);
+    expect(plan.readRoutablePods).toEqual([]);
+  });
+
   it('honours a failed-over primary', () => {
     const plan = computeReadRouting([makePod('db-0'), makePod('db-1')], 'db-1', { enabled: true });
     expect(plan.decisions.find((d) => d.name === 'db-1')?.role).toBe('primary');
