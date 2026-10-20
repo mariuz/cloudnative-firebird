@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.118.0/cloudnative-firebird-0.118.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.119.0/cloudnative-firebird-0.119.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.118.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.119.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -230,7 +230,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.118.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test). |
+| `<version>` (e.g. `0.119.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -406,9 +406,17 @@ spec:
     enabled: true
     schedule: "0 2 * * *"
 
-  # Prometheus monitoring (optional)
+  # Prometheus monitoring (optional); podMonitorRelabelings and podMonitorMetricRelabelings
+  # (CloudNativePG's) go onto every endpoint of the PodMonitor
   monitoring:
     enablePodMonitor: true
+
+  # Free text shown by kubectl firebird status (optional)
+  description: "Orders database, owned by the shop team"
+
+  # The PodDisruptionBudget of a cluster of several instances (optional, default true):
+  # false lets node drains evict any instance
+  enablePDB: true
 
   # Database file created on each instance's PVC (optional, defaults to mydb.fdb)
   databaseName: mydb.fdb
@@ -576,6 +584,8 @@ overrides it), so instance and Job pods must be able to pull it.
 | `phase` | Current cluster phase: `Creating`, `Running`, `Updating`, `Degraded`, `Deleting`, `Paused`, `Hibernated` |
 | `instances` | Configured number of instances |
 | `readyInstances` | Number of ready instances |
+| `instanceNames` | The instance pods, in order (since v0.119.0) |
+| `writeService`, `readService` | The Service clients write through (the primary's), and the one read-only clients use: `<name>-replica` with replication (unless `managed.services.disabledDefaultServices` turns it off), else the primary's again (since v0.119.0) |
 | `conditions` | Standard Kubernetes status conditions (`Ready`, `Progressing`, `Degraded`) |
 | `replicationStatus` | Primary pod, number of active replicas, and with read-only routing the `readRoutablePods` and `laggingReplicas` |
 | `volumes` | Per-PVC requested size, capacity and expansion state (`Ready`, `Resizing`, `ResizeFailed`, `ShrinkRejected`) |
@@ -596,7 +606,8 @@ kubectl patch firebirdcluster my-cluster --type merge -p '{"spec":{"hibernated":
 ### Node Maintenance Window (v0.103.0)
 
 A cluster of several instances has a PodDisruptionBudget (`<name>-pdb`, one instance available),
-which keeps a drain from evicting the last instance. For maintenance that drains every node in
+which keeps a drain from evicting the last instance (`spec.enablePDB: false`, CloudNativePG's
+`enablePDB`, does without it altogether, since v0.119.0). For maintenance that drains every node in
 turn, open a window, like CloudNativePG's `nodeMaintenanceWindow`:
 
 ```yaml

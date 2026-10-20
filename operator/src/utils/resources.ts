@@ -986,7 +986,12 @@ export function buildPodMonitor(cluster: FirebirdCluster): Record<string, unknow
           ]),
     // the custom queries' metrics exporter sidecar
     ...(customQueriesEnabled(cluster) ? [{ port: METRICS_EXPORTER_PORT_NAME, path: '/metrics', interval: '30s' }] : []),
-  ];
+  ].map((endpoint) => ({
+    ...endpoint,
+    // CloudNativePG's podMonitorRelabelings / podMonitorMetricRelabelings, on every endpoint
+    ...(cluster.spec.monitoring?.podMonitorRelabelings?.length ? { relabelings: cluster.spec.monitoring.podMonitorRelabelings } : {}),
+    ...(cluster.spec.monitoring?.podMonitorMetricRelabelings?.length ? { metricRelabelings: cluster.spec.monitoring.podMonitorMetricRelabelings } : {}),
+  }));
 
   return {
     apiVersion: 'monitoring.coreos.com/v1',

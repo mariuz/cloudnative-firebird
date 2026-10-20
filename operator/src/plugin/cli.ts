@@ -12,7 +12,7 @@ import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/s
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.118.0';
+export const PLUGIN_VERSION = '0.119.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -250,6 +250,7 @@ export function formatStatus(
   };
 
   field('Cluster', `${namespace}/${name}`);
+  field('Description', cluster.spec.description?.trim());
   field('Phase', `${status.phase ?? 'Unknown'}${status.phaseReason ? ` (${status.phaseReason})` : ''}`);
   field('Instances', `${status.readyInstances ?? 0}/${cluster.spec.instances} ready`);
   const catalog = cluster.spec.imageCatalogRef;
@@ -262,6 +263,7 @@ export function formatStatus(
   );
   field('Database', cluster.spec.databaseName ?? 'mydb.fdb');
   field('Primary', primary);
+  if (status.writeService) field('Services', `${status.writeService} (read-write)${status.readService && status.readService !== status.writeService ? `, ${status.readService} (read-only)` : ''}`);
   if (replication) {
     const sync = cluster.spec.replication?.synchronous;
     const parts = [

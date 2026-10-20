@@ -92,7 +92,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
   }
 
   validatePodSettings(spec);
-  const lifecycle = [...lifecycleErrors(spec), ...initSqlRefsErrors(cluster), ...extraConfigErrors(spec), ...tempVolumeErrors(spec), ...customQueriesErrors(spec)];
+  const lifecycle = [...lifecycleErrors(spec), ...initSqlRefsErrors(cluster), ...extraConfigErrors(spec), ...tempVolumeErrors(spec), ...customQueriesErrors(spec), ...sweepErrors(spec)];
   if (lifecycle.length > 0) throw new ValidationError(lifecycle.join('; '));
 
   if (
@@ -586,3 +586,21 @@ export function validateScheduledBackupSpec(scheduledBackup: {
   validateBackupDatabase('spec', scheduledBackup.spec.type, scheduledBackup.spec.database);
 }
 
+/**
+ * Errors of spec.description and the PodMonitor relabelings (CloudNativePG's description,
+ * podMonitorRelabelings and podMonitorMetricRelabelings), as the CRD rejects them
+ */
+export function sweepErrors(spec: FirebirdCluster['spec']): string[] {
+  const errors: string[] = [];
+  if (spec.description !== undefined && (typeof spec.description !== 'string' || spec.description.length > 1024)) {
+    errors.push('description must be text of at most 1024 characters');
+  }
+  for (const field of ['podMonitorRelabelings', 'podMonitorMetricRelabelings'] as const) {
+    const value = spec.monitoring?.[field];
+    if (value === undefined) continue;
+    if (!Array.isArray(value) || value.length > 64 || value.some((r) => !r || typeof r !== 'object' || Array.isArray(r))) {
+      errors.push(`monitoring.${field} must be a list of at most 64 relabel configs`);
+    }
+  }
+  return errors;
+}

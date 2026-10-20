@@ -95,6 +95,10 @@ spec:
                 - instances
                 - storage
               properties:
+                description:
+                  description: Free text about the cluster, shown by kubectl firebird status (CloudNativePG's description)
+                  type: string
+                  maxLength: 1024
                 instances:
                   description: Number of Firebird instances to run in this cluster
                   type: integer
@@ -283,6 +287,20 @@ spec:
                     enablePodMonitor:
                       description: Whether to enable Prometheus PodMonitor
                       type: boolean
+                    podMonitorMetricRelabelings:
+                      description: Prometheus metric relabelings of every PodMonitor endpoint (CloudNativePG's podMonitorMetricRelabelings)
+                      type: array
+                      maxItems: 64
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    podMonitorRelabelings:
+                      description: Prometheus relabelings of every PodMonitor endpoint (CloudNativePG's podMonitorRelabelings)
+                      type: array
+                      maxItems: 64
+                      items:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
                     enableGrafanaDashboard:
                       description: Whether to reconcile a Grafana dashboard ConfigMap
                       type: boolean
@@ -1189,6 +1207,11 @@ spec:
                 suspended:
                   description: Whether reconciliation is suspended for this cluster
                   type: boolean
+                enablePDB:
+                  description: >-
+                    The PodDisruptionBudget of a cluster of several instances (CloudNativePG's enablePDB):
+                    false removes it, so node drains can evict any instance. Default true.
+                  type: boolean
                 hibernated:
                   description: >
                     Declarative hibernation. When true the StatefulSet is scaled to zero and
@@ -1313,6 +1336,17 @@ spec:
                 readyInstances:
                   description: Number of ready instances
                   type: integer
+                instanceNames:
+                  description: The instance pods, in order
+                  type: array
+                  items:
+                    type: string
+                writeService:
+                  description: The Service clients write through (the primary's)
+                  type: string
+                readService:
+                  description: The Service read-only clients use (<name>-replica with replication, else the primary's)
+                  type: string
                 phase:
                   description: Current phase of the cluster
                   type: string

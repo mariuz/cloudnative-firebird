@@ -1,0 +1,20 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: described
+spec:
+  description: "Orders database, owned by the shop team"
+  instances: 3
+  enablePDB: false
+  storage:
+    size: 1Gi
+  monitoring:
+    enablePodMonitor: true
+    podMonitorRelabelings:
+      - sourceLabels: [__meta_kubernetes_pod_node_name]
+        targetLabel: node
+    podMonitorMetricRelabelings:
+      - sourceLabels: [__name__]
+        regex: firebird_exporter_.*
+        action: drop
