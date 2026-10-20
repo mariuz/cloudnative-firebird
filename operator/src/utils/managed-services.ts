@@ -171,3 +171,18 @@ function sorted(o: Record<string, string>): Record<string, string> {
 export function ownedByCluster(service: V1Service, cluster: FirebirdCluster): boolean {
   return (service.metadata?.ownerReferences ?? []).some((o) => o.kind === RESOURCE_KIND && (o.uid === cluster.metadata.uid || (!cluster.metadata.uid && o.name === cluster.metadata.name)));
 }
+
+/**
+ * What clients connect to (CloudNativePG's status.writeService, readService and instanceNames):
+ * the primary Service for writes, <name>-replica for reads with replication (unless turned off),
+ * else the primary Service as well
+ */
+export function clusterEndpoints(cluster: FirebirdCluster): { instanceNames: string[]; writeService: string; readService: string } {
+  const name = cluster.metadata.name!;
+  const replica = cluster.spec.replication?.enabled === true && !replicaServiceDisabled(cluster);
+  return {
+    instanceNames: Array.from({ length: Math.max(0, cluster.spec.instances || 0) }, (_, i) => `${name}-${i}`),
+    writeService: name,
+    readService: replica ? `${name}-replica` : name,
+  };
+}

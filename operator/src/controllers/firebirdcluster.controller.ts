@@ -87,6 +87,7 @@ import {
   MANAGED_SERVICE_LABEL,
   managedServiceDiffers,
   ownedByCluster,
+  clusterEndpoints,
   replicaServiceDisabled,
 } from '../utils/managed-services';
 import {
@@ -514,6 +515,7 @@ export class FirebirdClusterController {
           superuserSecretHash,
           fencedInstances: fencing.fenced,
           selector: podSelector(cluster),
+          ...clusterEndpoints(cluster),
           ...(volumes ? { volumes } : {}),
           conditions: [
             this.makeCondition('Ready', 'False', 'MajorUpgrade', image.upgrading),
@@ -540,6 +542,7 @@ export class FirebirdClusterController {
           superuserSecretHash,
           fencedInstances: fencing.fenced,
           selector: podSelector(cluster),
+          ...clusterEndpoints(cluster),
           ...(volumes ? { volumes } : {}),
           conditions: [
             this.makeCondition('Hibernated', 'True', 'HibernationRequested', 'spec.hibernated is true'),
@@ -591,6 +594,7 @@ export class FirebirdClusterController {
         superuserSecretHash,
         fencedInstances: fencing.fenced,
         selector: podSelector(cluster),
+        ...clusterEndpoints(cluster),
         reseedingInstances: Object.keys(reseed.requests).sort(),
         recreatingVolumes,
         rollingUpdate,
@@ -2867,8 +2871,8 @@ export class FirebirdClusterController {
     }
 
     // A hibernated cluster has no pods to protect, and a maintenance window lets drains evict
-    // them; drop the PDB so drains are not blocked
-    if (cluster.spec.instances > 1 && !cluster.spec.hibernated && !maintenance) {
+    // them; drop the PDB so drains are not blocked (so does spec.enablePDB: false)
+    if (cluster.spec.instances > 1 && !cluster.spec.hibernated && !maintenance && cluster.spec.enablePDB !== false) {
       const desired = buildPodDisruptionBudget(cluster);
       try {
         const existing = await this.policyApi.readNamespacedPodDisruptionBudget({ name: pdbName, namespace });
@@ -2892,7 +2896,7 @@ export class FirebirdClusterController {
     } else {
       try {
         await this.policyApi.readNamespacedPodDisruptionBudget({ name: pdbName, namespace });
-        log.info('Deleting PodDisruptionBudget for single instance, hibernated cluster or maintenance window');
+        log.info('Deleting PodDisruptionBudget: single instance, hibernated cluster, maintenance window or enablePDB false');
         await this.policyApi.deleteNamespacedPodDisruptionBudget({ name: pdbName, namespace });
       } catch {
         log.debug('PodDisruptionBudget does not exist, skipping deletion');

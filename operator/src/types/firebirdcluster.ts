@@ -180,6 +180,10 @@ export interface ExporterConfiguration {
 export interface MonitoringConfiguration {
   /** Whether to enable Prometheus metrics via PodMonitor */
   enablePodMonitor?: boolean;
+  /** Prometheus metric relabelings of every PodMonitor endpoint (CloudNativePG's podMonitorMetricRelabelings) */
+  podMonitorMetricRelabelings?: Array<Record<string, unknown>>;
+  /** Prometheus relabelings of every PodMonitor endpoint (CloudNativePG's podMonitorRelabelings) */
+  podMonitorRelabelings?: Array<Record<string, unknown>>;
   /** Whether to reconcile a Grafana dashboard ConfigMap for database metrics */
   enableGrafanaDashboard?: boolean;
   /** Metrics exporter sidecar configuration */
@@ -412,6 +416,8 @@ export interface ImageCatalogRef {
  * Specification of a FirebirdCluster resource.
  */
 export interface FirebirdClusterSpec {
+  /** Free text about the cluster, shown by kubectl firebird status (CloudNativePG's description) */
+  description?: string;
   /** Number of Firebird instances to run */
   instances: number;
   /**
@@ -466,6 +472,11 @@ export interface FirebirdClusterSpec {
   bootstrap?: BootstrapConfiguration;
   /** Whether the operator should suspend reconciliation for this cluster */
   suspended?: boolean;
+  /**
+   * The PodDisruptionBudget of a cluster of several instances (CloudNativePG's enablePDB): false
+   * removes it, so node drains can evict any instance (as during a node maintenance window)
+   */
+  enablePDB?: boolean;
   /**
    * Declarative hibernation: scales the cluster down to zero pods and suspends its
    * CronJobs while retaining PVCs, Services and configuration. Set back to false to resume.
@@ -752,6 +763,12 @@ export interface FirebirdClusterStatus {
   instances?: number;
   /** Number of ready instances */
   readyInstances?: number;
+  /** The instance pods, in order (CloudNativePG's instanceNames) */
+  instanceNames?: string[];
+  /** The Service clients write through: the primary's (CloudNativePG's writeService) */
+  writeService?: string;
+  /** The Service read-only clients use: <name>-replica with replication, else the primary's (CloudNativePG's readService) */
+  readService?: string;
   /** Current phase of the cluster */
   phase?: 'Creating' | 'Running' | 'Updating' | 'Upgrading' | 'Degraded' | 'Deleting' | 'Paused' | 'Hibernated';
   /** Human-readable message about current status */

@@ -1,0 +1,12 @@
+# expect: spec.monitoring.podMonitorRelabelings
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: bad-relabelings
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  monitoring:
+    podMonitorRelabelings:
+      targetLabel: node

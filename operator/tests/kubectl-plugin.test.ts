@@ -131,6 +131,20 @@ describe('kubectl firebird', () => {
     expect(errs.at(-1)).toContain('unknown command frobnicate');
   });
 
+  it('shows the description and the Services', async () => {
+    cluster.spec.description = ' Orders database ';
+    cluster.status = { ...cluster.status, writeService: 'db', readService: 'db-replica' };
+    expect(await exec('status', 'db')).toBe(0);
+    const text = out.join('\n');
+    expect(text).toContain('Description:  Orders database');
+    expect(text).toContain('Services:     db (read-write), db-replica (read-only)');
+    // without replication the reads go to the primary's Service: shown once
+    out.length = 0;
+    cluster.status = { ...cluster.status, readService: 'db' };
+    expect(await exec('status', 'db')).toBe(0);
+    expect(out.join('\n')).toContain('Services:     db (read-write)\n');
+  });
+
   it('reports the cluster, its instances, replication and backups', async () => {
     cluster.status = {
       ...cluster.status,

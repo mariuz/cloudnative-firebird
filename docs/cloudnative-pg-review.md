@@ -41,6 +41,39 @@ Status: **done** (in this repository), **planned** (listed in [ROADMAP.md](../RO
 | 1.28: replicas detect network drops within 5 s (`tcp_user_timeout`) | The segment puller uses 10 s connect and 60 s read timeouts and polls every 5 s. |
 | 1.30: stable instance serials | StatefulSet ordinals are stable by construction. |
 
+## Spec sweep (v0.119.0)
+
+CloudNativePG 1.30.1's `Cluster` spec and status (`api/v1/cluster_types.go`), field by field,
+against this operator. Adopted in this sweep:
+
+| CloudNativePG | Here |
+|---|---|
+| `spec.description` | `spec.description`, shown by `kubectl firebird status` |
+| `spec.enablePDB` | `spec.enablePDB`: false removes the cluster's PodDisruptionBudget (a node maintenance window removes it for its duration) |
+| `monitoring.podMonitorRelabelings`, `podMonitorMetricRelabelings` | The same, on every endpoint of the cluster's PodMonitor |
+| `status.instanceNames`, `writeService`, `readService` | The same: the instance pods in order, the primary Service, and `<name>-replica` with replication (unless turned off) or the primary Service again |
+
+Already covered or not applicable (the field, and where it lives here):
+
+| CloudNativePG | Here |
+|---|---|
+| `imageName`, `imageCatalogRef`, `imagePullSecrets`, `schedulerName`, `priorityClassName`, `instances`, `storage`, `resources`, `affinity`, `nodeMaintenanceWindow`, `primaryUpdateStrategy`, `primaryUpdateMethod`, `ephemeralVolumesSizeLimit`, `inheritedMetadata`, `serviceAccountName`, `superuserSecret`, `probes`, `backup`, `bootstrap`, `replica`, `monitoring.customQueries*`, `monitoring.enablePodMonitor`, `managed.services`, `primaryLease` | Same names (`affinity` as `affinity`, `podAntiAffinity`, `topologySpreadConstraints`, `nodeSelector`, `tolerations`; `primaryLease` under `replication.failover`) |
+| `postgresql` (parameters, `pg_hba`, `pg_ident`, `shared_preload_libraries`, `ldap`, `syncReplicaElectionConstraint`, `synchronous`) | `config.settings` (firebird.conf), `replication.synchronous`; no `pg_hba`: client access is restricted by the NetworkPolicy |
+| `minSyncReplicas`, `maxSyncReplicas` | `replication.synchronous` (one or several standbys, no "any N of M" quorum: Firebird waits for every `sync_replica`) |
+| `logLevel` | The operator's `LOG_LEVEL`; the instances log through Firebird's own `firebird.log` |
+| `enableSuperuserAccess` | n/a: SYSDBA always exists in Firebird; its Secret is `superuserSecret` |
+| `certificates` (server and client TLS Secrets) | n/a: Firebird has no TLS of its own; WireCrypt encrypts the wire protocol (`tls.enabled` makes it required), and segment shipping runs over segment TLS |
+| `walStorage` | n/a as a separate volume: the journal lives on the instance volume (`replication.journalDirectory`), archived to S3 |
+| `serviceAccountTemplate` | `serviceAccountName`: the operator does not create a ServiceAccount per cluster |
+| `podSelectorRefs` | n/a (`pg_hba` entries from pod selectors); `networkPolicy.ingressFrom` |
+| `externalClusters` | `bootstrap.clone` and `replica.journalS3` name their sources inline |
+| `tablespaces` | n/a: Firebird has no tablespaces |
+| `plugins` (CNPG-I) | n/a: no plugin interface; backups run as Jobs with a configurable S3 client image |
+| `replicationSlots` | n/a: journal segments are files, retained by `segmentRetentionHours` and the replicas' progress |
+| `managed.roles` | `FirebirdUser` and `FirebirdRole` resources |
+| `monitoring.tls`, `disableDefaultQueries`, `metricsQueriesTTL` | The exporter sidecars serve plain HTTP inside the cluster; the default metrics come from the exporter image; queries are read on every scrape |
+| Status: `currentPrimary`, `targetPrimary`, `phase`, `phaseReason`, `conditions`, `readyInstances`, `instances`, `selector`, `image`, `managedRolesStatus`, `topology`, `pvcCount`, `jobCount`, `danglingPVC`, `resizingPVC`, `firstRecoverabilityPoint`, `lastSuccessfulBackup`, `timelineID`, `systemID`, `onlineUpdateEnabled`, `switchReplicaClusterStatus` | `replicationStatus.primaryPod`, `switchover`, `phase`, `phaseReason`, `conditions`, `readyInstances`, `instances`, `selector`, `image`, the `FirebirdUser` / `FirebirdRole` statuses, `volumes`, `replicaCluster`, `majorUpgrade`, `imageCheck`; the backups' own statuses and `kubectl firebird backups`; no timeline (the journal sequence continues across promotions) |
+
 ## Not applicable
 
 - PgBouncer / `Pooler` features (image catalogs, TLS settings, `auth_user`, metrics): Firebird has

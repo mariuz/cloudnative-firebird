@@ -272,6 +272,14 @@ jobs:
             'until [ "$(kubectl get statefulset test-cluster -o jsonpath={.spec.replicas})" = "2" ]; do sleep 3; done'
           timeout 60 bash -c \
             'until kubectl get pdb test-cluster-pdb -n default 2>/dev/null; do sleep 3; done'
+          # the status names the instances and the Services (no replication: reads go to the primary's)
+          [ "$(kubectl get firebirdcluster test-cluster -o jsonpath='{.status.instanceNames}')" = '["test-cluster-0","test-cluster-1"]' ]
+          [ "$(kubectl get firebirdcluster test-cluster -o jsonpath='{.status.writeService} {.status.readService}')" = "test-cluster test-cluster" ]
+          # enablePDB: false removes the PodDisruptionBudget, true brings it back; the description shows
+          kubectl patch firebirdcluster test-cluster --type merge -p '{"spec":{"enablePDB":false,"description":"CI cluster"}}'
+          timeout 60 bash -c 'while kubectl get pdb test-cluster-pdb -n default 2>/dev/null; do sleep 3; done'
+          kubectl patch firebirdcluster test-cluster --type merge -p '{"spec":{"enablePDB":null,"description":null}}'
+          timeout 60 bash -c 'until kubectl get pdb test-cluster-pdb -n default 2>/dev/null; do sleep 3; done'
 
       - name: Verify declarative hibernation
         run: |
@@ -390,6 +398,11 @@ jobs:
           grep -qE "^$primary +primary +true +Running" /tmp/plugin-status.txt
           [ "$(grep -cE '^repl-[0-9]+ +replica +true +Running' /tmp/plugin-status.txt)" = 2 ]
           grep -qE '^Replication: +asynchronous' /tmp/plugin-status.txt
+          # the description and the Services (status.writeService / readService)
+          grep -qE '^Services: +repl \(read-write\), repl-replica \(read-only\)$' /tmp/plugin-status.txt
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"description":"CI replication cluster"}}'
+          kubectl firebird status repl | grep -q '^Description:  CI replication cluster'
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"description":null}}'
           # isql on the primary and on a replica, reading stdin
           echo "select 'tables=' || count(*) from rdb\$relations;" | kubectl firebird isql repl -- -q | grep -q 'tables='
           echo "select 'replica=' || mon\$replica_mode from mon\$database;" | kubectl firebird isql repl --replica -- -q | tee /tmp/plugin-isql.txt
