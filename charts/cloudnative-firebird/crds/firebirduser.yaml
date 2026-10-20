@@ -1,0 +1,169 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: firebirdusers.firebird.cloudnative-firebird.io
+spec:
+  group: firebird.cloudnative-firebird.io
+  names:
+    kind: FirebirdUser
+    listKind: FirebirdUserList
+    plural: firebirdusers
+    singular: firebirduser
+    shortNames:
+      - fbu
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterName
+        - name: User
+          type: string
+          jsonPath: .status.username
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          description: >-
+            FirebirdUser manages a Firebird login and its role grants as a standalone object
+            (after CloudNativePG's DatabaseRole). Users are applied to every instance's security
+            database; role grants to the cluster database.
+          type: object
+          required:
+            - spec
+          x-kubernetes-validations:
+            - rule: >-
+                has(self.spec.username) ||
+                (self.metadata.name.matches('^[A-Za-z][A-Za-z0-9-]{0,62}$') && self.metadata.name.lowerAscii() != 'sysdba')
+              message: the resource name is not a valid Firebird user name (letters, digits and "-"); set spec.username
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - clusterName
+                - passwordSecret
+              properties:
+                clusterName:
+                  description: FirebirdCluster name (immutable)
+                  type: string
+                  minLength: 1
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: clusterName is immutable
+                username:
+                  description: >-
+                    Firebird user name, a regular identifier stored in upper case (default: the
+                    resource name with "-" replaced by "_"). Immutable.
+                  type: string
+                  maxLength: 63
+                  pattern: '^[A-Za-z][A-Za-z0-9_$]{0,62}$'
+                  x-kubernetes-validations:
+                    - rule: self == oldSelf
+                      message: username is immutable
+                    - rule: self.upperAscii() != 'SYSDBA'
+                      message: SYSDBA is managed through the cluster superuserSecret
+                passwordSecret:
+                  description: Secret holding the password
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      minLength: 1
+                    key:
+                      description: Key in the Secret (default "password")
+                      type: string
+                active:
+                  description: Whether the user can log in (default true)
+                  type: boolean
+                admin:
+                  description: Grant the RDB$ADMIN role in the security database
+                  type: boolean
+                roles:
+                  description: >-
+                    Roles granted in the cluster database: regular identifiers, or names in double
+                    quotes ("Sales Team") for roles with delimited names. They must exist; roles
+                    granted earlier and no longer listed are revoked.
+                  type: array
+                  maxItems: 64
+                  items:
+                    type: string
+                    maxLength: 130
+                    x-kubernetes-validations:
+                      - rule: >-
+                          self.matches('^[A-Za-z][A-Za-z0-9_$]{0,62}$') ||
+                          (self.matches('^"([^"]|"")+"$') && !self.matches('[\\x00-\\x1f\\x7f]') &&
+                          !self.matches('^"\\s') && !self.matches('\\s"$'))
+                        message: >-
+                          roles must be regular identifiers or names in double quotes (no control
+                          characters, no leading or trailing spaces)
+                      - rule: self.upperAscii() != 'RDB$ADMIN' && self != '"RDB$ADMIN"'
+                        message: use spec.admin instead of the RDB$ADMIN role
+                reclaimPolicy:
+                  description: >-
+                    "retain" (default) keeps the Firebird user when this resource is deleted;
+                    "delete" drops it and revokes its privileges
+                  type: string
+                  enum:
+                    - retain
+                    - delete
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Applying
+                    - Applied
+                    - Failed
+                    - Dropping
+                message:
+                  type: string
+                username:
+                  type: string
+                jobName:
+                  type: string
+                lastFailureTime:
+                  type: string
+                  format: date-time
+                failedHash:
+                  type: string
+                droppedFrom:
+                  description: Instances the user has been dropped from while the resource is deleted (reclaimPolicy delete)
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      volume:
+                        type: string
+                instances:
+                  description: Instances the current spec has been applied to
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      hash:
+                        type: string
+                      volume:
+                        type: string

@@ -145,13 +145,34 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.117.0/cloudnative-firebird-0.117.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.118.0/cloudnative-firebird-0.118.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
 PodMonitor stays out, it needs the Prometheus operator) and attached to the GitHub Release the
 Release workflow creates for each version (see Operator images below); the kind CI checks it
 applies as a whole. From a checkout, the same in two steps:
+
+### Install with Helm
+
+The chart `charts/cloudnative-firebird` (since v0.118.0) renders the same operator, with values
+for the image, the replicas, the environment (`logLevel`, `firebirdDefaultImage`, `segmentTLS`,
+`primaryLease`, `extraEnv`), the webhook, resources, scheduling, the PodDisruptionBudget and an
+optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
+`oci://ghcr.io/mariuz/charts/cloudnative-firebird` and attached to each release:
+
+```bash
+helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
+  --version 0.118.0 -n cloudnative-firebird-system --create-namespace
+# from a checkout
+helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
+```
+
+The CRDs are in the chart's `crds/` directory, so Helm installs them once and does not upgrade
+them: before `helm upgrade`, apply the new version's `config/crds` (or the release manifest's
+CRDs). `hack/release/chart.sh check` keeps the chart's CRDs equal to `config/crds` and its default
+rendering equal to the install manifest (the unit test job runs it); the kind CI installs the
+operator from the chart, checks it reconciles and that the webhook works, and upgrades the release.
 
 ### Install the CRDs
 
@@ -209,7 +230,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.117.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test). |
+| `<version>` (e.g. `0.118.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 

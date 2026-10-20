@@ -1,0 +1,351 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloudnative-firebird-operator
+  labels:
+    {{- include "cloudnative-firebird.labels" . | nindent 4 }}
+rules:
+  # FirebirdCluster resources
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdclusters
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdclusters/status
+    verbs:
+      - get
+      - update
+      - patch
+  # Backup, scheduled backup and restore resources
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdbackups
+      - firebirdscheduledbackups
+      - firebirdrestores
+    verbs:
+      - get
+      - list
+      - watch
+  # Volume snapshot backups: the unlock finalizer, and the backups of their schedules (created, and
+  # deleted by the retention policy)
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdbackups
+    verbs:
+      - create
+      - patch
+      - update
+      - delete
+  # Image catalogs (spec.imageCatalogRef)
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdimagecatalogs
+      - firebirdclusterimagecatalogs
+    verbs:
+      - get
+      - list
+      - watch
+  # VolumeSnapshots of instance volumes (volume snapshot backups, bootstrap from a snapshot)
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdbackups/status
+      - firebirdscheduledbackups/status
+      - firebirdrestores/status
+    verbs:
+      - get
+      - update
+      - patch
+  # Declarative users and databases (the finalizer is managed on the object itself)
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdusers
+      - firebirdroles
+      - firebirddatabases
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - firebirdusers/status
+      - firebirdroles/status
+      - firebirddatabases/status
+    verbs:
+      - get
+      - update
+      - patch
+  # StatefulSets
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # StatefulSet revisions: what changed between a pod's revision and the new one (in-place resize)
+  - apiGroups:
+      - apps
+    resources:
+      - controllerrevisions
+    verbs:
+      - get
+  # Services
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # PersistentVolumeClaims
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumeclaims
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # Secrets (superuser password; segment TLS certificates, <cluster>-segment-tls; the rendered
+  # custom metrics queries, <cluster>-custom-queries, deleted when the queries are removed)
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - delete
+  # Events
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  # Pods (for status reporting and read-only routing labels)
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+      - patch
+      # restarts a replica into its init container to re-seed it (reseed annotation)
+      - delete
+  # rolling updates resize container resources without a restart when nothing else changed
+  - apiGroups:
+      - ""
+    resources:
+      - pods/resize
+    verbs:
+      - patch
+  # ConfigMaps (firebird.conf, init.sql, Grafana dashboards)
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # Backup, sweep, diagnostics and journal archive CronJobs; backup/restore Jobs
+  - apiGroups:
+      - batch
+    resources:
+      - cronjobs
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # Primary leader election Lease
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # The Role and RoleBinding that let the instances renew their cluster's Lease
+  # (replication.failover.primaryLease)
+  - apiGroups:
+      - rbac.authorization.k8s.io
+    resources:
+      - roles
+      - rolebindings
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # PodDisruptionBudgets
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # NetworkPolicies
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - networkpolicies
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  # Prometheus Operator PodMonitors
+  - apiGroups:
+      - monitoring.coreos.com
+    resources:
+      - podmonitors
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+
+  # Admission webhook: its caBundle
+  - apiGroups:
+      - admissionregistration.k8s.io
+    resources:
+      - validatingwebhookconfigurations
+    resourceNames:
+      - cloudnative-firebird-validating-webhook
+    verbs:
+      - get
+      - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloudnative-firebird-operator
+  labels:
+    {{- include "cloudnative-firebird.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cloudnative-firebird-operator
+subjects:
+  - kind: ServiceAccount
+    name: cloudnative-firebird-operator
+    namespace: {{ .Release.Namespace }}
+---
+# Admission webhook certificates, in the operator's namespace only
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cloudnative-firebird-webhook-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloudnative-firebird.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    resourceNames:
+      - cloudnative-firebird-webhook-cert
+    verbs:
+      - get
+      - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cloudnative-firebird-webhook-cert
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloudnative-firebird.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cloudnative-firebird-webhook-cert
+subjects:
+  - kind: ServiceAccount
+    name: cloudnative-firebird-operator
+    namespace: {{ .Release.Namespace }}

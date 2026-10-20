@@ -1,0 +1,12 @@
+cloudnative-firebird {{ .Chart.AppVersion }} runs in namespace {{ .Release.Namespace }}
+({{ .Values.replicaCount }} replica(s) of {{ include "cloudnative-firebird.image" . }}).
+
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/cloudnative-firebird-operator
+
+Create a cluster (https://github.com/mariuz/cloudnative-firebird#create-a-firebird-cluster):
+
+  kubectl apply -f https://raw.githubusercontent.com/mariuz/cloudnative-firebird/v{{ .Chart.AppVersion }}/config/samples/secret.yaml
+  kubectl apply -f https://raw.githubusercontent.com/mariuz/cloudnative-firebird/v{{ .Chart.AppVersion }}/config/samples/firebirdcluster_minimal.yaml
+
+The CRDs were installed with the chart and are not upgraded by helm upgrade: apply the new
+version's config/crds first (https://github.com/mariuz/cloudnative-firebird#upgrading-the-operator).

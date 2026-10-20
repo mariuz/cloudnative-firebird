@@ -1,0 +1,82 @@
+# Default values of the cloudnative-firebird chart. The defaults render the same operator as the
+# manifests in config/deploy (hack/release/chart.sh check keeps them equal).
+
+# one replica reconciles (leader election, Lease cloudnative-firebird-operator), every replica
+# serves the admission webhook; the other takes over within about 15 seconds
+replicaCount: 2
+
+image:
+  repository: ghcr.io/mariuz/cloudnative-firebird
+  # the chart's appVersion when empty
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# debug, info, warn, error
+logLevel: info
+
+# Firebird image of clusters without spec.imageName (empty: firebirdsql/firebird:latest)
+firebirdDefaultImage: ""
+
+# validating admission webhook; off, the operator still validates when it reconciles
+webhook:
+  enabled: true
+
+# segment TLS (docs/segment-tls.md)
+segmentTLS:
+  # for new clusters: auto (on from Kubernetes 1.29), "true", "false"
+  default: auto
+  # move clusters pinned to plain segment shipping over at an upgrade: "pinned", "all", or empty
+  migrate: ""
+  # refuse plain segment shipping
+  required: false
+
+# the primary holds its Lease (a promotion mutex) in new clusters with automatic failover
+primaryLease:
+  # auto (on from Kubernetes 1.29, native sidecars), "true", "false"
+  default: auto
+  # move clusters pinned to the operator-moved Lease over at an upgrade: "pinned", or empty
+  migrate: ""
+
+# off: a single replica without the Lease (LEADER_ELECTION=false)
+leaderElection: true
+
+# more environment variables of the operator container (name / value or valueFrom)
+extraEnv: []
+
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "200m"
+    memory: "256Mi"
+
+serviceAccount:
+  annotations: {}
+
+podAnnotations: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+# the replicas prefer different nodes
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudnative-firebird
+              app.kubernetes.io/component: operator
+
+# keeps one replica through node drains
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# scrape the operator's /metrics with the Prometheus Operator (monitoring.coreos.com CRDs)
+podMonitor:
+  enabled: false
+  interval: 30s

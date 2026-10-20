@@ -9,11 +9,22 @@ import { PLUGIN_VERSION } from '../src/plugin/cli';
 const root = join(__dirname, '..', '..');
 
 describe('the operator version', () => {
-  it('is the image config/deploy/deployment.yaml deploys (hack/release/version.sh)', () => {
+  it('is the image config/deploy/deployment.yaml deploys and the chart version (hack/release/version.sh)', () => {
     expect(PLUGIN_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
     const deployment = readFileSync(join(root, 'config/deploy/deployment.yaml'), 'utf8');
     expect(deployment).toContain(`image: ghcr.io/mariuz/cloudnative-firebird:${PLUGIN_VERSION}\n`);
+    const chart = readFileSync(join(root, 'charts/cloudnative-firebird/Chart.yaml'), 'utf8');
+    expect(chart).toContain(`\nversion: ${PLUGIN_VERSION}\n`);
+    expect(chart).toContain(`\nappVersion: "${PLUGIN_VERSION}"\n`);
     expect(execFileSync(join(root, 'hack/release/version.sh'), { encoding: 'utf8' }).trim()).toBe(PLUGIN_VERSION);
+  });
+
+  it('ships the same CRDs in the Helm chart (hack/release/chart.sh sync)', () => {
+    const crds = readdirSync(join(root, 'config/crds')).filter((f) => f.endsWith('.yaml')).sort();
+    expect(readdirSync(join(root, 'charts/cloudnative-firebird/crds')).filter((f) => f.endsWith('.yaml')).sort()).toEqual(crds);
+    for (const f of crds) {
+      expect(readFileSync(join(root, 'charts/cloudnative-firebird/crds', f), 'utf8'), f).toBe(readFileSync(join(root, 'config/crds', f), 'utf8'));
+    }
   });
 });
 

@@ -1,0 +1,17 @@
+{{- if .Values.podMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: cloudnative-firebird-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cloudnative-firebird.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "cloudnative-firebird.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.podMonitor.interval }}
+{{- end }}
