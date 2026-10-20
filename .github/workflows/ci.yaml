@@ -2992,8 +2992,9 @@ jobs:
             config/deploy/deployment.yaml | kubectl apply -f -
           kubectl set env deployment/cloudnative-firebird-operator -n $NS RESYNC_INTERVAL_SECONDS=10
           kubectl rollout status deployment/cloudnative-firebird-operator -n $NS --timeout=300s
+          # the old replicas may still be terminating (phase Running) right after the rollout
+          timeout 120 bash -c "until [ \"\$(kubectl get pods -n $NS -o jsonpath='{.items[*].spec.containers[0].image}' | tr ' ' '\\n' | sort -u)\" = cloudnative-firebird:ci ]; do sleep 3; done"
           kubectl get pods -n $NS -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[0].image}{"\n"}{end}'
-          [ "$(kubectl get pods -n $NS --field-selector=status.phase=Running -o jsonpath='{.items[*].spec.containers[0].image}' | tr ' ' '\n' | sort -u)" = cloudnative-firebird:ci ]
 
       - name: Verify the cluster after the upgrade
         run: |
