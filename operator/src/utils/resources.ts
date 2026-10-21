@@ -272,7 +272,7 @@ export function replicaServiceSelector(cluster: FirebirdCluster): Record<string,
  */
 export function buildStatefulSet(
   cluster: FirebirdCluster,
-  options?: { superuserSecretHash?: string }
+  options?: { superuserSecretHash?: string; replicas?: number }
 ): V1StatefulSet {
   const { name, namespace = 'default' } = cluster.metadata;
   const spec = cluster.spec;
@@ -445,8 +445,9 @@ export function buildStatefulSet(
     spec: {
       // Must reference the headless service for stable pod DNS
       serviceName: `${name}-headless`,
-      // Hibernation scales to zero pods while keeping the PVCs
-      replicas: spec.hibernated ? 0 : spec.instances,
+      // Hibernation scales to zero pods while keeping the PVCs; a scale-down that would remove the
+      // primary keeps more until the switchover away from it is done (utils/scaling.ts)
+      replicas: spec.hibernated ? 0 : options?.replicas ?? spec.instances,
       // with replication the operator restarts outdated pods itself, replicas first and the
       // primary last (utils/rolling-update.ts)
       // the operator rolls the pods (utils/rolling-update.ts)

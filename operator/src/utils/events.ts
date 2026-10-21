@@ -81,6 +81,7 @@ export const EventReason = {
   VolumeRecreating: 'VolumeRecreating',
   VolumeRecreated: 'VolumeRecreated',
   RollingUpdate: 'RollingUpdate',
+  ScaleDownSwitchover: 'ScaleDownSwitchover',
   RollingUpdateCompleted: 'RollingUpdateCompleted',
   ReplicaLagging: 'ReplicaLagging',
   VolumeResizing: 'VolumeResizing',

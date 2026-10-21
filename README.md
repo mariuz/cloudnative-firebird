@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.123.0/cloudnative-firebird-0.123.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.124.0/cloudnative-firebird-0.124.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.123.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.124.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.123.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test). |
+| `<version>` (e.g. `0.124.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -1211,6 +1211,29 @@ highest ordinal first, each once every instance is ready again (as the StatefulS
 `RollingUpdate` did), with no switchover and no supervision. Resource-only changes are applied in
 place as above. Since v0.71.0 the StatefulSets of such clusters switch to `OnDelete` too; the
 template does not change, so nothing restarts.
+
+### Scaling (v0.124.0)
+
+`spec.instances` sets the number of instances; the `FirebirdCluster` scale subresource maps it
+(with `status.instances` and the pods' label selector in `status.selector`), so `kubectl scale`
+and a HorizontalPodAutoscaler or VerticalPodAutoscaler work on it:
+
+```bash
+kubectl scale firebirdcluster my-cluster --replicas=3
+```
+
+Scaling up adds instances at the next ordinals; with replication each new replica is seeded from a
+ready replica or the primary's offline seed (an instance that was removed earlier comes back on
+its kept volume and catches up). Scaling down removes the instances with the highest ordinals, as
+the StatefulSet does, and keeps their volumes (`firebird-data-<cluster>-<n>`), so scaling up again
+reuses them. The primary can be any ordinal after a switchover or failover: a scale-down that would
+remove it waits instead of taking it away. The StatefulSet keeps the primary's ordinal running, the
+operator requests a planned switchover to the lowest-ordinal ready replica that stays
+(`ScaleDownSwitchover` event, `status.phase` `Updating` with the reason under `phaseReason`), and
+the cluster shrinks once the switchover completed. Without a ready replica that stays, it waits
+and says so. A scale-down also waits for a switchover or failover in progress whose instances it
+would remove. The kind CI scales a replicated cluster 3 → 2 → 1 (the primary at ordinal 1
+switches over to ordinal 0 first) and back to 3 through an HPA's minimum.
 
 ### Re-seeding a Replica
 

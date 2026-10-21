@@ -91,6 +91,7 @@ import {
   replicaServiceDisabled,
 } from '../utils/managed-services';
 import { backupSummary } from '../utils/backup-status';
+import { ScaleDownHold, scaleDownHold } from '../utils/scaling';
 import { FirebirdBackup } from '../types';
 import {
   catalogKind,
@@ -459,8 +460,10 @@ export class FirebirdClusterController {
       await this.reconcileService(cluster, log);
       // before the StatefulSet: an instance restarted into the new mode reads it when it starts
       await reconcileSegmentTlsPeers(this.coreApi, cluster);
+      // a scale-down that would remove the primary switches over first (utils/scaling.ts)
+      const scaleDown = await this.reconcileScaleDown(cluster, primaryPod, switchover, log);
       const { readyInstances, superuserSecretHash, statefulSetExisted, statefulSet } =
-        await this.reconcileStatefulSet(cluster, log);
+        await this.reconcileStatefulSet(cluster, log, scaleDown?.replicas);
       const volumes = statefulSetExisted
         ? await this.reconcileVolumeExpansion(cluster, log)
         : undefined;
@@ -585,12 +588,14 @@ export class FirebirdClusterController {
         : undefined;
 
       const status: Partial<FirebirdClusterStatus> = {
-        phase: image.upgrading ? 'Upgrading' : isReady ? (rollingUpdate ? 'Updating' : 'Running') : 'Creating',
+        phase: image.upgrading ? 'Upgrading' : isReady ? (rollingUpdate || scaleDown ? 'Updating' : 'Running') : 'Creating',
         phaseReason: image.upgrading
           ? image.upgrading
           : isReady
           ? rollingUpdate
             ? `Rolling update: ${rollingUpdate.message}`
+            : scaleDown
+            ? `Scaling down: ${scaleDown.message}`
             : fencedCount > 0
             ? `All resources reconciled; ${fencedCount} instance(s) fenced`
             : 'All resources reconciled successfully'
@@ -2179,6 +2184,7 @@ export class FirebirdClusterController {
   private async reconcileStatefulSet(
     cluster: FirebirdCluster,
     log: Logger,
+    replicas?: number,
   ): Promise<{
     readyInstances: number;
     superuserSecretHash?: string;
@@ -2201,7 +2207,7 @@ export class FirebirdClusterController {
       }
     }
 
-    const desired = buildStatefulSet(cluster, { superuserSecretHash });
+    const desired = buildStatefulSet(cluster, { superuserSecretHash, replicas });
 
     let existing;
     try {
@@ -2853,6 +2859,36 @@ export class FirebirdClusterController {
         `${pod} cannot be scheduled for ${UNSCHEDULABLE_GRACE_SECONDS}s during the node maintenance window (reusePVC: false): its volume is re-created`,
       );
     }
+  }
+
+  /**
+   * A scale-down of a replication cluster that would remove the primary (utils/scaling.ts): the
+   * StatefulSet keeps the primary's ordinal running and a switchover to the lowest-ordinal ready
+   * replica that stays is requested (the targetPrimary annotation, as a rolling update does)
+   */
+  private async reconcileScaleDown(cluster: FirebirdCluster, primaryPod: string, switchover: SwitchoverResult, log: Logger): Promise<ScaleDownHold | undefined> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    if (!replicationEnabled(cluster) || cluster.spec.hibernated) return undefined;
+    const pods = instancePods((await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items, name);
+    const hold = scaleDownHold(cluster, primaryPod, pods, switchover.status);
+    if (!hold) return undefined;
+    const requested = cluster.metadata.annotations?.[TARGET_PRIMARY_ANNOTATION]?.trim();
+    if (hold.switchoverTo && requested !== hold.switchoverTo) {
+      log.info({ from: primaryPod, target: hold.switchoverTo, instances: cluster.spec.instances }, 'Scaling down: switching over away from the primary first');
+      await this.event(cluster, 'Normal', EventReason.ScaleDownSwitchover, hold.message);
+      await this.customApi.patchNamespacedCustomObject(
+        {
+          group: API_GROUP,
+          version: API_VERSION,
+          namespace,
+          plural: RESOURCE_PLURAL,
+          name,
+          body: { metadata: { annotations: { [TARGET_PRIMARY_ANNOTATION]: hold.switchoverTo } } },
+        },
+        MERGE_PATCH,
+      );
+    }
+    return hold;
   }
 
   /** The backup summary of the cluster status from its FirebirdBackups (utils/backup-status.ts); empty when they cannot be listed */
