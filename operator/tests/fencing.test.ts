@@ -237,6 +237,33 @@ describe('FirebirdClusterController – fencing', () => {
     );
   });
 
+  it('decides on the stored status when a reconcile starts from a stale watch copy', async () => {
+    // the previous reconcile recorded db-1 as fenced and deleted its Job; this one starts from a
+    // copy without that status write: no second fence Job, and the status keeps db-1
+    const stale = makeCluster('["db-1"]');
+    stale.status = { ...stale.status, fencedInstances: [] };
+    const { controller, api } = mockApi({
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({ ...makeCluster('["db-1"]'), status: { fencedInstances: ['db-1'] } }),
+      readNamespacedStatefulSet: readyStatefulSet(2),
+      patchNamespacedStatefulSet: readyStatefulSet(2),
+    });
+    await controller.reconcile(stale);
+    expect(api('createNamespacedJob')).not.toHaveBeenCalled();
+    expect(api('getNamespacedCustomObject')).toHaveBeenCalled();
+    expect(lastStatus(api).fencedInstances).toEqual(['db-1']);
+    // the same for an unfence recorded by the previous reconcile
+    const unfenced = makeCluster('[]');
+    unfenced.status = { ...unfenced.status, fencedInstances: ['db-1'] };
+    const u = mockApi({ getNamespacedCustomObject: vi.fn().mockResolvedValue({ ...makeCluster('[]'), status: { fencedInstances: [] } }) });
+    await u.controller.reconcile(unfenced);
+    expect(u.api('createNamespacedJob')).not.toHaveBeenCalled();
+    expect(lastStatus(u.api).fencedInstances).toEqual([]);
+    // the stored object not readable: this copy decides, as before (a Job is started)
+    const unreadable = mockApi({ getNamespacedCustomObject: vi.fn().mockRejectedValue(new Error('timeout')) });
+    await unreadable.controller.reconcile(makeCluster('["db-1"]'));
+    expect(unreadable.api('createNamespacedJob')).toHaveBeenCalled();
+  });
+
   it('unfences instances removed from the annotation', async () => {
     const { controller, api } = mockApi();
     const cluster = makeCluster('[]');
