@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.122.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.123.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Backup summary in the cluster status** *(v0.123.0; CloudNativePG's lastSuccessfulBackup, firstRecoverabilityPoint)*
+  - `status.lastSuccessfulBackup`, `lastFailedBackup` and `firstRecoverabilityPoint` (the oldest completed `FirebirdBackup` still present: the earliest point a restore can go back to), each also per type (`…ByMethod`), from the cluster's backups on every reconcile. `kubectl firebird status` shows them as `Backups:` and adds each schedule's next run (`NEXT`). Unit tests cover the summary, the status write (and the backups not being listable), the next cron time and the plugin; the kind CI checks the status after the plugin's backup.
 - [x] **Fencing decides on the stored status** *(v0.122.0)*
   - A reconcile started from a stale watch copy (an event queued before the previous reconcile recorded a fence or unfence) acted on the status of before it: it fenced the instance again (the Job said "already fenced") and wrote `status.fencedInstances` back without it for a few seconds (seen in the kind CI's plugin check). When the annotation and the copy's status differ, the fencing reconcile now reads the stored status first, as the switchover state machine does; a unit test reproduces the stale copy for a fence and an unfence.
 - [x] **Segment server tests on free ports** *(v0.121.0)*

@@ -769,6 +769,16 @@ export interface FirebirdClusterStatus {
   writeService?: string;
   /** The Service read-only clients use: <name>-replica with replication, else the primary's (CloudNativePG's readService) */
   readService?: string;
+  /** Completion time of the latest completed FirebirdBackup of the cluster (utils/backup-status.ts) */
+  lastSuccessfulBackup?: string;
+  /** The same per backup type (logical, physical, volumeSnapshot) */
+  lastSuccessfulBackupByMethod?: Partial<Record<'logical' | 'physical' | 'volumeSnapshot', string>>;
+  /** Time of the latest failed FirebirdBackup of the cluster */
+  lastFailedBackup?: string;
+  /** Completion time of the oldest completed FirebirdBackup still present: the earliest point a restore can go back to */
+  firstRecoverabilityPoint?: string;
+  /** The same per backup type */
+  firstRecoverabilityPointByMethod?: Partial<Record<'logical' | 'physical' | 'volumeSnapshot', string>>;
   /** Current phase of the cluster */
   phase?: 'Creating' | 'Running' | 'Updating' | 'Upgrading' | 'Degraded' | 'Deleting' | 'Paused' | 'Hibernated';
   /** Human-readable message about current status */

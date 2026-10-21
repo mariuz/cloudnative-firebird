@@ -131,6 +131,27 @@ describe('kubectl firebird', () => {
     expect(errs.at(-1)).toContain('unknown command frobnicate');
   });
 
+  it('summarises the backups and the next scheduled one', async () => {
+    cluster.status = {
+      ...cluster.status,
+      // the plugin's clock is 2026-10-11T12:00:00Z
+      lastSuccessfulBackup: '2026-10-11T11:55:00Z',
+      lastSuccessfulBackupByMethod: { logical: '2026-10-11T11:55:00Z', physical: '2026-10-11T09:00:00Z' },
+      firstRecoverabilityPoint: '2026-10-09T12:00:00Z',
+      lastFailedBackup: '2026-10-11T11:00:00Z',
+    };
+    api.listScheduledBackups.mockResolvedValue([
+      { apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdScheduledBackup', metadata: { name: 'nightly' }, spec: { clusterName: 'db', schedule: '0 2 * * *' } },
+      { apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdScheduledBackup', metadata: { name: 'paused' }, spec: { clusterName: 'db', schedule: '0 3 * * *', suspend: true } },
+    ]);
+    expect(await exec('status', 'db')).toBe(0);
+    const text = out.join('\n');
+    expect(text).toMatch(/^Backups:      last successful 5m ago \(logical 5m ago, physical 3h ago\), first recoverability point 2d ago, last failed 1h ago$/m);
+    expect(text).toMatch(/NAME +SCHEDULE +TYPE +SUSPENDED +LAST SUCCESS +NEXT/);
+    expect(text).toMatch(/nightly +0 2 \* \* \* +logical +no +- +in \d+[smhd]/);
+    expect(text).toMatch(/paused +0 3 \* \* \* +logical +yes +- +-/);
+  });
+
   it('shows the description and the Services', async () => {
     cluster.spec.description = ' Orders database ';
     cluster.status = { ...cluster.status, writeService: 'db', readService: 'db-replica' };

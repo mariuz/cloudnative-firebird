@@ -1,6 +1,7 @@
 import { CoreV1Event, dumpYaml, V1Job, V1PersistentVolumeClaim, V1Pod, V1Service, V1StatefulSet } from '@kubernetes/client-node';
 import { API_GROUP, API_VERSION, RECONCILIATION_DISABLED_ANNOTATION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdScheduledBackup } from '../types';
 import { isPodReady, ROLE_LABEL } from '../utils/routing';
+import { nextCronTime } from '../utils/cron';
 import { formatEvents, listYaml, operatorLogLines, podContainers, sanitize } from './report';
 import { BENCH_TABLE, buildBenchJob } from './bench';
 import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/suspension';
@@ -12,7 +13,7 @@ import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/s
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.122.0';
+export const PLUGIN_VERSION = '0.123.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -264,6 +265,17 @@ export function formatStatus(
   field('Database', cluster.spec.databaseName ?? 'mydb.fdb');
   field('Primary', primary);
   if (status.writeService) field('Services', `${status.writeService} (read-write)${status.readService && status.readService !== status.writeService ? `, ${status.readService} (read-only)` : ''}`);
+  if (status.lastSuccessfulBackup || status.lastFailedBackup) {
+    const by = status.lastSuccessfulBackupByMethod ?? {};
+    const parts = [
+      status.lastSuccessfulBackup
+        ? `last successful ${age(status.lastSuccessfulBackup, now)} ago${Object.keys(by).length > 1 ? ` (${Object.entries(by).map(([t, at]) => `${t} ${age(at!, now)} ago`).join(', ')})` : ''}`
+        : undefined,
+      status.firstRecoverabilityPoint ? `first recoverability point ${age(status.firstRecoverabilityPoint, now)} ago` : undefined,
+      status.lastFailedBackup ? `last failed ${age(status.lastFailedBackup, now)} ago` : undefined,
+    ].filter(Boolean);
+    field('Backups', parts.join(', '));
+  }
   if (replication) {
     const sync = cluster.spec.replication?.synchronous;
     const parts = [
@@ -353,14 +365,24 @@ export function formatStatus(
   const schedules = scheduled.filter((s) => s.spec.clusterName === name);
   if (schedules.length > 0) {
     lines.push('', 'Scheduled backups:');
-    const scheduleRows = [['NAME', 'SCHEDULE', 'TYPE', 'SUSPENDED', 'LAST SUCCESS']];
+    const scheduleRows = [['NAME', 'SCHEDULE', 'TYPE', 'SUSPENDED', 'LAST SUCCESS', 'NEXT']];
     for (const s of schedules) {
+      let next = '-';
+      if (!s.spec.suspend) {
+        try {
+          const due = nextCronTime(s.spec.schedule, now);
+          if (due) next = `in ${age(now.toISOString(), due)}`;
+        } catch {
+          next = '?';
+        }
+      }
       scheduleRows.push([
         s.metadata.name,
         s.spec.schedule,
         s.spec.type ?? 'logical',
         s.spec.suspend ? 'yes' : 'no',
         s.status?.lastSuccessfulTime ? `${age(s.status.lastSuccessfulTime, now)} ago` : '-',
+        next,
       ]);
     }
     lines.push(table(scheduleRows));
