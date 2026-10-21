@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.120.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.121.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Segment server tests on free ports** *(v0.121.0)*
+  - The unit tests that run the real segment server (`segment-server.pl`: retention, pruning, the header page) picked a random port in a range, and test files run in parallel, so two of them collided now and then and one failed. The server now takes a free port from the OS with `SEGMENT_PORT=0` and reports it in its "listening on" line, and a test helper (`tests/helpers/segment-server.ts`) starts it that way and reads the port back.
 - [x] **Operator upgrade test** *(v0.120.0)*
   - A CI job on every change installs the latest release (its install manifest and published image) on kind, creates a replicated cluster with automatic failover and data, upgrades to the build under test the documented way (CRDs and RBAC first), and checks the cluster is `Running` again (the primary restarted last if the instances rolled), its rows are on every instance, new rows replicate, the new plugin reads it, and the operator logged no reconcile errors. The Release workflow publishes only once it passes, so a release that cannot upgrade the previous one is never published.
 - [x] **CloudNativePG 1.30 spec sweep** *(v0.119.0)*
