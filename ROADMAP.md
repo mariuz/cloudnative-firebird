@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.121.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.122.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Fencing decides on the stored status** *(v0.122.0)*
+  - A reconcile started from a stale watch copy (an event queued before the previous reconcile recorded a fence or unfence) acted on the status of before it: it fenced the instance again (the Job said "already fenced") and wrote `status.fencedInstances` back without it for a few seconds (seen in the kind CI's plugin check). When the annotation and the copy's status differ, the fencing reconcile now reads the stored status first, as the switchover state machine does; a unit test reproduces the stale copy for a fence and an unfence.
 - [x] **Segment server tests on free ports** *(v0.121.0)*
   - The unit tests that run the real segment server (`segment-server.pl`: retention, pruning, the header page) picked a random port in a range, and test files run in parallel, so two of them collided now and then and one failed. The server now takes a free port from the OS with `SEGMENT_PORT=0` and reports it in its "listening on" line, and a test helper (`tests/helpers/segment-server.ts`) starts it that way and reads the port back.
 - [x] **Operator upgrade test** *(v0.120.0)*

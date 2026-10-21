@@ -3901,11 +3901,33 @@ export class FirebirdClusterController {
     const { name, namespace = 'default' } = cluster.metadata;
     const desired = new Set(desiredFencedInstances(cluster));
     // entries for instances removed by scaling down are kept: their volumes stay shut down
-    const applied = new Set(cluster.status?.fencedInstances ?? []);
+    let applied = new Set(cluster.status?.fencedInstances ?? []);
     const result: FencingResult = { fenced: [], pending: [], failed: [] };
     if (cluster.spec.hibernated) {
       result.fenced = [...applied].sort();
       return result;
+    }
+    // A reconcile started from a stale watch copy (an event queued before the previous reconcile
+    // recorded a fence or unfence in the status) would act on the stored state of before it: fence
+    // the instance again (the Job says "already fenced") and write status.fencedInstances back
+    // without it for a few seconds. When the annotation and this copy differ, the stored status
+    // decides, as the switchover state machine does.
+    const instances = Array.from({ length: cluster.spec.instances }, (_, i) => `${name}-${i}`);
+    if (instances.some((pod) => desired.has(pod) !== applied.has(pod))) {
+      try {
+        const stored = (await this.customApi.getNamespacedCustomObject({
+          group: API_GROUP,
+          version: API_VERSION,
+          namespace,
+          plural: RESOURCE_PLURAL,
+          name,
+        })) as FirebirdCluster;
+        if (stored?.kind === 'FirebirdCluster' && stored.metadata?.name === name && stored.status?.fencedInstances) {
+          applied = new Set(stored.status.fencedInstances);
+        }
+      } catch {
+        // not readable: this copy's status decides, as before
+      }
     }
 
     for (let i = 0; i < cluster.spec.instances; i++) {
