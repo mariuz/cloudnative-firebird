@@ -928,6 +928,75 @@ jobs:
           done
           kubectl patch firebirdcluster repl --type merge -p '{"spec":{"autoSweep":null,"diagnostics":null}}'
 
+      - name: Verify scaling through the scale subresource
+        if: matrix.track.id == 'core'
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$DB" 2>&1; }
+          count() { sql "$1" 'select count(*) from app;' | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          wait_count() {
+            for n in $(seq 1 36); do [ "$(count "$1")" = "$2" ] && return 0; sleep 5; done
+            echo "$1 has $(count "$1") rows, expected $2"; return 1
+          }
+          scale() { kubectl get --raw /apis/firebird.cloudnative-firebird.io/v1/namespaces/default/firebirdclusters/repl/scale | python3 -c 'import json,sys; s=json.load(sys.stdin); print(s["spec"]["replicas"], s["status"]["replicas"])'; }
+          # after the switchover the primary is repl-1 of 3 instances
+          [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.replicationStatus.primaryPod})" = repl-1 ]
+          before=$(count repl-1)
+          # kubectl scale goes through the scale subresource: repl-2, a replica, goes; its volume stays
+          kubectl scale firebirdcluster repl --replicas=2
+          timeout 120 bash -c 'until [ "$(kubectl get statefulset repl -o jsonpath={.spec.replicas})" = 2 ]; do sleep 3; done'
+          timeout 120 bash -c 'while kubectl get pod repl-2 >/dev/null 2>&1; do sleep 3; done'
+          kubectl get pvc firebird-data-repl-2
+          timeout 60 bash -c 'until [ "$(kubectl get --raw /apis/firebird.cloudnative-firebird.io/v1/namespaces/default/firebirdclusters/repl/scale | python3 -c "import json,sys; s=json.load(sys.stdin); print(s[\"spec\"][\"replicas\"], s[\"status\"][\"replicas\"])")" = "2 2" ]; do sleep 3; done'
+          scale
+          # scaling below the primary's ordinal: the operator switches over to repl-0 first, then shrinks
+          kubectl scale firebirdcluster repl --replicas=1
+          timeout 90 bash -c 'until kubectl get events --field-selector involvedObject.name=repl,reason=ScaleDownSwitchover -o name | grep -q .; do sleep 3; done'
+          kubectl get firebirdcluster repl -o jsonpath='{.status.phase} {.status.phaseReason}'; echo
+          kubectl get firebirdcluster repl -o jsonpath='{.status.phaseReason}' | grep -q 'removes the primary repl-1: switching over to repl-0 first'
+          [ "$(kubectl get statefulset repl -o jsonpath={.spec.replicas})" = 2 ]
+          timeout 600 bash -c 'until [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.replicationStatus.primaryPod})" = repl-0 ] && [ "$(kubectl get statefulset repl -o jsonpath={.spec.replicas})" = 1 ]; do sleep 5; done'
+          timeout 120 bash -c 'while kubectl get pod repl-1 >/dev/null 2>&1; do sleep 3; done'
+          timeout 120 bash -c 'until [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.phase})" = Running ]; do sleep 3; done'
+          [ "$(count repl-0)" = "$before" ]
+          kubectl get pvc firebird-data-repl-1 firebird-data-repl-2
+          [ "$(scale)" = "1 1" ]
+          # an HPA scales through the same subresource: its minimum brings the cluster back to 3
+          # instances (the minimum needs no metrics); the removed instances come back on their volumes
+          kubectl apply -f - <<'EOF'
+          apiVersion: autoscaling/v2
+          kind: HorizontalPodAutoscaler
+          metadata:
+            name: repl
+            namespace: default
+          spec:
+            scaleTargetRef:
+              apiVersion: firebird.cloudnative-firebird.io/v1
+              kind: FirebirdCluster
+              name: repl
+            minReplicas: 3
+            maxReplicas: 3
+            metrics:
+              - type: Resource
+                resource:
+                  name: cpu
+                  target:
+                    type: Utilization
+                    averageUtilization: 80
+          EOF
+          timeout 180 bash -c 'until [ "$(kubectl get firebirdcluster repl -o jsonpath={.spec.instances})" = 3 ]; do sleep 5; done'
+          kubectl get hpa repl
+          kubectl delete hpa repl
+          for p in repl-1 repl-2; do
+            timeout 300 bash -c "until kubectl get pod $p >/dev/null 2>&1; do sleep 3; done"
+            kubectl wait pod/$p --for=condition=Ready --timeout=300s
+            wait_count $p "$before"
+          done
+          timeout 120 bash -c 'until [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.phase})" = Running ]; do sleep 3; done'
+          [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.replicationStatus.primaryPod})" = repl-0 ]
+          [ "$(scale)" = "3 3" ]
+          echo "scaled 3 -> 2 -> 1 (switchover from repl-1 to repl-0 first) -> 3 (HPA minimum)"
+
       - name: Verify automatic failover
         if: matrix.track.id == 'core'
         run: |

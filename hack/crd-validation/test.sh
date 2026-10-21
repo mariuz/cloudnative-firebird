@@ -47,4 +47,13 @@ else
   echo "ok   storage growth"
 fi
 
+# the scale subresource (kubectl scale, HPA / VPA) sets spec.instances
+if ! out=$($KUBECTL scale firebirdcluster crd-validation-cluster --replicas=3 2>&1); then
+  echo "FAIL scale subresource: $out"; failed=1
+elif [ "$($KUBECTL get firebirdcluster crd-validation-cluster -o jsonpath={.spec.instances})" != 3 ]; then
+  echo "FAIL scale subresource: spec.instances is not 3"; failed=1
+else
+  echo "ok   scale subresource"
+fi
+
 exit $failed
