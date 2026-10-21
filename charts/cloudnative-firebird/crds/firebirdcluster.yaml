@@ -1347,6 +1347,25 @@ spec:
                 readService:
                   description: The Service read-only clients use (<name>-replica with replication, else the primary's)
                   type: string
+                lastSuccessfulBackup:
+                  description: Completion time of the latest completed FirebirdBackup of the cluster
+                  type: string
+                lastSuccessfulBackupByMethod:
+                  description: The same per backup type (logical, physical, volumeSnapshot)
+                  type: object
+                  additionalProperties:
+                    type: string
+                lastFailedBackup:
+                  description: Time of the latest failed FirebirdBackup of the cluster
+                  type: string
+                firstRecoverabilityPoint:
+                  description: Completion time of the oldest completed FirebirdBackup still present (the earliest point a restore can go back to)
+                  type: string
+                firstRecoverabilityPointByMethod:
+                  description: The same per backup type
+                  type: object
+                  additionalProperties:
+                    type: string
                 phase:
                   description: Current phase of the cluster
                   type: string

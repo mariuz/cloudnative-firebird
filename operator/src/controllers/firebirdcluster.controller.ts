@@ -90,6 +90,8 @@ import {
   clusterEndpoints,
   replicaServiceDisabled,
 } from '../utils/managed-services';
+import { backupSummary } from '../utils/backup-status';
+import { FirebirdBackup } from '../types';
 import {
   catalogKind,
   catalogPlural,
@@ -506,6 +508,9 @@ export class FirebirdClusterController {
       await this.reconcileGrafanaDashboard(cluster, log);
       await this.reconcileCustomQueries(cluster, log);
 
+      // the backup summary of the status (last successful / failed, first recoverability point)
+      const backups = await this.backupSummary(cluster, log);
+
       if (cluster.spec.hibernated && image.upgrading) {
         const upgrading: Partial<FirebirdClusterStatus> = {
           phase: 'Upgrading',
@@ -516,6 +521,7 @@ export class FirebirdClusterController {
           fencedInstances: fencing.fenced,
           selector: podSelector(cluster),
           ...clusterEndpoints(cluster),
+          ...backups,
           ...(volumes ? { volumes } : {}),
           conditions: [
             this.makeCondition('Ready', 'False', 'MajorUpgrade', image.upgrading),
@@ -543,6 +549,7 @@ export class FirebirdClusterController {
           fencedInstances: fencing.fenced,
           selector: podSelector(cluster),
           ...clusterEndpoints(cluster),
+          ...backups,
           ...(volumes ? { volumes } : {}),
           conditions: [
             this.makeCondition('Hibernated', 'True', 'HibernationRequested', 'spec.hibernated is true'),
@@ -595,6 +602,7 @@ export class FirebirdClusterController {
         fencedInstances: fencing.fenced,
         selector: podSelector(cluster),
         ...clusterEndpoints(cluster),
+        ...backups,
         reseedingInstances: Object.keys(reseed.requests).sort(),
         recreatingVolumes,
         rollingUpdate,
@@ -2844,6 +2852,23 @@ export class FirebirdClusterController {
         EventReason.MaintenanceVolumeRecreation,
         `${pod} cannot be scheduled for ${UNSCHEDULABLE_GRACE_SECONDS}s during the node maintenance window (reusePVC: false): its volume is re-created`,
       );
+    }
+  }
+
+  /** The backup summary of the cluster status from its FirebirdBackups (utils/backup-status.ts); empty when they cannot be listed */
+  private async backupSummary(cluster: FirebirdCluster, log: Logger): Promise<ReturnType<typeof backupSummary>> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    try {
+      const list = (await this.customApi.listNamespacedCustomObject({
+        group: API_GROUP,
+        version: API_VERSION,
+        namespace,
+        plural: 'firebirdbackups',
+      })) as { items?: FirebirdBackup[] };
+      return backupSummary(list.items ?? [], name!);
+    } catch (err) {
+      log.warn({ err }, 'Could not list the backups for the cluster status');
+      return {};
     }
   }
 

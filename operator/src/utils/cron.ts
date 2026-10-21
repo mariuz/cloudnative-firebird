@@ -91,6 +91,18 @@ const MINUTE = 60_000;
  * undefined when it did not. Times missed while the operator was down collapse into the latest
  * one, like a CronJob's missed runs. At most a year is looked back.
  */
+/** The first time the schedule matches after `after` (to the minute), within limitDays, or undefined */
+export function nextCronTime(expression: string, after: Date, limitDays = 400): Date | undefined {
+  const schedule = parseCron(expression);
+  const start = Math.floor(after.getTime() / MINUTE) * MINUTE + MINUTE;
+  const end = start + limitDays * 24 * 60 * MINUTE;
+  for (let t = start; t < end; t += MINUTE) {
+    const time = new Date(t);
+    if (cronMatches(schedule, time)) return time;
+  }
+  return undefined;
+}
+
 export function latestCronTime(expression: string, after: Date, now: Date): Date | undefined {
   const schedule = parseCron(expression);
   const floor = Math.max(Math.floor(after.getTime() / MINUTE) * MINUTE, now.getTime() - 366 * 24 * 60 * MINUTE);
