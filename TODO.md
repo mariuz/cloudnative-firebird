@@ -8,9 +8,11 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **File the publication deadlock upstream** ([ISSUES.md](ISSUES.md) issue 1): the report,
   with the diagnosis from symbolized thread stacks, is ready in
   [docs/upstream](docs/upstream/01-replication-manager-header-deadlock.md); file it and track the
-  fix version. Replication stays experimental until then.
+  fix version. Replication stays experimental until then. Still unfixed in `master` at `4fed06f`
+  (2026-10-18; swept 2026-10-23), so the report applies as written.
 - [ ] **File the commit/TIP window upstream** ([ISSUES.md](ISSUES.md) issue 2, confirmed): the
-  report is ready in [docs/upstream](docs/upstream/02-commit-journaled-before-tip.md).
+  report is ready in [docs/upstream](docs/upstream/02-commit-journaled-before-tip.md). Still in
+  `master` at `4fed06f` (swept 2026-10-23).
 - [x] **Failover safety**: since v0.86.0 the primary can hold and renew the Lease itself
   (`failover.primaryLease`, CloudNativePG 1.30's promotion mutex): it fences itself when the
   Lease names another instance or cannot be renewed, and the operator promotes only once the
@@ -34,7 +36,9 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   `HDR_repl_seq` header clump (`src/jrd/ods.h`). Verified for Firebird 4.0.7 (ODS 13.0), 5.0.4
   (ODS 13.1) and the 6.0 snapshot (ODS 14.0, new header page layout, handled). Since v0.81.0
   `hack/firebird-formats/verify.sh` checks both against an image's own engine and replica
-  server, weekly for the 6 snapshot ("Firebird formats" workflow): run it (`workflow_dispatch`)
+  server, weekly for the 6 snapshot ("Firebird formats" workflow; last passed on 2026-10-19 for
+  Firebird 4, 5 and the 6 snapshot, and `ControlFile::DataV1` is still the only control file
+  version in `master` at `4fed06f`): run it (`workflow_dispatch`)
   for the Firebird 6 release and every later major version (an unknown ODS is refused, not
   guessed), or replace them with supported mechanisms if Firebird adds any.
 

@@ -8,6 +8,12 @@ operator handles them. Open follow-up work is listed in [TODO.md](TODO.md).
 The reproduction scripts in [`hack/repro/`](hack/repro) need only Docker. Each one starts its
 own containers and removes them when it finishes.
 
+Last swept on 2026-10-23 against Firebird `master` at `4fed06f` (2026-10-18, the local source
+checkout): the code behind issues 1, 2 and 9 is unchanged there (notes under each issue), and
+the weekly "Firebird formats" check of 2026-10-19 passed for Firebird 4, 5 and the 6 snapshot
+(TODO.md, "Firebird internal formats"). Nothing was closed; the two upstream reports are still
+to be filed.
+
 | # | Issue | Kind | Reproduces |
 |---|-------|------|------------|
 | 1 | A publishing database deadlocks under concurrent connect / commit / disconnect | Firebird bug, open ([report](docs/upstream/01-replication-manager-header-deadlock.md)) | Yes: 4 writers, 7 of 7 runs on 5.0.4 on one host (0 of 5 on another), 5 of 5 on the 6.0 snapshot, 2 of 3 on 4.0.7; 8 writers, 4 of 4 on 5.0.4; 0 of 7 with pooled connections or without publication |
@@ -72,7 +78,11 @@ the header page shared, then `getReplSequence` latches it shared again. A transa
 shared request wait behind it (the page latch is a fair `SyncObject` without an owner), while
 the writer waits for the first: the creating thread never returns, and every replicating
 statement waits for the mutex and every attachment for the header page. The code is unchanged
-in `master`. Full analysis, stacks and possible fixes: the
+in `master` (re-checked at `4fed06f`, 2026-10-18: `Manager::Manager` in
+`src/jrd/replication/Manager.cpp` still fetches the header page with `LCK_read` and then calls
+`getReplSequence`, which fetches it again, with a comment that the second shared fetch "is
+allowed and OK"; `GlobalObjectHolder::getReplManager` still holds `m_mutex` around it). Full
+analysis, stacks and possible fixes: the
 [upstream report](docs/upstream/01-replication-manager-header-deadlock.md).
 
 **Operator impact.** Replication is marked experimental. Applications that hold pooled
@@ -95,7 +105,8 @@ not a supported access pattern.
 ## 2. Commit journaled before its TIP state: lock-based copies miss transactions (confirmed)
 
 **What happens.** In `TRA_commit` (`src/jrd/tra.cpp`), `REPL_trans_commit()` journals the
-commit before `TRA_set_state()` marks the transaction committed in the TIP. A backup lock
+commit before `TRA_set_state()` marks the transaction committed in the TIP (unchanged in
+`master` at `4fed06f`, 2026-10-18: the two calls follow each other at lines 547 and 548). A backup lock
 (`ALTER DATABASE BEGIN BACKUP`, `nbackup -L`, `nbackup -B`) that lands between the two switches
 the journal (`REPL_journal_switch` in `src/jrd/nbak.cpp`) after the commit was journaled in
 segment *S*, while the TIP write goes to the delta file. The copy holds the transaction as not
@@ -180,7 +191,10 @@ restored from it with `-SEQ` treats that segment as already applied.
 **What happens.** A database whose replication sequence is 0 (for example one created offline,
 before anything was journaled) has no "Replication sequence" line in `gstat -h` output.
 
-**Handling.** The init scripts treat a missing value as 0.
+**Handling.** The init scripts treat a missing value as 0. The cause (`master` at `4fed06f`):
+`gstat` prints the line from the header's `HDR_repl_seq` clump (`src/utilities/gstat/ppg.cpp`),
+and the engine only stores that clump when it first sets a sequence (`PAG_set_repl_sequence` in
+`src/jrd/pag.cpp`), so a database that never journaled has no clump to print.
 
 ---
 
@@ -254,7 +268,8 @@ includes, when a database is opened: at its first attachment after the last one 
 global objects, `GlobalObjectHolder` in `src/jrd/Database.h`, created with them and never
 replaced). There is no way to reload it: a changed or added `sync_replica` is ignored while any
 attachment stays open, and takes effect as soon as every attachment is closed, without a
-shutdown.
+shutdown. `master` at `4fed06f` (2026-10-18) has no reload either: `src/jrd/replication/Config.cpp`
+is only read when the configuration object is created.
 
 ```sh
 hack/repro/sync-replica.sh   # "--- 4." shows the three cases
