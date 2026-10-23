@@ -143,6 +143,8 @@ describe('kubectl firebird', () => {
     api.listScheduledBackups.mockResolvedValue([
       { apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdScheduledBackup', metadata: { name: 'nightly' }, spec: { clusterName: 'db', schedule: '0 2 * * *' } },
       { apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdScheduledBackup', metadata: { name: 'paused' }, spec: { clusterName: 'db', schedule: '0 3 * * *', suspend: true } },
+      // the operator's status wins over the plugin's own computation
+      { apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdScheduledBackup', metadata: { name: 'recorded' }, spec: { clusterName: 'db', schedule: '0 4 * * *' }, status: { nextScheduleTime: '2026-10-11T12:30:00Z', lastCheckTime: '2026-10-11T11:59:50Z' } },
     ]);
     expect(await exec('status', 'db')).toBe(0);
     const text = out.join('\n');
@@ -150,6 +152,7 @@ describe('kubectl firebird', () => {
     expect(text).toMatch(/NAME +SCHEDULE +TYPE +SUSPENDED +LAST SUCCESS +NEXT/);
     expect(text).toMatch(/nightly +0 2 \* \* \* +logical +no +- +in \d+[smhd]/);
     expect(text).toMatch(/paused +0 3 \* \* \* +logical +yes +- +-/);
+    expect(text).toMatch(/recorded +0 4 \* \* \* +logical +no +- +in 30m/);
   });
 
   it('shows the description and the Services', async () => {

@@ -28,6 +28,12 @@ spec:
         - name: Suspend
           type: boolean
           jsonPath: .spec.suspend
+        - name: Last schedule
+          type: date
+          jsonPath: .status.lastScheduleTime
+        - name: Next
+          type: string
+          jsonPath: .status.nextScheduleTime
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
@@ -180,3 +186,11 @@ spec:
                 lastBackupName:
                   description: The last FirebirdBackup created by the operator (volume snapshots)
                   type: string
+                lastCheckTime:
+                  description: When the operator last checked the schedule
+                  type: string
+                  format: date-time
+                nextScheduleTime:
+                  description: The next scheduled time (UTC); unset while the schedule is suspended
+                  type: string
+                  format: date-time
