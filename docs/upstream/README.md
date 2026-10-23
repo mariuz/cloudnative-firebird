@@ -10,4 +10,6 @@ how the operator handles them: [ISSUES.md](../../ISSUES.md).
 | [Deadlock creating the replication manager](01-replication-manager-header-deadlock.md) (stacks: [full output](01-replication-manager-header-deadlock-stacks.txt)) | 1 | ready to file |
 | [Commit journaled before its TIP state](02-commit-journaled-before-tip.md) | 2 | ready to file |
 
-Once filed, replace "ready to file" with the tracker link, and add it to ISSUES.md.
+Once filed, replace "ready to file" with the tracker link, and add it to ISSUES.md. Both were
+re-checked against Firebird `master` at `4fed06f` (2026-10-18) on 2026-10-23: the code they
+describe is unchanged, so they apply as written.
