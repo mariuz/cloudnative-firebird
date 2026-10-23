@@ -412,8 +412,9 @@ jobs:
           timeout 300 bash -c 'until [ "$(kubectl get firebirdbackup plugin-backup -o jsonpath={.status.phase})" = Completed ]; do
             [ "$(kubectl get firebirdbackup plugin-backup -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done'
           kubectl firebird status repl | grep -qE '^plugin-backup +logical +Completed'
-          # the cluster status summarises its backups (the resync carries it)
-          timeout 60 bash -c 'until [ -n "$(kubectl get firebirdcluster repl -o jsonpath={.status.lastSuccessfulBackup})" ]; do sleep 3; done'
+          # the cluster status summarises its backups, reconciled as the backup completed (not at the
+          # next resync, 10 s here)
+          timeout 20 bash -c 'until [ -n "$(kubectl get firebirdcluster repl -o jsonpath={.status.lastSuccessfulBackup})" ]; do sleep 1; done'
           [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.firstRecoverabilityPoint})" = "$(kubectl get firebirdbackup plugin-backup -o jsonpath={.status.completionTime})" ]
           [ "$(kubectl get firebirdcluster repl -o jsonpath='{.status.lastSuccessfulBackupByMethod.logical}')" = "$(kubectl get firebirdbackup plugin-backup -o jsonpath={.status.completionTime})" ]
           kubectl firebird status repl | grep -qE '^Backups:      last successful [0-9]+[smh] ago, first recoverability point [0-9]+[smh] ago$'
