@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.124.0):** journal replication (experimental) with replica re-seeding and lag metrics,
+> **Status note (v0.125.0):** journal replication (experimental) with replica re-seeding and lag metrics,
 > planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
 > were marked done before they were implemented; they are annotated where that is the case
 > (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Backup summary updated as backups finish** *(v0.125.0)*
+  - A FirebirdBackup that completes or fails, or a finished one deleted, reconciles its cluster right away (coalesced with any reconcile running), so `status.lastSuccessfulBackup`, `lastFailedBackup` and `firstRecoverabilityPoint` and `kubectl firebird status` follow it at once instead of at the next resync; a backup's other updates change nothing there. Unit tests on the operator's event handling; the kind CI expects the status within 20 s of the backup completing.
 - [x] **Safe scaling through the scale subresource** *(v0.124.0)*
   - Scaling a replication cluster down (`spec.instances`, `kubectl scale`, an HPA) removes the highest ordinals, which could be the primary after a switchover or failover: the operator now keeps the primary's ordinal running, requests a planned switchover to the lowest-ordinal ready replica that stays (`ScaleDownSwitchover` event, `phaseReason`), and shrinks once it completed; a switchover or failover in progress is waited for too. The removed instances' volumes stay and are reused by a scale-up. Unit tests cover the hold and the controller; the CRD check scales through the subresource against the API server; the kind CI scales 3 → 2 → 1 (switching over first) and back to 3 through an HPA's minimum, with the data on every instance.
 - [x] **Backup summary in the cluster status** *(v0.123.0; CloudNativePG's lastSuccessfulBackup, firstRecoverabilityPoint)*

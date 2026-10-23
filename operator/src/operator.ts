@@ -46,6 +46,8 @@ function drivingAnnotations(cluster: FirebirdCluster): string {
 /** Kubernetes object fields the operator's event handling relies on */
 interface WatchedObject {
   metadata: { name: string; namespace?: string; generation?: number; annotations?: Record<string, string> };
+  spec?: { clusterName?: string };
+  status?: { phase?: string };
 }
 
 /** A watched resource kind other than FirebirdCluster (backups, restores, users) and how to reconcile it */
@@ -126,6 +128,8 @@ export class Operator {
   private readonly rerun = new Set<string>();
   /** metadata.generation of the last successful reconcile, per cluster */
   private readonly reconciledGenerations = new Map<string, number>();
+  /** The outcome (Completed / Failed) last seen of each FirebirdBackup, by key: its cluster's backup summary follows it */
+  private readonly backupOutcomes = new Map<string, string>();
   /** reconciliationDisabled state of the last reconcile, per backup, restore or user */
   private readonly reconciledPause = new Map<string, boolean>();
   /** podFingerprint of every watched instance pod, keyed by namespace/name */
@@ -300,6 +304,7 @@ export class Operator {
     this.knownBackupObjects.clear();
     this.rerun.clear();
     this.reconciledGenerations.clear();
+    this.backupOutcomes.clear();
     this.reconciledPause.clear();
     this.reconciledFencing.clear();
     this.healthServer.stop();
@@ -448,6 +453,7 @@ export class Operator {
     const { name, namespace = 'default', generation } = obj.metadata;
     const key = `${kind.plural}/${namespace}/${name}`;
     const log = logger.child({ kind: kind.plural, name, namespace, phase });
+    this.nudgeClusterForBackup(kind, phase, obj, key);
 
     switch (phase) {
       case 'ADDED':
@@ -476,6 +482,28 @@ export class Operator {
       default:
         log.debug('Ignoring watch event');
     }
+  }
+
+  /**
+   * A FirebirdBackup that completed or failed, or a completed or failed one deleted, changes its
+   * cluster's backup summary (status.lastSuccessfulBackup, firstRecoverabilityPoint): the cluster
+   * is reconciled now rather than at the next resync. Other updates of a backup change nothing
+   * there.
+   */
+  private nudgeClusterForBackup(kind: BackupKind, phase: string, obj: WatchedObject, key: string): void {
+    if (kind.plural !== 'firebirdbackups') return;
+    const outcome = obj.status?.phase === 'Completed' || obj.status?.phase === 'Failed' ? obj.status.phase : undefined;
+    const previous = this.backupOutcomes.get(key);
+    if (phase === 'DELETED' || !outcome) this.backupOutcomes.delete(key);
+    else this.backupOutcomes.set(key, outcome);
+    const changed = phase === 'DELETED' ? previous !== undefined : outcome !== undefined && outcome !== previous;
+    if (!changed || !obj.spec?.clusterName) return;
+    const clusterKey = `${obj.metadata.namespace ?? 'default'}/${obj.spec.clusterName}`;
+    if (!this.knownClusters.has(clusterKey)) return;
+    logger.info({ backup: obj.metadata.name, cluster: clusterKey, outcome: phase === 'DELETED' ? 'deleted' : outcome }, 'Backup changed, reconciling its cluster');
+    this.reconcileCluster(clusterKey).catch((err) => {
+      logger.error({ err, cluster: clusterKey }, 'Backup-triggered reconcile failed');
+    });
   }
 
   /**

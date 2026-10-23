@@ -548,6 +548,44 @@ describe('Operator – backup resources', () => {
     operator.stop();
   });
 
+  it("reconciles a backup's cluster when it completes, fails or a finished one is deleted", async () => {
+    const operator = new Operator(new KubeConfig(), 8080, 0);
+    await operator.start();
+    emit('firebirdclusters', 'ADDED', {
+      apiVersion: 'firebird.cloudnative-firebird.io/v1',
+      kind: 'FirebirdCluster',
+      metadata: { name: 'c', namespace: 'default', generation: 1 },
+      spec: { instances: 1, storage: { size: '1Gi' } },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    mockReconcile.mockClear();
+    const withPhase = (phase?: string, name = 'b1', clusterName = 'c') => ({ ...backup(1, name), spec: { clusterName }, status: phase ? { phase } : {} });
+    // created and running: the summary does not change yet
+    emit('firebirdbackups', 'ADDED', withPhase());
+    emit('firebirdbackups', 'MODIFIED', withPhase('Running'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockReconcile).not.toHaveBeenCalled();
+    // completed: the cluster is reconciled now (a status-only update of the backup otherwise waits for the resync)
+    emit('firebirdbackups', 'MODIFIED', withPhase('Completed'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockReconcile).toHaveBeenCalledTimes(1);
+    expect(mockReconcile.mock.calls[0][0].metadata.name).toBe('c');
+    // the same outcome seen again (another status field changed): nothing
+    emit('firebirdbackups', 'MODIFIED', withPhase('Completed'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockReconcile).toHaveBeenCalledTimes(1);
+    // deleted: the first recoverability point may move
+    emit('firebirdbackups', 'DELETED', withPhase('Completed'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockReconcile).toHaveBeenCalledTimes(2);
+    // a failed backup counts too; another cluster's (unknown here) does not
+    emit('firebirdbackups', 'ADDED', withPhase('Failed', 'b2'));
+    emit('firebirdbackups', 'ADDED', withPhase('Completed', 'b3', 'elsewhere'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mockReconcile).toHaveBeenCalledTimes(3);
+    operator.stop();
+  });
+
   it('reconciles right away when the reconciliationDisabled annotation is added or removed', async () => {
     const operator = new Operator(new KubeConfig(), 8080, 0);
     await operator.start();
