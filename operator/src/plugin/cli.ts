@@ -13,7 +13,7 @@ import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/s
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.127.0';
+export const PLUGIN_VERSION = '0.128.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -84,7 +84,7 @@ Commands:
   backup <cluster> [--type logical|physical|volumeSnapshot] [--level 0|1|2]
                    [--snapshot-class name] [--name backup-name] [--database firebird-database]
                                             take an on-demand backup (FirebirdBackup)
-  backups <cluster>                         the cluster's backups, newest first
+  backups <cluster>                         the cluster's backups, newest first, and its schedules
   restore <cluster> <backup> [--target file] [--name restore-name]
                                             restore a completed backup into a new database file
                                             (FirebirdRestore; the cluster database is never replaced)
@@ -230,6 +230,34 @@ export function formatBackups(backups: FirebirdBackup[], cluster: string, now: D
   return table(rows);
 }
 
+/** The schedules of a cluster: their next run from the operator's status, computed when not written yet; empty without any */
+export function formatSchedules(scheduled: FirebirdScheduledBackup[], cluster: string, now: Date): string {
+  const schedules = scheduled.filter((s) => s.spec.clusterName === cluster);
+  if (schedules.length === 0) return '';
+  const rows = [['NAME', 'SCHEDULE', 'TYPE', 'SUSPENDED', 'LAST CHECK', 'LAST SUCCESS', 'NEXT']];
+  for (const s of schedules) {
+    let next = '-';
+    if (!s.spec.suspend) {
+      try {
+        const due = s.status?.nextScheduleTime ? new Date(s.status.nextScheduleTime) : nextCronTime(s.spec.schedule, now);
+        if (due) next = due > now ? `in ${age(now.toISOString(), due)}` : 'due';
+      } catch {
+        next = '?';
+      }
+    }
+    rows.push([
+      s.metadata.name,
+      s.spec.schedule,
+      s.spec.type ?? 'logical',
+      s.spec.suspend ? 'yes' : 'no',
+      s.status?.lastCheckTime ? `${age(s.status.lastCheckTime, now)} ago` : '-',
+      s.status?.lastSuccessfulTime ? `${age(s.status.lastSuccessfulTime, now)} ago` : '-',
+      next,
+    ]);
+  }
+  return table(rows);
+}
+
 /** The status report of a cluster */
 export function formatStatus(
   cluster: FirebirdCluster,
@@ -362,32 +390,8 @@ export function formatStatus(
     }
     lines.push(table(backupRows));
   }
-  const schedules = scheduled.filter((s) => s.spec.clusterName === name);
-  if (schedules.length > 0) {
-    lines.push('', 'Scheduled backups:');
-    const scheduleRows = [['NAME', 'SCHEDULE', 'TYPE', 'SUSPENDED', 'LAST SUCCESS', 'NEXT']];
-    for (const s of schedules) {
-      let next = '-';
-      if (!s.spec.suspend) {
-        // the operator's status.nextScheduleTime; computed when it has not been written yet
-        try {
-          const due = s.status?.nextScheduleTime ? new Date(s.status.nextScheduleTime) : nextCronTime(s.spec.schedule, now);
-          if (due) next = due > now ? `in ${age(now.toISOString(), due)}` : 'due';
-        } catch {
-          next = '?';
-        }
-      }
-      scheduleRows.push([
-        s.metadata.name,
-        s.spec.schedule,
-        s.spec.type ?? 'logical',
-        s.spec.suspend ? 'yes' : 'no',
-        s.status?.lastSuccessfulTime ? `${age(s.status.lastSuccessfulTime, now)} ago` : '-',
-        next,
-      ]);
-    }
-    lines.push(table(scheduleRows));
-  }
+  const scheduleTable = formatSchedules(scheduled, name, now);
+  if (scheduleTable) lines.push('', 'Scheduled backups:', scheduleTable);
   const conditions = (status.conditions ?? []).filter((c) => c.status !== 'True' || c.type === 'Ready');
   if (conditions.length > 0) {
     lines.push('', 'Conditions:');
@@ -601,7 +605,10 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
       case 'backups': {
         const [name] = need(parsed, 1, 'backups <cluster>');
         await api.getCluster(namespace, name);
-        io.out(formatBackups(await api.listBackups(namespace), name, io.now()));
+        const [backups, scheduled] = await Promise.all([api.listBackups(namespace), api.listScheduledBackups(namespace)]);
+        const now = io.now();
+        const schedules = formatSchedules(scheduled, name, now);
+        io.out(formatBackups(backups, name, now) + (schedules ? `\n\nScheduled backups:\n${schedules}` : ''));
         return 0;
       }
 
