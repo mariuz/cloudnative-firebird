@@ -20,7 +20,13 @@ set -eu
 IMAGE=${IMAGE:-firebirdsql/firebird:5}
 work=$(mktemp -d)
 net=fbsync-repro
-cleanup() { docker rm -f syncp syncr >/dev/null 2>&1 || true; docker network rm "$net" >/dev/null 2>&1 || true; rm -rf "$work"; }
+cleanup() {
+  docker rm -f syncp syncr >/dev/null 2>&1 || true
+  docker network rm "$net" >/dev/null 2>&1 || true
+  # the feed directory and its segments belong to the containers' user: removed with the image's own rm
+  rm -rf "$work" 2>/dev/null || docker run --rm -v "$work:/w" --entrypoint sh "$IMAGE" -c 'rm -rf /w/* /w/.[!.]*' >/dev/null 2>&1 || true
+  rm -rf "$work" 2>/dev/null || true
+}
 trap cleanup EXIT
 cleanup
 mkdir -p "$work"

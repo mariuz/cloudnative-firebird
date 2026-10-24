@@ -62,7 +62,20 @@ docker run -d --name fb-race-replica -e FIREBIRD_ROOT_PASSWORD=pw -e ISC_USER=SY
 until docker exec fb-race-primary sh -c "ls /tmp/done* 2>/dev/null | wc -l | grep -qx $WRITERS"; do
   cp -n "$work"/p/data/replication/archive/* "$work/r/data/replication/source/" 2>/dev/null; sleep 2
 done
-sleep 8; cp -n "$work"/p/data/replication/archive/* "$work/r/data/replication/source/" 2>/dev/null; sleep 15
+# then let it catch up: keep shipping until its row count stopped changing (up to 5 minutes)
+last=-1 same=0
+for n in $(seq 1 60); do
+  cp -n "$work"/p/data/replication/archive/* "$work/r/data/replication/source/" 2>/dev/null
+  sleep 5
+  count=$(docker exec fb-race-replica sh -c "echo 'select count(*) from app;' | isql -q localhost:$DB" 2>/dev/null | awk '$1 ~ /^[0-9]+$/ { print $1 }')
+  if [ -n "$count" ] && [ "$count" = "$last" ]; then
+    same=$((same + 1))
+    [ "$same" -ge 3 ] && break
+  else
+    same=0
+  fi
+  last=${count:--1}
+done
 
 ids() { docker exec "$1" sh -c "echo 'select id, note from app order by id;' | isql -q localhost:$DB" | awk '$1 ~ /^[0-9]+$/ { print $1 "/" $2 }' | sort; }
 ids fb-race-primary > "$work/primary.ids"

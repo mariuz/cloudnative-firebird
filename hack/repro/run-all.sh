@@ -82,12 +82,14 @@ fi
 run issue2-seed-race env WRITERS=8 CONNECTIONS=persistent ROWS=3000 "$here/replica-seed-race.sh"
 line=$(last '^rows missing or different on the replica: ' "$logs/issue2-seed-race.log")
 missing=${line#rows missing or different on the replica: }
+counts=$(last '^primary rows: ' "$logs/issue2-seed-race.log")
 if [ -z "$line" ]; then
   verdict 2 "replica-seed-race.sh, 8 writers, persistent connections" unclear "no result"
 elif [ "$missing" = none ]; then
-  verdict 2 "replica-seed-race.sh, 8 writers, persistent connections" "not reproduced" "replica identical to the primary"
+  verdict 2 "replica-seed-race.sh, 8 writers, persistent connections" "not reproduced" "replica identical to the primary ($counts)"
 else
-  verdict 2 "replica-seed-race.sh, 8 writers, persistent connections" reproduced "$(echo "$missing" | wc -w) row(s) missing or different on the replica: $missing"
+  # the list can be long: the count and the first rows (id/note)
+  verdict 2 "replica-seed-race.sh, 8 writers, persistent connections" reproduced "$(echo "$missing" | wc -w) row(s) missing or different on the replica ($counts): $(echo "$missing" | tr -s ' ' '\n' | head -5 | tr '\n' ' ')..."
 fi
 
 # 8 and 9: synchronous replication (sync-replica.sh prints the counts after each step)
@@ -108,19 +110,26 @@ else
   verdict 8 "sync-replica.sh, a write with the replica stopped" unclear "primary rows $primary; replica $replica"
 fi
 # 9: sync_replica is read only when the database is opened: a change is ignored while an attachment
-# stays open (row 31 still replicated) and applies once every attachment closed (row 32 not replicated)
+# stays open (row 31 still replicated) and applies once every attachment closed (row 32 not replicated,
+# row 33 replicated again). The replica count follows the primary's by one row at each step that
+# replicated (the primary's first row predates the sync_replica setting, so the totals never match).
 counts() { last "^$1" "$log" | sed -n 's/.*: primary \([0-9]*\), replica \([0-9]*\) .*/\1 \2/p'; }
+read -r p0 r0 <<<"$(counts 'after full shutdown and online')"
 read -r p1 r1 <<<"$(counts 'sync_replica removed, an attachment still open')"
 read -r p2 r2 <<<"$(counts 'every attachment closed, no shutdown')"
-if [ -z "${p1:-}" ] || [ -z "${p2:-}" ]; then
-  verdict 9 "sync-replica.sh, sync_replica removed while attached" unclear "no result"
-elif [ "$p1" = "$r1" ] && [ "$p2" = $((r2 + 1)) ]; then
-  verdict 9 "sync-replica.sh, sync_replica removed while attached" reproduced "ignored while an attachment stayed open ($p1 rows on both), read once every attachment closed (primary $p2, replica $r2)"
+read -r p3 r3 <<<"$(counts 'sync_replica back while nothing was attached')"
+steps="attached: primary ${p1:-?}, replica ${r1:-?}; all closed: primary ${p2:-?}, replica ${r2:-?}; set again: primary ${p3:-?}, replica ${r3:-?}"
+if [ -z "${r0:-}" ] || [ -z "${r1:-}" ] || [ -z "${r2:-}" ] || [ -z "${r3:-}" ]; then
+  verdict 9 "sync-replica.sh, sync_replica removed while attached" unclear "no result ($steps)"
+elif [ "$r1" = $((r0 + 1)) ] && [ "$r2" = "$r1" ] && [ "$r3" = $((r2 + 1)) ]; then
+  verdict 9 "sync-replica.sh, sync_replica removed while attached" reproduced "the removal was ignored while an attachment stayed open and read once every attachment closed, without a shutdown ($steps)"
+elif [ "$r1" = "$r0" ]; then
+  verdict 9 "sync-replica.sh, sync_replica removed while attached" "not reproduced" "the removal took effect while an attachment stayed open ($steps)"
 else
-  verdict 9 "sync-replica.sh, sync_replica removed while attached" "not reproduced" "attached: primary $p1, replica $r1; all closed: primary $p2, replica $r2"
+  verdict 9 "sync-replica.sh, sync_replica removed while attached" unclear "$steps"
 fi
 
-server=$(docker run --rm --entrypoint sh "$image" -c 'isql -z </dev/null 2>&1 | head -n 1' 2>/dev/null | sed -n 's/.*\(LI-V[0-9.]*\).*/\1/p')
+server=$(docker run --rm --entrypoint sh "$image" -c 'isql -z </dev/null 2>&1 | head -n 1' 2>/dev/null | sed -n 's/.*\(LI-[A-Z][0-9.]*[0-9]\).*/\1/p')
 {
   echo
   echo "## Firebird issues: $image${server:+ ($server)}"

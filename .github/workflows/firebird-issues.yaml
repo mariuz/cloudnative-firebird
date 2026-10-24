@@ -22,9 +22,9 @@ on:
         required: false
         default: ""
       runs:
-        description: "Runs of issue 1's load test (publication-under-load.sh)"
+        description: "Runs of issue 1's load test (publication-under-load.sh); 3 on the schedule"
         required: false
-        default: "1"
+        default: "3"
 
 permissions:
   contents: read
@@ -43,7 +43,7 @@ jobs:
 
       - name: Run the reproduction scripts against ${{ matrix.image }}
         env:
-          RUNS: ${{ github.event.inputs.runs || '1' }}
+          RUNS: ${{ github.event.inputs.runs || '3' }}
         run: hack/repro/run-all.sh "${{ matrix.image }}" repro-logs
 
       - name: Name the logs
