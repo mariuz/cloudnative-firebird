@@ -30,4 +30,10 @@ for field in version appVersion; do
   fi
 done
 
+# the Release notes come from ROADMAP.md: the version needs its entry
+if ! "$root/hack/release/notes.sh" "$version" >/dev/null; then
+  echo "add a ROADMAP.md entry marked v$version: the GitHub Release's notes are built from it (hack/release/notes.sh)" >&2
+  exit 1
+fi
+
 echo "$version"
