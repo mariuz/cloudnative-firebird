@@ -59,31 +59,35 @@ docker run -d --name fb-race-replica -e FIREBIRD_ROOT_PASSWORD=pw -e ISC_USER=SY
   -v "$work/r/replication.conf:/opt/firebird/replication.conf:ro" "$IMAGE" >/dev/null
 
 # ship archived segments to the replica until the writer is done, then let it catch up. A segment
-# is shipped once the archive command finished writing it (not modified for 3 s) and appears in
-# the source directory whole (copied next to it, then renamed), so the replica never reads a
-# partial file.
+# is shipped once, when the archive command finished writing it (not modified for 3 s), and
+# appears in the source directory whole (copied next to it, then renamed), so the replica never
+# reads a partial file; the replica server deletes a segment once it applied it.
 archive=$work/p/data/replication/archive
 source=$work/r/data/replication/source
-mkdir -p "$work/r/data/replication/stage"
+stage=$work/r/data/replication/stage
+shipped=$work/shipped
+mkdir -p "$stage"
+: > "$shipped"
 ship() {
-  find "$archive" -type f ! -newermt '-3 seconds' 2>/dev/null | while read -r f; do
+  find "$archive" -type f ! -newermt '-3 seconds' 2>/dev/null | sort | while read -r f; do
     n=$(basename "$f")
-    [ -e "$source/$n" ] && continue
-    cp "$f" "$work/r/data/replication/stage/$n" && mv "$work/r/data/replication/stage/$n" "$source/$n"
+    grep -qxF "$n" "$shipped" && continue
+    cp "$f" "$stage/$n" && mv "$stage/$n" "$source/$n" && echo "$n" >> "$shipped"
   done
 }
 until docker exec fb-race-primary sh -c "ls /tmp/done* 2>/dev/null | wc -l | grep -qx $WRITERS"; do
   ship; sleep 2
 done
-# then let it catch up: keep shipping until its row count stopped changing (up to 5 minutes)
+# then let it catch up: ship the last segments and wait until the replica consumed every shipped
+# one and its row count stopped changing (a segment holds thousands of rows; up to 5 minutes)
 last=-1 same=0
 for n in $(seq 1 60); do
   ship
   sleep 5
   count=$(docker exec fb-race-replica sh -c "echo 'select count(*) from app;' | isql -q localhost:$DB" 2>/dev/null | awk '$1 ~ /^[0-9]+$/ { print $1 }')
-  if [ -n "$count" ] && [ "$count" = "$last" ]; then
+  if [ -z "$(ls "$source")" ] && [ -n "$count" ] && [ "$count" = "$last" ]; then
     same=$((same + 1))
-    [ "$same" -ge 3 ] && break
+    [ "$same" -ge 2 ] && break
   else
     same=0
   fi
@@ -97,6 +101,6 @@ missing=$(comm -23 "$work/primary.ids" "$work/replica.ids" | tr '\n' ' ')
 echo "primary rows: $(wc -l < "$work/primary.ids"), replica rows: $(wc -l < "$work/replica.ids")"
 echo "rows missing or different on the replica: ${missing:-none}"
 # a replica far behind stopped applying: its logs say why
-echo "--- segments: $(ls "$archive" | wc -l) archived, $(ls "$source" | wc -l) shipped"
+echo "--- segments: $(ls "$archive" | wc -l) archived, $(wc -l < "$shipped") shipped, $(ls "$source" | wc -l) not applied"
 docker exec fb-race-replica sh -c 'for f in $(ls /opt/firebird/*.log /var/log/firebird/*.log 2>/dev/null); do echo "--- replica $f (last 20 lines)"; tail -n 20 "$f"; done' || true
 [ -n "${KEEP:-}" ] || docker rm -f fb-race-primary fb-race-replica >/dev/null
