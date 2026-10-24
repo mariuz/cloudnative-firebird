@@ -58,14 +58,27 @@ docker run -d --name fb-race-replica -e FIREBIRD_ROOT_PASSWORD=pw -e ISC_USER=SY
   -e FIREBIRD_DATABASE=mydb.fdb -v "$work/r/data:/var/lib/firebird/data" \
   -v "$work/r/replication.conf:/opt/firebird/replication.conf:ro" "$IMAGE" >/dev/null
 
-# ship archived segments to the replica until the writer is done, then let it catch up
+# ship archived segments to the replica until the writer is done, then let it catch up. A segment
+# is shipped once the archive command finished writing it (not modified for 3 s) and appears in
+# the source directory whole (copied next to it, then renamed), so the replica never reads a
+# partial file.
+archive=$work/p/data/replication/archive
+source=$work/r/data/replication/source
+mkdir -p "$work/r/data/replication/stage"
+ship() {
+  find "$archive" -type f ! -newermt '-3 seconds' 2>/dev/null | while read -r f; do
+    n=$(basename "$f")
+    [ -e "$source/$n" ] && continue
+    cp "$f" "$work/r/data/replication/stage/$n" && mv "$work/r/data/replication/stage/$n" "$source/$n"
+  done
+}
 until docker exec fb-race-primary sh -c "ls /tmp/done* 2>/dev/null | wc -l | grep -qx $WRITERS"; do
-  cp -n "$work"/p/data/replication/archive/* "$work/r/data/replication/source/" 2>/dev/null; sleep 2
+  ship; sleep 2
 done
 # then let it catch up: keep shipping until its row count stopped changing (up to 5 minutes)
 last=-1 same=0
 for n in $(seq 1 60); do
-  cp -n "$work"/p/data/replication/archive/* "$work/r/data/replication/source/" 2>/dev/null
+  ship
   sleep 5
   count=$(docker exec fb-race-replica sh -c "echo 'select count(*) from app;' | isql -q localhost:$DB" 2>/dev/null | awk '$1 ~ /^[0-9]+$/ { print $1 }')
   if [ -n "$count" ] && [ "$count" = "$last" ]; then
@@ -83,4 +96,6 @@ ids fb-race-replica > "$work/replica.ids"
 missing=$(comm -23 "$work/primary.ids" "$work/replica.ids" | tr '\n' ' ')
 echo "primary rows: $(wc -l < "$work/primary.ids"), replica rows: $(wc -l < "$work/replica.ids")"
 echo "rows missing or different on the replica: ${missing:-none}"
+echo "--- the replica's replication.log (last 20 lines)"
+docker exec fb-race-replica sh -c 'tail -n 20 /opt/firebird/replication.log 2>/dev/null' || true
 [ -n "${KEEP:-}" ] || docker rm -f fb-race-primary fb-race-replica >/dev/null

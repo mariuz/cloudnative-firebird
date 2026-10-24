@@ -862,8 +862,8 @@ jobs:
           # the client must be attached before the switchover starts: once the primary leaves the
           # Service its connect is refused and the Job finds nobody to wait for (another remote
           # attachment, gone a moment later, once made the check below pass too early)
-          for i in $(seq 1 45); do kubectl logs swclient 2>/dev/null | grep -Eq '^ *1$' && break; sleep 2; done
-          kubectl logs swclient | grep -Eq '^ *1$' || { kubectl get pod swclient; kubectl logs swclient; exit 1; }
+          for i in $(seq 1 45); do kubectl logs swclient 2>/dev/null | grep -Eq '^ *1 *$' && break; sleep 2; done
+          kubectl logs swclient | grep -Eq '^ *1 *$' || { kubectl get pod swclient; kubectl logs swclient; exit 1; }
           remote() { kubectl exec repl-0 -c firebird -- sh -c "echo \"select 'remote=' || count(*) from mon\\\$attachments where mon\\\$system_flag = 0 and mon\\\$remote_address not starting with '127.';\" | isql -q localhost:$DB" | sed -n 's/.*remote=\([0-9]*\).*/\1/p'; }
           for i in $(seq 1 45); do [ "$(remote)" -ge 1 ] 2>/dev/null && break; sleep 2; done
           [ "$(remote)" -ge 1 ] || { kubectl logs swclient; exit 1; }

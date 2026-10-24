@@ -87,6 +87,9 @@ if [ -z "$line" ]; then
   verdict 2 "replica-seed-race.sh, 8 writers, persistent connections" unclear "no result"
 elif [ "$missing" = none ]; then
   verdict 2 "replica-seed-race.sh, 8 writers, persistent connections" "not reproduced" "replica identical to the primary ($counts)"
+elif [ "$(echo "$missing" | wc -w)" -gt 100 ]; then
+  # the issue loses a transaction or two: far more means the replica stopped applying (its replication.log is in the test's log)
+  verdict 2 "replica-seed-race.sh, 8 writers, persistent connections" unclear "the replica stopped $(echo "$missing" | wc -w) rows short of the primary ($counts): see its replication.log in the test's log"
 else
   # the list can be long: the count and the first rows (id/note)
   verdict 2 "replica-seed-race.sh, 8 writers, persistent connections" reproduced "$(echo "$missing" | wc -w) row(s) missing or different on the replica ($counts): $(echo "$missing" | tr -s ' ' '\n' | head -5 | tr '\n' ' ')..."
