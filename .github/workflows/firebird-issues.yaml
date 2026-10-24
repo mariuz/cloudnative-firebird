@@ -1,0 +1,59 @@
+name: Firebird issues
+
+# Re-runs the reproduction scripts of ISSUES.md (hack/repro, through hack/repro/run-all.sh) against
+# the Firebird images, so the "Reproduces" column can be checked against the current images
+# without a local Docker: weekly (a new 6 snapshot or a point release may fix an issue), on
+# changes to the scripts, and on demand for any image (e.g. a Firebird release candidate). Each
+# job's summary gives the verdict per issue (reproduced, not reproduced, unclear) and the scripts'
+# logs are kept as artifacts. A job fails only when a script could not run, never for what
+# Firebird did.
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "hack/repro/**"
+      - ".github/workflows/firebird-issues.yaml"
+  schedule:
+    - cron: "47 4 * * 2"
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Firebird image to run against (e.g. firebirdsql/firebird:6); empty for 4, 5 and the 6 snapshot"
+        required: false
+        default: ""
+      runs:
+        description: "Runs of issue 1's load test (publication-under-load.sh)"
+        required: false
+        default: "1"
+
+permissions:
+  contents: read
+
+jobs:
+  issues:
+    name: Firebird issues (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.image != '' && fromJSON(format('["{0}"]', github.event.inputs.image)) || fromJSON('["firebirdsql/firebird:4", "firebirdsql/firebird:5", "firebirdsql/firebird:6-snapshot"]') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the reproduction scripts against ${{ matrix.image }}
+        env:
+          RUNS: ${{ github.event.inputs.runs || '1' }}
+        run: hack/repro/run-all.sh "${{ matrix.image }}" repro-logs
+
+      - name: Name the logs
+        id: logs
+        if: always()
+        run: echo "name=repro-logs-$(echo '${{ matrix.image }}' | tr ':/' '--')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ steps.logs.outputs.name }}
+          path: repro-logs
+          if-no-files-found: ignore

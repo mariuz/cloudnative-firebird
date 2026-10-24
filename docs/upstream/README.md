@@ -2,7 +2,8 @@
 
 Firebird problems found while building this operator, written up as issues for the
 [Firebird tracker](https://github.com/FirebirdSQL/firebird/issues). Each one has a
-reproduction script in [`hack/repro/`](../../hack/repro) that needs only Docker. Background and
+reproduction script in [`hack/repro/`](../../hack/repro) that needs only Docker, re-run weekly
+against Firebird 4, 5 and the 6 snapshot by the "Firebird issues" workflow. Background and
 how the operator handles them: [ISSUES.md](../../ISSUES.md).
 
 | Report | ISSUES.md | Status |

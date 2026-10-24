@@ -6,7 +6,14 @@ Problems found while building journal replication against the official
 operator handles them. Open follow-up work is listed in [TODO.md](TODO.md).
 
 The reproduction scripts in [`hack/repro/`](hack/repro) need only Docker. Each one starts its
-own containers and removes them when it finishes.
+own containers and removes them when it finishes. `hack/repro/run-all.sh [image]` runs them all
+against one image and prints a verdict per issue (reproduced, not reproduced, unclear) with the
+scripts' logs kept; the "Firebird issues" workflow
+([`.github/workflows/firebird-issues.yaml`](.github/workflows/firebird-issues.yaml)) does so
+weekly for Firebird 4, 5 and the 6 snapshot, and on demand for any image (`workflow_dispatch`),
+with the verdicts in each job's summary and the logs as artifacts. The "Reproduces" column
+below records the runs made by hand while the issues were found; the workflow's latest runs
+(Actions tab) say whether an issue still reproduces on the current images.
 
 Last swept on 2026-10-23 against Firebird `master` at `4fed06f` (2026-10-18, the local source
 checkout): the code behind issues 1, 2 and 9 is unchanged there (notes under each issue), and
