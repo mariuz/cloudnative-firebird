@@ -96,6 +96,7 @@ ids fb-race-replica > "$work/replica.ids"
 missing=$(comm -23 "$work/primary.ids" "$work/replica.ids" | tr '\n' ' ')
 echo "primary rows: $(wc -l < "$work/primary.ids"), replica rows: $(wc -l < "$work/replica.ids")"
 echo "rows missing or different on the replica: ${missing:-none}"
-echo "--- the replica's replication.log (last 20 lines)"
-docker exec fb-race-replica sh -c 'tail -n 20 /opt/firebird/replication.log 2>/dev/null' || true
+# a replica far behind stopped applying: its logs say why
+echo "--- segments: $(ls "$archive" | wc -l) archived, $(ls "$source" | wc -l) shipped"
+docker exec fb-race-replica sh -c 'for f in $(ls /opt/firebird/*.log /var/log/firebird/*.log 2>/dev/null); do echo "--- replica $f (last 20 lines)"; tail -n 20 "$f"; done' || true
 [ -n "${KEEP:-}" ] || docker rm -f fb-race-primary fb-race-replica >/dev/null
