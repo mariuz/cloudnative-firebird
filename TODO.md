@@ -9,10 +9,13 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   with the diagnosis from symbolized thread stacks, is ready in
   [docs/upstream](docs/upstream/01-replication-manager-header-deadlock.md); file it and track the
   fix version. Replication stays experimental until then. Still unfixed in `master` at `4fed06f`
-  (2026-10-18; swept 2026-10-23), so the report applies as written.
+  (2026-10-18; swept 2026-10-23), so the report applies as written. The weekly "Firebird issues"
+  workflow (`hack/repro/run-all.sh`) re-runs the reproduction against Firebird 4, 5 and the 6
+  snapshot: a run where it stops reproducing on a new build is the signal to look for the fix.
 - [ ] **File the commit/TIP window upstream** ([ISSUES.md](ISSUES.md) issue 2, confirmed): the
   report is ready in [docs/upstream](docs/upstream/02-commit-journaled-before-tip.md). Still in
-  `master` at `4fed06f` (swept 2026-10-23).
+  `master` at `4fed06f` (swept 2026-10-23); the weekly "Firebird issues" workflow re-runs
+  `tip-window.sh` and `replica-seed-race.sh` too.
 - [x] **Failover safety**: since v0.86.0 the primary can hold and renew the Lease itself
   (`failover.primaryLease`, CloudNativePG 1.30's promotion mutex): it fences itself when the
   Lease names another instance or cannot be renewed, and the operator promotes only once the
