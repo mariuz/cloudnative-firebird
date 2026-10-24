@@ -13,7 +13,7 @@ import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/s
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.125.0';
+export const PLUGIN_VERSION = '0.126.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -369,9 +369,10 @@ export function formatStatus(
     for (const s of schedules) {
       let next = '-';
       if (!s.spec.suspend) {
+        // the operator's status.nextScheduleTime; computed when it has not been written yet
         try {
-          const due = nextCronTime(s.spec.schedule, now);
-          if (due) next = `in ${age(now.toISOString(), due)}`;
+          const due = s.status?.nextScheduleTime ? new Date(s.status.nextScheduleTime) : nextCronTime(s.spec.schedule, now);
+          if (due) next = due > now ? `in ${age(now.toISOString(), due)}` : 'due';
         } catch {
           next = '?';
         }

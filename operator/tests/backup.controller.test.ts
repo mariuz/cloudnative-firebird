@@ -349,7 +349,24 @@ describe('FirebirdBackupController', () => {
     it('creates the CronJob and records its name', async () => {
       await controller.reconcileScheduledBackup(scheduled);
       expect(batchApi.createNamespacedCronJob.mock.calls[0][0].body.metadata.name).toBe('sched-backup-nightly-backup');
-      expect(lastStatus()).toEqual({ cronJobName: 'sched-backup-nightly-backup' });
+      expect(lastStatus()).toEqual({
+        cronJobName: 'sched-backup-nightly-backup',
+        lastCheckTime: expect.any(String),
+        nextScheduleTime: expect.stringMatching(/T02:00:00\.000Z$/),
+      });
+      expect(new Date(lastStatus().nextScheduleTime).getTime()).toBeGreaterThan(new Date(lastStatus().lastCheckTime).getTime());
+    });
+
+    it('records the check without a next time while suspended', async () => {
+      await controller.reconcileScheduledBackup({ ...scheduled, spec: { ...scheduled.spec, suspend: true } });
+      expect(lastStatus()).toEqual({ cronJobName: 'sched-backup-nightly-backup', lastCheckTime: expect.any(String) });
+      // a suspended schedule loses the next time it had
+      await controller.reconcileScheduledBackup({
+        ...scheduled,
+        spec: { ...scheduled.spec, suspend: true },
+        status: { cronJobName: 'sched-backup-nightly-backup', nextScheduleTime: '2026-01-03T02:00:00.000Z' },
+      });
+      expect(lastStatus()).toEqual({ cronJobName: 'sched-backup-nightly-backup', lastCheckTime: expect.any(String) });
     });
 
     it("backs up a FirebirdDatabase's file on schedule", async () => {
@@ -377,6 +394,8 @@ describe('FirebirdBackupController', () => {
         cronJobName: 'sched-backup-nightly-backup',
         lastScheduleTime: '2026-01-02T02:00:00.000Z',
         lastSuccessfulTime: '2026-01-02T02:01:00.000Z',
+        lastCheckTime: expect.any(String),
+        nextScheduleTime: expect.stringMatching(/T02:00:00\.000Z$/),
       });
     });
   });

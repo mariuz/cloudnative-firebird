@@ -1,7 +1,7 @@
 import { withInheritedMetadata } from '../utils/pod-settings';
 import { clusterStoppedReason } from '../utils/major-upgrade';
 import { replicaClusterFollowing } from '../utils/replica-cluster';
-import { latestCronTime } from '../utils/cron';
+import { latestCronTime, nextCronTime } from '../utils/cron';
 import {
   buildScheduledSnapshotBackup,
   buildSnapshotLockJob,
@@ -51,6 +51,25 @@ import { existingTargetMessage, restoreTargetExists, superuserPasswordFrom } fro
 import { SegmentClient, segmentRequest } from '../utils/replication-lag';
 import { cronJobNeedsUpdate, databaseName, FIREBIRD_DATA_DIR, instancePodSelector, withTemplateHash } from '../utils/resources';
 import { managedDatabaseName } from '../utils/databases';
+
+/**
+ * CloudNativePG's lastCheckTime and nextScheduleTime: when the schedule was checked, and its next
+ * time after that (to the minute, UTC), none while it is suspended.
+ */
+export function scheduleCheck(
+  spec: { schedule: string; suspend?: boolean },
+  now: Date,
+): { lastCheckTime: string; nextScheduleTime?: string } {
+  let nextScheduleTime: string | undefined;
+  if (!spec.suspend) {
+    try {
+      nextScheduleTime = nextCronTime(spec.schedule, now)?.toISOString();
+    } catch {
+      nextScheduleTime = undefined;
+    }
+  }
+  return { lastCheckTime: now.toISOString(), nextScheduleTime };
+}
 import {
   ValidationError,
   validateBackupSpec,
@@ -371,6 +390,7 @@ export class FirebirdBackupController {
       cronJobName: cronName,
       lastScheduleTime: iso(current.status?.lastScheduleTime),
       lastSuccessfulTime: iso(current.status?.lastSuccessfulTime),
+      ...scheduleCheck(scheduledBackup.spec, new Date()),
     });
   }
 
@@ -686,6 +706,7 @@ export class FirebirdBackupController {
       lastScheduleTime,
       lastBackupName,
       lastSuccessfulTime: successes.length > 0 ? new Date(successes[successes.length - 1]).toISOString() : status.lastSuccessfulTime,
+      ...scheduleCheck(spec, now),
     });
   }
 

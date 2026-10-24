@@ -1970,7 +1970,16 @@ jobs:
             || { kubectl get firebirdbackup -o wide; kubectl get firebirdscheduledbackup snap-every-minute -o jsonpath='{.status}'; exit 1; }
           kubectl get firebirdscheduledbackup snap-every-minute -o jsonpath='{.status}'; echo
           if kubectl get cronjob sched-backup-snap-every-minute >/dev/null 2>&1; then echo "a CronJob was created for volume snapshots"; exit 1; fi
+          # the schedule's status: checked, and due again the minute after the last run
+          last=$(kubectl get firebirdscheduledbackup snap-every-minute -o jsonpath='{.status.lastScheduleTime}')
+          next=$(kubectl get firebirdscheduledbackup snap-every-minute -o jsonpath='{.status.nextScheduleTime}')
+          [ -n "$(kubectl get firebirdscheduledbackup snap-every-minute -o jsonpath='{.status.lastCheckTime}')" ] || { echo "no lastCheckTime"; exit 1; }
+          [ "$(date -u -d "$next" +%s)" -gt "$(date -u -d "$last" +%s)" ] || { echo "nextScheduleTime $next is not after lastScheduleTime $last"; exit 1; }
+          kubectl get firebirdscheduledbackup snap-every-minute | grep -q "$next"
           kubectl patch firebirdscheduledbackup snap-every-minute --type merge -p '{"spec":{"suspend":true}}'
+          # suspended: no next time
+          timeout 90 bash -c 'until [ -z "$(kubectl get firebirdscheduledbackup snap-every-minute -o jsonpath={.status.nextScheduleTime})" ]; do sleep 5; done' \
+            || { echo "nextScheduleTime still set while suspended"; kubectl get firebirdscheduledbackup snap-every-minute -o jsonpath='{.status}'; exit 1; }
           # a new cluster from the snapshot: its first volume is created from it, the second is seeded by replication
           kubectl apply -f - <<'EOF'
           apiVersion: firebird.cloudnative-firebird.io/v1

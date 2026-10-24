@@ -431,6 +431,9 @@ describe('FirebirdBackupController volume snapshots', () => {
     const status = customApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)?.[0].body[0].value;
     expect(status).toMatchObject({ lastBackupName: created[0].metadata.name, lastSuccessfulTime: recent.status!.completionTime });
     expect(new Date(status.lastScheduleTime).getUTCSeconds()).toBe(0);
+    // checked now, due again at the next minute
+    expect(new Date(status.lastCheckTime).getTime()).toBeGreaterThan(Date.now() - 10_000);
+    expect(new Date(status.nextScheduleTime).getTime()).toBe(new Date(status.lastScheduleTime).getTime() + 60_000);
 
     // the next run waits while that backup runs
     await controller.reconcileScheduledBackup({ ...scheduled, status: { lastScheduleTime: new Date(Date.now() - 120_000).toISOString() } });
