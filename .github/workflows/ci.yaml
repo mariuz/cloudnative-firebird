@@ -445,6 +445,15 @@ jobs:
           grep -qE '^NAME +SCHEDULE +TYPE +SUSPENDED +LAST CHECK +LAST SUCCESS +NEXT$' /tmp/plugin-backups.txt
           grep -qE '^plugin-schedule +0 3 \* \* \* +logical +yes +[0-9]+s ago +- +-$' /tmp/plugin-backups.txt
           kubectl firebird status repl | grep -qE '^plugin-schedule +0 3 \* \* \* +logical +yes +[0-9]+s ago +- +-$'
+          # resumed from the plugin: a next run; suspended again: none
+          kubectl firebird schedule on repl plugin-schedule | grep -q 'resumed'
+          [ -z "$(kubectl get firebirdscheduledbackup plugin-schedule -o jsonpath={.spec.suspend})" ]
+          timeout 60 bash -c 'until [ -n "$(kubectl get firebirdscheduledbackup plugin-schedule -o jsonpath={.status.nextScheduleTime})" ]; do sleep 2; done'
+          kubectl firebird backups repl | grep -qE '^plugin-schedule +0 3 \* \* \* +logical +no +[0-9]+s ago +- +in [0-9]+[smh]$'
+          kubectl firebird schedule off repl plugin-schedule | grep -q 'suspended'
+          [ "$(kubectl get firebirdscheduledbackup plugin-schedule -o jsonpath={.spec.suspend})" = true ]
+          if kubectl firebird schedule off repl no-such-schedule 2>/tmp/plugin-err.txt; then echo "a missing schedule was accepted"; exit 1; fi
+          grep -q 'no FirebirdScheduledBackup no-such-schedule' /tmp/plugin-err.txt
           kubectl delete firebirdscheduledbackup plugin-schedule
           kubectl firebird restore repl plugin-backup --target plugin-restored.fdb --name plugin-restore
           timeout 300 bash -c 'until [ "$(kubectl get firebirdrestore plugin-restore -o jsonpath={.status.phase})" = Completed ]; do

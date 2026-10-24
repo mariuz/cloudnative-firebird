@@ -13,7 +13,7 @@ import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/s
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.129.0';
+export const PLUGIN_VERSION = '0.130.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -37,6 +37,8 @@ export interface PluginApi {
   patchStatefulSet(namespace: string, name: string, patch: object): Promise<void>;
   listBackups(namespace: string): Promise<FirebirdBackup[]>;
   listScheduledBackups(namespace: string): Promise<FirebirdScheduledBackup[]>;
+  /** JSON merge patch of a FirebirdScheduledBackup */
+  patchScheduledBackup(namespace: string, name: string, patch: object): Promise<void>;
   listDatabases(namespace: string): Promise<FirebirdDatabase[]>;
   createBackup(namespace: string, body: FirebirdBackup): Promise<void>;
   createRestore(namespace: string, body: FirebirdRestore): Promise<void>;
@@ -85,6 +87,7 @@ Commands:
                    [--snapshot-class name] [--name backup-name] [--database firebird-database]
                                             take an on-demand backup (FirebirdBackup)
   backups <cluster>                         the cluster's backups, newest first, and its schedules
+  schedule on|off <cluster> <schedule>      resume or suspend a FirebirdScheduledBackup of the cluster
   restore <cluster> <backup> [--target file] [--name restore-name]
                                             restore a completed backup into a new database file
                                             (FirebirdRestore; the cluster database is never replaced)
@@ -609,6 +612,20 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
         const now = io.now();
         const schedules = formatSchedules(scheduled, name, now);
         io.out(formatBackups(backups, name, now) + (schedules ? `\n\nScheduled backups:\n${schedules}` : ''));
+        return 0;
+      }
+
+      case 'schedule': {
+        const usage = 'schedule on|off <cluster> <schedule>';
+        const [mode, name, scheduleName] = need(parsed, 3, usage);
+        const on = onOff(mode, usage);
+        await api.getCluster(namespace, name);
+        const schedule = (await api.listScheduledBackups(namespace)).find((s) => s.metadata.name === scheduleName);
+        if (!schedule) throw new UsageError(`no FirebirdScheduledBackup ${scheduleName} in namespace ${namespace} (kubectl firebird backups ${name})`);
+        if (schedule.spec.clusterName !== name) throw new UsageError(`${scheduleName} is a schedule of cluster ${schedule.spec.clusterName}, not ${name}`);
+        // on: the field goes (the default); off: suspend
+        await api.patchScheduledBackup(namespace, scheduleName, { spec: { suspend: on ? null : true } });
+        io.out(on ? `schedule ${scheduleName} resumed (${schedule.spec.schedule})` : `schedule ${scheduleName} suspended: no backups until it is resumed`);
         return 0;
       }
 

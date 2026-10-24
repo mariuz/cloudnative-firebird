@@ -67,6 +67,7 @@ describe('kubectl firebird', () => {
       patchStatefulSet: vi.fn().mockResolvedValue(undefined),
       listBackups: vi.fn().mockResolvedValue([]),
       listScheduledBackups: vi.fn().mockResolvedValue([]),
+      patchScheduledBackup: vi.fn().mockResolvedValue(undefined),
       listDatabases: vi.fn().mockResolvedValue([]),
       createBackup: vi.fn().mockResolvedValue(undefined),
       createRestore: vi.fn().mockResolvedValue(undefined),
@@ -318,6 +319,27 @@ describe('kubectl firebird', () => {
     expect(api.patchPod).toHaveBeenCalledWith('prod', 'db-0', { metadata: { annotations: { [RESEED_ANNOTATION]: 'true' } } });
     expect(await exec('reseed', 'db', '1')).toBe(2);
     expect(errs.at(-1)).toContain('is the primary');
+  });
+
+  it('suspends and resumes a schedule of the cluster', async () => {
+    api.listScheduledBackups.mockResolvedValue([
+      { apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdScheduledBackup', metadata: { name: 'nightly' }, spec: { clusterName: 'db', schedule: '0 2 * * *' } },
+      { apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdScheduledBackup', metadata: { name: 'theirs' }, spec: { clusterName: 'x', schedule: '0 3 * * *' } },
+    ]);
+    expect(await exec('schedule', 'off', 'db', 'nightly')).toBe(0);
+    expect(api.patchScheduledBackup).toHaveBeenLastCalledWith('prod', 'nightly', { spec: { suspend: true } });
+    expect(out.at(-1)).toBe('schedule nightly suspended: no backups until it is resumed');
+    expect(await exec('schedule', 'on', 'db', 'nightly')).toBe(0);
+    expect(api.patchScheduledBackup).toHaveBeenLastCalledWith('prod', 'nightly', { spec: { suspend: null } });
+    expect(out.at(-1)).toBe('schedule nightly resumed (0 2 * * *)');
+    // another cluster's schedule, a missing one, a wrong mode
+    expect(await exec('schedule', 'off', 'db', 'theirs')).toBe(2);
+    expect(errs.at(-1)).toContain('is a schedule of cluster x, not db');
+    expect(await exec('schedule', 'off', 'db', 'nope')).toBe(2);
+    expect(errs.at(-1)).toContain('no FirebirdScheduledBackup nope');
+    expect(await exec('schedule', 'pause', 'db', 'nightly')).toBe(2);
+    expect(errs.at(-1)).toContain('expected on or off');
+    expect(api.patchScheduledBackup).toHaveBeenCalledTimes(2);
   });
 
   it('creates on-demand backups', async () => {

@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Suspending a schedule from the plugin** *(v0.130.0)*
+  - `kubectl firebird schedule on|off <cluster> <schedule>` resumes or suspends one of the cluster's `FirebirdScheduledBackup`s (`spec.suspend`, like `hibernate on|off`); another cluster's schedule or a missing one is refused. Unit tests cover both directions and the refusals; the kind CI suspends and resumes a schedule and checks `kubectl firebird backups` follows (`SUSPENDED`, the next run).
 - [x] **Release notes from the roadmap** *(v0.129.0)*
   - A GitHub Release says what changed: `hack/release/notes.sh [version]` prints the version's ROADMAP.md entries (title, marker and bullets, as Markdown sections), and the Release workflow puts them into the Release's notes, with the operator image and its digest and the install commands (`gh release edit` refreshes the notes of a re-published version). `hack/release/version.sh` (also the unit test) requires an entry marked with the operator's version, so no version is released without one. Unit tests cover the current version, a version with several entries, a version that is only mentioned in another entry's marker, and a missing one.
 - [x] **Schedules in the plugin's backups view** *(v0.128.0)*
