@@ -351,6 +351,13 @@ jobs:
           [ -n "$(kubectl get firebirdcluster repl -o jsonpath={.status.replicationStatus.lastArchivedSequence})" ]
           [ "$(kubectl get pod repl-1 -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/replication-lag-seconds}')" = 0 ]
 
+          # kubectl get's columns: the primary by default, the image the instances run with -o wide
+          column() { kubectl get firebirdcluster repl -o wide | awk -v name="$1" 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == name) c = i } NR == 2 { print $c }'; }
+          kubectl get firebirdcluster repl -o wide
+          [ "$(column PRIMARY)" = "$(kubectl get firebirdcluster repl -o jsonpath={.status.replicationStatus.primaryPod})" ]
+          [ "$(column IMAGE)" = "$(kubectl get firebirdcluster repl -o jsonpath={.status.image})" ]
+          kubectl get firebirdcluster repl | head -n 1 | grep -q PRIMARY
+
           # ... and exports it on the operator's /metrics endpoint
           # the leader (Lease holder) reconciles and exports the cluster metrics
           OP=$(kubectl get lease cloudnative-firebird-operator -n cloudnative-firebird-system -o jsonpath={.spec.holderIdentity})

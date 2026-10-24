@@ -22,12 +22,19 @@ spec:
         - name: Cluster
           type: string
           jsonPath: .spec.clusterName
+        - name: Type
+          type: string
+          jsonPath: .spec.type
         - name: Phase
           type: string
           jsonPath: .status.phase
         - name: Location
           type: string
           jsonPath: .status.location
+        - name: Error
+          type: string
+          jsonPath: .status.error
+          priority: 1
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
