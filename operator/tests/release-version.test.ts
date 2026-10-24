@@ -19,6 +19,23 @@ describe('the operator version', () => {
     expect(execFileSync(join(root, 'hack/release/version.sh'), { encoding: 'utf8' }).trim()).toBe(PLUGIN_VERSION);
   });
 
+  it("has its ROADMAP.md entry, the release notes (hack/release/notes.sh)", () => {
+    const notes = execFileSync(join(root, 'hack/release/notes.sh'), [PLUGIN_VERSION], { encoding: 'utf8' });
+    const lines = notes.split('\n');
+    expect(lines[0]).toMatch(/^### \S/);
+    expect(lines[2]).toMatch(new RegExp(`^_v${PLUGIN_VERSION.replace(/\./g, '\\.')}([^0-9.].*)?_$`));
+    expect(lines[4]).toMatch(/^- \S/);
+    // the default is the operator's version
+    expect(execFileSync(join(root, 'hack/release/notes.sh'), { encoding: 'utf8' })).toBe(notes);
+    // every entry of a version, in the roadmap's order (v0.4.0 has several); a version with none fails
+    const old = execFileSync(join(root, 'hack/release/notes.sh'), ['0.4.0'], { encoding: 'utf8' });
+    expect(old.split('\n').filter((l) => l.startsWith('### ')).length).toBeGreaterThan(1);
+    expect(old).toContain('### Grafana Dashboard ConfigMaps');
+    // the version is a whole token of the marker: v0.40.0 is not v0.4.0
+    expect(execFileSync(join(root, 'hack/release/notes.sh'), ['0.40.0'], { encoding: 'utf8' })).not.toContain('Dedicated Backup CRDs');
+    expect(() => execFileSync(join(root, 'hack/release/notes.sh'), ['9.9.9'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).toThrow(/no entry marked v9\.9\.9/);
+  });
+
   it('ships the same CRDs in the Helm chart (hack/release/chart.sh sync)', () => {
     const crds = readdirSync(join(root, 'config/crds')).filter((f) => f.endsWith('.yaml')).sort();
     expect(readdirSync(join(root, 'charts/cloudnative-firebird/crds')).filter((f) => f.endsWith('.yaml')).sort()).toEqual(crds);

@@ -103,6 +103,7 @@ jobs:
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
 
       - name: Build${{ steps.version.outputs.publish == 'true' && ' and push' || '' }}
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: operator
@@ -148,32 +149,41 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
           FILE: ${{ steps.bundle.outputs.file }}
           CHART: ${{ steps.chart.outputs.file }}
         run: |
           # the versioned manifest, and the same under a fixed name for releases/latest/download
           cp "$FILE" cloudnative-firebird.yaml
+          # the notes: what changed (the version's ROADMAP.md entry), the image, how to install
+          {
+            echo "## What changed"
+            echo
+            hack/release/notes.sh "$VERSION"
+            echo
+            echo "## Install or upgrade"
+            echo
+            echo "Operator image: \`$IMAGE:$VERSION\` (linux/amd64, linux/arm64${DIGEST:+; \`$DIGEST\`})."
+            echo
+            echo "The CRDs and the operator, in one manifest:"
+            echo
+            echo '```bash'
+            echo "kubectl apply -f https://github.com/${{ github.repository }}/releases/download/v$VERSION/$FILE"
+            echo '```'
+            echo
+            echo "Or with Helm (the chart, \`$(basename "$CHART")\`, is also pushed to \`oci://ghcr.io/${{ github.repository_owner }}/charts/cloudnative-firebird\`):"
+            echo
+            echo '```bash'
+            echo "helm install cloudnative-firebird oci://ghcr.io/${{ github.repository_owner }}/charts/cloudnative-firebird --version $VERSION -n cloudnative-firebird-system --create-namespace"
+            echo '```'
+            echo
+            echo "Upgrading: [README](https://github.com/${{ github.repository }}/blob/v$VERSION/README.md#upgrading-the-operator); the whole roadmap: [ROADMAP.md](https://github.com/${{ github.repository }}/blob/v$VERSION/ROADMAP.md)."
+          } > release-notes.md
           if gh release view "v$VERSION" >/dev/null 2>&1; then
             gh release upload "v$VERSION" "$FILE" cloudnative-firebird.yaml "$CHART" --clobber
+            gh release edit "v$VERSION" --notes-file release-notes.md
           else
-            gh release create "v$VERSION" "$FILE" cloudnative-firebird.yaml "$CHART" --title "v$VERSION" --notes "$(cat <<NOTES
-          Operator image: \`$IMAGE:$VERSION\` (linux/amd64, linux/arm64).
-
-          Install or upgrade (the CRDs and the operator):
-
-          \`\`\`bash
-          kubectl apply -f https://github.com/${{ github.repository }}/releases/download/v$VERSION/$FILE
-          \`\`\`
-
-          Or with Helm (the chart, \`$(basename "$CHART")\`, is also pushed to \`oci://ghcr.io/${{ github.repository_owner }}/charts/cloudnative-firebird\`):
-
-          \`\`\`bash
-          helm install cloudnative-firebird oci://ghcr.io/${{ github.repository_owner }}/charts/cloudnative-firebird --version $VERSION -n cloudnative-firebird-system --create-namespace
-          \`\`\`
-
-          What changed: [ROADMAP.md](https://github.com/${{ github.repository }}/blob/v$VERSION/ROADMAP.md), upgrading: [README](https://github.com/${{ github.repository }}/blob/v$VERSION/README.md#upgrading-the-operator).
-          NOTES
-          )"
+            gh release create "v$VERSION" "$FILE" cloudnative-firebird.yaml "$CHART" --title "v$VERSION" --notes-file release-notes.md
           fi
 
       - name: Summary
