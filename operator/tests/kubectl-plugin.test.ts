@@ -149,10 +149,10 @@ describe('kubectl firebird', () => {
     expect(await exec('status', 'db')).toBe(0);
     const text = out.join('\n');
     expect(text).toMatch(/^Backups:      last successful 5m ago \(logical 5m ago, physical 3h ago\), first recoverability point 2d ago, last failed 1h ago$/m);
-    expect(text).toMatch(/NAME +SCHEDULE +TYPE +SUSPENDED +LAST SUCCESS +NEXT/);
-    expect(text).toMatch(/nightly +0 2 \* \* \* +logical +no +- +in \d+[smhd]/);
-    expect(text).toMatch(/paused +0 3 \* \* \* +logical +yes +- +-/);
-    expect(text).toMatch(/recorded +0 4 \* \* \* +logical +no +- +in 30m/);
+    expect(text).toMatch(/NAME +SCHEDULE +TYPE +SUSPENDED +LAST CHECK +LAST SUCCESS +NEXT/);
+    expect(text).toMatch(/nightly +0 2 \* \* \* +logical +no +- +- +in \d+[smhd]/);
+    expect(text).toMatch(/paused +0 3 \* \* \* +logical +yes +- +- +-/);
+    expect(text).toMatch(/recorded +0 4 \* \* \* +logical +no +10s ago +- +in 30m/);
   });
 
   it('shows the description and the Services', async () => {
@@ -477,6 +477,22 @@ describe('kubectl firebird', () => {
     api.listBackups.mockResolvedValue(backups);
     expect(await exec('backups', 'db')).toBe(0);
     expect(out.at(-1)).toBe(formatBackups(backups, 'db', new Date('2026-10-11T12:00:00Z')));
+
+    // the cluster's schedules follow, with the operator's last check and next time
+    api.listScheduledBackups.mockResolvedValue([
+      { apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdScheduledBackup', metadata: { name: 'nightly' }, spec: { clusterName: 'db', schedule: '0 2 * * *', type: 'physical' }, status: { lastCheckTime: '2026-10-11T11:59:40Z', lastSuccessfulTime: '2026-10-11T02:01:00Z', nextScheduleTime: '2026-10-12T02:00:00Z' } },
+      { apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdScheduledBackup', metadata: { name: 'theirs' }, spec: { clusterName: 'x', schedule: '0 3 * * *' } },
+    ]);
+    expect(await exec('backups', 'db')).toBe(0);
+    const withSchedules = out.at(-1)!;
+    expect(withSchedules.startsWith(formatBackups(backups, 'db', new Date('2026-10-11T12:00:00Z')))).toBe(true);
+    expect(withSchedules).toMatch(/\n\nScheduled backups:\nNAME +SCHEDULE +TYPE +SUSPENDED +LAST CHECK +LAST SUCCESS +NEXT\n/);
+    expect(withSchedules).toMatch(/^nightly +0 2 \* \* \* +physical +no +20s ago +10h ago +in 14h$/m);
+    expect(withSchedules).not.toContain('theirs');
+    // without backups the schedules still show
+    api.listBackups.mockResolvedValue([]);
+    expect(await exec('backups', 'db')).toBe(0);
+    expect(out.at(-1)).toMatch(/^no backups of cluster db\n\nScheduled backups:\n/);
   });
 
   it('restores a completed backup into a new file, and refuses the others', async () => {

@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Schedules in the plugin's backups view** *(v0.128.0)*
+  - `kubectl firebird backups` lists the cluster's `FirebirdScheduledBackup`s after its backups (schedule, type, suspension, the operator's last check, last success and next run from `status.nextScheduleTime`), also when the cluster has no backup yet, and `kubectl firebird status` shows the same table with the new `LAST CHECK` column. Unit tests cover both commands; the kind CI lists a suspended schedule through the plugin.
 - [x] **Cluster printer columns** *(v0.127.0; CloudNativePG's `kubectl get cluster` columns)*
   - `kubectl get firebirdcluster` shows the primary pod next to the phase, and `-o wide` the image the instances run (`status.image`, the catalog entry included, instead of the spec's `imageName`), the last successful backup and the phase reason; backups show their type (and the error with `-o wide`), scheduled backups their type. The CRD check reads the columns against the API server and the kind CI compares the primary and image columns with the status.
 - [x] **Reproduction scripts in CI** *(2026-10-24, tooling)*

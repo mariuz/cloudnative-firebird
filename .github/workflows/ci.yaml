@@ -428,6 +428,24 @@ jobs:
           # the backups list, and a restore of the backup into a new file on the primary
           kubectl firebird backups repl | tee /tmp/plugin-backups.txt
           grep -qE '^plugin-backup +logical +Completed .*\(cluster\) +[^ ]*backup-plugin-backup.fbk$' /tmp/plugin-backups.txt
+          # ... followed by the cluster's schedules, with the operator's last check (a suspended one: no next run)
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdScheduledBackup
+          metadata:
+            name: plugin-schedule
+          spec:
+            clusterName: repl
+            schedule: "0 3 * * *"
+            suspend: true
+          EOF
+          timeout 60 bash -c 'until [ -n "$(kubectl get firebirdscheduledbackup plugin-schedule -o jsonpath={.status.lastCheckTime})" ]; do sleep 2; done'
+          kubectl firebird backups repl | tee /tmp/plugin-backups.txt
+          grep -qE '^Scheduled backups:$' /tmp/plugin-backups.txt
+          grep -qE '^NAME +SCHEDULE +TYPE +SUSPENDED +LAST CHECK +LAST SUCCESS +NEXT$' /tmp/plugin-backups.txt
+          grep -qE '^plugin-schedule +0 3 \* \* \* +logical +yes +[0-9]+s ago +- +-$' /tmp/plugin-backups.txt
+          kubectl firebird status repl | grep -qE '^plugin-schedule +0 3 \* \* \* +logical +yes +[0-9]+s ago +- +-$'
+          kubectl delete firebirdscheduledbackup plugin-schedule
           kubectl firebird restore repl plugin-backup --target plugin-restored.fdb --name plugin-restore
           timeout 300 bash -c 'until [ "$(kubectl get firebirdrestore plugin-restore -o jsonpath={.status.phase})" = Completed ]; do
             [ "$(kubectl get firebirdrestore plugin-restore -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done' \
