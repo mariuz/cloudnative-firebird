@@ -55,6 +55,9 @@ function kubeApi(kubeConfig: KubeConfig): PluginApi {
     listScheduledBackups: async (namespace) =>
       ((await custom.listNamespacedCustomObject(crd(namespace, 'firebirdscheduledbackups'))) as { items?: FirebirdScheduledBackup[] })
         .items ?? [],
+    patchScheduledBackup: async (namespace, name, body) => {
+      await custom.patchNamespacedCustomObject({ ...crd(namespace, 'firebirdscheduledbackups'), name, body }, MERGE_PATCH);
+    },
     listDatabases: async (namespace) =>
       ((await custom.listNamespacedCustomObject(crd(namespace, 'firebirddatabases'))) as { items?: FirebirdDatabase[] }).items ?? [],
     createBackup: async (namespace, body) => {
