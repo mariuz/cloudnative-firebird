@@ -41,9 +41,21 @@ spec:
         - name: Phase
           type: string
           jsonPath: .status.phase
-        - name: Image
+        - name: Primary
           type: string
-          jsonPath: .spec.imageName
+          jsonPath: .status.replicationStatus.primaryPod
+        - name: Image
+          description: The image the instances run (imageName, or the catalog entry)
+          type: string
+          jsonPath: .status.image
+          priority: 1
+        - name: Last backup
+          type: date
+          jsonPath: .status.lastSuccessfulBackup
+          priority: 1
+        - name: Reason
+          type: string
+          jsonPath: .status.phaseReason
           priority: 1
       schema:
         openAPIV3Schema:

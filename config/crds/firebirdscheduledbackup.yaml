@@ -25,6 +25,9 @@ spec:
         - name: Schedule
           type: string
           jsonPath: .spec.schedule
+        - name: Type
+          type: string
+          jsonPath: .spec.type
         - name: Suspend
           type: boolean
           jsonPath: .spec.suspend

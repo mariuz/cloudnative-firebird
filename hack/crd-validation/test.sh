@@ -56,4 +56,11 @@ else
   echo "ok   scale subresource"
 fi
 
+# the printer columns (kubectl get): the primary with the phase, the image and last backup with -o wide
+header=$($KUBECTL get firebirdcluster crd-validation-cluster -o wide | head -n 1)
+for col in INSTANCES READY PHASE PRIMARY IMAGE 'LAST BACKUP'; do
+  grep -q "$col" <<<"$header" || { echo "FAIL printer columns: $col missing from: $header"; failed=1; }
+done
+$KUBECTL get firebirdcluster crd-validation-cluster | head -n 1 | grep -q PRIMARY && echo "ok   printer columns" || { echo "FAIL printer columns: PRIMARY not shown by default"; failed=1; }
+
 exit $failed
