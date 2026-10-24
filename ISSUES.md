@@ -23,14 +23,15 @@ to be filed.
 
 | # | Issue | Kind | Reproduces |
 |---|-------|------|------------|
-| 1 | A publishing database deadlocks under concurrent connect / commit / disconnect | Firebird bug, open ([report](docs/upstream/01-replication-manager-header-deadlock.md)) | Yes: 4 writers, 7 of 7 runs on 5.0.4 on one host (0 of 5 on another), 5 of 5 on the 6.0 snapshot, 2 of 3 on 4.0.7; 8 writers, 4 of 4 on 5.0.4; 0 of 7 with pooled connections or without publication |
-| 2 | Commit journaled before its TIP state: lock-based replica copies miss transactions | Firebird behaviour, handled ([report](docs/upstream/02-commit-journaled-before-tip.md)) | Yes: window transactions in 18 of 20 backups; 2 transactions lost in 3 of 3 documented-procedure replicas (8 writers) |
+| 1 | A publishing database deadlocks under concurrent connect / commit / disconnect | Firebird bug, open ([report](docs/upstream/01-replication-manager-header-deadlock.md)) | Yes: 4 writers, 7 of 7 runs on 5.0.4 on one host (0 of 5 on another), 5 of 5 on the 6.0 snapshot, 2 of 3 on 4.0.7; 8 writers, 4 of 4 on 5.0.4; 0 of 7 with pooled connections or without publication. CI (2026-10-24, 8 writers, 16 runs per image): 12 of 16 on 5.0.4, 6 of 16 on 4.0.7, 3 of 16 on the 6.0 snapshot 2411 |
+| 2 | Commit journaled before its TIP state: lock-based replica copies miss transactions | Firebird behaviour, handled ([report](docs/upstream/02-commit-journaled-before-tip.md)) | Yes: window transactions in 18 of 20 backups; 2 transactions lost in 3 of 3 documented-procedure replicas (8 writers). CI (2026-10-24): window transactions in 52 of 120 copies on 5.0.4, 37 of 120 on 4.0.7, 30 of 120 on the 6.0 snapshot; 1 row lost on the documented-procedure replica on 5.0.4 and on 4.0.7, none on the 6.0 snapshot (1 run each) |
 | 3 | A physical copy inherits publication; a publishing replica fast-forwards past segments | Expected behaviour, handled | Yes, always |
 | 4 | `nbackup -B 0` copies record the still-active segment | Expected behaviour, handled | Yes, always |
 | 5 | `gstat -h` omits "Replication sequence" while it is 0 | Minor | Yes, always |
 | 6 | The official image keeps the security database on the container filesystem | Image behaviour, handled | Yes, always |
 | 7 | Firebird 6 refuses header statistics for a database in full shutdown | Firebird 6 behaviour, handled | Yes, always (6.0 snapshot) |
-| 8 | Firebird 4 commits while a synchronous replica is unreachable | Firebird 4 behaviour, handled | Yes, always (4.0.7); not on 5.0.4 or the 6.0 snapshot |
+| 8 | Firebird 4 commits while a synchronous replica is unreachable | Firebird 4 behaviour, handled | Yes, always (4.0.7; CI 2026-10-24: 6 of 6); not on 5.0.4 or the 6.0 snapshot (0 of 6 each) |
+| 9 | `replication.conf` is read only when a database is opened: no reload | Firebird behaviour, handled | Yes, always (CI 2026-10-24: 6 of 6 on 4.0.7, 5.0.4 and the 6.0 snapshot) |
 
 ---
 
@@ -75,6 +76,13 @@ A single writer that connects once per commit did not hang in any run, so the co
 matters. The replication log (`replication.log`) records nothing when the server hangs. On a
 later host (4 vCPUs) 4 writers on 5.0.4 completed 5 of 5 runs, while 8 writers hung in 4 of 4
 within 10 seconds, and the 6.0 snapshot (6.0.0.2196) hung in 2 of 2 with 4.
+
+**CI runs** (2026-10-24, the "Firebird issues" workflow on GitHub's 2-vCPU runners, 8 writers,
+16 runs per image over six jobs): 5.0.4 hung in 12 of 16 (after 10 to 40 s), 4.0.7 in 6 of 16
+(after 30 to 60 s), and the 6.0 snapshot (6.0.0.2411) in 3 of 16 (after 10 s and 70 s, once
+stopping at 4807 of 4808 rows while the server still answered). The publication-off control
+completed in every job. The snapshot hangs less often than 6.0.0.2196 did on a 4-vCPU host
+(5 of 5); the code is unchanged in `master`, so the difference is the load, not a fix.
 
 **Diagnosis.** Thread stacks of the hung 5.0.4 servers, with the release's debug symbols
 (`KEEP=1 hack/repro/publication-under-load.sh`, then `hack/repro/capture-stacks.sh
@@ -143,6 +151,8 @@ as not committed (`RDB$GET_TRANSACTION_CN` -2). Persistent connections avoid iss
 | `replica-seed-race.sh`, 1 to 4 writers (earlier) | 6 | none lost |
 | the operator's live seed (`allowLiveSeedFromPrimary`), 8 writers | 6 | replica identical to the primary; e.g. 4 window transactions replayed from segment 3 |
 | the same with a transaction of 200 000 rows journaled two segments before the lock and committed after it | 1 | replica identical (224 008 rows); the transaction replayed from segment 1 |
+| `tip-window.sh`, 8 writers, CI 2026-10-24 (six jobs per image, 2-vCPU runners) | 120 backups per image | 82 window transactions in 52 copies (5.0.4), 54 in 37 (4.0.7), 37 in 30 (6.0 snapshot 2411) |
+| `replica-seed-race.sh`, 8 writers, persistent connections, CI 2026-10-24 | 1 per image | 1 row missing on 5.0.4 and on 4.0.7 (the replica's `replication.log`: "Record being updated in table APP does not exist, inserting instead"), none on the 6.0 snapshot |
 
 With per-row conflicts the loss is partly masked: the next transaction's update of the missing
 row is applied as an insert ("record being updated does not exist, inserting instead"), so the
@@ -257,7 +267,9 @@ commits on the other one only.
 IMAGE=firebirdsql/firebird:4 hack/repro/sync-replica.sh   # "replica stopped; a write on the primary:" shows no error
 ```
 
-After `replica stopped`, row 5 is committed on the primary but never reaches the replica.
+After `replica stopped`, row 5 is committed on the primary but never reaches the replica. The
+"Firebird issues" workflow (2026-10-24) saw it in 6 of 6 runs on 4.0.7 and never on 5.0.4 or
+the 6.0 snapshot, where the commit fails.
 
 **Handling.** Synchronous replication is only used from Firebird 5 on: the operator asks the
 primary's segment server for its engine version (`VERSION`) and on Firebird 4 attaches no
@@ -281,6 +293,9 @@ is only read when the configuration object is created.
 ```sh
 hack/repro/sync-replica.sh   # "--- 4." shows the three cases
 ```
+
+The "Firebird issues" workflow (2026-10-24) reproduced it in 6 of 6 runs on each of 4.0.7, 5.0.4
+and the 6.0 snapshot.
 
 **Handling.** With clients attached, only a shutdown closes every attachment and keeps new ones
 out, so the operator attaches and detaches a synchronous standby with the primary briefly in
