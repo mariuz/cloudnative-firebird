@@ -5,8 +5,10 @@ import {
   FENCED_INSTANCES_ANNOTATION,
   formatBackups,
   formatStatus,
+  imageVersion,
   nextFencedList,
   parseArgs,
+  PLUGIN_VERSION,
   PluginApi,
   PluginIo,
   RESEED_ANNOTATION,
@@ -72,6 +74,9 @@ describe('kubectl firebird', () => {
       createBackup: vi.fn().mockResolvedValue(undefined),
       createRestore: vi.fn().mockResolvedValue(undefined),
       createJob: vi.fn().mockResolvedValue(undefined),
+      listDeployments: vi.fn().mockResolvedValue([
+        { metadata: { name: 'cloudnative-firebird-operator' }, spec: { replicas: 2, template: { spec: { containers: [{ image: `ghcr.io/mariuz/cloudnative-firebird:${PLUGIN_VERSION}` }] } } }, status: { readyReplicas: 2 } },
+      ]),
       getStatefulSet: vi.fn().mockResolvedValue({ metadata: { name: 'db', managedFields: [{ manager: 'x' }] }, spec: {} }),
       listServices: vi.fn().mockResolvedValue([{ metadata: { name: 'db' } }, { metadata: { name: 'db-replica' } }]),
       listClaims: vi.fn().mockRejectedValue(Object.assign(new Error('x'), { code: 403, body: '{"message":"persistentvolumeclaims is forbidden"}' })),
@@ -122,6 +127,39 @@ describe('kubectl firebird', () => {
     expect(parseArgs(['isql', 'db', '--replica', '--', '-q', '-i', 'f.sql']).rest).toEqual(['-q', '-i', 'f.sql']);
     expect(() => parseArgs(['status', '--bogus'])).toThrow('unknown flag');
     expect(() => parseArgs(['status', '-n'])).toThrow('needs a value');
+  });
+
+  it("prints the plugin's version and the operator's", async () => {
+    expect(await exec('version')).toBe(0);
+    expect(out).toEqual([
+      `kubectl-firebird ${PLUGIN_VERSION}`,
+      `operator ${PLUGIN_VERSION} (ghcr.io/mariuz/cloudnative-firebird:${PLUGIN_VERSION}; 2/2 ready; cloudnative-firebird-system/cloudnative-firebird-operator)`,
+    ]);
+    expect(api.listDeployments).toHaveBeenCalledWith('cloudnative-firebird-system', 'app.kubernetes.io/name=cloudnative-firebird,app.kubernetes.io/component=operator');
+    expect(errs).toEqual([]);
+    // another version of the operator: a warning; a CI or digest image: none
+    api.listDeployments.mockResolvedValue([{ metadata: { name: 'op' }, spec: { replicas: 1, template: { spec: { containers: [{ image: 'ghcr.io/mariuz/cloudnative-firebird:0.1.0' }] } } }, status: { readyReplicas: 0 } }]);
+    expect(await exec('version', '--operator-namespace', 'ops')).toBe(0);
+    expect(api.listDeployments).toHaveBeenLastCalledWith('ops', expect.any(String));
+    expect(out.at(-1)).toBe('operator 0.1.0 (ghcr.io/mariuz/cloudnative-firebird:0.1.0; 0/1 ready; ops/op)');
+    expect(errs.at(-1)).toBe(`warning: the plugin (${PLUGIN_VERSION}) and the operator (0.1.0) differ: use the plugin of the operator's version`);
+    api.listDeployments.mockResolvedValue([{ metadata: { name: 'op' }, spec: { replicas: 2, template: { spec: { containers: [{ image: 'cloudnative-firebird:ci' }] } } }, status: { readyReplicas: 2 } }]);
+    expect(await exec('version')).toBe(0);
+    expect(out.at(-1)).toBe('operator ci (cloudnative-firebird:ci; 2/2 ready; cloudnative-firebird-system/op)');
+    expect(errs).toHaveLength(1);
+    // no operator, or no access: said, without failing
+    api.listDeployments.mockResolvedValue([]);
+    expect(await exec('version')).toBe(0);
+    expect(out.at(-1)).toBe('operator: none in namespace cloudnative-firebird-system (--operator-namespace selects another)');
+    api.listDeployments.mockRejectedValue(Object.assign(new Error('x'), { code: 403, body: '{"message":"deployments.apps is forbidden"}' }));
+    expect(await exec('version')).toBe(0);
+    expect(out.at(-1)).toMatch(/^operator: cannot read the Deployments of namespace cloudnative-firebird-system \(deployments.apps is forbidden\)/);
+    // the version an image carries
+    expect(imageVersion('ghcr.io/mariuz/cloudnative-firebird:0.130.0')).toBe('0.130.0');
+    expect(imageVersion('localhost:5000/cloudnative-firebird:ci')).toBe('ci');
+    expect(imageVersion('localhost:5000/cloudnative-firebird')).toBe('latest');
+    expect(imageVersion('ghcr.io/mariuz/cloudnative-firebird@sha256:abc')).toBe('unknown');
+    expect(imageVersion('ghcr.io/mariuz/cloudnative-firebird:0.130.0@sha256:abc')).toBe('0.130.0');
   });
 
   it('prints usage, and fails on unknown commands', async () => {

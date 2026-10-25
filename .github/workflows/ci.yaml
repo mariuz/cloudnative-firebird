@@ -398,7 +398,9 @@ jobs:
           mkdir -p /tmp/plugin-bin && ln -sf "$PWD/operator/dist/plugin/kubectl-firebird.js" /tmp/plugin-bin/kubectl-firebird
           export PATH=/tmp/plugin-bin:$PATH
           kubectl plugin list 2>/dev/null | grep -q kubectl-firebird
-          kubectl firebird version
+          kubectl firebird version | tee /tmp/plugin-version.txt
+          grep -qE '^kubectl-firebird [0-9]+\.[0-9]+\.[0-9]+$' /tmp/plugin-version.txt
+          grep -qE '^operator ci \(cloudnative-firebird:ci; [12]/2 ready; cloudnative-firebird-system/cloudnative-firebird-operator\)$' /tmp/plugin-version.txt
           kubectl firebird status repl | tee /tmp/plugin-status.txt
           primary=$(kubectl get firebirdcluster repl -o jsonpath={.status.replicationStatus.primaryPod})
           grep -qE "^Primary: +$primary$" /tmp/plugin-status.txt
@@ -639,7 +641,7 @@ jobs:
           [ "$(count restore-from-logical.fdb)" = "30" ]
           # without replication the backup file server answers (test-cluster)
           kubectl exec test-cluster-0 -c firebird -- touch $DB_DIR/stale.fdb
-          out=$(kubectl apply -f - 2>&1 <<'EOF' || true
+          cat > /tmp/over-stale.yaml <<'EOF'
           apiVersion: firebird.cloudnative-firebird.io/v1
           kind: FirebirdRestore
           metadata:
@@ -649,7 +651,14 @@ jobs:
             backupPath: whatever.fbk
             targetDatabase: stale.fdb
           EOF
-          ); echo "$out"
+          # the webhook's objectSelector was just removed again: until the API server picks the
+          # configuration up, an apply is admitted (the operator then fails it); retried until denied
+          for i in $(seq 1 20); do
+            out=$(kubectl apply -f /tmp/over-stale.yaml 2>&1 || true)
+            echo "$out" | grep -q 'denied the request' && break
+            kubectl delete firebirdrestore over-stale --ignore-not-found >/dev/null; sleep 3
+          done
+          echo "$out"
           echo "$out" | grep -q 'denied the request: targetDatabase stale.fdb already exists on test-cluster-0'
           kubectl exec test-cluster-0 -c firebird -- rm $DB_DIR/stale.fdb
           echo "restores into existing targets are refused"
@@ -2630,7 +2639,8 @@ jobs:
           # paused with the annotation (kubectl firebird reconcile off): the phase, an event, the status line
           kubectl firebird reconcile off paused
           timeout 60 bash -c 'until [ "$(kubectl get firebirdcluster paused -o jsonpath={.status.phase})" = Paused ]; do sleep 2; done'
-          kubectl get events --field-selector involvedObject.name=paused,reason=ReconciliationPaused -o name | grep -q .
+          # the event follows the status by a moment
+          timeout 60 bash -c 'until kubectl get events --field-selector involvedObject.name=paused,reason=ReconciliationPaused -o name | grep -q .; do sleep 2; done'
           kubectl firebird status paused | tee /dev/stderr | grep -q '^Paused: .*reconciliationLoop annotation'
           # a spec change is not applied while paused, across several resyncs
           kubectl patch firebirdcluster paused --type merge -p '{"spec":{"env":[{"name":"PAUSE_TEST","value":"1"}]}}'
@@ -2641,7 +2651,7 @@ jobs:
           # resumed: the change is applied
           kubectl firebird reconcile on paused
           timeout 180 bash -c 'until kubectl get statefulset paused -o jsonpath="{.spec.template.spec.containers[0].env}" | grep -q PAUSE_TEST; do sleep 3; done'
-          kubectl get events --field-selector involvedObject.name=paused,reason=ReconciliationResumed -o name | grep -q .
+          timeout 60 bash -c 'until kubectl get events --field-selector involvedObject.name=paused,reason=ReconciliationResumed -o name | grep -q .; do sleep 2; done'
           if kubectl firebird status paused | grep -q '^Paused:'; then echo "still reported paused"; exit 1; fi
           kubectl delete firebirdcluster paused --wait=true --timeout=300s
           kubectl wait --for=delete pod/paused-0 --timeout=300s || true

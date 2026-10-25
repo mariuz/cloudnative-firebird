@@ -1,4 +1,4 @@
-import { CoreV1Event, dumpYaml, V1Job, V1PersistentVolumeClaim, V1Pod, V1Service, V1StatefulSet } from '@kubernetes/client-node';
+import { CoreV1Event, dumpYaml, V1Deployment, V1Job, V1PersistentVolumeClaim, V1Pod, V1Service, V1StatefulSet } from '@kubernetes/client-node';
 import { API_GROUP, API_VERSION, RECONCILIATION_DISABLED_ANNOTATION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdScheduledBackup } from '../types';
 import { isPodReady, ROLE_LABEL } from '../utils/routing';
 import { nextCronTime } from '../utils/cron';
@@ -13,7 +13,7 @@ import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/s
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.130.0';
+export const PLUGIN_VERSION = '0.131.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -43,6 +43,8 @@ export interface PluginApi {
   createBackup(namespace: string, body: FirebirdBackup): Promise<void>;
   createRestore(namespace: string, body: FirebirdRestore): Promise<void>;
   createJob(namespace: string, body: V1Job): Promise<void>;
+  /** version: the operator's Deployments */
+  listDeployments(namespace: string, labelSelector: string): Promise<V1Deployment[]>;
   /** report */
   getStatefulSet(namespace: string, name: string): Promise<V1StatefulSet>;
   listServices(namespace: string, labelSelector: string): Promise<V1Service[]>;
@@ -103,7 +105,7 @@ Commands:
   report <cluster> [--output dir] [--operator-namespace ns] [--no-logs]
                                             a support bundle: the cluster's resources, status, events,
                                             instance logs and the operator's log lines about it
-  version                                   the plugin's version
+  version [--operator-namespace ns]         the plugin's version, and the operator's (its Deployment's image)
 
 An instance is its pod name (my-cluster-1) or its ordinal (1).`;
 
@@ -409,6 +411,39 @@ function need(parsed: Parsed, count: number, usage: string): string[] {
   return parsed.positional.slice(1);
 }
 
+/** The version an image reference carries as its tag (`latest` without one; a digest alone has none) */
+export function imageVersion(image: string): string {
+  const [ref] = image.split('@');
+  const tag = ref.slice(ref.lastIndexOf('/') + 1).split(':')[1];
+  return tag ?? (ref === image ? 'latest' : 'unknown');
+}
+
+/**
+ * The operator's version from its Deployments (`app.kubernetes.io/name=cloudnative-firebird`,
+ * component operator) in a namespace, one line each, and a warning when the plugin's version and
+ * the operator's are both releases that differ.
+ */
+export async function operatorVersion(api: PluginApi, namespace: string): Promise<{ lines: string[]; warning?: string }> {
+  let deployments: V1Deployment[];
+  try {
+    deployments = await api.listDeployments(namespace, `${OPERATOR_SELECTOR},app.kubernetes.io/component=operator`);
+  } catch (err) {
+    return { lines: [`operator: cannot read the Deployments of namespace ${namespace} (${apiErrorMessage(err)}); --operator-namespace selects another`] };
+  }
+  if (deployments.length === 0) return { lines: [`operator: none in namespace ${namespace} (--operator-namespace selects another)`] };
+  const lines: string[] = [];
+  let warning: string | undefined;
+  for (const d of deployments) {
+    const image = d.spec?.template?.spec?.containers?.[0]?.image ?? 'unknown';
+    const version = imageVersion(image);
+    lines.push(`operator ${version} (${image}; ${d.status?.readyReplicas ?? 0}/${d.spec?.replicas ?? 0} ready; ${namespace}/${d.metadata?.name})`);
+    if (/^\d+\.\d+\.\d+$/.test(version) && version !== PLUGIN_VERSION) {
+      warning = `warning: the plugin (${PLUGIN_VERSION}) and the operator (${version}) differ: use the plugin of the operator's version`;
+    }
+  }
+  return { lines, warning };
+}
+
 function onOff(value: string, usage: string): boolean {
   if (value === 'on') return true;
   if (value === 'off') return false;
@@ -445,9 +480,14 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
     const context = parsed.flags.get('context') as string | undefined;
 
     switch (command) {
-      case 'version':
+      case 'version': {
         io.out(`kubectl-firebird ${PLUGIN_VERSION}`);
+        const operatorNamespace = (parsed.flags.get('operator-namespace') as string | undefined) ?? OPERATOR_NAMESPACE;
+        const { lines, warning } = await operatorVersion(api, operatorNamespace);
+        for (const line of lines) io.out(line);
+        if (warning) io.err(warning);
         return 0;
+      }
 
       case 'status': {
         const [name] = need(parsed, 1, 'status <cluster>');

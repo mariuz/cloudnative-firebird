@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **The operator's version from the plugin** *(v0.131.0; CloudNativePG's `kubectl cnpg version`)*
+  - `kubectl firebird version` also reports the operator: the version its Deployment's image carries (the tag; `latest` or `unknown` for a digest), the ready replicas and the Deployment, from the Deployments labelled as the operator in `cloudnative-firebird-system` (`--operator-namespace` for another), and warns when the plugin's and the operator's release versions differ; no operator or no access is said without failing. Unit tests cover the lines, the warning, the image tag parsing and the failures; the kind CI checks the line for the CI image.
 - [x] **Suspending a schedule from the plugin** *(v0.130.0)*
   - `kubectl firebird schedule on|off <cluster> <schedule>` resumes or suspends one of the cluster's `FirebirdScheduledBackup`s (`spec.suspend`, like `hibernate on|off`); another cluster's schedule or a missing one is refused. Unit tests cover both directions and the refusals; the kind CI suspends and resumes a schedule and checks `kubectl firebird backups` follows (`SUSPENDED`, the next run).
 - [x] **Release notes from the roadmap** *(v0.129.0)*
