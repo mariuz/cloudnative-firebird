@@ -507,12 +507,17 @@ jobs:
           # report: a support bundle
           kubectl firebird report repl -o /tmp/plugin-report | tee /tmp/plugin-report.txt
           grep -q 'report of cluster repl written to /tmp/plugin-report/' /tmp/plugin-report.txt
-          for f in status.txt cluster.yaml statefulset.yaml pods.yaml services.yaml pvcs.yaml events.txt backups.yaml operator.log "logs/$replica-replication-init.log"; do
+          for f in status.txt versions.txt cluster.yaml statefulset.yaml pods.yaml services.yaml pvcs.yaml events.txt backups.yaml operator.log "logs/$replica-replication-init.log"; do
             [ -s "/tmp/plugin-report/$f" ] || { echo "report: $f missing or empty"; ls -R /tmp/plugin-report; cat /tmp/plugin-report/errors.txt 2>/dev/null; exit 1; }
           done
           grep -qE "^Primary: +$primary$" /tmp/plugin-report/status.txt
           grep -q 'plugin-backup' /tmp/plugin-report/backups.yaml
           grep -q '"cluster":"repl"' /tmp/plugin-report/operator.log
+          cat /tmp/plugin-report/versions.txt
+          grep -qE '^operator ci \(cloudnative-firebird:ci; [12]/2 ready; ' /tmp/plugin-report/versions.txt
+          grep -qE '^kubernetes v1\.[0-9]+\.[0-9]+' /tmp/plugin-report/versions.txt
+          grep -qE "^firebird $(kubectl get firebirdcluster repl -o jsonpath={.status.image}) \(status.image\)$" /tmp/plugin-report/versions.txt
+          grep -qE "^  $primary: " /tmp/plugin-report/versions.txt
           if grep -rq managedFields /tmp/plugin-report; then echo "managedFields in the report"; exit 1; fi
           ls /tmp/plugin-report /tmp/plugin-report/logs
           kubectl delete firebirdbackup plugin-backup

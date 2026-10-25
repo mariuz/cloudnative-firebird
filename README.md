@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.131.0/cloudnative-firebird-0.131.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.132.0/cloudnative-firebird-0.132.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.131.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.132.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.131.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.132.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -311,7 +311,7 @@ kubectl plugin list | grep firebird
 | `kubectl firebird isql my-cluster [--replica\|--instance 1] [-- isql args]` | Runs `isql` in the `firebird` container (`kubectl exec`; `-it` from a terminal, so a script can be piped in) as SYSDBA, through the container's credentials. |
 | `kubectl firebird logs my-cluster [--instance 1] [--container c] [--tail n] [-f]` | The logs of every instance at once, each line prefixed with its pod (`kubectl logs -l ... --prefix`), or of one instance. The `firebird` container by default; `--container` takes a sidecar or init container (`replication-init`, `segment-server`, ...). Since v0.99.0. |
 | `kubectl firebird destroy my-cluster 2` | Deletes a replica's pod and volume; the operator creates a new volume and seeds it from the primary (the `reseed=volume` annotation, see Re-seeding a Replica). The primary, clusters without replication (the instance would come back empty) and hibernated clusters are refused. Since v0.99.0. |
-| `kubectl firebird report my-cluster [-o dir] [--operator-namespace ns] [--no-logs]` | Writes a support bundle to a new directory (`report-<cluster>-<time>` by default): the status report; the cluster, StatefulSet, pods, Services, PVCs, backups, schedules and databases as YAML; the cluster's events; every container's log of each instance; and the operator's log lines about the cluster (from `cloudnative-firebird-system` by default). Secrets are never read, literal credentials in environment variables (e.g. the default `masterkey`) are redacted and `managedFields` left out. What cannot be read (RBAC, a missing CRD) is listed in `errors.txt`. Since v0.99.0. |
+| `kubectl firebird report my-cluster [-o dir] [--operator-namespace ns] [--no-logs]` | Writes a support bundle to a new directory (`report-<cluster>-<time>` by default): the status report; `versions.txt` with the plugin's, the operator's and the Kubernetes server's versions and the images the instances run (since v0.132.0); the cluster, StatefulSet, pods, Services, PVCs, backups, schedules and databases as YAML; the cluster's events; every container's log of each instance; and the operator's log lines about the cluster (from `cloudnative-firebird-system` by default). Secrets are never read, literal credentials in environment variables (e.g. the default `masterkey`) are redacted and `managedFields` left out. What cannot be read (RBAC, a missing CRD) is listed in `errors.txt`. Since v0.99.0. |
 
 An instance is named by its pod name or its ordinal. Wrong arguments exit with 2 and API errors
 with 1, showing the API server's message.

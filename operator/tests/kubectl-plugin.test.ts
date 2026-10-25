@@ -5,6 +5,7 @@ import {
   FENCED_INSTANCES_ANNOTATION,
   formatBackups,
   formatStatus,
+  formatVersions,
   imageVersion,
   nextFencedList,
   parseArgs,
@@ -74,6 +75,7 @@ describe('kubectl firebird', () => {
       createBackup: vi.fn().mockResolvedValue(undefined),
       createRestore: vi.fn().mockResolvedValue(undefined),
       createJob: vi.fn().mockResolvedValue(undefined),
+      serverVersion: vi.fn().mockResolvedValue('v1.34.1'),
       listDeployments: vi.fn().mockResolvedValue([
         { metadata: { name: 'cloudnative-firebird-operator' }, spec: { replicas: 2, template: { spec: { containers: [{ image: `ghcr.io/mariuz/cloudnative-firebird:${PLUGIN_VERSION}` }] } } }, status: { readyReplicas: 2 } },
       ]),
@@ -472,8 +474,19 @@ describe('kubectl firebird', () => {
     expect([...files.keys()].map((k) => k.slice(dir.length + 1)).sort()).toEqual([
       'backups.yaml', 'cluster.yaml', 'databases.yaml', 'errors.txt', 'events.txt',
       'logs/db-0-firebird.log', 'logs/db-0-segment-tls.log', 'operator.log', 'pods.yaml', 'scheduled-backups.yaml',
-      'services.yaml', 'statefulset.yaml', 'status.txt',
+      'services.yaml', 'statefulset.yaml', 'status.txt', 'versions.txt',
     ]);
+    // what was running: the plugin, the operator, Kubernetes, the images
+    pods[0].spec!.containers[0].image = 'firebirdsql/firebird:5.0.4';
+    expect(files.get(`${dir}/versions.txt`)).toBe(
+      [
+        `kubectl-firebird ${PLUGIN_VERSION}`,
+        `operator ${PLUGIN_VERSION} (ghcr.io/mariuz/cloudnative-firebird:${PLUGIN_VERSION}; 2/2 ready; cloudnative-firebird-system/cloudnative-firebird-operator)`,
+        'kubernetes v1.34.1',
+        'firebird unknown (status.image)',
+        '',
+      ].join('\n'),
+    );
     expect(files.get(`${dir}/pods.yaml`)).toContain('value: <redacted>');
     expect(files.get(`${dir}/pods.yaml`)).not.toContain('masterkey');
     expect(files.get(`${dir}/pods.yaml`)).toContain('value: SYSDBA');
@@ -483,7 +496,14 @@ describe('kubectl firebird', () => {
     expect(files.get(`${dir}/status.txt`)).toContain('Cluster:      prod/db');
     expect(files.get(`${dir}/operator.log`)).toBe('# cloudnative-firebird-system/op-1\n{"msg":"a","cluster":"db","namespace":"prod"}\n');
     expect(files.get(`${dir}/errors.txt`)).toBe('pvcs.yaml: persistentvolumeclaims is forbidden\n');
-    expect(out.at(-1)).toBe(`report of cluster db written to ${dir}/ (12 files; 1 could not be collected: see errors.txt)`);
+    expect(out.at(-1)).toBe(`report of cluster db written to ${dir}/ (13 files; 1 could not be collected: see errors.txt)`);
+    // the images, and a server version that cannot be read, in versions.txt
+    cluster.status = { ...cluster.status, image: 'firebirdsql/firebird:5.0.4' };
+    api.serverVersion.mockRejectedValue(Object.assign(new Error('x'), { code: 403, body: '{"message":"version is forbidden"}' }));
+    const versions = await formatVersions(api as unknown as PluginApi, 'ops', cluster, pods);
+    expect(versions).toContain('kubernetes: cannot read the server version (version is forbidden)');
+    expect(versions).toContain('firebird firebirdsql/firebird:5.0.4 (status.image)\n  db-0: firebirdsql/firebird:5.0.4\n');
+    expect(api.listDeployments).toHaveBeenLastCalledWith('ops', expect.any(String));
 
     // an existing directory is not overwritten; --no-logs leaves the logs out
     expect(await exec('report', 'db')).toBe(1);

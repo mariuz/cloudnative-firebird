@@ -8,6 +8,7 @@ import {
   KubeConfig,
   PatchStrategy,
   setHeaderOptions,
+  VersionApi,
 } from '@kubernetes/client-node';
 import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdScheduledBackup } from '../types';
 import { PluginApi, run } from './cli';
@@ -33,6 +34,7 @@ function kubeApi(kubeConfig: KubeConfig): PluginApi {
   const core = kubeConfig.makeApiClient(CoreV1Api);
   const apps = kubeConfig.makeApiClient(AppsV1Api);
   const batch = kubeConfig.makeApiClient(BatchV1Api);
+  const version = kubeConfig.makeApiClient(VersionApi);
   const crd = (namespace: string, plural: string) => ({ group: API_GROUP, version: API_VERSION, namespace, plural });
   return {
     getCluster: async (namespace, name) =>
@@ -70,6 +72,7 @@ function kubeApi(kubeConfig: KubeConfig): PluginApi {
       await custom.createNamespacedCustomObject({ ...crd(namespace, 'firebirdrestores'), body });
     },
     listDeployments: async (namespace, labelSelector) => (await apps.listNamespacedDeployment({ namespace, labelSelector })).items,
+    serverVersion: async () => (await version.getCode()).gitVersion,
     getStatefulSet: (namespace, name) => apps.readNamespacedStatefulSet({ namespace, name }),
     listServices: async (namespace, labelSelector) => (await core.listNamespacedService({ namespace, labelSelector })).items,
     listClaims: async (namespace, labelSelector) => (await core.listNamespacedPersistentVolumeClaim({ namespace, labelSelector })).items,

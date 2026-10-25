@@ -13,7 +13,7 @@ import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/s
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.131.0';
+export const PLUGIN_VERSION = '0.132.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -45,6 +45,8 @@ export interface PluginApi {
   createJob(namespace: string, body: V1Job): Promise<void>;
   /** version: the operator's Deployments */
   listDeployments(namespace: string, labelSelector: string): Promise<V1Deployment[]>;
+  /** report: the Kubernetes server's version (gitVersion) */
+  serverVersion(): Promise<string>;
   /** report */
   getStatefulSet(namespace: string, name: string): Promise<V1StatefulSet>;
   listServices(namespace: string, labelSelector: string): Promise<V1Service[]>;
@@ -444,6 +446,28 @@ export async function operatorVersion(api: PluginApi, namespace: string): Promis
   return { lines, warning };
 }
 
+/**
+ * The report's versions.txt: the plugin, the operator (as `version` prints it), the Kubernetes
+ * server, and the images the cluster runs (status.image, and each instance pod's firebird container)
+ */
+export async function formatVersions(api: PluginApi, operatorNamespace: string, cluster: FirebirdCluster, pods: V1Pod[]): Promise<string> {
+  const lines = [`kubectl-firebird ${PLUGIN_VERSION}`];
+  const operator = await operatorVersion(api, operatorNamespace);
+  lines.push(...operator.lines);
+  if (operator.warning) lines.push(operator.warning);
+  try {
+    lines.push(`kubernetes ${await api.serverVersion()}`);
+  } catch (err) {
+    lines.push(`kubernetes: cannot read the server version (${apiErrorMessage(err)})`);
+  }
+  lines.push(`firebird ${cluster.status?.image ?? cluster.spec.imageName ?? 'unknown'} (status.image)`);
+  for (const pod of pods) {
+    const image = pod.spec?.containers?.find((c) => c.name === 'firebird')?.image;
+    if (image) lines.push(`  ${pod.metadata?.name}: ${image}`);
+  }
+  return `${lines.join('\n')}\n`;
+}
+
 function onOff(value: string, usage: string): boolean {
   if (value === 'on') return true;
   if (value === 'off') return false;
@@ -832,6 +856,8 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
           api.listDatabases(namespace).catch(() => [] as FirebirdDatabase[]),
         ]);
         await file('status.txt', async () => `${formatStatus(cluster, pods, backups, scheduled, io.now(), databases)}\n`);
+        const operatorNamespace = (parsed.flags.get('operator-namespace') as string | undefined) ?? OPERATOR_NAMESPACE;
+        await file('versions.txt', () => formatVersions(api, operatorNamespace, cluster, pods));
         await file('cluster.yaml', async () => dumpYaml(sanitize(cluster)));
         await file('statefulset.yaml', async () => dumpYaml(sanitize(await api.getStatefulSet(namespace, name))));
         await file('pods.yaml', async () => listYaml(pods));
@@ -849,7 +875,6 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
               await file(`logs/${podName}-${container}.log`, () => api.readPodLog(namespace, podName, container));
             }
           }
-          const operatorNamespace = (parsed.flags.get('operator-namespace') as string | undefined) ?? OPERATOR_NAMESPACE;
           await file('operator.log', async () => {
             const operators = await api.listPods(operatorNamespace, OPERATOR_SELECTOR);
             if (operators.length === 0) throw new Error(`no operator pod in namespace ${operatorNamespace} (--operator-namespace)`);
