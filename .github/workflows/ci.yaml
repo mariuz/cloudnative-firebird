@@ -641,7 +641,7 @@ jobs:
           [ "$(count restore-from-logical.fdb)" = "30" ]
           # without replication the backup file server answers (test-cluster)
           kubectl exec test-cluster-0 -c firebird -- touch $DB_DIR/stale.fdb
-          out=$(kubectl apply -f - 2>&1 <<'EOF' || true
+          cat > /tmp/over-stale.yaml <<'EOF'
           apiVersion: firebird.cloudnative-firebird.io/v1
           kind: FirebirdRestore
           metadata:
@@ -651,7 +651,14 @@ jobs:
             backupPath: whatever.fbk
             targetDatabase: stale.fdb
           EOF
-          ); echo "$out"
+          # the webhook's objectSelector was just removed again: until the API server picks the
+          # configuration up, an apply is admitted (the operator then fails it); retried until denied
+          for i in $(seq 1 20); do
+            out=$(kubectl apply -f /tmp/over-stale.yaml 2>&1 || true)
+            echo "$out" | grep -q 'denied the request' && break
+            kubectl delete firebirdrestore over-stale --ignore-not-found >/dev/null; sleep 3
+          done
+          echo "$out"
           echo "$out" | grep -q 'denied the request: targetDatabase stale.fdb already exists on test-cluster-0'
           kubectl exec test-cluster-0 -c firebird -- rm $DB_DIR/stale.fdb
           echo "restores into existing targets are refused"
