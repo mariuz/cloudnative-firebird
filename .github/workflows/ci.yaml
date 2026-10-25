@@ -398,7 +398,9 @@ jobs:
           mkdir -p /tmp/plugin-bin && ln -sf "$PWD/operator/dist/plugin/kubectl-firebird.js" /tmp/plugin-bin/kubectl-firebird
           export PATH=/tmp/plugin-bin:$PATH
           kubectl plugin list 2>/dev/null | grep -q kubectl-firebird
-          kubectl firebird version
+          kubectl firebird version | tee /tmp/plugin-version.txt
+          grep -qE '^kubectl-firebird [0-9]+\.[0-9]+\.[0-9]+$' /tmp/plugin-version.txt
+          grep -qE '^operator ci \(cloudnative-firebird:ci; [12]/2 ready; cloudnative-firebird-system/cloudnative-firebird-operator\)$' /tmp/plugin-version.txt
           kubectl firebird status repl | tee /tmp/plugin-status.txt
           primary=$(kubectl get firebirdcluster repl -o jsonpath={.status.replicationStatus.primaryPod})
           grep -qE "^Primary: +$primary$" /tmp/plugin-status.txt

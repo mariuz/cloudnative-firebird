@@ -69,6 +69,7 @@ function kubeApi(kubeConfig: KubeConfig): PluginApi {
     createRestore: async (namespace, body) => {
       await custom.createNamespacedCustomObject({ ...crd(namespace, 'firebirdrestores'), body });
     },
+    listDeployments: async (namespace, labelSelector) => (await apps.listNamespacedDeployment({ namespace, labelSelector })).items,
     getStatefulSet: (namespace, name) => apps.readNamespacedStatefulSet({ namespace, name }),
     listServices: async (namespace, labelSelector) => (await core.listNamespacedService({ namespace, labelSelector })).items,
     listClaims: async (namespace, labelSelector) => (await core.listNamespacedPersistentVolumeClaim({ namespace, labelSelector })).items,
