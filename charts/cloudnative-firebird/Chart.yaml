@@ -3,8 +3,8 @@ name: cloudnative-firebird
 description: Kubernetes operator for Firebird SQL, after CloudNativePG (replication, failover, backups, point-in-time recovery, declarative users)
 type: application
 # both follow the operator's version (hack/release/version.sh)
-version: 0.132.0
-appVersion: "0.132.0"
+version: 0.133.0
+appVersion: "0.133.0"
 kubeVersion: ">=1.25.0-0"
 home: https://github.com/mariuz/cloudnative-firebird
 sources:

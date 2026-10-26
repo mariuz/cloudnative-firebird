@@ -3,6 +3,7 @@ import { FirebirdBackupController } from '../src/controllers/backup.controller';
 import { KubeConfig, BatchV1Api, CoordinationV1Api, CustomObjectsApi, V1Job } from '@kubernetes/client-node';
 import { FirebirdBackup, FirebirdScheduledBackup, FirebirdRestore, FirebirdCluster } from '../src/types';
 import { ValidationError } from '../src/utils/validation';
+import { EventRecorder } from '../src/utils/events';
 
 const notFound = Object.assign(new Error('not found'), { code: 404 });
 
@@ -353,20 +354,47 @@ describe('FirebirdBackupController', () => {
         cronJobName: 'sched-backup-nightly-backup',
         lastCheckTime: expect.any(String),
         nextScheduleTime: expect.stringMatching(/T02:00:00\.000Z$/),
+        suspended: false,
       });
       expect(new Date(lastStatus().nextScheduleTime).getTime()).toBeGreaterThan(new Date(lastStatus().lastCheckTime).getTime());
     });
 
     it('records the check without a next time while suspended', async () => {
       await controller.reconcileScheduledBackup({ ...scheduled, spec: { ...scheduled.spec, suspend: true } });
-      expect(lastStatus()).toEqual({ cronJobName: 'sched-backup-nightly-backup', lastCheckTime: expect.any(String) });
+      expect(lastStatus()).toEqual({ cronJobName: 'sched-backup-nightly-backup', lastCheckTime: expect.any(String), suspended: true });
       // a suspended schedule loses the next time it had
       await controller.reconcileScheduledBackup({
         ...scheduled,
         spec: { ...scheduled.spec, suspend: true },
         status: { cronJobName: 'sched-backup-nightly-backup', nextScheduleTime: '2026-01-03T02:00:00.000Z' },
       });
-      expect(lastStatus()).toEqual({ cronJobName: 'sched-backup-nightly-backup', lastCheckTime: expect.any(String) });
+      expect(lastStatus()).toEqual({ cronJobName: 'sched-backup-nightly-backup', lastCheckTime: expect.any(String), suspended: true });
+    });
+
+    it('records an event when the schedule is suspended or resumed, not on its first check', async () => {
+      const record = vi.spyOn(EventRecorder.prototype, 'record').mockResolvedValue(undefined);
+      const reasons = () => record.mock.calls.map((c) => c[2]);
+      // the first check: the state is recorded, no event
+      await controller.reconcileScheduledBackup({ ...scheduled, spec: { ...scheduled.spec, suspend: true } });
+      expect(lastStatus().suspended).toBe(true);
+      expect(reasons()).toEqual([]);
+      // unchanged: nothing
+      await controller.reconcileScheduledBackup({ ...scheduled, spec: { ...scheduled.spec, suspend: true }, status: { suspended: true } });
+      expect(reasons()).toEqual([]);
+      // resumed, with the next time
+      await controller.reconcileScheduledBackup({ ...scheduled, status: { suspended: true } });
+      expect(record).toHaveBeenLastCalledWith(
+        expect.objectContaining({ kind: 'FirebirdScheduledBackup', metadata: scheduled.metadata }),
+        'Normal',
+        'ScheduleResumed',
+        expect.stringMatching(/^schedule 0 2 \* \* \* resumed: next backup at \d{4}-\d\d-\d\dT02:00:00\.000Z$/),
+      );
+      expect(lastStatus().suspended).toBe(false);
+      // suspended again
+      await controller.reconcileScheduledBackup({ ...scheduled, spec: { ...scheduled.spec, suspend: true }, status: { suspended: false } });
+      expect(record).toHaveBeenLastCalledWith(expect.anything(), 'Normal', 'ScheduleSuspended', 'schedule 0 2 * * * suspended: no backups until it is resumed');
+      expect(reasons()).toEqual(['ScheduleResumed', 'ScheduleSuspended']);
+      record.mockRestore();
     });
 
     it("backs up a FirebirdDatabase's file on schedule", async () => {
@@ -396,6 +424,7 @@ describe('FirebirdBackupController', () => {
         lastSuccessfulTime: '2026-01-02T02:01:00.000Z',
         lastCheckTime: expect.any(String),
         nextScheduleTime: expect.stringMatching(/T02:00:00\.000Z$/),
+        suspended: false,
       });
     });
   });

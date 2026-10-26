@@ -90,6 +90,8 @@ export const EventReason = {
   BackupStarted: 'BackupStarted',
   BackupCompleted: 'BackupCompleted',
   BackupFailed: 'BackupFailed',
+  ScheduleSuspended: 'ScheduleSuspended',
+  ScheduleResumed: 'ScheduleResumed',
   RestoreStarted: 'RestoreStarted',
   RestoreCompleted: 'RestoreCompleted',
   RestoreFailed: 'RestoreFailed',

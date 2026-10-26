@@ -193,6 +193,9 @@ spec:
                   description: When the operator last checked the schedule
                   type: string
                   format: date-time
+                suspended:
+                  description: spec.suspend as of the last check (a change records a ScheduleSuspended or ScheduleResumed event)
+                  type: boolean
                 nextScheduleTime:
                   description: The next scheduled time (UTC); unset while the schedule is suspended
                   type: string
