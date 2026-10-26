@@ -278,6 +278,8 @@ export interface FirebirdScheduledBackupStatus {
   lastBackupName?: string;
   /** When the operator last checked the schedule (CloudNativePG's lastCheckTime) */
   lastCheckTime?: string;
+  /** spec.suspend as of that check: a change records a ScheduleSuspended or ScheduleResumed event */
+  suspended?: boolean;
   /** The next scheduled time (UTC), unset while the schedule is suspended (CloudNativePG's nextScheduleTime) */
   nextScheduleTime?: string;
 }

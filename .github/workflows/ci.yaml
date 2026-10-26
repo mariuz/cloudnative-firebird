@@ -454,6 +454,13 @@ jobs:
           kubectl firebird backups repl | grep -qE '^plugin-schedule +0 3 \* \* \* +logical +no +[0-9]+s ago +- +in [0-9]+[smh]$'
           kubectl firebird schedule off repl plugin-schedule | grep -q 'suspended'
           [ "$(kubectl get firebirdscheduledbackup plugin-schedule -o jsonpath={.spec.suspend})" = true ]
+          # each change is an event on the schedule (created suspended: none for its first check)
+          sched_events() { kubectl get events --field-selector involvedObject.kind=FirebirdScheduledBackup,involvedObject.name=plugin-schedule -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}'; }
+          for i in $(seq 1 30); do sched_events | grep -qx ScheduleSuspended && break; sleep 2; done
+          sched_events | grep -qx ScheduleSuspended || { sched_events; exit 1; }
+          sched_events | grep -qx ScheduleResumed
+          kubectl get events --field-selector involvedObject.name=plugin-schedule,reason=ScheduleResumed -o jsonpath='{.items[0].message}' | grep -q 'resumed: next backup at '
+          [ "$(kubectl get firebirdscheduledbackup plugin-schedule -o jsonpath={.status.suspended})" = true ]
           if kubectl firebird schedule off repl no-such-schedule 2>/tmp/plugin-err.txt; then echo "a missing schedule was accepted"; exit 1; fi
           grep -q 'no FirebirdScheduledBackup no-such-schedule' /tmp/plugin-err.txt
           kubectl delete firebirdscheduledbackup plugin-schedule

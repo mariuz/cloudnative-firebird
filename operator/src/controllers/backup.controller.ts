@@ -59,7 +59,7 @@ import { managedDatabaseName } from '../utils/databases';
 export function scheduleCheck(
   spec: { schedule: string; suspend?: boolean },
   now: Date,
-): { lastCheckTime: string; nextScheduleTime?: string } {
+): { lastCheckTime: string; nextScheduleTime?: string; suspended: boolean } {
   let nextScheduleTime: string | undefined;
   if (!spec.suspend) {
     try {
@@ -68,7 +68,7 @@ export function scheduleCheck(
       nextScheduleTime = undefined;
     }
   }
-  return { lastCheckTime: now.toISOString(), nextScheduleTime };
+  return { lastCheckTime: now.toISOString(), nextScheduleTime, suspended: Boolean(spec.suspend) };
 }
 import {
   ValidationError,
@@ -158,8 +158,8 @@ export class FirebirdBackupController {
 
   /** Records a Kubernetes event on a backup or restore */
   private event(
-    object: FirebirdBackup | FirebirdRestore,
-    kind: 'FirebirdBackup' | 'FirebirdRestore',
+    object: FirebirdBackup | FirebirdRestore | FirebirdScheduledBackup,
+    kind: 'FirebirdBackup' | 'FirebirdRestore' | 'FirebirdScheduledBackup',
     type: EventType,
     reason: string,
     message: string,
@@ -355,6 +355,7 @@ export class FirebirdBackupController {
     }
 
     validateScheduledBackupSpec(scheduledBackup);
+    await this.scheduleSuspensionEvent(scheduledBackup);
     if (scheduledBackup.spec.type === 'volumeSnapshot') {
       await this.reconcileScheduledSnapshots(scheduledBackup, log);
       return;
@@ -871,6 +872,29 @@ export class FirebirdBackupController {
 
   private updateRestoreStatus(restore: FirebirdRestore, status: NonNullable<FirebirdRestore['status']>): Promise<void> {
     return this.patchStatus('firebirdrestores', restore.metadata, restore.status, status);
+  }
+
+  /**
+   * A schedule suspended or resumed since the last check (status.suspended): an event, so kubectl
+   * describe shows when the backups were paused. The first check of a schedule records its state
+   * without one.
+   */
+  private async scheduleSuspensionEvent(scheduled: FirebirdScheduledBackup): Promise<void> {
+    const was = scheduled.status?.suspended;
+    const suspended = Boolean(scheduled.spec.suspend);
+    if (was === undefined || was === suspended) return;
+    if (suspended) {
+      await this.event(scheduled, 'FirebirdScheduledBackup', 'Normal', EventReason.ScheduleSuspended, `schedule ${scheduled.spec.schedule} suspended: no backups until it is resumed`);
+    } else {
+      const { nextScheduleTime } = scheduleCheck(scheduled.spec, new Date());
+      await this.event(
+        scheduled,
+        'FirebirdScheduledBackup',
+        'Normal',
+        EventReason.ScheduleResumed,
+        `schedule ${scheduled.spec.schedule} resumed${nextScheduleTime ? `: next backup at ${nextScheduleTime}` : ''}`,
+      );
+    }
   }
 
   private updateScheduledBackupStatus(
