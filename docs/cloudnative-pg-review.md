@@ -1,4 +1,4 @@
-# CloudNativePG review (1.28 – 1.30.1)
+# CloudNativePG review (1.28 – 1.30.1, and main to October 2026)
 
 cloudnative-firebird follows [CloudNativePG](https://github.com/cloudnative-pg/cloudnative-pg)
 where Firebird allows it. This review walks through the CloudNativePG changes from 1.28.0
@@ -75,6 +75,27 @@ Already covered or not applicable (the field, and where it lives here):
 | `managed.roles` | `FirebirdUser` and `FirebirdRole` resources |
 | `monitoring.tls`, `disableDefaultQueries`, `metricsQueriesTTL` | The exporter sidecars serve plain HTTP inside the cluster; the default metrics come from the exporter image; queries are read on every scrape |
 | Status: `currentPrimary`, `targetPrimary`, `phase`, `phaseReason`, `conditions`, `readyInstances`, `instances`, `selector`, `image`, `managedRolesStatus`, `topology`, `pvcCount`, `jobCount`, `danglingPVC`, `resizingPVC`, `firstRecoverabilityPoint`, `lastSuccessfulBackup`, `timelineID`, `systemID`, `onlineUpdateEnabled`, `switchReplicaClusterStatus` | `replicationStatus.primaryPod`, `switchover`, `phase`, `phaseReason`, `conditions`, `readyInstances`, `instances`, `selector`, `image`, the `FirebirdUser` / `FirebirdRole` statuses, `volumes`, `replicaCluster`, `majorUpgrade`, `imageCheck`; `status.lastSuccessfulBackup`, `lastFailedBackup`, `firstRecoverabilityPoint` and their `ByMethod` maps (v0.123.0), the backups' own statuses and `kubectl firebird backups`; no timeline (the journal sequence continues across promotions) |
+
+## Main branch after 1.30.1 (swept 2026-10-26)
+
+CloudNativePG has released nothing after 1.30.1 (its `v1.30.md` and `v1.29.md` end with 1.30.1
+and 1.29.3, September 23, 2026). The changes merged to its `main` branch since then, the future
+1.31, were read from the commit messages (to `10bfae1`, October 26, 2026). Open items are in
+[TODO.md](../TODO.md) ("Other roadmap items").
+
+| CloudNativePG (main, PR) | Here | Status |
+|---|---|---|
+| A replica that stops being the target primary stops renewing the primary Lease (#11677) | The `lease-holder` sidecar renews only while its pod is the primary (the role in the ConfigMap file, or the promoted marker) and its database is online: a replica never renews, whatever the target. | aligned |
+| The primary isolation check moves to the Lease: once the last renewal is `renewDeadline` old (10 of 15 s), the primary probes its peers and shuts PostgreSQL down at once, before a replica may promote (#11357) | The sidecar fences the database once the Lease could not be renewed for its whole duration, the moment it expires; the operator promotes only after that, through the election Job, so the margin is that Job's time. Fencing at a renew deadline before the expiry, as CloudNativePG now does, is an open item. The peer-based isolation check (`contactTimeoutSeconds`, v0.74.0) stays separate. | planned |
+| The liveness probe becomes a watchdog: it fails when the Lease loop stopped calling the API, or when PostgreSQL ignores an immediate shutdown for `immediateShutdownTimeout` (#11358) | Every Lease call of the sidecar is bounded by a 5 s timeout and the loop runs in a native sidecar that the kubelet restarts if it exits, so a stuck loop is not expected; the liveness probe stays a TCP check of the Firebird port. A shutdown Firebird ignores is not detected. | aligned in part |
+| A cluster recreated over the resources it left behind finds an orphan primary Lease: it is adopted, or deleted and recreated when restoring over orphan PVCs, and the operator may delete leases (#11609) | The operator creates `<cluster>-lease` only when none exists and otherwise leaves it as it is, so a cluster recreated after a deletion with orphan propagation (or a restore by a backup tool) keeps a Lease without its owner, naming the old primary: with the primary Lease on, the new primary's sidecar would fence itself if that name differs. Adopting or replacing an orphan Lease is an open item. | planned |
+| A connect timeout on the instance manager's local connections, which hung on a stopped postmaster (#11718) | The metrics exporter runs every query under `timeout` (`QUERY_TIMEOUT_SECONDS`, 10 s); the segment server's local `isql` and `fbsvcmgr` calls have none, so a hung server blocks it (the operator's own requests to it time out). Bounding them is an open item. | planned |
+| The status patches that start a Backup are conditional on the `resourceVersion` read, so a stale reconcile cannot start it twice (#11617) | Backup Jobs have deterministic names (a second create gets a conflict, which is ignored), so a backup cannot run twice; but the status is replaced from the copy the reconcile started with, so a stale copy can write an older phase back for a moment, as the fencing status could before v0.122.0. Conditional status writes are an open item. | planned |
+| A declarative role can have its password generated into a `basic-auth` Secret, with renewal (#11337) | `FirebirdUser` takes its password from an existing Secret (`passwordSecret`). Generated passwords are an open item. | planned |
+| A `cnpg-viewer-role` ClusterRole and read-only DBA RBAC samples (#11684) | No viewer role is shipped; read access is whatever the cluster's own roles grant. A `cloudnative-firebird-viewer` ClusterRole (aggregated to `view`) is an open item. | planned |
+| `kubectl cnpg status` copes with a missing `pods/exec` permission (#11687) | `kubectl firebird status` reads the API only; `isql`, `logs` and `report` need exec or logs and say so through the API's own errors. | aligned |
+| The exec timeout applies to each retry (#11651) | The operator never execs into pods (Jobs and the segment servers do the work); the plugin runs `kubectl exec` once. | n/a |
+| `pg_basebackup` `additionalArgs` and `tablespaceMapping`, image extension paths, timeline-aware barman-cloud WAL markers, the replica cluster's system ID while PostgreSQL is down, 1.31 announced as the last release with native Barman Cloud, a TLA+ model of the primary Lease | PostgreSQL- or Barman-specific; the Lease protocol here is tested by unit tests and the kind CI, not modelled. | n/a |
 
 ## Not applicable
 

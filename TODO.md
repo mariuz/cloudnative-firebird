@@ -55,4 +55,24 @@ Nothing open.
 
 ## Other roadmap items
 
-Nothing open.
+From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
+[docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md)), most important first:
+
+- [ ] **Adopt or replace an orphan primary Lease** (CloudNativePG #11609): a cluster recreated
+  over the resources a deleted one left behind (orphan propagation, a restore by a backup tool)
+  keeps `<cluster>-lease` without its owner, naming the old primary; with the primary Lease on,
+  the new primary's `lease-holder` fences itself when that name differs. Adopt the Lease (set the
+  ownerReference and the current primary), or delete and recreate it when no instance runs yet.
+- [ ] **Fence before the Lease expires** (#11357): the sidecar fences once the Lease went its whole
+  duration without a renewal, the moment a replica becomes promotable; fence at a renew deadline
+  (two thirds of the duration, as CloudNativePG's 10 of 15 s) instead.
+- [ ] **Bound the segment server's local commands** (#11718): its `isql` and `fbsvcmgr` calls to
+  the local server have no timeout, so a hung server blocks it; run them under `timeout`, as the
+  metrics exporter does.
+- [ ] **Conditional backup and restore status writes** (#11617): the status is replaced from the
+  copy a reconcile started with; test the `resourceVersion` read, as the fencing reconcile does
+  since v0.122.0, so a stale copy cannot write an older phase back.
+- [ ] **Generated passwords for `FirebirdUser`** (#11337): generate the password into a Secret
+  when none is given, with optional renewal.
+- [ ] **A viewer ClusterRole** (#11684): `cloudnative-firebird-viewer`, read-only on the
+  `firebird.cloudnative-firebird.io` resources and aggregated to `view`, with a README section.
