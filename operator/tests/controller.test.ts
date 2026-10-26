@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, type Mock } from 'vitest';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
+import { EventRecorder } from '../src/utils/events';
 import {
   AppsV1Api,
   BatchV1Api,
@@ -138,6 +139,7 @@ function makeMockKubeConfig({
   const mockCoordinationApi = {
     readNamespacedLease: vi.fn().mockRejectedValue(notFoundError),
     createNamespacedLease: vi.fn().mockResolvedValue({}),
+    patchNamespacedLease: vi.fn().mockResolvedValue({}),
   };
   // the primary Lease's Role (none: nothing to remove)
   const mockRbacApi = {
@@ -157,7 +159,7 @@ function makeMockKubeConfig({
     return {} as unknown as CoreV1Api;
   });
 
-  return { mockKubeConfig, mockCoreApi, mockAppsApi, mockBatchApi, mockCustomApi, mockPolicyApi, mockNetworkingApi };
+  return { mockKubeConfig, mockCoreApi, mockAppsApi, mockBatchApi, mockCustomApi, mockPolicyApi, mockNetworkingApi, mockCoordinationApi };
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +282,40 @@ describe('FirebirdClusterController – basic reconciliation', () => {
       const created = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0].body;
       expect(created.spec.podManagementPolicy).toBe('Parallel');
       expect(patchNamespacedStatefulSetImpl).not.toHaveBeenCalled();
+    });
+
+    it('adopts the Lease a deleted cluster of the same name left, keeping its holder as the primary', async () => {
+      const { mockKubeConfig, mockCoordinationApi } = makeMockKubeConfig();
+      const record = vi.spyOn(EventRecorder.prototype, 'record').mockResolvedValue(undefined);
+      // a cluster deleted with orphan propagation, whose primary was ordinal 1
+      mockCoordinationApi.readNamespacedLease.mockResolvedValue({ metadata: { name: 'test-cluster-lease' }, spec: { holderIdentity: 'test-cluster-1' } });
+      const cluster = makeCluster();
+      await new FirebirdClusterController(mockKubeConfig).reconcile(cluster);
+      expect(mockCoordinationApi.createNamespacedLease).not.toHaveBeenCalled();
+      const adopt = mockCoordinationApi.patchNamespacedLease.mock.calls.find((c) => c[0].body.some((op: { path: string }) => op.path === '/metadata/ownerReferences'));
+      expect(adopt?.[0]).toMatchObject({
+        name: 'test-cluster-lease',
+        namespace: 'default',
+        body: [
+          { op: 'add', path: '/metadata/ownerReferences', value: [expect.objectContaining({ kind: 'FirebirdCluster', uid: 'test-uid-1234', controller: true })] },
+          { op: 'add', path: '/metadata/labels', value: expect.objectContaining({ 'app.kubernetes.io/managed-by': 'cloudnative-firebird-operator' }) },
+        ],
+      });
+      // only the metadata: the holder is not touched
+      expect(JSON.stringify(adopt?.[0].body)).not.toContain('holderIdentity');
+      expect(record.mock.calls.find((c) => c[2] === 'LeaseAdopted')?.[3]).toBe(
+        'adopted the Lease test-cluster-lease a deleted cluster left; test-cluster-1 stays the primary',
+      );
+      record.mockRestore();
+
+      // owned by the cluster from then on: left alone
+      mockCoordinationApi.patchNamespacedLease.mockClear();
+      mockCoordinationApi.readNamespacedLease.mockResolvedValue({
+        metadata: { name: 'test-cluster-lease', ownerReferences: [{ kind: 'FirebirdCluster', uid: 'test-uid-1234', controller: true }] },
+        spec: { holderIdentity: 'test-cluster-1' },
+      });
+      await new FirebirdClusterController(mockKubeConfig).reconcile(cluster);
+      expect(mockCoordinationApi.patchNamespacedLease).not.toHaveBeenCalled();
     });
 
     it('creates the replacement on a later reconcile while the old StatefulSet is still being deleted', async () => {

@@ -1024,6 +1024,29 @@ export function buildPodMonitor(cluster: FirebirdCluster): Record<string, unknow
 /**
  * Builds the primary leader Lease resource for HA failover and election.
  */
+/**
+ * The owner and labels that adopt the cluster's Lease, or undefined when the cluster owns it
+ * already. A cluster deleted with orphan propagation (or restored by a backup tool) leaves its
+ * Lease without an owner, or with the deleted cluster's, for which the garbage collector would
+ * delete it later; a cluster recreated under the same name finds it. Its holder stays: the operator
+ * takes it as the primary, the instance whose volume held the primary's database.
+ */
+export function leaseAdoption(
+  lease: V1Lease,
+  cluster: FirebirdCluster,
+): { ownerReferences: NonNullable<V1Lease['metadata']>['ownerReferences']; labels: Record<string, string> } | undefined {
+  const uid = cluster.metadata.uid;
+  if (!uid) return undefined;
+  const refs = lease.metadata?.ownerReferences ?? [];
+  if (refs.some((r) => r.kind === RESOURCE_KIND && r.uid === uid)) return undefined;
+  const owner = buildLease(cluster).metadata!.ownerReferences![0];
+  return {
+    // another cluster's (the deleted one's) goes, and any other controller: an object has one
+    ownerReferences: [...refs.filter((r) => r.kind !== RESOURCE_KIND && !r.controller), owner],
+    labels: { ...(lease.metadata?.labels ?? {}), ...clusterLabels(cluster.metadata.name) },
+  };
+}
+
 export function buildLease(cluster: FirebirdCluster): V1Lease {
   const { name, namespace = 'default' } = cluster.metadata;
   const labels = clusterLabels(name);
