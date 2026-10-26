@@ -460,7 +460,8 @@ jobs:
           sched_events | grep -qx ScheduleSuspended || { sched_events; exit 1; }
           sched_events | grep -qx ScheduleResumed
           kubectl get events --field-selector involvedObject.name=plugin-schedule,reason=ScheduleResumed -o jsonpath='{.items[0].message}' | grep -q 'resumed: next backup at '
-          [ "$(kubectl get firebirdscheduledbackup plugin-schedule -o jsonpath={.status.suspended})" = true ]
+          # the status follows the event by a moment (the same reconcile writes it after)
+          timeout 60 bash -c 'until [ "$(kubectl get firebirdscheduledbackup plugin-schedule -o jsonpath={.status.suspended})" = true ]; do sleep 1; done'
           if kubectl firebird schedule off repl no-such-schedule 2>/tmp/plugin-err.txt; then echo "a missing schedule was accepted"; exit 1; fi
           grep -q 'no FirebirdScheduledBackup no-such-schedule' /tmp/plugin-err.txt
           kubectl delete firebirdscheduledbackup plugin-schedule
