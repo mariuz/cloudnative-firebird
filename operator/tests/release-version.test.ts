@@ -65,11 +65,20 @@ describe('the release install manifest (hack/release/bundle.sh)', () => {
       'ClusterRoleBinding',
       'Role',
       'RoleBinding',
+      'ClusterRole',
       'Service',
       'ValidatingWebhookConfiguration',
       'Deployment',
       'PodDisruptionBudget',
     ]);
+    // the read-only role for users, aggregated into the built-in view, edit and admin roles
+    const viewer = docs.find((d) => d.kind === 'ClusterRole' && d.metadata.name === 'cloudnative-firebird-viewer') as unknown as {
+      metadata: { labels: Record<string, string> };
+      rules: Array<{ apiGroups: string[]; resources: string[]; verbs: string[] }>;
+    };
+    expect(viewer).toBeDefined();
+    for (const role of ['view', 'edit', 'admin']) expect(viewer.metadata.labels[`rbac.authorization.k8s.io/aggregate-to-${role}`]).toBe('true');
+    expect(viewer.rules).toEqual([{ apiGroups: ['firebird.cloudnative-firebird.io'], resources: ['*'], verbs: ['get', 'list', 'watch'] }]);
     // the PodMonitor needs the Prometheus operator and stays out
     expect(kinds).not.toContain('PodMonitor');
     for (const d of docs) {

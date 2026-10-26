@@ -79,5 +79,8 @@ From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
   since v0.122.0, so a stale copy cannot write an older phase back.
 - [ ] **Generated passwords for `FirebirdUser`** (#11337): generate the password into a Secret
   when none is given, with optional renewal.
-- [ ] **A viewer ClusterRole** (#11684): `cloudnative-firebird-viewer`, read-only on the
-  `firebird.cloudnative-firebird.io` resources and aggregated to `view`, with a README section.
+- [x] **A viewer ClusterRole** (#11684, v0.135.0): `cloudnative-firebird-viewer`, read-only on
+  every `firebird.cloudnative-firebird.io` resource, aggregated into `view`, `edit` and `admin`, in
+  the install manifest and the chart, with a README section. CloudNativePG's DBA samples (a
+  port-forward role, a Role for one Secret) are not copied: `view` already covers what the
+  plugin's read-only commands need.

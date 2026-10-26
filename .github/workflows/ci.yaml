@@ -178,6 +178,51 @@ jobs:
             'until [ -n "$(kubectl get firebirdcluster test-cluster -o jsonpath={.status.phase})" ]; do sleep 3; done'
           kubectl get firebirdcluster test-cluster -o jsonpath='{.status}'; echo
 
+      - name: Verify the viewer ClusterRole
+        run: |
+          # the aggregation controller copies the rule of cloudnative-firebird-viewer into the
+          # built-in roles in a moment
+          for role in view edit admin; do
+            timeout 60 bash -c "until kubectl get clusterrole $role -o jsonpath='{.rules[*].apiGroups}' | grep -q firebird.cloudnative-firebird.io; do sleep 2; done" \
+              || { echo "the $role ClusterRole has no rule for the operator's resources"; kubectl get clusterrole $role -o yaml; exit 1; }
+          done
+          # one service account bound to the viewer role itself, one to the built-in view role
+          kubectl create serviceaccount fb-viewer
+          kubectl create serviceaccount fb-view
+          kubectl create rolebinding fb-viewer --clusterrole=cloudnative-firebird-viewer --serviceaccount=default:fb-viewer
+          kubectl create rolebinding fb-view --clusterrole=view --serviceaccount=default:fb-view
+          # expect <service account> <verb> <resource> yes|no [kubectl auth can-i flags]
+          expect() {
+            sa="$1" verb="$2" res="$3" want="$4"
+            shift 4
+            got="$(kubectl auth can-i "$verb" "$res" "$@" -n default --as="system:serviceaccount:default:$sa" 2>/dev/null | awk '{print $1}' || true)"
+            [ "$got" = "$want" ] || { echo "$sa $verb $res $*: got '$got', expected '$want'"; exit 1; }
+            echo "$sa $verb $res $*: $got"
+          }
+          for sa in fb-viewer fb-view; do
+            for r in firebirdclusters firebirdbackups firebirdscheduledbackups firebirdrestores firebirdusers firebirdroles firebirddatabases firebirdimagecatalogs; do
+              expect $sa list "$r.firebird.cloudnative-firebird.io" yes
+            done
+            expect $sa watch firebirdclusters.firebird.cloudnative-firebird.io yes
+            expect $sa get firebirdclusters.firebird.cloudnative-firebird.io yes --subresource=status
+            expect $sa patch firebirdclusters.firebird.cloudnative-firebird.io no
+            expect $sa delete firebirdbackups.firebird.cloudnative-firebird.io no
+            expect $sa create firebirdbackups.firebird.cloudnative-firebird.io no
+            expect $sa get secrets no
+            expect $sa create pods/exec no
+          done
+          # the viewer role alone reads nothing outside the operator's API group
+          expect fb-viewer list pods no
+          # the view role also reads what kubectl firebird status, backups and logs need
+          expect fb-view list pods yes
+          expect fb-view get pods/log yes
+          expect fb-view get statefulsets.apps yes
+          expect fb-view list events yes
+          # and the request itself is allowed, not just reported to be
+          kubectl get firebirdcluster test-cluster -n default --as=system:serviceaccount:default:fb-viewer
+          kubectl delete rolebinding fb-viewer fb-view
+          kubectl delete serviceaccount fb-viewer fb-view
+
       - name: Verify segment TLS is on by default for new clusters
         run: |
           # kind runs Kubernetes 1.29 or later: the operator defaults new clusters to segment TLS
