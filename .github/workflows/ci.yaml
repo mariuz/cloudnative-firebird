@@ -932,8 +932,13 @@ jobs:
           endpoints=$(kubectl get endpointslices -l kubernetes.io/service-name=repl -o jsonpath='{.items[*].endpoints[*].addresses[*]}')
           echo "primary Service endpoints while stopping: '$endpoints'"
           [ -z "$endpoints" ]
-          new_client=$(kubectl run swnew --image="$image" --restart=Never --rm -i --env=ISC_USER=SYSDBA --env=ISC_PASSWORD=masterkey --command -- \
-            sh -c "echo 'select 1 from rdb\$database;' | isql -q repl:$DB" 2>&1 || true)
+          # the client's own log, read once it ended (kubectl run -i attaches late and can miss its
+          # output: the refusal printed before the attach left nothing to check)
+          kubectl run swnew --image="$image" --restart=Never --env=ISC_USER=SYSDBA --env=ISC_PASSWORD=masterkey --command -- \
+            sh -c "echo 'select 1 from rdb\$database;' | isql -q repl:$DB"
+          timeout 60 bash -c 'until [ "$(kubectl get pod swnew -o jsonpath={.status.phase})" = Succeeded ] || [ "$(kubectl get pod swnew -o jsonpath={.status.phase})" = Failed ]; do sleep 1; done'
+          new_client=$(kubectl logs swnew 2>&1 || true)
+          kubectl delete pod swnew --wait=false
           echo "$new_client"
           echo "$new_client" | grep -qi 'unable to complete network request'
           [ "$(remote)" -ge 1 ] || { echo "the attached client was disconnected"; exit 1; }
