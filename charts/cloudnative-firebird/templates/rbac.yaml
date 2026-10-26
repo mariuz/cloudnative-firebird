@@ -349,3 +349,24 @@ subjects:
   - kind: ServiceAccount
     name: cloudnative-firebird-operator
     namespace: {{ .Release.Namespace }}
+---
+# Read-only access to every resource of the operator's API group, aggregated into the built-in
+# view, edit and admin ClusterRoles (config/deploy/rbac.yaml).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloudnative-firebird-viewer
+  labels:
+    {{- include "cloudnative-firebird.labels" . | nindent 4 }}
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - "*"
+    verbs:
+      - get
+      - list
+      - watch

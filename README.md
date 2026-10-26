@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.134.0/cloudnative-firebird-0.134.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.135.0/cloudnative-firebird-0.135.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.134.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.135.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.134.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.135.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -249,6 +249,31 @@ image for both platforms without publishing it. Running the workflow on demand (
 `imagePullPolicy: IfNotPresent`; the kind CI builds `cloudnative-firebird:ci` from the checkout and
 substitutes it. The sidecars the operator runs from its own image (segment TLS, the primary Lease)
 use the image of the running operator, whatever tag it was deployed with.
+
+### Read-only Access for Users (v0.135.0)
+
+The install manifest and the Helm chart include the ClusterRole `cloudnative-firebird-viewer`.
+It allows `get`, `list` and `watch` on every resource of the `firebird.cloudnative-firebird.io`
+group, with their status: clusters, backups, schedules, restores, users, roles, databases and
+image catalogs, including resources a later release adds. It grants nothing else, so no Secrets,
+no `pods/exec` and no writes. Its labels aggregate it into Kubernetes' built-in `view`, `edit` and
+`admin` ClusterRoles (as CloudNativePG's `cnpg-viewer-role` does), so a user who holds one of these
+in a namespace can read that namespace's Firebird resources without another binding:
+
+```bash
+# read-only on everything a namespace holds, the Firebird resources included: what
+# kubectl firebird status, backups, logs and report need
+kubectl create rolebinding dba-view --clusterrole=view --user=jane -n default
+# only the Firebird resources, for a dashboard's service account
+kubectl create rolebinding fb-dashboard --clusterrole=cloudnative-firebird-viewer \
+  --serviceaccount=monitoring:dashboard -n default
+```
+
+The plugin's commands read the instance pods, their logs, the StatefulSet, Services, PVCs and
+events as well. `view` covers those, but `cloudnative-firebird-viewer` alone does not. `report`
+also reads the operator's log in `cloudnative-firebird-system`, which needs `view` in that
+namespace. Neither role allows the commands that change something, such as `promote`, `fence`,
+`backup` or `isql`. The kind CI checks the aggregation and the permissions of both bindings.
 
 ### Create a Firebird Cluster
 

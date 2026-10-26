@@ -109,6 +109,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - Auto-generated Kubernetes NetworkPolicy resources restricting port 3050 access to approved client labels/namespaces.
 - [x] **SYSDBA & User Password Rotation** *(v0.5.0)*
   - Automated password rotation tracking for superuser and application credentials stored in Kubernetes Secrets.
+- [x] **A read-only viewer ClusterRole** *(v0.135.0; CloudNativePG #11684)*
+  - `cloudnative-firebird-viewer` ships in the install manifest and the Helm chart. It allows `get`, `list` and `watch` on every resource of `firebird.cloudnative-firebird.io` and its status, including resources a later release adds, and nothing else (no Secrets, no `pods/exec`, no writes). Its labels aggregate it into the built-in `view`, `edit` and `admin` roles, so whoever can read a namespace can read its Firebird clusters, backups, users and databases. The README shows the bindings for a DBA (`view`, which also covers the pods, logs and events the plugin reads) and for a dashboard (the viewer role alone).
+  - The kind CI waits for the aggregation into all three roles, then checks with `kubectl auth can-i` what a service account bound to the viewer role and one bound to `view` can and cannot do.
 
 ---
 

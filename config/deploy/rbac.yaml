@@ -355,3 +355,28 @@ subjects:
   - kind: ServiceAccount
     name: cloudnative-firebird-operator
     namespace: cloudnative-firebird-system
+---
+# Read-only access for people (and dashboards) to every resource of the operator's API group,
+# including the ones added later and their status. Bind it in a namespace with a RoleBinding, or
+# everywhere with a ClusterRoleBinding. The labels aggregate it into the built-in view, edit and
+# admin ClusterRoles, so whoever has one of those in a namespace can read the clusters, backups,
+# users and databases there too. It grants nothing on Secrets, pods/exec or other resources.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloudnative-firebird-viewer
+  labels:
+    app.kubernetes.io/name: cloudnative-firebird
+    app.kubernetes.io/component: operator
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups:
+      - firebird.cloudnative-firebird.io
+    resources:
+      - "*"
+    verbs:
+      - get
+      - list
+      - watch
