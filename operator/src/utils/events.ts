@@ -58,6 +58,7 @@ export const EventReason = {
   CustomQueriesInvalid: 'CustomQueriesInvalid',
   ReconciliationPaused: 'ReconciliationPaused',
   ReconciliationResumed: 'ReconciliationResumed',
+  LeaseAdopted: 'LeaseAdopted',
   MajorUpgradeStarted: 'MajorUpgradeStarted',
   MajorUpgradeConverting: 'MajorUpgradeConverting',
   MajorUpgradeStarting: 'MajorUpgradeStarting',

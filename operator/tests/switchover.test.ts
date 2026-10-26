@@ -38,7 +38,11 @@ function setup(opts: { pods?: object[]; job?: V1Job; stored?: FirebirdCluster; l
           : (opts.pods ?? [pod('db-0', 'u0'), pod('db-1', 'u1'), pod('db-2', 'u2')]),
       }),
     ),
-    readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: opts.lease ?? 'db-0' } }),
+    // the Lease the operator created: owned by the cluster (one without is adopted)
+    readNamespacedLease: vi.fn().mockResolvedValue({
+      metadata: { ownerReferences: [{ apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdCluster', name: 'db', uid: 'c', controller: true }] },
+      spec: { holderIdentity: opts.lease ?? 'db-0' },
+    }),
     getNamespacedCustomObject: opts.stored ? vi.fn().mockResolvedValue(opts.stored) : vi.fn().mockRejectedValue(notFound),
     readNamespacedJob: opts.job ? vi.fn().mockResolvedValue(opts.job) : vi.fn().mockRejectedValue(notFound),
     readNamespacedConfigMap: vi.fn().mockResolvedValue({ data: {} }),

@@ -164,6 +164,7 @@ import {
   buildGrafanaDashboardConfigMap,
   buildHeadlessService,
   buildLease,
+  leaseAdoption,
   buildNetworkPolicy,
   CloneTarget,
   cloneTargets,
@@ -3365,16 +3366,36 @@ export class FirebirdClusterController {
     const leaseName = `${name}-lease`;
     const desired = buildLease(cluster);
 
+    let lease;
     try {
-      await this.coordinationApi.readNamespacedLease({ name: leaseName, namespace });
-      log.debug('Leader lease already exists, skipping');
-    } catch {
+      lease = await this.coordinationApi.readNamespacedLease({ name: leaseName, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
       log.info('Creating leader lease');
       await this.coordinationApi.createNamespacedLease({
         namespace,
         body: desired,
       });
+      return;
     }
+    // a Lease a deleted cluster of this name left: adopted, its holder kept (the primary's volume).
+    // Only the metadata is patched, so a renewal of the lease-holder sidecar cannot conflict.
+    const adoption = leaseAdoption(lease, cluster);
+    if (!adoption) {
+      log.debug('Leader lease already exists, skipping');
+      return;
+    }
+    const holder = lease.spec?.holderIdentity || 'no instance';
+    log.warn({ lease: leaseName, holder }, 'Adopting the Lease a deleted cluster left; its holder stays the primary');
+    await this.coordinationApi.patchNamespacedLease({
+      name: leaseName,
+      namespace,
+      body: [
+        { op: 'add', path: '/metadata/ownerReferences', value: adoption.ownerReferences },
+        { op: 'add', path: '/metadata/labels', value: adoption.labels },
+      ],
+    });
+    await this.event(cluster, 'Normal', EventReason.LeaseAdopted, `adopted the Lease ${leaseName} a deleted cluster left; ${holder} stays the primary`);
   }
 
   /**

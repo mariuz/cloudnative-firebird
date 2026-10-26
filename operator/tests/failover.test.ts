@@ -15,6 +15,13 @@ import { validateClusterSpec } from '../src/utils/validation';
 import { FirebirdCluster, SwitchoverStatus } from '../src/types';
 import { metrics } from '../src/utils/metrics';
 
+
+/** A Lease owned by the test cluster (uid c), as the operator creates it */
+const owned = (lease: { metadata?: object; spec?: object }) => ({
+  ...lease,
+  metadata: { ...(lease.metadata ?? {}), ownerReferences: [{ apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdCluster', name: 'db', uid: 'c', controller: true }] },
+});
+
 const makeCluster = (status?: FirebirdCluster['status'], failover: object = { enabled: true, delaySeconds: 30 }): FirebirdCluster => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
   kind: 'FirebirdCluster',
@@ -43,7 +50,8 @@ function setup(opts: { pods?: object[]; job?: V1Job; jobs?: Record<string, V1Job
           : (opts.pods ?? [pod('db-0', 'u0', false), pod('db-1', 'u1'), pod('db-2', 'u2')]),
       }),
     ),
-    readNamespacedLease: vi.fn().mockResolvedValue(opts.lease ?? { spec: { holderIdentity: 'db-0' } }),
+    // the Lease the operator created: owned by the cluster (one without is adopted)
+    readNamespacedLease: vi.fn().mockResolvedValue(owned(opts.lease ?? { spec: { holderIdentity: 'db-0' } })),
     readNamespacedJob: opts.jobs
       ? vi.fn().mockImplementation(({ name }: { name: string }) => (opts.jobs![name] ? Promise.resolve(opts.jobs![name]) : Promise.reject(notFound)))
       : opts.job

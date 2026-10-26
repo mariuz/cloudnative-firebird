@@ -18,6 +18,7 @@ import {
   networkPolicyNeedsUpdate,
   networkPolicyWireFormat,
   buildLease,
+  leaseAdoption,
   buildDiagnosticsCronJob,
   buildGrafanaDashboardConfigMap,
   clusterLabels,
@@ -789,6 +790,34 @@ describe('Leader Election Lease', () => {
     expect(lease.apiVersion).toBe('coordination.k8s.io/v1');
     expect(lease.metadata?.name).toBe('test-cluster-lease');
     expect(lease.spec?.holderIdentity).toBe('test-cluster-0');
+  });
+
+  it('adopts a Lease a deleted cluster left, keeping its holder', () => {
+    const cluster = makeCluster();
+    const uid = cluster.metadata.uid!;
+    const owner = { apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdCluster', name: 'test-cluster', uid, controller: true, blockOwnerDeletion: true };
+    // the cluster's own Lease: nothing to do
+    expect(leaseAdoption(buildLease(cluster), cluster)).toBeUndefined();
+    // left by a deletion with orphan propagation: no owner, and another holder (the primary's volume)
+    const orphan = { metadata: { name: 'test-cluster-lease', labels: { team: 'db' } }, spec: { holderIdentity: 'test-cluster-1' } };
+    expect(leaseAdoption(orphan, cluster)).toEqual({
+      ownerReferences: [owner],
+      labels: { team: 'db', ...clusterLabels('test-cluster') },
+    });
+    // left owned by the deleted cluster (another uid), which the garbage collector would remove;
+    // a non-controller owner stays, another controller goes
+    const stale = {
+      metadata: {
+        ownerReferences: [
+          { ...owner, uid: 'old-uid' },
+          { apiVersion: 'v1', kind: 'ConfigMap', name: 'keep', uid: 'k' },
+          { apiVersion: 'apps/v1', kind: 'Deployment', name: 'other', uid: 'o', controller: true },
+        ],
+      },
+    };
+    expect(leaseAdoption(stale, cluster)?.ownerReferences).toEqual([{ apiVersion: 'v1', kind: 'ConfigMap', name: 'keep', uid: 'k' }, owner]);
+    // a cluster without a uid yet (never read from the API server): nothing to compare
+    expect(leaseAdoption(orphan, { ...cluster, metadata: { ...cluster.metadata, uid: undefined } })).toBeUndefined();
   });
 
   it('serializes renewTime with microsecond precision as required by the Lease API', () => {

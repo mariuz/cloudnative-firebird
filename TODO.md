@@ -58,11 +58,16 @@ Nothing open.
 From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
 [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md)), most important first:
 
-- [ ] **Adopt or replace an orphan primary Lease** (CloudNativePG #11609): a cluster recreated
-  over the resources a deleted one left behind (orphan propagation, a restore by a backup tool)
-  keeps `<cluster>-lease` without its owner, naming the old primary; with the primary Lease on,
-  the new primary's `lease-holder` fences itself when that name differs. Adopt the Lease (set the
-  ownerReference and the current primary), or delete and recreate it when no instance runs yet.
+- [x] **Adopt an orphan primary Lease** (CloudNativePG #11609, v0.134.0): a cluster recreated
+  over the resources a deleted one left keeps `<cluster>-lease` without its owner (or with the
+  deleted cluster's, for which the garbage collector would remove it later); the operator now
+  adopts it and keeps its holder, which it takes as the primary: the instance whose volume held
+  the primary's database. (CloudNativePG recreates the Lease when restoring over orphan PVCs; here
+  that would make ordinal 0 the primary whatever its volume holds.)
+- [ ] **Adopt the other leftovers of a recreated cluster**: the StatefulSet, Services, ConfigMap,
+  PodDisruptionBudget, NetworkPolicy and CronJobs a cluster deleted with orphan propagation left
+  are used as they are but keep no owner (the StatefulSet only gets one when it is next patched),
+  so deleting the recreated cluster leaves them behind.
 - [ ] **Fence before the Lease expires** (#11357): the sidecar fences once the Lease went its whole
   duration without a renewal, the moment a replica becomes promotable; fence at a renew deadline
   (two thirds of the duration, as CloudNativePG's 10 of 15 s) instead.

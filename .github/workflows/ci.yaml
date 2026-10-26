@@ -460,7 +460,8 @@ jobs:
           sched_events | grep -qx ScheduleSuspended || { sched_events; exit 1; }
           sched_events | grep -qx ScheduleResumed
           kubectl get events --field-selector involvedObject.name=plugin-schedule,reason=ScheduleResumed -o jsonpath='{.items[0].message}' | grep -q 'resumed: next backup at '
-          [ "$(kubectl get firebirdscheduledbackup plugin-schedule -o jsonpath={.status.suspended})" = true ]
+          # the status follows the event by a moment (the same reconcile writes it after)
+          timeout 60 bash -c 'until [ "$(kubectl get firebirdscheduledbackup plugin-schedule -o jsonpath={.status.suspended})" = true ]; do sleep 1; done'
           if kubectl firebird schedule off repl no-such-schedule 2>/tmp/plugin-err.txt; then echo "a missing schedule was accepted"; exit 1; fi
           grep -q 'no FirebirdScheduledBackup no-such-schedule' /tmp/plugin-err.txt
           kubectl delete firebirdscheduledbackup plugin-schedule
@@ -932,8 +933,13 @@ jobs:
           endpoints=$(kubectl get endpointslices -l kubernetes.io/service-name=repl -o jsonpath='{.items[*].endpoints[*].addresses[*]}')
           echo "primary Service endpoints while stopping: '$endpoints'"
           [ -z "$endpoints" ]
-          new_client=$(kubectl run swnew --image="$image" --restart=Never --rm -i --env=ISC_USER=SYSDBA --env=ISC_PASSWORD=masterkey --command -- \
-            sh -c "echo 'select 1 from rdb\$database;' | isql -q repl:$DB" 2>&1 || true)
+          # the client's own log, read once it ended (kubectl run -i attaches late and can miss its
+          # output: the refusal printed before the attach left nothing to check)
+          kubectl run swnew --image="$image" --restart=Never --env=ISC_USER=SYSDBA --env=ISC_PASSWORD=masterkey --command -- \
+            sh -c "echo 'select 1 from rdb\$database;' | isql -q repl:$DB"
+          timeout 60 bash -c 'until [ "$(kubectl get pod swnew -o jsonpath={.status.phase})" = Succeeded ] || [ "$(kubectl get pod swnew -o jsonpath={.status.phase})" = Failed ]; do sleep 1; done'
+          new_client=$(kubectl logs swnew 2>&1 || true)
+          kubectl delete pod swnew --wait=false
           echo "$new_client"
           echo "$new_client" | grep -qi 'unable to complete network request'
           [ "$(remote)" -ge 1 ] || { echo "the attached client was disconnected"; exit 1; }
@@ -2667,6 +2673,47 @@ jobs:
           if kubectl firebird status paused | grep -q '^Paused:'; then echo "still reported paused"; exit 1; fi
           kubectl delete firebirdcluster paused --wait=true --timeout=300s
           kubectl wait --for=delete pod/paused-0 --timeout=300s || true
+
+      - name: Verify a recreated cluster adopts the Lease it left
+        if: matrix.track.id == 'extended'
+        run: |
+          cat > /tmp/orphan.yaml <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: orphan
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+          EOF
+          kubectl apply -f /tmp/orphan.yaml
+          timeout 300 bash -c 'until kubectl get pod orphan-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/orphan-0 --for=condition=Ready --timeout=600s
+          timeout 120 bash -c 'until [ -n "$(kubectl get lease orphan-lease -o jsonpath={.metadata.ownerReferences[0].uid} 2>/dev/null)" ]; do sleep 2; done'
+          holder=$(kubectl get lease orphan-lease -o jsonpath={.spec.holderIdentity})
+          old_uid=$(kubectl get firebirdcluster orphan -o jsonpath={.metadata.uid})
+          # deleted keeping what it owns (as before a restore by a backup tool): the Lease stays, without its owner
+          kubectl delete firebirdcluster orphan --cascade=orphan --wait=true --timeout=120s
+          timeout 120 bash -c 'until [ -z "$(kubectl get lease orphan-lease -o jsonpath={.metadata.ownerReferences})" ]; do sleep 2; done'
+          # recreated under the same name: the Lease is adopted, its holder kept as the primary
+          kubectl apply -f /tmp/orphan.yaml
+          new_uid=$(kubectl get firebirdcluster orphan -o jsonpath={.metadata.uid})
+          [ "$new_uid" != "$old_uid" ]
+          timeout 120 bash -c "until [ \"\$(kubectl get lease orphan-lease -o jsonpath={.metadata.ownerReferences[0].uid})\" = $new_uid ]; do sleep 2; done" \
+            || { kubectl get lease orphan-lease -o yaml; exit 1; }
+          [ "$(kubectl get lease orphan-lease -o jsonpath={.spec.holderIdentity})" = "$holder" ]
+          timeout 60 bash -c 'until kubectl get events --field-selector involvedObject.name=orphan,reason=LeaseAdopted -o name | grep -q .; do sleep 2; done'
+          kubectl get events --field-selector involvedObject.name=orphan,reason=LeaseAdopted -o jsonpath='{.items[0].message}' | grep -q "$holder stays the primary"
+          timeout 180 bash -c 'until [ "$(kubectl get firebirdcluster orphan -o jsonpath={.status.phase})" = Running ]; do sleep 3; done'
+          # deleted again: the adopted Lease goes with it
+          kubectl delete firebirdcluster orphan --wait=true --timeout=120s
+          timeout 120 bash -c 'while kubectl get lease orphan-lease >/dev/null 2>&1; do sleep 2; done' \
+            || { echo "the adopted Lease was not deleted with its cluster"; kubectl get lease orphan-lease -o yaml; exit 1; }
+          # the first deletion's other leftovers are not adopted yet (TODO.md): removed here
+          kubectl delete statefulset,service,configmap,poddisruptionbudget,networkpolicy,secret,cronjob,pvc \
+            -l firebird.cloudnative-firebird.io/cluster=orphan --ignore-not-found --wait=false
+          kubectl delete pod orphan-0 --ignore-not-found --wait=false
 
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
