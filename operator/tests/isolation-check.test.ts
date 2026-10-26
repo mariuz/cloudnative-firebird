@@ -35,8 +35,8 @@ const freePort = (): Promise<number> =>
 
 /**
  * A directory with the scripts and a fake fbsvcmgr: it logs its arguments, answers header
- * statistics with the state in "<dir>/state" (online or shutdown), and fails when "<dir>/fail"
- * exists.
+ * statistics with the state in "<dir>/state" (online or shutdown), fails when "<dir>/fail"
+ * exists, and hangs (a server that answers nothing) when "<dir>/hang" exists.
  */
 function workspace() {
   const dir = mkdtempSync(join(tmpdir(), 'fb-isolation-'));
@@ -48,6 +48,7 @@ function workspace() {
     `#!/bin/sh
 echo "$*" >> "${dir}/calls"
 [ -f "${dir}/fail" ] && exit 1
+[ -f "${dir}/hang" ] && exec sleep 60
 case "$*" in
   *sts_hdr_pages*) [ "$(cat "${dir}/state" 2>/dev/null)" = shutdown ] && echo "Attributes force write, full shutdown" || echo "Attributes force write";;
 esac
@@ -296,6 +297,24 @@ describe('isolation-check.pl', () => {
     });
   });
 
+  it('gives up on a hung local server after the local timeouts, and fences again on the next check', () => {
+    if (!hasPerl) return;
+    const ws = workspace();
+    writeFileSync(join(ws.dir, 'hang'), '');
+    const started = Date.now();
+    const out = check(ws, {
+      KUBERNETES_SERVICE_HOST: '127.0.0.1',
+      KUBERNETES_SERVICE_PORT: closedPort,
+      LAST_CONNECTED: longAgo,
+      LOCAL_QUERY_TIMEOUT_SECONDS: '1',
+      LOCAL_COMMAND_TIMEOUT_SECONDS: '1',
+    });
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(out).toMatch(/fbsvcmgr action_properties timed out after 1s/);
+    expect(out).toMatch(/full shutdown failed; retrying on the next check/);
+    expect(existsSync(ws.marker)).toBe(false);
+  });
+
   it('does nothing when disabled', () => {
     if (!hasPerl) return;
     const ws = workspace();
@@ -400,5 +419,71 @@ describe('segment server ISOLATION and REJOIN', () => {
     expect((await ask('FENCE lost'))[0]).toMatch(/^ERR cannot shut/);
     expect(existsSync(join(base, 'self-fenced'))).toBe(false);
     spawnSync('rm', [join(ws.dir, 'fail')]);
+  });
+});
+
+describe('segment server with a hung local server', () => {
+  let server: ChildProcess | undefined;
+  afterAll(() => server?.kill());
+
+  it('answers STATE, FENCE and REJOIN with an error after the local timeouts, and serves on', { timeout: 30_000 }, async () => {
+    if (!hasPerl) return;
+    const ws = workspace();
+    const base = join(ws.dir, 'repl');
+    for (const d of ['archive', 'source']) mkdirSync(join(base, d), { recursive: true });
+    const port = await freePort();
+    let log = '';
+    server = spawn('perl', [join(ws.dir, 'segment-server.pl')], {
+      env: {
+        PATH: `${join(ws.dir, 'bin')}:${process.env.PATH}`,
+        ARCHIVE_DIR: join(base, 'archive'),
+        SOURCE_DIR: join(base, 'source'),
+        REPLICATION_DIR: base,
+        DATABASE_PATH: '/data/db.fdb',
+        PRIMARY_FILE: join(ws.dir, 'primary'),
+        POD_NAME: 'db-0',
+        ISC_PASSWORD: 'tok',
+        SEGMENT_PORT: String(port),
+        SCRIPT_DIR: ws.dir,
+        LOCAL_QUERY_TIMEOUT_SECONDS: '1',
+        LOCAL_COMMAND_TIMEOUT_SECONDS: '2',
+      },
+    });
+    server.stdout?.on('data', (d) => (log += d.toString()));
+    const ask = async (line: string) => {
+      for (let i = 0; ; i++) {
+        try {
+          return await segmentRequest(port, `tok ${line}`);
+        } catch (err) {
+          if (i > 50) throw err;
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
+    };
+    expect(await ask('STATE')).toEqual(['OK online']);
+    writeFileSync(join(ws.dir, 'hang'), '');
+    const timed = async (line: string) => {
+      const started = Date.now();
+      const reply = await ask(line);
+      return { reply: reply[0], ms: Date.now() - started };
+    };
+    const state = await timed('STATE');
+    expect(state.reply).toMatch(/^ERR cannot read the state/);
+    expect(state.ms).toBeLessThan(8_000);
+    const fence = await timed('FENCE the Lease is held by db-1');
+    expect(fence.reply).toMatch(/^ERR cannot shut/);
+    expect(fence.ms).toBeLessThan(9_000);
+    expect(existsSync(join(base, 'self-fenced'))).toBe(false);
+    writeFileSync(join(base, 'self-fenced'), '1700000000\n');
+    expect((await ask('REJOIN'))[0]).toMatch(/^ERR cannot bring/);
+    expect(existsSync(join(base, 'self-fenced'))).toBe(true);
+    // requests that need no local command are served as before
+    expect(await ask('ISOLATION')).toEqual(['OK fenced 1700000000']);
+    expect(log).toMatch(/fbsvcmgr action_db_stats timed out after 1s/);
+    expect(log).toMatch(/fbsvcmgr timed out after 2s/);
+    // the server answers again once it does
+    spawnSync('rm', [join(ws.dir, 'hang'), join(base, 'self-fenced')]);
+    writeFileSync(join(ws.dir, 'state'), 'online');
+    expect(await ask('STATE')).toEqual(['OK online']);
   });
 });
