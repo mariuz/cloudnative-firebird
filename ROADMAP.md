@@ -171,6 +171,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Versions in the support bundle** *(v0.132.0)*
+  - `kubectl firebird report` writes `versions.txt`: the plugin's version, the operator's Deployments as `kubectl firebird version` prints them (with the mismatch warning), the Kubernetes server's version and the images the cluster runs (`status.image` and each instance pod's firebird container), so a bundle says what was running; what cannot be read is said in place. A unit test covers the file and the fallbacks; the kind CI checks the operator, Kubernetes and image lines.
 - [x] **Unit tests with room under load** *(2026-10-25, tooling)*
   - The tests that run the Perl and shell scripts for real (smart shutdown, stop-with-server, the PITR server stop, the segment server's commands) take one to five seconds each and ran against vitest's default 5 s limit when the suite's parallel files loaded the machine: one failed and passed on a re-run, another file once stalled. The suite's test and hook timeouts are 30 s (a hung test still fails; nothing is retried), checked by running the whole suite under a four-process CPU load.
 - [x] **The operator's version from the plugin** *(v0.131.0; CloudNativePG's `kubectl cnpg version`)*
