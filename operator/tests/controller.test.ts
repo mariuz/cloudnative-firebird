@@ -288,7 +288,10 @@ describe('FirebirdClusterController – basic reconciliation', () => {
         const readNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({ metadata: { name: 'test-cluster' }, spec: { replicas: 1 } });
         const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({ readNamespacedStatefulSetImpl });
         const done = new FirebirdClusterController(mockKubeConfig).reconcile(makeCluster());
-        await vi.runAllTimersAsync();
+        // the controller polls 20 times 500 ms: advance past that, a bounded amount (runAllTimers
+        // also fired the logger's thread-stream flush poll, a timer chain that renews itself until
+        // its real-clock deadline, and aborted after 10 000 timers when the log was mid-flush)
+        await vi.advanceTimersByTimeAsync(11_000);
         await done;
         expect(mockAppsApi.deleteNamespacedStatefulSet).toHaveBeenCalled();
         expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled();
