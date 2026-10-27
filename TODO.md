@@ -71,9 +71,10 @@ From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
 - [ ] **Fence before the Lease expires** (#11357): the sidecar fences once the Lease went its whole
   duration without a renewal, the moment a replica becomes promotable; fence at a renew deadline
   (two thirds of the duration, as CloudNativePG's 10 of 15 s) instead.
-- [ ] **Bound the segment server's local commands** (#11718): its `isql` and `fbsvcmgr` calls to
-  the local server have no timeout, so a hung server blocks it; run them under `timeout`, as the
-  metrics exporter does.
+- [x] **Bound the segment server's local commands** (#11718, v0.136.0): the segment server's
+  and the isolation check's `isql`, `fbsvcmgr` and `gfix` calls to the local server run under
+  `timeout`: reads after `LOCAL_QUERY_TIMEOUT_SECONDS` (10 s), changes after
+  `LOCAL_COMMAND_TIMEOUT_SECONDS` (60 s). The `nbackup` and file copies stay unbounded.
 - [ ] **Conditional backup and restore status writes** (#11617): the status is replaced from the
   copy a reconcile started with; test the `resourceVersion` read, as the fencing reconcile does
   since v0.122.0, so a stale copy cannot write an older phase back.

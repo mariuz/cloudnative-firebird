@@ -187,6 +187,33 @@ my $backup_re = qr/^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:nbk|fbk|nbk\.ctl)$/;
 $data_dir = '.' if $data_dir eq '';
 $| = 1;
 
+# The commands to the local server run under timeout(1): a hung server would hold this one with
+# them, and every request queued behind (CloudNativePG #11718). Reads (the database's state, a
+# value of MON$DATABASE) get LOCAL_QUERY_TIMEOUT_SECONDS, 10 s by default, as the Lease holder
+# gives up on STATE after 10 s; changes (full shutdown, online, replica mode, the backup lock,
+# publication) LOCAL_COMMAND_TIMEOUT_SECONDS, 60 s. An nbackup (NBACKUP) and the file copies take
+# as long as the database is large and are not bounded.
+sub seconds_env { my ($name, $default) = @_; return ($ENV{$name} // '') =~ /^[1-9]\d*$/ ? $ENV{$name} : $default; }
+my $query_timeout = seconds_env('LOCAL_QUERY_TIMEOUT_SECONDS', 10);
+my $command_timeout = seconds_env('LOCAL_COMMAND_TIMEOUT_SECONDS', 60);
+# the command line under timeout: TERM after the limit, KILL 5 s later if it is still running
+sub bounded { my ($seconds, @cmd) = @_; return ('timeout', '-k', '5', $seconds, @cmd); }
+sub bounded_sh { my ($seconds, $cmd) = @_; return "timeout -k 5 $seconds $cmd"; }
+# runs a bounded command; false when it failed, with a line in the log when it timed out
+sub run_bounded {
+  my ($seconds, @cmd) = @_;
+  my $status = system(bounded($seconds, @cmd));
+  report_timeout($status, $seconds, $cmd[0]);
+  return $status == 0;
+}
+sub report_timeout {
+  my ($status, $seconds, $what) = @_;
+  my $code = $status >> 8;
+  return 0 unless $status != -1 && ($code == 124 || $code == 137);
+  print "$what timed out after ${seconds}s\n";
+  return 1;
+}
+
 sub same_string {
   my ($a, $b) = @_;
   return 0 unless length($a) == length($b);
@@ -234,7 +261,8 @@ sub is_primary {
 
 # The database's state from the local server: "online", "shutdown", or undef (no answer)
 sub database_state {
-  my $out = `fbsvcmgr localhost:service_mgr action_db_stats dbname '$database' sts_hdr_pages 2>&1`;
+  my $out = `timeout -k 5 $query_timeout fbsvcmgr localhost:service_mgr action_db_stats dbname '$database' sts_hdr_pages 2>&1`;
+  report_timeout($?, $query_timeout, 'fbsvcmgr action_db_stats');
   # Firebird 6 refuses header statistics for a database in full shutdown
   return 'shutdown' if $out =~ /^database .* shutdown/m;
   return undef if $?;
@@ -253,8 +281,8 @@ sub fence_database {
   close $fh;
   rename "$self_fenced.tmp", $self_fenced;
   print "$reason: fencing the primary (database in full shutdown)\n";
-  if (system('fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database,
-             'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') != 0) {
+  if (!run_bounded($command_timeout, 'fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database,
+                   'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0')) {
     unlink $self_fenced;
     print "full shutdown failed\n";
     return 0;
@@ -344,24 +372,28 @@ sub live_value {
   my ($expression) = @_;
   my $sql = "SET LIST ON; SELECT $expression AS V FROM MON\$DATABASE;";
   $sql =~ s/([\\"`\$])/\\$1/g;   # quoted for the double-quoted shell string below
-  open(my $isql, '-|', 'sh', '-c', "echo \"$sql\" | isql -q localhost:$database")
+  open(my $isql, '-|', 'sh', '-c', "echo \"$sql\" | " . bounded_sh($query_timeout, "isql -q localhost:$database"))
     or return undef;
   my $value;
   while (my $line = <$isql>) { $value = $1 if $line =~ /^V\s+(\S+)/; }
   close $isql;
+  # a value printed before the limit is not trusted either
+  return undef if report_timeout($?, $query_timeout, 'isql');
   return $value;
 }
 
 sub live_sql {
   my ($statement) = @_;
-  return system('sh', '-c', "echo '$statement' | isql -q -b localhost:$database") == 0;
+  my $status = system('sh', '-c', "echo '$statement' | " . bounded_sh($command_timeout, "isql -q -b localhost:$database"));
+  report_timeout($status, $command_timeout, 'isql');
+  return $status == 0;
 }
 
 # "Replication sequence" / "Database GUID" from the header page of a database file that no
 # server has open (seed copies only)
 sub header_field {
   my ($path, $field) = @_;
-  open(my $gstat, '-|', 'gstat', '-h', $path) or return undef;
+  open(my $gstat, '-|', bounded($query_timeout, 'gstat', '-h', $path)) or return undef;
   my $value;
   while (my $line = <$gstat>) {
     $value = $1 if $line =~ /^\s*\Q$field\E:?\s*(\S+)/;
@@ -540,9 +572,10 @@ sub promote_here {
   # the service manager's own message goes into the reply (the operator's event) when it fails
   my $fb_out = '';
   my $fb = sub {
-    my $cmd = join ' ', map { "'$_'" } 'fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database, @_;
+    my $cmd = join ' ', map { "'$_'" } bounded($command_timeout, 'fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database, @_);
     $fb_out = `$cmd 2>&1`;
     my $ok = $? == 0;
+    $fb_out = "timed out after ${command_timeout}s" if $fb_out =~ /^\s*$/ && ($? >> 8 == 124 || $? >> 8 == 137);
     $fb_out =~ s/\s+/ /g;
     $fb_out =~ s/^ | $//g;
     return $ok;
@@ -603,9 +636,9 @@ sub promote_here {
     system('cp', $database, "$bootstrap_seed.tmp") == 0 or die "cannot copy the bootstrap seed\n";
     $fb->('prp_online_mode', 'prp_sm_normal') or die 'cannot bring the database online' . ($fb_out ne '' ? ": $fb_out" : '') . "\n";
     $shut = 0;
-    system('gfix', '-replica', 'none', "localhost:$database") == 0 or die "cannot set replica mode none\n";
+    run_bounded($command_timeout, 'gfix', '-replica', 'none', "localhost:$database") or die "cannot set replica mode none\n";
     $writable = 1;
-    system('sh', '-c', "isql -q -b -i \"$ENV{SCRIPT_DIR}/enable-publication.sql\" localhost:$database") == 0
+    run_bounded($command_timeout, 'isql', '-q', '-b', '-i', "$ENV{SCRIPT_DIR}/enable-publication.sql", "localhost:$database")
       or die "cannot enable publication\n";
     # complete: the replica's state goes (the new journal continues after $seq)
     write_file($promoted_flag, time . "\n");
@@ -623,8 +656,8 @@ sub promote_here {
     # replica, publishing (a file no server has open, as the init container's tools use them);
     # without it new replicas seed from a ready replica
     my $tmp = "$bootstrap_seed.tmp";
-    if (system('gfix', '-online', 'normal', $tmp) == 0 && system('gfix', '-replica', 'none', $tmp) == 0 &&
-        system('sh', '-c', "isql -q -b -i \"$ENV{SCRIPT_DIR}/enable-publication.sql\" \"$tmp\"") == 0 &&
+    if (run_bounded($command_timeout, 'gfix', '-online', 'normal', $tmp) && run_bounded($command_timeout, 'gfix', '-replica', 'none', $tmp) &&
+        run_bounded($command_timeout, 'isql', '-q', '-b', '-i', "$ENV{SCRIPT_DIR}/enable-publication.sql", $tmp) &&
         write_file("$base/bootstrap-seed.seq", "$seq\n") && rename($tmp, $bootstrap_seed)) {
       print "offline bootstrap seed written (sequence $seq)\n";
     } else {
@@ -636,7 +669,7 @@ sub promote_here {
   unless ($ok) {
     my $err = $@;
     # back to a replica the offline promotion can still take over
-    system('gfix', '-replica', 'read_only', "localhost:$database") if $writable;
+    run_bounded($command_timeout, 'gfix', '-replica', 'read_only', "localhost:$database") if $writable;
     unlink "$bootstrap_seed.tmp";
     $fb->('prp_online_mode', 'prp_sm_normal') if $shut;
     print $client "ERR $err";
@@ -896,8 +929,8 @@ while (1) {
   } elsif ($cmd eq 'REJOIN') {
     if (!-f $self_fenced) {
       print $client "OK\n";
-    } elsif (system('fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database,
-                    'prp_online_mode', 'prp_sm_normal') == 0) {
+    } elsif (run_bounded($command_timeout, 'fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database,
+                         'prp_online_mode', 'prp_sm_normal')) {
       unlink $self_fenced;
       print "isolation fence lifted by the operator: database online\n";
       print $client "OK\n";

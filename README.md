@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.135.0/cloudnative-firebird-0.135.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.136.0/cloudnative-firebird-0.136.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.135.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.136.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.135.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.136.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -1059,6 +1059,20 @@ Enabling it on a cluster that runs restarts the instances (a rolling update, the
 add the sidecar, as enabling failover does for the isolation check; the kind CI checks the
 default on new clusters, then cuts a primary off from the API server alone and checks that it
 fences itself before the operator fails over.
+
+**A hung local server** (v0.136.0): the segment server and the isolation check reach their
+instance's Firebird server through `isql`, `fbsvcmgr` and `gfix` on `localhost`, and each call
+now runs under `timeout` (TERM at the limit, KILL 5 s later), as the metrics exporter's queries
+do. Before, one call to a server that accepted the connection and never answered held the
+segment server, and every request waiting behind it, until the server came back. Reads, such as
+the state the Lease holder asks for and the operator's `MON$DATABASE` values, give up after
+`LOCAL_QUERY_TIMEOUT_SECONDS` (10 s, the time the Lease holder waits for STATE). Changes give up
+after `LOCAL_COMMAND_TIMEOUT_SECONDS` (60 s): the full shutdown of a fence, bringing the database
+online, the replica mode, the backup lock of a seed copy, and publication. A call that times out
+fails like any refused call, so a fence is retried and a promotion falls back to the offline one.
+The sidecar's log says which command timed out. The `nbackup` the segment server takes (backups
+from a replica) and its file copies scale with the database and have no limit
+(CloudNativePG #11718).
 
 ### Synchronous Replication
 

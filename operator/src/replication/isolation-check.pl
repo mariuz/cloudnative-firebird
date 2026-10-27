@@ -62,6 +62,15 @@ my $peers_cache  = $ENV{PEERS_CACHE_FILE} // "$marker.peers";
 my $seed_sources = $ENV{SEED_SOURCES_FILE} // '';
 my $peer_addresses = $ENV{PEER_ADDRESSES_FILE} // '';
 my $once         = ($ENV{ONCE} // '') eq 'true';   # tests: one check, then exit
+# the local server's calls are bounded as the segment server's (segment-server.pl): a hung server
+# must not hold the check, whose fence has to come before the operator's failover
+my $query_timeout = ($ENV{LOCAL_QUERY_TIMEOUT_SECONDS} // '') =~ /^[1-9]\d*$/ ? $ENV{LOCAL_QUERY_TIMEOUT_SECONDS} : 10;
+my $command_timeout = ($ENV{LOCAL_COMMAND_TIMEOUT_SECONDS} // '') =~ /^[1-9]\d*$/ ? $ENV{LOCAL_COMMAND_TIMEOUT_SECONDS} : 60;
+sub report_timeout {
+  my ($status, $seconds, $what) = @_;
+  my $code = $status >> 8;
+  print "$what timed out after ${seconds}s\n" if $status != -1 && ($code == 124 || $code == 137);
+}
 exit 0 unless $timeout =~ /^\d+$/ && $timeout > 0;
 $| = 1;
 
@@ -197,7 +206,8 @@ sub connected {
 
 # The database state from the local server: "online", "shutdown", or undef (no answer)
 sub database_state {
-  my $out = `fbsvcmgr localhost:service_mgr action_db_stats dbname '$database' sts_hdr_pages 2>&1`;
+  my $out = `timeout -k 5 $query_timeout fbsvcmgr localhost:service_mgr action_db_stats dbname '$database' sts_hdr_pages 2>&1`;
+  report_timeout($?, $query_timeout, 'fbsvcmgr action_db_stats');
   # Firebird 6 refuses header statistics for a database in full shutdown
   return 'shutdown' if $out =~ /^database .* shutdown/m;
   return undef if $?;
@@ -223,8 +233,10 @@ sub fence {
   close $fh;
   rename "$marker.tmp", $marker;
   print "isolated: " . ($reason // "neither the Kubernetes API server nor another instance reachable for " . (time - $since) . "s") . "; fencing the primary (database in full shutdown)\n";
-  if (system('fbsvcmgr', 'localhost:service_mgr', 'action_properties', 'dbname', $database,
-             'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0') != 0) {
+  my $status = system('timeout', '-k', '5', $command_timeout, 'fbsvcmgr', 'localhost:service_mgr', 'action_properties',
+                      'dbname', $database, 'prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0');
+  report_timeout($status, $command_timeout, 'fbsvcmgr action_properties');
+  if ($status != 0) {
     unlink $marker;
     print "full shutdown failed; retrying on the next check\n";
   }
