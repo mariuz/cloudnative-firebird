@@ -78,9 +78,13 @@ From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
   and the isolation check's `isql`, `fbsvcmgr` and `gfix` calls to the local server run under
   `timeout`: reads after `LOCAL_QUERY_TIMEOUT_SECONDS` (10 s), changes after
   `LOCAL_COMMAND_TIMEOUT_SECONDS` (60 s). The `nbackup` and file copies stay unbounded.
-- [ ] **Conditional backup and restore status writes** (#11617): the status is replaced from the
-  copy a reconcile started with; test the `resourceVersion` read, as the fencing reconcile does
-  since v0.122.0, so a stale copy cannot write an older phase back.
+- [x] **Conditional backup and restore status writes** (#11617, v0.138.0): the backup, restore
+  and schedule status writes test the `resourceVersion` of the copy the reconcile read; a refused
+  write (422) ends that reconcile without an error, and the terminal events follow the status
+  write, so an older copy neither writes an older phase back nor records an event twice.
+- [ ] **Conditional status writes for users, roles and databases**: `FirebirdUser`, `FirebirdRole`
+  and `FirebirdDatabase` still replace their status unconditionally (their finalizer patches
+  already test the version); the same test would keep an older copy from writing back.
 - [ ] **Generated passwords for `FirebirdUser`** (#11337): generate the password into a Secret
   when none is given, with optional renewal.
 - [x] **A viewer ClusterRole** (#11684, v0.135.0): `cloudnative-firebird-viewer`, read-only on

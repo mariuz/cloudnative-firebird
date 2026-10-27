@@ -59,7 +59,7 @@ describe('FirebirdBackupController', () => {
 
   const lastStatus = () => {
     const calls = customApi.patchNamespacedCustomObjectStatus.mock.calls;
-    return calls[calls.length - 1]?.[0].body[0].value;
+    return calls[calls.length - 1]?.[0].body.at(-1).value;
   };
 
   const makeBackup = (overrides: Partial<FirebirdBackup> = {}): FirebirdBackup => ({
@@ -228,6 +228,78 @@ describe('FirebirdBackupController', () => {
       customApi.getNamespacedCustomObject.mockRejectedValue(new Error('connection refused'));
       await expect(controller.reconcileBackup(makeBackup())).rejects.toThrow('connection refused');
       expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled();
+    });
+
+    describe('status writes conditional on the copy read (CloudNativePG #11617)', () => {
+      const versioned = (resourceVersion: string, status?: FirebirdBackup['status']) =>
+        makeBackup({ metadata: { name: 'test-backup', namespace: 'default', resourceVersion }, ...(status ? { status } : {}) });
+      // what the API server answers a JSON patch whose test operation fails
+      const testFailed = Object.assign(new Error('the server rejected our request due to an error in our request'), { code: 422 });
+
+      it("tests the copy's resourceVersion before replacing the status", async () => {
+        await controller.reconcileBackup(versioned('41'));
+        const body = customApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body;
+        expect(body[0]).toEqual({ op: 'test', path: '/metadata/resourceVersion', value: '41' });
+        expect(body[1]).toMatchObject({ op: 'replace', path: '/status', value: { phase: 'Running' } });
+        // a copy without a version (never from the API server) is written as before
+        customApi.patchNamespacedCustomObjectStatus.mockClear();
+        await controller.reconcileBackup(makeBackup());
+        expect(customApi.patchNamespacedCustomObjectStatus.mock.calls[0][0].body.map((op: { op: string }) => op.op)).toEqual(['replace']);
+      });
+
+      it('writes nothing, and records no event, from a copy older than the stored backup', async () => {
+        const record = vi.spyOn(EventRecorder.prototype, 'record').mockResolvedValue(undefined);
+        // the Job finished; this copy still says Running, from before the write that recorded Completed
+        batchApi.readNamespacedJob.mockResolvedValue({ ...complete, metadata: { name: 'backup-test-backup' } });
+        customApi.patchNamespacedCustomObjectStatus.mockRejectedValue(testFailed);
+        await expect(controller.reconcileBackup(versioned('41', { phase: 'Running', startTime: '2026-01-01T00:00:00.000Z' }))).resolves.toBeUndefined();
+        expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1);
+        expect(record.mock.calls.map((c) => c[2])).not.toContain('BackupCompleted');
+        record.mockRestore();
+      });
+
+      it('records the terminal event once the status is written', async () => {
+        const record = vi.spyOn(EventRecorder.prototype, 'record').mockResolvedValue(undefined);
+        batchApi.readNamespacedJob.mockResolvedValue({ ...complete, metadata: { name: 'backup-test-backup' } });
+        const order: string[] = [];
+        customApi.patchNamespacedCustomObjectStatus.mockImplementation(async () => {
+          order.push('status');
+          return { metadata: { resourceVersion: '42' } };
+        });
+        record.mockImplementation(async (_o, _t, reason) => {
+          order.push(reason);
+        });
+        const copy = versioned('41', { phase: 'Running', startTime: '2026-01-01T00:00:00.000Z' });
+        await controller.reconcileBackup(copy);
+        expect(order).toEqual(['status', 'BackupCompleted']);
+        // the copy follows its own write, so a later write of the same reconcile is not refused
+        expect(copy.metadata.resourceVersion).toBe('42');
+        record.mockRestore();
+      });
+
+      it('still fails on other API errors', async () => {
+        customApi.patchNamespacedCustomObjectStatus.mockRejectedValue(Object.assign(new Error('forbidden'), { code: 403 }));
+        await expect(controller.reconcileBackup(versioned('41'))).rejects.toThrow('forbidden');
+        // a 422 without a test operation (a copy without a version) is not taken for a stale copy
+        customApi.patchNamespacedCustomObjectStatus.mockRejectedValue(testFailed);
+        await expect(controller.reconcileBackup(makeBackup())).rejects.toThrow('rejected');
+      });
+
+      it('applies to restores and schedules too', async () => {
+        customApi.patchNamespacedCustomObjectStatus.mockRejectedValue(testFailed);
+        const restore = makeRestore();
+        restore.metadata.resourceVersion = '7';
+        await expect(controller.reconcileRestore(restore)).resolves.toBeUndefined();
+        expect(customApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)[0].body[0]).toEqual({ op: 'test', path: '/metadata/resourceVersion', value: '7' });
+        const schedule: FirebirdScheduledBackup = {
+          apiVersion: 'firebird.cloudnative-firebird.io/v1',
+          kind: 'FirebirdScheduledBackup',
+          metadata: { name: 'nightly', namespace: 'default', resourceVersion: '9' },
+          spec: { clusterName: 'test-cluster', schedule: '0 2 * * *' },
+        };
+        await expect(controller.reconcileScheduledBackup(schedule)).resolves.toBeUndefined();
+        expect(customApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)[0].body[0]).toEqual({ op: 'test', path: '/metadata/resourceVersion', value: '9' });
+      });
     });
   });
 

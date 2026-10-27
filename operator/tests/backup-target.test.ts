@@ -78,7 +78,7 @@ describe('backup target', () => {
     const job = api.createNamespacedJob.mock.calls[0][0].body;
     const env = job.spec.template.spec.initContainers[0].env;
     expect(env.find((e: { name: string }) => e.name === 'FIREBIRD_HOST').value).toBe('db-1.db-headless');
-    const status = api.patchNamespacedCustomObjectStatus.mock.calls.at(-1)[0].body[0].value;
+    const status = api.patchNamespacedCustomObjectStatus.mock.calls.at(-1)[0].body.at(-1).value;
     expect(status).toMatchObject({ phase: 'Running', instance: 'db-1' });
   });
 });
