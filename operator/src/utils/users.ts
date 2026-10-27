@@ -5,6 +5,7 @@ import { API_GROUP, FirebirdCluster, FirebirdUser } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, jobPodSpec } from './resources';
 import { instanceHost } from './replication';
 import { ValidationError } from './validation';
+import { passwordSecretRef, validatePasswordSpec } from './user-password';
 import { Identifier, parseIdentifier, REGULAR_IDENTIFIER, sqlString } from './identifiers';
 
 /**
@@ -52,9 +53,7 @@ export function validateUserSpec(user: FirebirdUser): void {
   if (!spec?.clusterName || spec.clusterName.trim() === '') {
     throw new ValidationError('FirebirdUser clusterName is required');
   }
-  if (!spec.passwordSecret?.name) {
-    throw new ValidationError('FirebirdUser passwordSecret.name is required');
-  }
+  validatePasswordSpec(user);
   const username = spec.username ?? user.metadata.name.replace(/-/g, '_');
   if (!IDENTIFIER.test(username)) {
     throw new ValidationError(
@@ -87,7 +86,7 @@ export function userSpecHash(user: FirebirdUser, secret: { uid?: string; resourc
     admin: user.spec.admin ?? false,
     // stored names: unchanged for regular identifiers, so existing users are not applied again
     roles: desiredRoles(user).map((r) => r.name),
-    secret: `${secret.uid ?? ''}/${secret.resourceVersion ?? ''}/${user.spec.passwordSecret.key ?? 'password'}`,
+    secret: `${secret.uid ?? ''}/${secret.resourceVersion ?? ''}/${passwordSecretRef(user).key}`,
   });
   return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
 }
@@ -220,12 +219,8 @@ export function buildUserJob(
                   ? [
                       {
                         name: 'PASSWORD',
-                        valueFrom: {
-                          secretKeyRef: {
-                            name: user.spec.passwordSecret.name,
-                            key: user.spec.passwordSecret.key ?? 'password',
-                          },
-                        },
+                        // passwordSecret, or the Secret of a generated password
+                        valueFrom: { secretKeyRef: passwordSecretRef(user) },
                       },
                       { name: 'USER_CLAUSE', value: userClause },
                       { name: 'GRANT_SQL', value: grantSql(username, desiredRoles(user)) },

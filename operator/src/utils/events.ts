@@ -100,6 +100,8 @@ export const EventReason = {
   RecoveryCompleted: 'RecoveryCompleted',
   UserApplied: 'UserApplied',
   UserFailed: 'UserFailed',
+  PasswordGenerated: 'PasswordGenerated',
+  PasswordRenewed: 'PasswordRenewed',
   UserDropped: 'UserDropped',
   DatabaseCreated: 'DatabaseCreated',
   DatabaseFailed: 'DatabaseFailed',
