@@ -176,7 +176,7 @@ describe('FirebirdRoleController', () => {
     const controller = new FirebirdRoleController(kubeConfig, () => opts.now ?? Date.parse('2026-09-30T12:00:00Z'));
     const status = () => {
       const calls = api.patchNamespacedCustomObjectStatus.mock.calls;
-      return calls[calls.length - 1]?.[0].body[0].value;
+      return calls[calls.length - 1]?.[0].body.at(-1).value;
     };
     const created = () => api.createNamespacedJob.mock.calls.map((c) => c[0].body as V1Job);
     return { controller, api, status, created };
@@ -191,6 +191,18 @@ describe('FirebirdRoleController', () => {
       },
     },
     status: { conditions: [{ type: 'Complete', status: 'True' }] },
+  });
+
+  it('writes the status over the version it read, and stops quietly on an older copy', async () => {
+    const s = setup();
+    await s.controller.reconcileRole(makeRole());
+    expect(s.api.patchNamespacedCustomObjectStatus.mock.calls[0][0].body[0]).toEqual({ op: 'test', path: '/metadata/resourceVersion', value: '1' });
+    const old = setup();
+    old.api.patchNamespacedCustomObjectStatus.mockRejectedValue(Object.assign(new Error('the server rejected our request due to an error in our request'), { code: 422 }));
+    await expect(old.controller.reconcileRole(makeRole())).resolves.toBeUndefined();
+    const e = setup();
+    e.api.patchNamespacedCustomObjectStatus.mockRejectedValue(Object.assign(new Error('forbidden'), { code: 403 }));
+    await expect(e.controller.reconcileRole(makeRole())).rejects.toThrow('forbidden');
   });
 
   it('with replication, applies on the primary only and records the applied spec', async () => {

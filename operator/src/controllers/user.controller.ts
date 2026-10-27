@@ -11,6 +11,7 @@ import {
 } from '@kubernetes/client-node';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { logger } from '../utils/logger';
+import { followOwnWrite, replaceStatus, StaleCopyError } from '../utils/status-write';
 import { CLUSTER_LABEL, instancePodSelector } from '../utils/resources';
 import { replicationEnabled } from '../utils/replication';
 import { isPodReady } from '../utils/routing';
@@ -90,6 +91,15 @@ export class FirebirdUserController {
   }
 
   async reconcileUser(user: FirebirdUser): Promise<void> {
+    try {
+      await this.reconcileUserCopy(user);
+    } catch (err) {
+      if (!(err instanceof StaleCopyError)) throw err;
+      logger.debug({ user: user.metadata.name, namespace: user.metadata.namespace, version: err.version }, err.message);
+    }
+  }
+
+  private async reconcileUserCopy(user: FirebirdUser): Promise<void> {
     const { name, namespace = 'default' } = user.metadata;
     const log = logger.child({ user: name, namespace });
 
@@ -417,7 +427,7 @@ export class FirebirdUserController {
     const has = finalizers.includes(USER_FINALIZER);
     if (has === wanted) return;
     const next = wanted ? [...finalizers, USER_FINALIZER] : finalizers.filter((f) => f !== USER_FINALIZER);
-    await this.customApi.patchNamespacedCustomObject({
+    const patched = await this.customApi.patchNamespacedCustomObject({
       group: API_GROUP,
       version: API_VERSION,
       namespace: user.metadata.namespace ?? 'default',
@@ -430,6 +440,8 @@ export class FirebirdUserController {
       ],
     });
     user.metadata.finalizers = next;
+    // the patch tested this copy's version: it stays current with its own write
+    followOwnWrite(user, patched);
   }
 
   /** Replaces the status when it changed; undefined fields are dropped */
@@ -439,13 +451,6 @@ export class FirebirdUserController {
     );
     const canonical = (o: object) => JSON.stringify(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
     if (user.status && canonical(user.status) === canonical(merged)) return;
-    await this.customApi.patchNamespacedCustomObjectStatus({
-      group: API_GROUP,
-      version: API_VERSION,
-      namespace: user.metadata.namespace ?? 'default',
-      plural: 'firebirdusers',
-      name: user.metadata.name,
-      body: [{ op: 'replace' as const, path: '/status', value: merged }],
-    });
+    await replaceStatus(this.customApi, 'firebirdusers', user, merged);
   }
 }

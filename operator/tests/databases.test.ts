@@ -134,7 +134,7 @@ describe('FirebirdDatabaseController', () => {
     const kubeConfig = new KubeConfig();
     vi.spyOn(kubeConfig, 'makeApiClient').mockReturnValue(new Proxy({}, { get: (_t, p: string) => api[p] ?? vi.fn().mockResolvedValue({}) }) as never);
     const controller = new FirebirdDatabaseController(kubeConfig, () => opts.now ?? Date.parse('2026-10-11T12:00:00Z'));
-    const status = () => api.patchNamespacedCustomObjectStatus.mock.calls.at(-1)?.[0].body[0].value;
+    const status = () => api.patchNamespacedCustomObjectStatus.mock.calls.at(-1)?.[0].body.at(-1).value;
     const created = () => api.createNamespacedJob.mock.calls.map((c) => c[0].body as V1Job);
     const finalizers = () => api.patchNamespacedCustomObject.mock.calls.at(-1)?.[0].body[1].value;
     const events = () => api.createNamespacedEvent.mock.calls.map((c) => c[0].body.reason);
@@ -209,6 +209,24 @@ describe('FirebirdDatabaseController', () => {
     await hibernated.controller.reconcileDatabase(makeDatabase());
     expect(hibernated.status()).toMatchObject({ phase: 'Pending' });
     expect(hibernated.created()).toHaveLength(0);
+  });
+
+  it('writes the status over the version it read, and stops quietly on an older copy', async () => {
+    const s = setup();
+    await s.controller.reconcileDatabase(makeDatabase());
+    expect(s.api.patchNamespacedCustomObjectStatus.mock.calls[0][0].body[0]).toEqual({ op: 'test', path: '/metadata/resourceVersion', value: '1' });
+    const old = setup();
+    old.api.patchNamespacedCustomObjectStatus.mockRejectedValue(Object.assign(new Error('the server rejected our request due to an error in our request'), { code: 422 }));
+    await expect(old.controller.reconcileDatabase(makeDatabase())).resolves.toBeUndefined();
+    // the finalizer patch is this reconcile's own write: its status write follows its version
+    const f = setup();
+    f.api.patchNamespacedCustomObject.mockResolvedValue({ metadata: { resourceVersion: '2' } });
+    await f.controller.reconcileDatabase(makeDatabase({ reclaimPolicy: 'delete' }));
+    expect(f.api.patchNamespacedCustomObjectStatus.mock.calls[0][0].body[0]).toEqual({ op: 'test', path: '/metadata/resourceVersion', value: '2' });
+    // a database deleted meanwhile is still no error
+    const gone = setup();
+    gone.api.patchNamespacedCustomObjectStatus.mockRejectedValue(Object.assign(new Error('not found'), { code: 404 }));
+    await expect(gone.controller.reconcileDatabase(makeDatabase())).resolves.toBeUndefined();
   });
 
   it('adds the finalizer for reclaimPolicy delete, and drops the database on deletion', async () => {

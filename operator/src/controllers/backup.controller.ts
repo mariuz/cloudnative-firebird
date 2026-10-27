@@ -35,6 +35,7 @@ import {
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { BackupTarget, chooseBackupInstance } from '../utils/backup-target';
 import { logger } from '../utils/logger';
+import { followOwnWrite, replaceStatus, StaleCopyError } from '../utils/status-write';
 import {
   BackupSource,
   backupLocation,
@@ -105,20 +106,6 @@ function jobInstance(job: V1Job): string | undefined {
 function statusCode(err: unknown): number | undefined {
   const e = err as { code?: number; statusCode?: number; response?: { statusCode?: number } };
   return e?.code ?? e?.statusCode ?? e?.response?.statusCode;
-}
-
-/**
- * A status write refused because the object changed after the copy the reconcile works from was
- * read: that reconcile stops, and the one of the newer copy (its watch event) decides instead
- */
-export class StaleCopyError extends Error {
-  constructor(
-    object: string,
-    readonly version: string,
-  ) {
-    super(`${object} changed since resourceVersion ${version} was read: status not written from the older copy`);
-    this.name = 'StaleCopyError';
-  }
 }
 
 /** Returns true for a Kubernetes API "not found" error */
@@ -671,8 +658,7 @@ export class FirebirdBackupController {
     })) as FirebirdBackup | undefined;
     // this reconcile's own write: its copy stays current if it was when the finalizer was read (a
     // copy older than that stays older, so its status writes are still refused)
-    const version = patched?.metadata?.resourceVersion;
-    if (version && fresh.metadata.resourceVersion === backup.metadata.resourceVersion) backup.metadata.resourceVersion = version;
+    if (fresh.metadata.resourceVersion === backup.metadata.resourceVersion) followOwnWrite(backup, patched);
   }
 
   /**
@@ -896,7 +882,7 @@ export class FirebirdBackupController {
    * predates another write (a watch event queued before the last reconcile's status write) must not
    * write an older phase or time back, so the API server refuses it (StaleCopyError) and the
    * reconcile of the newer copy decides instead. The copy takes the new resourceVersion, so the
-   * reconcile's next write applies to it.
+   * reconcile's next write applies to it (utils/status-write.ts).
    */
   private async patchStatus(
     plural: string,
@@ -909,26 +895,7 @@ export class FirebirdBackupController {
     );
     const canonical = (o: object) => JSON.stringify(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
     if (current && canonical(current) === canonical(merged)) return;
-    const version = object.metadata.resourceVersion;
-    let written: { metadata?: { resourceVersion?: string } } | undefined;
-    try {
-      written = (await this.customApi.patchNamespacedCustomObjectStatus({
-        group: API_GROUP,
-        version: API_VERSION,
-        namespace: object.metadata.namespace ?? 'default',
-        plural,
-        name: object.metadata.name,
-        body: [
-          ...(version ? [{ op: 'test' as const, path: '/metadata/resourceVersion', value: version }] : []),
-          { op: 'replace' as const, path: '/status', value: merged },
-        ],
-      })) as { metadata?: { resourceVersion?: string } } | undefined;
-    } catch (err) {
-      // a failed test operation: the stored object changed since this copy was read
-      if (version && statusCode(err) === 422) throw new StaleCopyError(`${plural}/${object.metadata.name}`, version);
-      throw err;
-    }
-    if (written?.metadata?.resourceVersion) object.metadata.resourceVersion = written.metadata.resourceVersion;
+    await replaceStatus(this.customApi, plural, object, merged);
   }
 
   private updateBackupStatus(backup: FirebirdBackup, status: NonNullable<FirebirdBackup['status']>): Promise<void> {
