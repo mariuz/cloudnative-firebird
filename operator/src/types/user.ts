@@ -10,12 +10,14 @@ export interface FirebirdUserSpec {
    * name with "-" replaced by "_".
    */
   username?: string;
-  /** Secret holding the password */
-  passwordSecret: {
+  /** Secret holding the password; exactly one of passwordSecret and password */
+  passwordSecret?: {
     name: string;
     /** Key in the Secret (default "password") */
     key?: string;
   };
+  /** A password the operator generates into a Secret it owns (CloudNativePG 1.31's password stanza) */
+  password?: FirebirdUserPasswordSpec;
   /** Whether the user can log in (default true) */
   active?: boolean;
   /** Grant the RDB$ADMIN role in the security database (user management rights) */
@@ -31,6 +33,23 @@ export interface FirebirdUserSpec {
    * it, "delete" drops it and revokes its privileges.
    */
   reclaimPolicy?: 'retain' | 'delete';
+}
+
+/** A generated password: kept in a kubernetes.io/basic-auth Secret owned by the FirebirdUser */
+export interface FirebirdUserPasswordSpec {
+  /** "generate": the only mode */
+  mode: 'generate';
+  /** Name of the Secret (default "<resource name>-password"); one the operator does not own is never overwritten */
+  secretName?: string;
+  /** Number of characters, letters and digits (default 32, 16 to 128) */
+  length?: number;
+  /**
+   * Lifetime of a password ("2160h", "90m", "1h30m"): the operator generates a new one
+   * renewBefore ahead of the expiration. Unset: generated once and kept.
+   */
+  duration?: string;
+  /** How long before the expiration the password is renewed (default a third of duration) */
+  renewBefore?: string;
 }
 
 /** User state applied to one instance */
@@ -59,6 +78,8 @@ export interface FirebirdUserStatus {
   failedHash?: string;
   /** Instances (and volumes) the user has been dropped from while the resource is deleted */
   droppedFrom?: Array<{ name: string; volume: string }>;
+  /** The generated password (spec.password): its Secret, when it was generated and when it expires */
+  password?: { secretName: string; generatedTime?: string; expiration?: string };
 }
 
 export interface FirebirdUser {

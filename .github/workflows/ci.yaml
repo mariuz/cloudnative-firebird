@@ -817,6 +817,61 @@ jobs:
           timeout 120 bash -c 'while kubectl get firebirdcluster repl -o jsonpath={.status.fencedInstances} | grep -q repl-2; do sleep 3; done'
           echo "user dropped from every instance"
 
+          # a generated password (spec.password, v0.140.0): the operator writes it into a basic-auth
+          # Secret the FirebirdUser owns, applies it on every instance, and renews it before it
+          # expires (here 60 s after it was generated: duration 3m, renewBefore 2m)
+          as_gen() {
+            kubectl exec "$1" -c firebird -- env "PW=$2" bash -c \
+              'echo "select current_user from rdb\$database;" | isql -q -u gen_user -p "$PW" localhost:/var/lib/firebird/data/mydb.fdb' 2>&1
+          }
+          gen_login() {
+            for n in $(seq 1 24); do as_gen "$1" "$2" | grep -q GEN_USER && return 0; sleep 5; done
+            as_gen "$1" "$2"; kubectl get firebirduser gen-user -o yaml; return 1
+          }
+          gen_password() { kubectl get secret gen-user-password -o jsonpath={.data.password} | base64 -d; }
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdUser
+          metadata:
+            name: gen-user
+          spec:
+            clusterName: repl
+            password:
+              mode: generate
+              duration: 3m
+              renewBefore: 2m
+            reclaimPolicy: delete
+          EOF
+          timeout 300 bash -c \
+            'until [ "$(kubectl get firebirduser gen-user -o jsonpath={.status.phase})" = "Applied" ]; do sleep 5; done' \
+            || { kubectl get firebirduser gen-user -o yaml; kubectl logs job/fbuser-gen-user || true; exit 1; }
+          [ "$(kubectl get secret gen-user-password -o jsonpath={.type})" = kubernetes.io/basic-auth ]
+          [ "$(kubectl get secret gen-user-password -o jsonpath={.metadata.ownerReferences[0].uid})" = "$(kubectl get firebirduser gen-user -o jsonpath={.metadata.uid})" ]
+          [ "$(kubectl get secret gen-user-password -o jsonpath={.data.username} | base64 -d)" = GEN_USER ]
+          pw1=$(gen_password)
+          echo "$pw1" | grep -qE '^[A-Za-z0-9]{32}$'
+          [ "$(kubectl get firebirduser gen-user -o jsonpath={.status.password.secretName})" = gen-user-password ]
+          kubectl get firebirduser gen-user -o jsonpath='{.status.password}'; echo
+          for pod in repl-0 repl-1 repl-2; do gen_login $pod "$pw1"; done
+          echo "generated password applied on every instance"
+          # renewed: a new password in the Secret, then on every instance; the old one stops working
+          timeout 180 bash -c 'until [ "$(kubectl get secret gen-user-password -o jsonpath={.data.password} | base64 -d)" != "$0" ]; do sleep 3; done' "$pw1" \
+            || { kubectl get firebirduser gen-user -o yaml; exit 1; }
+          # no further renewal while the new password is checked
+          kubectl patch firebirduser gen-user --type json \
+            -p '[{"op":"remove","path":"/spec/password/renewBefore"},{"op":"remove","path":"/spec/password/duration"}]'
+          pw2=$(gen_password)
+          for pod in repl-0 repl-1 repl-2; do gen_login $pod "$pw2"; done
+          for pod in repl-0 repl-1 repl-2; do as_gen $pod "$pw1" | grep -q 'not defined'; done
+          timeout 60 bash -c 'until kubectl get events --field-selector involvedObject.name=gen-user -o jsonpath="{.items[*].reason}" | grep -q PasswordRenewed; do sleep 3; done'
+          kubectl get events --field-selector involvedObject.name=gen-user -o jsonpath='{.items[*].reason}' | grep -q PasswordGenerated
+          echo "generated password renewed on every instance"
+          # the Secret goes with the FirebirdUser (garbage collection: it owns it)
+          kubectl delete firebirduser gen-user --wait=true --timeout=240s
+          timeout 120 bash -c 'while kubectl get secret gen-user-password >/dev/null 2>&1; do sleep 3; done'
+          for pod in repl-0 repl-1 repl-2; do as_gen $pod "$pw2" | grep -q 'not defined'; done
+          echo "generated user dropped, its Secret deleted"
+
           # a user created with plain SQL (as before v0.12.0, or by an application) exists on one
           # instance only: hack/users/unmanaged-users.sh finds it and writes a FirebirdUser for it,
           # keeping its role (a FirebirdUser revokes the roles it does not list)

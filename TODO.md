@@ -85,8 +85,11 @@ From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
 - [x] **Conditional status writes for users, roles and databases** (v0.139.0): `FirebirdUser`,
   `FirebirdRole` and `FirebirdDatabase` write their status over the version they read, as backups
   do (one helper, utils/status-write.ts); their finalizer patches keep the copy's version current.
-- [ ] **Generated passwords for `FirebirdUser`** (#11337): generate the password into a Secret
-  when none is given, with optional renewal.
+- [x] **Generated passwords for `FirebirdUser`** (#11337, v0.140.0): `spec.password` (`mode:
+  generate`, `secretName`, `length`, `duration`, `renewBefore`) generates the password into a
+  basic-auth Secret the user owns, renewed before it expires when a duration is set; a Secret it
+  does not own is never written. CloudNativePG's `criteria` (symbols, no upper case, repeats) are
+  not copied: letters and digits need no quoting anywhere.
 - [x] **A viewer ClusterRole** (#11684, v0.135.0): `cloudnative-firebird-viewer`, read-only on
   every `firebird.cloudnative-firebird.io` resource, aggregated into `view`, `edit` and `admin`, in
   the install manifest and the chart, with a README section. CloudNativePG's DBA samples (a

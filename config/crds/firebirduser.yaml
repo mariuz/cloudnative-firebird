@@ -56,7 +56,9 @@ spec:
               type: object
               required:
                 - clusterName
-                - passwordSecret
+              x-kubernetes-validations:
+                - rule: has(self.passwordSecret) != has(self.password)
+                  message: set exactly one of passwordSecret and password
               properties:
                 clusterName:
                   description: FirebirdCluster name (immutable)
@@ -77,8 +79,48 @@ spec:
                       message: username is immutable
                     - rule: self.upperAscii() != 'SYSDBA'
                       message: SYSDBA is managed through the cluster superuserSecret
+                password:
+                  description: >-
+                    A password the operator generates into a kubernetes.io/basic-auth Secret it
+                    owns (username, password), "<name>-password" by default, instead of
+                    passwordSecret. Generated once and kept, unless duration gives it a lifetime.
+                  type: object
+                  required:
+                    - mode
+                  x-kubernetes-validations:
+                    - rule: '!has(self.renewBefore) || has(self.duration)'
+                      message: password.renewBefore needs password.duration
+                  properties:
+                    mode:
+                      type: string
+                      enum:
+                        - generate
+                    secretName:
+                      description: >-
+                        Name of the Secret (default "<name>-password"); one the FirebirdUser does
+                        not own is never overwritten
+                      type: string
+                      maxLength: 253
+                      pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+                    length:
+                      description: Number of characters, letters and digits (default 32)
+                      type: integer
+                      minimum: 16
+                      maximum: 128
+                    duration:
+                      description: >-
+                        Lifetime of a password, in hours, minutes and seconds ("2160h", "1h30m"):
+                        a new one is generated renewBefore ahead of the expiration. Unset: kept.
+                      type: string
+                      pattern: '^([0-9]+h)?([0-9]+m)?([0-9]+s)?$'
+                      minLength: 2
+                    renewBefore:
+                      description: How long before the expiration the password is renewed (default a third of duration)
+                      type: string
+                      pattern: '^([0-9]+h)?([0-9]+m)?([0-9]+s)?$'
+                      minLength: 2
                 passwordSecret:
-                  description: Secret holding the password
+                  description: Secret holding the password (or password, generated)
                   type: object
                   required:
                     - name
@@ -145,6 +187,18 @@ spec:
                   format: date-time
                 failedHash:
                   type: string
+                password:
+                  description: The generated password (spec.password)
+                  type: object
+                  properties:
+                    secretName:
+                      type: string
+                    generatedTime:
+                      type: string
+                      format: date-time
+                    expiration:
+                      type: string
+                      format: date-time
                 droppedFrom:
                   description: Instances the user has been dropped from while the resource is deleted (reclaimPolicy delete)
                   type: array

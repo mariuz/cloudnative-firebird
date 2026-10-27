@@ -300,6 +300,81 @@ describe('FirebirdUserController', () => {
     expect(c.status()).toMatchObject({ phase: 'Pending', message: 'FirebirdCluster db not found' });
   });
 
+  describe('a generated password (spec.password)', () => {
+    const generating = (password: Partial<NonNullable<FirebirdUser['spec']['password']>> = {}) =>
+      makeUser({ passwordSecret: undefined, password: { mode: 'generate', ...password } });
+    const ownedSecret = (generated: string) => ({
+      metadata: {
+        name: 'app-user-password',
+        uid: 'g-uid',
+        resourceVersion: '20',
+        annotations: { 'firebird.cloudnative-firebird.io/password-generated': generated },
+        ownerReferences: [{ apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdUser', name: 'app-user', uid: 'u-uid', controller: true }],
+      },
+      data: { username: 'QVBQX1VTRVI=', password: 'b2xk' },
+    });
+    const reasons = (api: Record<string, Mock>) => api.createNamespacedEvent.mock.calls.map((c) => c[0].body.reason);
+
+    it('generates the Secret, applies the password from it and reports it', async () => {
+      const s = setup();
+      let stored: unknown;
+      s.api.readNamespacedSecret.mockImplementation(async () => {
+        if (!stored) throw notFound;
+        return stored;
+      });
+      s.api.createNamespacedSecret = vi.fn().mockImplementation(async ({ body }) => {
+        stored = { ...body, metadata: { ...body.metadata, uid: 'g-uid', resourceVersion: '20' } };
+        return stored;
+      });
+      await s.controller.reconcileUser(generating());
+      const body = s.api.createNamespacedSecret.mock.calls[0][0].body;
+      expect(body.type).toBe('kubernetes.io/basic-auth');
+      expect(body.metadata.name).toBe('app-user-password');
+      expect(Buffer.from(body.data.username, 'base64').toString()).toBe('APP_USER');
+      expect(Buffer.from(body.data.password, 'base64').toString()).toMatch(/^[A-Za-z0-9]{32}$/);
+      expect(reasons(s.api)).toContain('PasswordGenerated');
+      // the Job reads the password from the generated Secret
+      const env = s.created()[0].spec!.template.spec!.containers[0].env!;
+      expect(env.find((e) => e.name === 'PASSWORD')?.valueFrom).toEqual({ secretKeyRef: { name: 'app-user-password', key: 'password' } });
+      expect(s.status()).toMatchObject({ phase: 'Applying', password: { secretName: 'app-user-password', generatedTime: '2026-09-27T12:00:00.000Z' } });
+    });
+
+    it('keeps the password, and renews it once its duration says so', async () => {
+      const keep = setup();
+      keep.api.readNamespacedSecret.mockResolvedValue(ownedSecret('2026-09-27T00:00:00.000Z'));
+      keep.api.replaceNamespacedSecret = vi.fn();
+      keep.api.createNamespacedSecret = vi.fn();
+      await keep.controller.reconcileUser(generating({ duration: '24h', renewBefore: '6h' }));
+      expect(keep.api.createNamespacedSecret).not.toHaveBeenCalled();
+      expect(keep.api.replaceNamespacedSecret).not.toHaveBeenCalled();
+      expect(keep.status()).toMatchObject({ password: { expiration: '2026-09-28T00:00:00.000Z' } });
+
+      // 12:00 is past the renewal at 18:00 the day before
+      const renew = setup();
+      renew.api.readNamespacedSecret.mockResolvedValue(ownedSecret('2026-09-26T00:00:00.000Z'));
+      renew.api.replaceNamespacedSecret = vi.fn().mockImplementation(async ({ body }) => body);
+      await renew.controller.reconcileUser(generating({ duration: '24h', renewBefore: '6h' }));
+      const replaced = renew.api.replaceNamespacedSecret.mock.calls[0][0].body;
+      expect(replaced.metadata.resourceVersion).toBe('20');
+      expect(Buffer.from(replaced.data.password, 'base64').toString()).not.toBe('old');
+      expect(replaced.metadata.annotations['firebird.cloudnative-firebird.io/password-generated']).toBe('2026-09-27T12:00:00.000Z');
+      expect(reasons(renew.api)).toContain('PasswordRenewed');
+      expect(renew.status()).toMatchObject({ password: { expiration: '2026-09-28T12:00:00.000Z' } });
+    });
+
+    it('never writes into a Secret it does not own', async () => {
+      const s = setup();
+      s.api.readNamespacedSecret.mockResolvedValue({ metadata: { name: 'app-user-password' }, data: { password: 'eA==' } });
+      s.api.replaceNamespacedSecret = vi.fn();
+      s.api.createNamespacedSecret = vi.fn();
+      await s.controller.reconcileUser(generating());
+      expect(s.api.replaceNamespacedSecret).not.toHaveBeenCalled();
+      expect(s.api.createNamespacedSecret).not.toHaveBeenCalled();
+      expect(s.created()).toHaveLength(0);
+      expect(s.status()).toMatchObject({ phase: 'Failed', message: expect.stringContaining('is not owned by this FirebirdUser') });
+    });
+  });
+
   it('writes the status over the version it read, and stops quietly on an older copy', async () => {
     const s = setup();
     await s.controller.reconcileUser(makeUser());

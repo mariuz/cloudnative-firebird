@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.139.0/cloudnative-firebird-0.139.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.140.0/cloudnative-firebird-0.140.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.139.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.140.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.139.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.140.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -1832,7 +1832,7 @@ metadata:
 spec:
   clusterName: my-cluster
   passwordSecret:
-    name: app-user-password # key "password" (or passwordSecret.key)
+    name: app-user-password # key "password" (or passwordSecret.key); or password (below)
   roles: [reader]           # granted in the cluster database; others are revoked
   active: true              # false: the user cannot log in
   admin: false              # true: RDB$ADMIN in the security database
@@ -1858,6 +1858,43 @@ connection, and once the instance is ready the operator drops it again through a
 (`drop-users-<pod>`, in case it became ready without a restart) and clears the entry. A user that
 a `FirebirdUser` declares again meanwhile is not dropped; an instance scaled away with its volume
 deleted needs nothing.
+
+#### Generated passwords (v0.140.0)
+
+Instead of `passwordSecret`, a `FirebirdUser` can have the operator generate its password, as
+CloudNativePG 1.31's `DatabaseRole` can:
+
+```yaml
+spec:
+  clusterName: my-cluster
+  password:
+    mode: generate
+    secretName: app-user-password # default "<name>-password"
+    length: 32                    # default; 16 to 128 letters and digits
+    duration: 2160h               # optional lifetime (hours, minutes, seconds)
+    renewBefore: 168h             # optional; default a third of duration
+```
+
+The operator writes the password into a `kubernetes.io/basic-auth` Secret (keys `username` and
+`password`) that the `FirebirdUser` owns, records when it was generated (the
+`firebird.cloudnative-firebird.io/password-generated` annotation), and applies it like a password
+from `passwordSecret`. Applications read the Secret. `status.password` shows the Secret, when the
+password was generated and, with a duration, when it expires.
+
+- **Renewal:** without `duration` the password is generated once and kept. With it, a new password
+  is generated `renewBefore` ahead of the expiration and applied to every instance (a
+  `PasswordRenewed` event). Firebird keeps one password per user, so clients still using the old
+  one fail once the new one is applied: they must read the Secret again. That is why renewal is
+  off by default.
+- **An existing Secret:** a Secret of that name the `FirebirdUser` does not own is never
+  overwritten or deleted. The user is `Failed` until `secretName` names another Secret, and the
+  admission webhook warns about it.
+- **Removal:** the Secret is owned by the `FirebirdUser`, so Kubernetes deletes it with the
+  resource. With `reclaimPolicy: retain`, copy the password first if the Firebird user is to keep
+  working. A deleted Secret is generated again with a new password.
+- **Replica clusters:** passwords are generated there too. Each instance has its own security
+  database, so a replica cluster's users are its own, unlike CloudNativePG's roles, which belong
+  to the primary cluster.
 
 Security notes: the password is read from the Secret inside the Job and only sent to the servers
 as SQL text, where it can briefly show in `MON$STATEMENTS` or a trace session, to administrators

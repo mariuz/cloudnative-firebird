@@ -8,10 +8,20 @@ import {
   KubeConfig,
   V1ConfigMap,
   V1Job,
+  V1Secret,
 } from '@kubernetes/client-node';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { logger } from '../utils/logger';
 import { followOwnWrite, replaceStatus, StaleCopyError } from '../utils/status-write';
+import {
+  buildPasswordSecret,
+  DEFAULT_PASSWORD_LENGTH,
+  generatedSecretName,
+  generatePassword,
+  passwordSecretRef,
+  passwordStatus,
+  planPassword,
+} from '../utils/user-password';
 import { CLUSTER_LABEL, instancePodSelector } from '../utils/resources';
 import { replicationEnabled } from '../utils/replication';
 import { isPodReady } from '../utils/routing';
@@ -133,25 +143,38 @@ export class FirebirdUserController {
       return;
     }
 
+    // a generated password (spec.password): its Secret first, created or renewed when due
+    let generated: FirebirdUserStatus['password'];
+    if (user.spec.password) {
+      const outcome = await this.ensureGeneratedPassword(user, log);
+      if ('conflict' in outcome) {
+        await this.updateStatus(user, { phase: 'Failed', message: outcome.conflict });
+        return;
+      }
+      generated = outcome.status;
+    }
+
+    const ref = passwordSecretRef(user);
     let secret;
     try {
-      secret = await this.coreApi.readNamespacedSecret({ name: user.spec.passwordSecret.name, namespace });
+      secret = await this.coreApi.readNamespacedSecret({ name: ref.name, namespace });
     } catch (err) {
       if (!isNotFound(err)) throw err;
-      await this.updateStatus(user, { phase: 'Pending', message: `Secret ${user.spec.passwordSecret.name} not found` });
+      await this.updateStatus(user, { phase: 'Pending', message: `Secret ${ref.name} not found` });
       return;
     }
-    const key = user.spec.passwordSecret.key ?? 'password';
+    const key = ref.key;
     if (!secret.data?.[key] && !secret.stringData?.[key]) {
       await this.updateStatus(user, {
         phase: 'Failed',
-        message: `Secret ${user.spec.passwordSecret.name} has no key "${key}"`,
+        message: `Secret ${ref.name} has no key "${key}"`,
       });
       return;
     }
     const hash = userSpecHash(user, secret.metadata ?? {});
 
-    const status: FirebirdUserStatus = { ...(user.status ?? {}), username: firebirdUsername(user) };
+    // status.password only with a generated password (dropped when passwordSecret replaces it)
+    const status: FirebirdUserStatus = { ...(user.status ?? {}), username: firebirdUsername(user), password: generated };
     let applied = [...(status.instances ?? [])];
 
     // at most one Job per user: record a finished one before planning the next
@@ -419,6 +442,55 @@ export class FirebirdUserController {
       if (isNotFound(err)) return undefined;
       throw err;
     }
+  }
+
+  /**
+   * The Secret of a generated password: created when missing, renewed when its duration says so,
+   * never written when the FirebirdUser does not own it. Its new resourceVersion changes the
+   * spec hash, so the instances get the new password.
+   */
+  private async ensureGeneratedPassword(
+    user: FirebirdUser,
+    log: typeof logger,
+  ): Promise<{ status: NonNullable<FirebirdUserStatus['password']> } | { conflict: string }> {
+    const namespace = user.metadata.namespace ?? 'default';
+    const name = generatedSecretName(user);
+    let secret: V1Secret | undefined;
+    try {
+      secret = await this.coreApi.readNamespacedSecret({ name, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+    }
+    const now = new Date(this.now());
+    const plan = planPassword(user, secret, now);
+    if (plan.kind === 'conflict') return { conflict: plan.message };
+    if (plan.kind === 'keep') return { status: passwordStatus(user, secret!) };
+    const username = firebirdUsername(user);
+    const body = buildPasswordSecret(user, username, generatePassword(user.spec.password!.length ?? DEFAULT_PASSWORD_LENGTH), now);
+    if (plan.kind === 'create') {
+      // a Secret created meanwhile by someone else (409) is retried, and then found not owned
+      secret = await this.coreApi.createNamespacedSecret({ namespace, body });
+      log.info({ secret: name }, 'Generated the password of the Firebird user');
+      await this.event(user, 'Normal', EventReason.PasswordGenerated, `password of ${username} generated into Secret ${name}`);
+    } else {
+      // with the version read: a change meanwhile (409) is retried with the new one
+      secret = await this.coreApi.replaceNamespacedSecret({
+        name,
+        namespace,
+        body: {
+          ...body,
+          metadata: {
+            ...body.metadata,
+            resourceVersion: secret!.metadata?.resourceVersion,
+            labels: { ...(secret!.metadata?.labels ?? {}), ...body.metadata!.labels },
+            annotations: { ...(secret!.metadata?.annotations ?? {}), ...body.metadata!.annotations },
+          },
+        },
+      });
+      log.info({ secret: name, reason: plan.reason }, 'Renewed the password of the Firebird user');
+      await this.event(user, 'Normal', EventReason.PasswordRenewed, `password of ${username} renewed in Secret ${name}: ${plan.reason}`);
+    }
+    return { status: passwordStatus(user, secret) };
   }
 
   /** Adds or removes the drop-user finalizer */

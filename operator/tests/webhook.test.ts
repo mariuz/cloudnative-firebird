@@ -224,6 +224,17 @@ describe('admission checks', () => {
     const user = (secret: string) => ({ metadata: { name: 'app' }, spec: { clusterName: 'db', passwordSecret: { name: secret } } });
     expect((await validate(req('FirebirdUser', user('pw')))).warnings).toEqual(['Secret pw has no key "password"']);
     expect((await validate(req('FirebirdUser', user('none')))).warnings).toEqual(['Secret none does not exist (yet) in namespace default']);
+    // a generated password: no Secret needed, but one of that name the user does not own is never written
+    const generated = (secretName?: string) => ({
+      metadata: { name: 'app' },
+      spec: { clusterName: 'db', password: { mode: 'generate', ...(secretName ? { secretName } : {}) } },
+    });
+    expect((await validate(req('FirebirdUser', generated()))).warnings ?? []).toEqual([]);
+    expect((await validate(req('FirebirdUser', generated('pw')))).warnings).toEqual([
+      'Secret pw exists and is not owned by this FirebirdUser: no password is generated into it (set password.secretName)',
+    ]);
+    // both or neither: refused
+    expect((await validate(req('FirebirdUser', { metadata: { name: 'app' }, spec: { clusterName: 'db' } }))).denied).toMatch(/passwordSecret.name or password/);
   });
 
   it('refuses databases on replicated clusters and invalid database specs', async () => {

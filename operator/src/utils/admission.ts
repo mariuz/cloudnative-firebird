@@ -11,6 +11,7 @@ import { volumeSnapshotRestoreMessage } from './volume-snapshot';
 import { databaseName } from './resources';
 import { AdmissionRequest, AdmissionVerdict, AdmissionValidator } from './webhook';
 import { existingTargetMessage, restoreTargetExists, superuserPasswordFrom } from './restore-target';
+import { ownsSecret, passwordSecretRef } from './user-password';
 
 /**
  * What the admission webhook checks (webhook.ts):
@@ -198,11 +199,15 @@ export function createAdmissionValidator(lookups: AdmissionLookups): AdmissionVa
           const user = object as FirebirdUser;
           validateUserSpec(user);
           await clusterOf(user.spec.clusterName);
-          const ref = user.spec.passwordSecret;
+          const ref = passwordSecretRef(user);
           const secret = await lookups.secret(namespace, ref.name);
-          const key = ref.key ?? 'password';
-          if (!secret) warnings.push(`Secret ${ref.name} does not exist (yet) in namespace ${namespace}`);
-          else if (!secret.data?.[key] && !secret.stringData?.[key]) warnings.push(`Secret ${ref.name} has no key "${key}"`);
+          if (user.spec.password) {
+            // generated: a Secret of that name the user does not own is never overwritten
+            if (secret && !ownsSecret(user, secret)) {
+              warnings.push(`Secret ${ref.name} exists and is not owned by this FirebirdUser: no password is generated into it (set password.secretName)`);
+            }
+          } else if (!secret) warnings.push(`Secret ${ref.name} does not exist (yet) in namespace ${namespace}`);
+          else if (!secret.data?.[ref.key] && !secret.stringData?.[ref.key]) warnings.push(`Secret ${ref.name} has no key "${ref.key}"`);
           break;
         }
         case 'FirebirdRole': {
