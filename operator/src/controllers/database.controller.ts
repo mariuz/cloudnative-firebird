@@ -3,6 +3,7 @@ import { BatchV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Job } from '@kub
 import { clusterStoppedReason } from '../utils/major-upgrade';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { logger } from '../utils/logger';
+import { followOwnWrite, replaceStatus, StaleCopyError } from '../utils/status-write';
 import { CLUSTER_LABEL, instancePodSelector } from '../utils/resources';
 import { isPodReady } from '../utils/routing';
 import { ValidationError } from '../utils/validation';
@@ -81,6 +82,15 @@ export class FirebirdDatabaseController {
   }
 
   async reconcileDatabase(database: FirebirdDatabase): Promise<void> {
+    try {
+      await this.reconcileDatabaseCopy(database);
+    } catch (err) {
+      if (!(err instanceof StaleCopyError)) throw err;
+      logger.debug({ database: database.metadata.name, namespace: database.metadata.namespace, version: err.version }, err.message);
+    }
+  }
+
+  private async reconcileDatabaseCopy(database: FirebirdDatabase): Promise<void> {
     const { name, namespace = 'default' } = database.metadata;
     const log = logger.child({ database: name, namespace });
 
@@ -305,7 +315,7 @@ export class FirebirdDatabaseController {
     const finalizers = database.metadata.finalizers ?? [];
     if (finalizers.includes(DATABASE_FINALIZER) === wanted) return;
     const next = wanted ? [...finalizers, DATABASE_FINALIZER] : finalizers.filter((f) => f !== DATABASE_FINALIZER);
-    await this.customApi.patchNamespacedCustomObject({
+    const patched = await this.customApi.patchNamespacedCustomObject({
       group: API_GROUP,
       version: API_VERSION,
       namespace: database.metadata.namespace ?? 'default',
@@ -318,6 +328,8 @@ export class FirebirdDatabaseController {
       ],
     });
     database.metadata.finalizers = next;
+    // the patch tested this copy's version: it stays current with its own write
+    followOwnWrite(database, patched);
   }
 
   /** Replaces the status when it changed; undefined fields are dropped */
@@ -326,14 +338,7 @@ export class FirebirdDatabaseController {
     const canonical = (o: object) => JSON.stringify(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
     if (database.status && canonical(database.status) === canonical(merged)) return;
     try {
-      await this.customApi.patchNamespacedCustomObjectStatus({
-        group: API_GROUP,
-        version: API_VERSION,
-        namespace: database.metadata.namespace ?? 'default',
-        plural: 'firebirddatabases',
-        name: database.metadata.name,
-        body: [{ op: 'replace', path: '/status', value: merged }],
-      });
+      await replaceStatus(this.customApi, 'firebirddatabases', database, merged);
     } catch (err) {
       // deleted meanwhile (its finalizer released)
       if (!isNotFound(err)) throw err;

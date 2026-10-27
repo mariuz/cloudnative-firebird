@@ -82,9 +82,9 @@ From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
   and schedule status writes test the `resourceVersion` of the copy the reconcile read; a refused
   write (422) ends that reconcile without an error, and the terminal events follow the status
   write, so an older copy neither writes an older phase back nor records an event twice.
-- [ ] **Conditional status writes for users, roles and databases**: `FirebirdUser`, `FirebirdRole`
-  and `FirebirdDatabase` still replace their status unconditionally (their finalizer patches
-  already test the version); the same test would keep an older copy from writing back.
+- [x] **Conditional status writes for users, roles and databases** (v0.139.0): `FirebirdUser`,
+  `FirebirdRole` and `FirebirdDatabase` write their status over the version they read, as backups
+  do (one helper, utils/status-write.ts); their finalizer patches keep the copy's version current.
 - [ ] **Generated passwords for `FirebirdUser`** (#11337): generate the password into a Secret
   when none is given, with optional renewal.
 - [x] **A viewer ClusterRole** (#11684, v0.135.0): `cloudnative-firebird-viewer`, read-only on

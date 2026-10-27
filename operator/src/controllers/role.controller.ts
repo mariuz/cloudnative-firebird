@@ -4,6 +4,7 @@ import { replicaClusterFollowing } from '../utils/replica-cluster';
 import { BatchV1Api, CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Job } from '@kubernetes/client-node';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
 import { logger } from '../utils/logger';
+import { followOwnWrite, replaceStatus, StaleCopyError } from '../utils/status-write';
 import { CLUSTER_LABEL, instancePodSelector } from '../utils/resources';
 import { replicationEnabled } from '../utils/replication';
 import { isPodReady } from '../utils/routing';
@@ -75,6 +76,15 @@ export class FirebirdRoleController {
   }
 
   async reconcileRole(role: FirebirdRole): Promise<void> {
+    try {
+      await this.reconcileRoleCopy(role);
+    } catch (err) {
+      if (!(err instanceof StaleCopyError)) throw err;
+      logger.debug({ role: role.metadata.name, namespace: role.metadata.namespace, version: err.version }, err.message);
+    }
+  }
+
+  private async reconcileRoleCopy(role: FirebirdRole): Promise<void> {
     const { name, namespace = 'default' } = role.metadata;
     const log = logger.child({ role: name, namespace });
 
@@ -322,7 +332,7 @@ export class FirebirdRoleController {
     const finalizers = role.metadata.finalizers ?? [];
     if (finalizers.includes(ROLE_FINALIZER) === wanted) return;
     const next = wanted ? [...finalizers, ROLE_FINALIZER] : finalizers.filter((f) => f !== ROLE_FINALIZER);
-    await this.customApi.patchNamespacedCustomObject({
+    const patched = await this.customApi.patchNamespacedCustomObject({
       group: API_GROUP,
       version: API_VERSION,
       namespace: role.metadata.namespace ?? 'default',
@@ -335,6 +345,8 @@ export class FirebirdRoleController {
       ],
     });
     role.metadata.finalizers = next;
+    // the patch tested this copy's version: it stays current with its own write
+    followOwnWrite(role, patched);
   }
 
   /** Replaces the status when it changed; undefined fields are dropped */
@@ -344,14 +356,7 @@ export class FirebirdRoleController {
     );
     const canonical = (o: object) => JSON.stringify(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
     if (role.status && canonical(role.status) === canonical(merged)) return;
-    await this.customApi.patchNamespacedCustomObjectStatus({
-      group: API_GROUP,
-      version: API_VERSION,
-      namespace: role.metadata.namespace ?? 'default',
-      plural: 'firebirdroles',
-      name: role.metadata.name,
-      body: [{ op: 'replace' as const, path: '/status', value: merged }],
-    });
+    await replaceStatus(this.customApi, 'firebirdroles', role, merged);
     role.status = merged as FirebirdRoleStatus;
   }
 }

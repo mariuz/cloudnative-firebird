@@ -198,7 +198,7 @@ describe('FirebirdUserController', () => {
     const controller = new FirebirdUserController(kubeConfig, () => opts.now ?? Date.parse('2026-09-27T12:00:00Z'));
     const status = () => {
       const calls = api.patchNamespacedCustomObjectStatus.mock.calls;
-      return calls[calls.length - 1]?.[0].body[0].value;
+      return calls[calls.length - 1]?.[0].body.at(-1).value;
     };
     const created = () => api.createNamespacedJob.mock.calls.map((c) => c[0].body as V1Job);
     return { controller, api, status, created };
@@ -298,6 +298,25 @@ describe('FirebirdUserController', () => {
     c.api.getNamespacedCustomObject.mockRejectedValue(notFound);
     await c.controller.reconcileUser(makeUser());
     expect(c.status()).toMatchObject({ phase: 'Pending', message: 'FirebirdCluster db not found' });
+  });
+
+  it('writes the status over the version it read, and stops quietly on an older copy', async () => {
+    const s = setup();
+    await s.controller.reconcileUser(makeUser());
+    expect(s.api.patchNamespacedCustomObjectStatus.mock.calls[0][0].body[0]).toEqual({ op: 'test', path: '/metadata/resourceVersion', value: '1' });
+    // the API server refuses the write from a copy that predates another write
+    const old = setup();
+    old.api.patchNamespacedCustomObjectStatus.mockRejectedValue(Object.assign(new Error('the server rejected our request due to an error in our request'), { code: 422 }));
+    await expect(old.controller.reconcileUser(makeUser())).resolves.toBeUndefined();
+    // the finalizer patch is this reconcile's own write: its status write follows its version
+    const f = setup();
+    f.api.patchNamespacedCustomObject.mockResolvedValue({ metadata: { resourceVersion: '2' } });
+    await f.controller.reconcileUser(makeUser({ reclaimPolicy: 'delete' }));
+    expect(f.api.patchNamespacedCustomObjectStatus.mock.calls[0][0].body[0]).toEqual({ op: 'test', path: '/metadata/resourceVersion', value: '2' });
+    // other errors still fail the reconcile
+    const e = setup();
+    e.api.patchNamespacedCustomObjectStatus.mockRejectedValue(Object.assign(new Error('forbidden'), { code: 403 }));
+    await expect(e.controller.reconcileUser(makeUser())).rejects.toThrow('forbidden');
   });
 
   it('adds the finalizer for reclaimPolicy delete, and drops the user on deletion', async () => {
