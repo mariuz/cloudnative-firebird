@@ -10,7 +10,7 @@ import { notFoundError } from './helpers/factories';
 import type { FirebirdCluster } from '../src/types';
 import { afterEach, type Mock } from 'vitest';
 import { validateClusterSpec } from '../src/utils/validation';
-import { LeaseHolder, renewIntervalSeconds, isPrimary, type DatabaseState } from '../src/lease-holder';
+import { LeaseHolder, renewDeadlineSeconds, renewIntervalSeconds, isPrimary, type DatabaseState } from '../src/lease-holder';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -190,25 +190,30 @@ describe('the lease holder', () => {
     expect(await r.h.tick()).toBe('re-acquired the Lease: database back online');
   });
 
-  it('fences the database once the Lease could not be renewed for its duration', async () => {
+  it('fences the database once the Lease could not be renewed for the renew deadline, before it expires', async () => {
+    expect(renewDeadlineSeconds(15)).toBe(10);
+    expect(renewDeadlineSeconds(5)).toBe(3);
+    expect(renewDeadlineSeconds(120)).toBe(80);
+    for (const d of [5, 6, 7, 15, 30, 120]) {
+      expect(renewDeadlineSeconds(d)).toBeGreaterThan(renewIntervalSeconds(d));
+      expect(renewDeadlineSeconds(d)).toBeLessThan(d);
+    }
     const t = holder();
     await t.h.tick();
     t.state.lease = async () => {
       throw new Error('connect ETIMEDOUT');
     };
     t.advance(5);
-    expect(await t.h.tick()).toBe('cannot read the Lease (connect ETIMEDOUT): fencing in 10s');
-    t.advance(5);
     expect(await t.h.tick()).toBe('cannot read the Lease (connect ETIMEDOUT): fencing in 5s');
     expect(t.fence).not.toHaveBeenCalled();
     t.advance(5);
     expect(await t.h.tick()).toBe('fenced: the Lease could not be renewed');
-    expect(t.fence).toHaveBeenCalledWith('cannot renew the Lease: the API server has not answered for 15s');
+    expect(t.fence).toHaveBeenCalledWith('cannot renew the Lease: the API server has not answered for 10s');
     // a failing renewal counts the same way
     const r = holder();
     r.renew.mockRejectedValue(new Error('403'));
-    expect(await r.h.tick()).toBe('cannot renew the Lease (403): fencing in 15s');
-    r.advance(15);
+    expect(await r.h.tick()).toBe('cannot renew the Lease (403): fencing in 10s');
+    r.advance(10);
     expect(await r.h.tick()).toBe('fenced: the Lease could not be renewed');
     // a fence that fails is retried on the next tick
     const f = holder({ lease: { spec: { holderIdentity: 'db-1' } } });
@@ -217,6 +222,67 @@ describe('the lease holder', () => {
     expect(f.log).toContain('cannot fence the database (no reply); retrying');
     await f.h.tick();
     expect(f.fence).toHaveBeenCalledTimes(2);
+  });
+
+  it('counts the deadline from when the last successful renewal was sent', async () => {
+    const t = holder();
+    // a renewal that takes 4s to answer: its renewTime is when it was sent
+    t.renew.mockImplementationOnce(async () => {
+      t.advance(4);
+    });
+    await t.h.tick();
+    t.state.lease = async () => {
+      throw new Error('connect ETIMEDOUT');
+    };
+    t.advance(2);
+    expect(await t.h.tick()).toBe('cannot read the Lease (connect ETIMEDOUT): fencing in 4s');
+  });
+
+  it('enforces the deadline every second, whatever a tick is waiting for', async () => {
+    const t = holder();
+    expect(await t.h.checkDeadline()).toBeUndefined();
+    await t.h.tick();
+    t.advance(9);
+    expect(await t.h.checkDeadline()).toBeUndefined();
+    // a tick stuck on a renewal that does not answer
+    let answer: () => void = () => undefined;
+    t.renew.mockImplementationOnce(() => new Promise<void>((resolve) => (answer = resolve)));
+    const stuck = t.h.tick();
+    t.advance(1);
+    expect(await t.h.checkDeadline()).toBe('fenced: the Lease could not be renewed');
+    expect(t.fence).toHaveBeenCalledWith('cannot renew the Lease: no renewal succeeded for 10s (renew deadline)');
+    // nothing more until the Lease is held again
+    t.advance(1);
+    expect(await t.h.checkDeadline()).toBeUndefined();
+    expect(t.fence).toHaveBeenCalledTimes(1);
+    // the renewal answers after the fence: it does not count, the next tick brings the database back
+    answer();
+    expect(await stuck).toBe('fenced: the Lease could not be renewed in time');
+    expect(await t.h.checkDeadline()).toBeUndefined();
+    t.state.db = 'fenced';
+    expect(await t.h.tick()).toBe('re-acquired the Lease: database back online');
+    expect(t.rejoin).toHaveBeenCalledTimes(1);
+    // a fence that fails is retried at the next check
+    const f = holder();
+    await f.h.tick();
+    f.fence.mockRejectedValueOnce(new Error('no reply'));
+    f.advance(10);
+    await f.h.checkDeadline();
+    expect(f.log).toContain('cannot fence the database (no reply); retrying');
+    f.advance(1);
+    expect(await f.h.checkDeadline()).toBe('fenced: the Lease could not be renewed');
+    expect(f.fence).toHaveBeenCalledTimes(2);
+    // never while not holding the Lease: a replica, or a database down
+    const replica = holder({ primary: false });
+    await replica.h.tick();
+    replica.advance(60);
+    expect(await replica.h.checkDeadline()).toBeUndefined();
+    const down = holder({ state: 'shutdown' });
+    await down.h.tick();
+    down.advance(60);
+    expect(await down.h.checkDeadline()).toBeUndefined();
+    expect(replica.fence).not.toHaveBeenCalled();
+    expect(down.fence).not.toHaveBeenCalled();
   });
 
   it('reads the pod role from the ConfigMap file or the promoted marker', () => {

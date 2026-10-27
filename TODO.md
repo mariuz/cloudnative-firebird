@@ -68,9 +68,12 @@ From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
   PodDisruptionBudget, NetworkPolicy and CronJobs a cluster deleted with orphan propagation left
   are used as they are but keep no owner (the StatefulSet only gets one when it is next patched),
   so deleting the recreated cluster leaves them behind.
-- [ ] **Fence before the Lease expires** (#11357): the sidecar fences once the Lease went its whole
-  duration without a renewal, the moment a replica becomes promotable; fence at a renew deadline
-  (two thirds of the duration, as CloudNativePG's 10 of 15 s) instead.
+- [x] **Fence before the Lease expires** (#11357, v0.137.0): the sidecar fences at the renew
+  deadline, two thirds of the duration (10 of 15 s), counted from when the last successful
+  renewal was sent, with a check every second that a slow tick cannot hold back; ticks keep
+  their interval from the start of the last one. The kind CI checks the fence comes before the
+  Lease expires. CloudNativePG's peer probe at the deadline is not copied: the isolation check
+  (`contactTimeoutSeconds`) already covers a primary nothing reaches.
 - [x] **Bound the segment server's local commands** (#11718, v0.136.0): the segment server's
   and the isolation check's `isql`, `fbsvcmgr` and `gfix` calls to the local server run under
   `timeout`: reads after `LOCAL_QUERY_TIMEOUT_SECONDS` (10 s), changes after

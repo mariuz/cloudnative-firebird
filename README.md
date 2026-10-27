@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.136.0/cloudnative-firebird-0.136.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.137.0/cloudnative-firebird-0.137.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.136.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.137.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.136.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.137.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -1029,9 +1029,13 @@ token projected into the sidecar alone):
 
 - the primary **fences** its database (the isolation check's full shutdown) when the Lease names
   another instance (the operator promoted a replica) or when it could not renew the Lease for
-  `durationSeconds` (it cannot reach the API server: the operator may be promoting a replica on
-  the other side). Clients that still reach it cannot write to a database that may no longer be
-  the primary. The sidecar brings it back online itself once it can re-acquire the Lease (the
+  the **renew deadline**, two thirds of `durationSeconds` (10 of the default 15 s, as
+  CloudNativePG's `renewDeadline`). It cannot reach the API server, and the operator may promote
+  a replica on the other side once the Lease expires. The deadline counts from when the last
+  successful renewal was sent, and a check every second enforces it even while a renewal is still
+  waiting on the API server, so the fence lands about a third of the duration before the Lease can
+  expire (before v0.137.0 it came once the whole duration had passed, at the expiry). Clients that
+  still reach it cannot write to a database that may no longer be the primary. The sidecar brings it back online itself once it can re-acquire the Lease (the
   Lease still names it, or nobody: with the version it read, so a failover that took the Lease
   over meanwhile wins). A fence by the isolation check (nothing reached the primary) stays the
   operator's to lift, as before: a primary that still reaches the API server but nothing else

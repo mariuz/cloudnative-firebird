@@ -18,14 +18,18 @@ import { segmentRequest } from './utils/replication-lag';
  * It fences the database (the segment server's FENCE: the isolation check's full shutdown, lifted
  * by the operator with REJOIN once it has checked that this instance still holds the Lease) when
  * the Lease names another instance (the operator promoted a replica) or when it could not renew
- * it for the Lease's duration (it cannot reach the API server: the operator may be promoting a
- * replica on the other side). A database fenced this way comes back online once this pod holds
- * the Lease again: the holder re-acquires it (with the version it read, so a failover that took
- * the Lease over meanwhile wins) and asks the segment server to bring the database back
- * (REJOIN). A database the isolation check fenced (nothing reached this primary, or neither the
- * API server nor a peer did) is left to the operator, which lifts it once it reaches the primary
- * again while it still holds the Lease, as without the primary Lease: a primary that still
- * reaches the API server but nothing else must not take writes again on its own.
+ * it for the renew deadline, two thirds of the Lease's duration (10 of 15 s, CloudNativePG's
+ * renewDeadline): it cannot reach the API server, and the operator may promote a replica once the
+ * Lease expires. The deadline counts from when the last successful renewal was sent (the
+ * renewTime it wrote), and a check every second enforces it whatever a tick is waiting for, so
+ * the fence lands about a third of the duration before the Lease can expire. A database fenced
+ * this way comes back online once this pod holds the Lease again: the holder re-acquires it (with
+ * the version it read, so a failover that took the Lease over meanwhile wins) and asks the
+ * segment server to bring the database back (REJOIN). A database the isolation check fenced
+ * (nothing reached this primary, or neither the API server nor a peer did) is left to the
+ * operator, which lifts it once it reaches the primary again while it still holds the Lease, as
+ * without the primary Lease: a primary that still reaches the API server but nothing else must
+ * not take writes again on its own.
  *
  * Environment: POD_NAME, POD_NAMESPACE, LEASE_NAME, LEASE_DURATION_SECONDS, PRIMARY_FILE,
  * REPLICATION_DIR, TOKEN_DIR (the projected ServiceAccount token and the API server's CA),
@@ -61,8 +65,10 @@ export interface LeaseHolderOptions {
 
 /** One holder: its ticks decide what to do from the pod's role, the database's state and the Lease */
 export class LeaseHolder {
-  /** When the Lease was last renewed, or this pod started holding it; undefined while not holding */
+  /** When the last successful renewal was sent, or this pod started holding it; undefined while not holding */
   private lastRenewed: number | undefined;
+  /** Counts the deadline's fences: a renewal sent before one does not count as holding again */
+  private fences = 0;
   private lastAction = '';
 
   constructor(private readonly options: LeaseHolderOptions) {}
@@ -81,6 +87,8 @@ export class LeaseHolder {
 
   async tick(): Promise<string> {
     const { self, durationSeconds, api } = this.options;
+    // a fence by the deadline's check while this tick waits makes its renewal not count
+    const fences = this.fences;
     if (!this.options.isPrimary()) {
       this.lastRenewed = undefined;
       return this.say('not the primary: not holding the Lease');
@@ -98,6 +106,7 @@ export class LeaseHolder {
       }
       const holder = lease?.spec?.holderIdentity ?? '';
       if (!lease || (holder && holder !== self)) return this.say(`fenced; the Lease is held by ${holder || 'nobody'}`);
+      const sent = this.now;
       try {
         await api.renew(lease, self, durationSeconds);
       } catch (err) {
@@ -108,7 +117,7 @@ export class LeaseHolder {
       } catch (err) {
         return this.say(`re-acquired the Lease; cannot bring the database back online (${(err as Error).message}); retrying`);
       }
-      this.lastRenewed = this.now;
+      this.lastRenewed = sent;
       return this.say('re-acquired the Lease: database back online');
     }
     if (state !== 'online') {
@@ -121,12 +130,14 @@ export class LeaseHolder {
     try {
       lease = await api.read();
     } catch (err) {
+      if (this.lastRenewed === undefined) return this.say('fenced: the Lease could not be renewed');
       const since = Math.round((this.now - this.lastRenewed) / 1000);
-      if (since >= durationSeconds) {
+      const deadline = renewDeadlineSeconds(durationSeconds);
+      if (since >= deadline) {
         await this.fence(`cannot renew the Lease: the API server has not answered for ${since}s`);
         return this.say('fenced: the Lease could not be renewed');
       }
-      return this.say(`cannot read the Lease (${(err as Error).message}): fencing in ${durationSeconds - since}s`);
+      return this.say(`cannot read the Lease (${(err as Error).message}): fencing in ${deadline - since}s`);
     }
     const holder = lease?.spec?.holderIdentity ?? '';
     if (!lease) return this.say('the Lease does not exist yet');
@@ -135,25 +146,47 @@ export class LeaseHolder {
       await this.fence(`the Lease is held by ${holder}`);
       return this.say(`fenced: the Lease is held by ${holder}`);
     }
+    // the renewal writes renewTime as it is sent: the deadline counts from there
+    const sent = this.now;
     try {
       await api.renew(lease, self, durationSeconds);
-      this.lastRenewed = this.now;
+      // the deadline's check fenced the database while this tick was on its way: the next tick
+      // finds it fenced and brings it back with the Lease
+      if (this.fences !== fences) return this.say('fenced: the Lease could not be renewed in time');
+      this.lastRenewed = sent;
       return this.say(`holding the Lease ${this.options.self === holder ? '' : '(acquired) '}as the primary, renewed every ${renewIntervalSeconds(durationSeconds)}s`);
     } catch (err) {
+      if (this.lastRenewed === undefined) return this.say('fenced: the Lease could not be renewed');
       const since = Math.round((this.now - this.lastRenewed) / 1000);
-      if (since >= durationSeconds) {
+      const deadline = renewDeadlineSeconds(durationSeconds);
+      if (since >= deadline) {
         await this.fence(`cannot renew the Lease: ${(err as Error).message} (for ${since}s)`);
         return this.say('fenced: the Lease could not be renewed');
       }
-      return this.say(`cannot renew the Lease (${(err as Error).message}): fencing in ${durationSeconds - since}s`);
+      return this.say(`cannot renew the Lease (${(err as Error).message}): fencing in ${deadline - since}s`);
     }
   }
 
+  /**
+   * The renew deadline, checked every second beside the ticks: a tick waiting on a slow API
+   * server (or the segment server) must not hold the fence past it. Fences once no renewal
+   * succeeded for the deadline while holding the Lease; returns what it did, if anything.
+   */
+  async checkDeadline(): Promise<string | undefined> {
+    if (this.lastRenewed === undefined) return undefined;
+    const since = Math.round((this.now - this.lastRenewed) / 1000);
+    if (since < renewDeadlineSeconds(this.options.durationSeconds)) return undefined;
+    this.fences++;
+    await this.fence(`cannot renew the Lease: no renewal succeeded for ${since}s (renew deadline)`);
+    return this.say('fenced: the Lease could not be renewed');
+  }
+
   private async fence(reason: string): Promise<void> {
-    this.lastRenewed = undefined;
     try {
       await this.options.fence(reason);
+      this.lastRenewed = undefined;
     } catch (err) {
+      // still counted from the last renewal: the deadline's check tries again within a second
       this.options.log?.(`cannot fence the database (${(err as Error).message}); retrying`);
     }
   }
@@ -163,7 +196,16 @@ export function renewIntervalSeconds(durationSeconds: number): number {
   return Math.max(1, Math.floor(durationSeconds / 3));
 }
 
-/** How long an API request may take: a primary cut off from the API server must notice within the Lease's duration */
+/**
+ * How long the primary may go without a successful renewal before it fences: two thirds of the
+ * duration (10 of 15 s, as CloudNativePG's renewDeadline), so the fence comes before the Lease
+ * expires and the operator may promote a replica. Always above the renew interval.
+ */
+export function renewDeadlineSeconds(durationSeconds: number): number {
+  return Math.max(renewIntervalSeconds(durationSeconds) + 1, Math.floor((durationSeconds * 2) / 3));
+}
+
+/** How long an API request may take: a primary cut off from the API server must notice within the renew deadline */
 export const API_TIMEOUT_MS = 5_000;
 
 function withTimeout<T>(promise: Promise<T>, what: string, ms = API_TIMEOUT_MS): Promise<T> {
@@ -273,14 +315,29 @@ export async function main(env = process.env): Promise<never> {
     rejoin: server.rejoin,
     log: (message) => console.log(`lease holder: ${message}`),
   });
-  console.log(`lease holder: ${self} watching Lease ${namespace}/${name} (duration ${durationSeconds}s)`);
+  console.log(
+    `lease holder: ${self} watching Lease ${namespace}/${name} (duration ${durationSeconds}s, renew deadline ${renewDeadlineSeconds(durationSeconds)}s)`,
+  );
+  let checking = false;
+  setInterval(() => {
+    if (checking) return;
+    checking = true;
+    holder
+      .checkDeadline()
+      .catch((err) => console.log(`lease holder: ${(err as Error).message}`))
+      .finally(() => (checking = false));
+  }, 1000);
+  // a tick every interval from the start of the last one, so the time a tick takes does not
+  // stretch the renewals towards the deadline
   for (;;) {
+    const started = Date.now();
     try {
       await holder.tick();
     } catch (err) {
       console.log(`lease holder: ${(err as Error).message}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, renewIntervalSeconds(durationSeconds) * 1000));
+    const wait = renewIntervalSeconds(durationSeconds) * 1000 - (Date.now() - started);
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, wait)));
   }
 }
 

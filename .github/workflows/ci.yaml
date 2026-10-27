@@ -1372,9 +1372,9 @@ jobs:
           old_uid=$(kubectl get pod "$primary" -o jsonpath={.metadata.uid})
           # the primary is cut off from the API server only: the operator and the replicas still
           # reach it (the isolation check does not fence it), but it cannot renew its Lease, so it
-          # fences itself once the Lease's duration (15 s) passed, and the operator, finding it
-          # not ready, fails over once the Lease expired. The rules go into the pod's network
-          # namespace from the kind node, as in the cut-off primary step.
+          # fences itself at the renew deadline (10 of the Lease's 15 s), before the Lease expires,
+          # and the operator, finding it not ready, fails over once the Lease expired. The rules go
+          # into the pod's network namespace from the kind node, as in the cut-off primary step.
           api_ip=$(kubectl get endpoints kubernetes -o jsonpath='{.subsets[0].addresses[0].ip}')
           api_port=$(kubectl get endpoints kubernetes -o jsonpath='{.subsets[0].ports[0].port}')
           svc_ip=$(kubectl get service kubernetes -o jsonpath={.spec.clusterIP})
@@ -1385,11 +1385,16 @@ jobs:
           docker exec "$node" nsenter -t "$pid" -n iptables -I OUTPUT -d "$api_ip" -p tcp --dport "$api_port" -j DROP
           echo "cut $primary off from the API server ($svc_ip:443, $api_ip:$api_port)"
           fenced=no
+          renewed=""
           for n in $(seq 1 120); do
+            # the last renewal of the cut-off primary, before the failover takes the Lease over
+            if [ "$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})" = "$primary" ]; then
+              renewed=$(kubectl get lease repl-lease -o jsonpath={.spec.renewTime})
+            fi
             if [ "$fenced" = no ] && [ "$(kubectl get pod "$primary" -o jsonpath={.metadata.uid} 2>/dev/null)" = "$old_uid" ] &&
               kubectl logs "$primary" -c lease-holder 2>/dev/null | tee /tmp/lease-holder.log | grep -q 'fenced: the Lease could not be renewed'; then
               fenced=yes
-              kubectl logs "$primary" -c segment-server > /tmp/lease-segment-server.log 2>/dev/null || true
+              kubectl logs --timestamps "$primary" -c segment-server > /tmp/lease-segment-server.log 2>/dev/null || true
             fi
             # kind, phase and start time in one read: read apart, the previous failover's "Completed"
             # and the start time of the one just begun pass together while it is still electing
@@ -1402,8 +1407,25 @@ jobs:
           [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})" != "$last_failover" ]
           [ "$fenced" = yes ] || { echo "the primary did not fence itself when it could not renew its Lease"; cat /tmp/lease-holder.log 2>/dev/null; exit 1; }
           grep -E 'cannot (read|renew) the Lease' /tmp/lease-holder.log
-          grep 'cannot renew the Lease: the API server has not answered' /tmp/lease-segment-server.log
-          grep -q 'fencing the primary (database in full shutdown)' /tmp/lease-segment-server.log
+          # by the tick (a read that timed out) or by the deadline's check every second, whichever came first
+          grep -E 'cannot renew the Lease: (the API server has not answered|no renewal succeeded)' /tmp/lease-segment-server.log
+          fence_line=$(grep -E 'cannot renew the Lease.*fencing the primary \(database in full shutdown\)' /tmp/lease-segment-server.log | tail -1)
+          [ -n "$fence_line" ] && [ -n "$renewed" ]
+          # the fence came before the Lease expired (its last renewal plus 15 s), the moment the
+          # operator could start the failover: kind's node, kubelet and pods share one clock
+          python3 - "$renewed" "${fence_line%% *}" <<'PY'
+          import sys
+          from datetime import datetime, timezone
+          def parse(t):
+              # RFC 3339 in UTC, with or without a fraction (the Lease: micro-, kubectl: nanoseconds)
+              head, _, frac = t.rstrip('Z').partition('.')
+              base = datetime.strptime(head, '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+              return base.timestamp() + (float('0.' + frac) if frac else 0)
+          renewed, fenced = parse(sys.argv[1]), parse(sys.argv[2])
+          after = fenced - renewed
+          print(f'last renewal {sys.argv[1]}, fence {sys.argv[2]}: {after:.1f}s later')
+          sys.exit(0 if 0 < after < 15 else 1)
+          PY
           new=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
           [ "$new" != "$primary" ]
           [ "$(count "$new")" = "$before" ]

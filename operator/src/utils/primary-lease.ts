@@ -15,7 +15,8 @@ import { nativeSidecarsSupported } from './segment-tls-default';
  * the Lease itself: a lease-holder sidecar (lease-holder.ts, from the operator image) in every
  * instance pod renews the Lease while its pod is the primary and its database is online, and
  * fences the database (the isolation check's fence: full shutdown) when the Lease names another
- * instance or cannot be renewed for the Lease's duration; it brings a fenced database back
+ * instance or cannot be renewed for the renew deadline (two thirds of the Lease's duration, so
+ * before the Lease expires); it brings a fenced database back
  * (REJOIN) once it re-acquires the Lease. The operator promotes a replica only once the Lease
  * has expired, taking it over with the version it read, so a primary that still renews it
  * (alive, online and reaching the API server) is never replaced, and one the operator replaces
