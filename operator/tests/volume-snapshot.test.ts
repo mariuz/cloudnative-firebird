@@ -260,11 +260,14 @@ describe('FirebirdBackupController volume snapshots', () => {
       }),
       patchNamespacedCustomObjectStatus: vi.fn().mockImplementation(({ plural, name, body }) => {
         const b = store(plural)?.get(name) as { status?: unknown; metadata: { resourceVersion?: string } } | undefined;
-        if (b) {
-          b.status = body[0].value;
-          b.metadata.resourceVersion = String(Number(b.metadata.resourceVersion ?? '1') + 1);
+        if (!b) return Promise.resolve({});
+        // as the API server: a failed test operation refuses the whole patch
+        for (const op of body) {
+          if (op.op === 'test' && (b.metadata.resourceVersion ?? '1') !== op.value) return Promise.reject(Object.assign(new Error('test failed'), { code: 422 }));
         }
-        return Promise.resolve({});
+        b.status = body.find((op: { op: string }) => op.op === 'replace').value;
+        b.metadata.resourceVersion = String(Number(b.metadata.resourceVersion ?? '1') + 1);
+        return Promise.resolve(structuredClone(b));
       }),
     };
     const coordinationApi = { readNamespacedLease: vi.fn().mockResolvedValue({ spec: { holderIdentity: 'db-1' } }) };
@@ -428,7 +431,7 @@ describe('FirebirdBackupController volume snapshots', () => {
     expect(backups.has(old.metadata.name)).toBe(false);
     expect(snapshots.has('nightly-202601010000')).toBe(false);
     expect(backups.has(recent.metadata.name)).toBe(true);
-    const status = customApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)?.[0].body[0].value;
+    const status = customApi.patchNamespacedCustomObjectStatus.mock.calls.at(-1)?.[0].body.at(-1).value;
     expect(status).toMatchObject({ lastBackupName: created[0].metadata.name, lastSuccessfulTime: recent.status!.completionTime });
     expect(new Date(status.lastScheduleTime).getUTCSeconds()).toBe(0);
     // checked now, due again at the next minute

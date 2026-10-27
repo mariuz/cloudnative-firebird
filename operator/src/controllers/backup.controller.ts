@@ -107,6 +107,20 @@ function statusCode(err: unknown): number | undefined {
   return e?.code ?? e?.statusCode ?? e?.response?.statusCode;
 }
 
+/**
+ * A status write refused because the object changed after the copy the reconcile works from was
+ * read: that reconcile stops, and the one of the newer copy (its watch event) decides instead
+ */
+export class StaleCopyError extends Error {
+  constructor(
+    object: string,
+    readonly version: string,
+  ) {
+    super(`${object} changed since resourceVersion ${version} was read: status not written from the older copy`);
+    this.name = 'StaleCopyError';
+  }
+}
+
 /** Returns true for a Kubernetes API "not found" error */
 function isNotFound(err: unknown): boolean {
   return statusCode(err) === 404;
@@ -242,6 +256,15 @@ export class FirebirdBackupController {
    * Reconcile a FirebirdBackup resource.
    */
   async reconcileBackup(backup: FirebirdBackup): Promise<void> {
+    try {
+      await this.reconcileBackupCopy(backup);
+    } catch (err) {
+      if (!(err instanceof StaleCopyError)) throw err;
+      logger.debug({ backup: backup.metadata.name, namespace: backup.metadata.namespace, version: err.version }, err.message);
+    }
+  }
+
+  private async reconcileBackupCopy(backup: FirebirdBackup): Promise<void> {
     const { name, namespace = 'default' } = backup.metadata;
     const log = logger.child({ backup: name, namespace });
     if (reconciliationDisabled(backup)) {
@@ -305,13 +328,7 @@ export class FirebirdBackupController {
       if (outcome === 'Completed') {
         const verified = Boolean(backup.spec.verify) && backup.spec.type !== 'physical';
         log.info({ location: base.location, verified }, 'Backup completed');
-        await this.event(
-          backup,
-          'FirebirdBackup',
-          'Normal',
-          EventReason.BackupCompleted,
-          `backup stored at ${base.location}${verified ? ', restored and validated' : ''}`,
-        );
+        // the event once the status is written: a refused write (an older copy) records none
         await this.updateBackupStatus(backup, {
           ...base,
           ...(verified ? { verified } : {}),
@@ -320,15 +337,22 @@ export class FirebirdBackupController {
           completionTime: new Date().toISOString(),
           error: undefined,
         });
+        await this.event(
+          backup,
+          'FirebirdBackup',
+          'Normal',
+          EventReason.BackupCompleted,
+          `backup stored at ${base.location}${verified ? ', restored and validated' : ''}`,
+        );
       } else if (outcome === 'Failed') {
         log.warn({ jobName }, 'Backup Job failed');
-        await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, `backup Job ${jobName} failed; see its pod logs`);
         await this.updateBackupStatus(backup, {
           ...base,
           phase: 'Failed',
           startTime,
           error: `backup Job ${jobName} failed${backup.spec.verify ? ' (or the backup did not restore and validate)' : ''}; see its pod logs`,
         });
+        await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, `backup Job ${jobName} failed; see its pod logs`);
       } else {
         await this.updateBackupStatus(backup, { ...base, phase: 'Running', startTime, error: undefined });
       }
@@ -347,6 +371,15 @@ export class FirebirdBackupController {
    * Reconcile a FirebirdScheduledBackup resource.
    */
   async reconcileScheduledBackup(scheduledBackup: FirebirdScheduledBackup): Promise<void> {
+    try {
+      await this.reconcileScheduledBackupCopy(scheduledBackup);
+    } catch (err) {
+      if (!(err instanceof StaleCopyError)) throw err;
+      logger.debug({ scheduledBackup: scheduledBackup.metadata.name, namespace: scheduledBackup.metadata.namespace, version: err.version }, err.message);
+    }
+  }
+
+  private async reconcileScheduledBackupCopy(scheduledBackup: FirebirdScheduledBackup): Promise<void> {
     const { name, namespace = 'default' } = scheduledBackup.metadata;
     const log = logger.child({ scheduledBackup: name, namespace });
     if (reconciliationDisabled(scheduledBackup)) {
@@ -447,8 +480,8 @@ export class FirebirdBackupController {
       const outcome = jobOutcome(lock);
       if (outcome === 'Failed') {
         const error = `locking the database on ${instance} failed (Job ${lockName}); see its pod logs`;
-        await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, error);
         await this.updateBackupStatus(backup, { phase: 'Failed', jobName: lockName, instance, startTime, error });
+        await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, error);
         await this.ensureSnapshotFinalizer(backup, false);
         return;
       }
@@ -525,8 +558,8 @@ export class FirebirdBackupController {
           `unlocking the database on ${instance} failed (Job ${unlockName}): it may still be locked for backup, ` +
           'its changes going to the delta file; run ALTER DATABASE END BACKUP on it' +
           (error ? ` (${error})` : '');
-        await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, message);
         await this.updateBackupStatus(backup, { phase: 'Failed', jobName: unlockName, startTime, volumeSnapshot: observed, error: message });
+        await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, message);
         await this.ensureSnapshotFinalizer(backup, false);
         return;
       }
@@ -549,18 +582,11 @@ export class FirebirdBackupController {
           ? `VolumeSnapshot ${snap.name} failed: ${progress!.error}`
           : undefined);
     if (error) {
-      await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, error);
       await this.updateBackupStatus(backup, { phase: 'Failed', startTime, volumeSnapshot: observed, error });
+      await this.event(backup, 'FirebirdBackup', 'Warning', EventReason.BackupFailed, error);
     } else if (progress!.ready) {
       const location = `VolumeSnapshot ${namespace}/${snap.name}`;
       log.info({ volumeSnapshot: snap.name, restoreSize: observed.restoreSize }, 'Volume snapshot backup completed');
-      await this.event(
-        backup,
-        'FirebirdBackup',
-        'Normal',
-        EventReason.BackupCompleted,
-        `volume snapshot ${snap.name} of ${snap.claimName} ready${observed.restoreSize ? ` (restore size ${observed.restoreSize})` : ''}`,
-      );
       await this.updateBackupStatus(backup, {
         phase: 'Completed',
         startTime,
@@ -569,6 +595,13 @@ export class FirebirdBackupController {
         volumeSnapshot: observed,
         error: undefined,
       });
+      await this.event(
+        backup,
+        'FirebirdBackup',
+        'Normal',
+        EventReason.BackupCompleted,
+        `volume snapshot ${snap.name} of ${snap.claimName} ready${observed.restoreSize ? ` (restore size ${observed.restoreSize})` : ''}`,
+      );
     } else {
       await this.updateBackupStatus(backup, { phase: 'Running', startTime, volumeSnapshot: observed, error: undefined });
     }
@@ -620,7 +653,7 @@ export class FirebirdBackupController {
     }
     const finalizers = fresh.metadata.finalizers ?? [];
     if (finalizers.includes(SNAPSHOT_FINALIZER) === wanted) return;
-    await this.customApi.patchNamespacedCustomObject({
+    const patched = (await this.customApi.patchNamespacedCustomObject({
       group: API_GROUP,
       version: API_VERSION,
       namespace,
@@ -635,7 +668,11 @@ export class FirebirdBackupController {
           value: wanted ? [...finalizers, SNAPSHOT_FINALIZER] : finalizers.filter((f) => f !== SNAPSHOT_FINALIZER),
         },
       ],
-    });
+    })) as FirebirdBackup | undefined;
+    // this reconcile's own write: its copy stays current if it was when the finalizer was read (a
+    // copy older than that stays older, so its status writes are still refused)
+    const version = patched?.metadata?.resourceVersion;
+    if (version && fresh.metadata.resourceVersion === backup.metadata.resourceVersion) backup.metadata.resourceVersion = version;
   }
 
   /**
@@ -751,6 +788,15 @@ export class FirebirdBackupController {
    * Reconcile a FirebirdRestore resource.
    */
   async reconcileRestore(restore: FirebirdRestore): Promise<void> {
+    try {
+      await this.reconcileRestoreCopy(restore);
+    } catch (err) {
+      if (!(err instanceof StaleCopyError)) throw err;
+      logger.debug({ restore: restore.metadata.name, namespace: restore.metadata.namespace, version: err.version }, err.message);
+    }
+  }
+
+  private async reconcileRestoreCopy(restore: FirebirdRestore): Promise<void> {
     const { name, namespace = 'default' } = restore.metadata;
     const log = logger.child({ restore: name, namespace });
     if (reconciliationDisabled(restore)) {
@@ -813,7 +859,6 @@ export class FirebirdBackupController {
       const startTime = restore.status?.startTime ?? new Date().toISOString();
       if (outcome === 'Completed') {
         log.info({ target: base.targetPath }, 'Restore completed');
-        await this.event(restore, 'FirebirdRestore', 'Normal', EventReason.RestoreCompleted, `restored into ${base.targetPath}`);
         await this.updateRestoreStatus(restore, {
           ...base,
           phase: 'Completed',
@@ -821,15 +866,16 @@ export class FirebirdBackupController {
           completionTime: new Date().toISOString(),
           error: undefined,
         });
+        await this.event(restore, 'FirebirdRestore', 'Normal', EventReason.RestoreCompleted, `restored into ${base.targetPath}`);
       } else if (outcome === 'Failed') {
         log.warn({ jobName }, 'Restore Job failed');
-        await this.event(restore, 'FirebirdRestore', 'Warning', EventReason.RestoreFailed, `restore Job ${jobName} failed; see its pod logs`);
         await this.updateRestoreStatus(restore, {
           ...base,
           phase: 'Failed',
           startTime,
           error: `restore Job ${jobName} failed; see its pod logs`,
         });
+        await this.event(restore, 'FirebirdRestore', 'Warning', EventReason.RestoreFailed, `restore Job ${jobName} failed; see its pod logs`);
       } else {
         await this.updateRestoreStatus(restore, { ...base, phase: 'Restoring', startTime, error: undefined });
       }
@@ -844,34 +890,53 @@ export class FirebirdBackupController {
     }
   }
 
-  /** Replaces the status when it changed; undefined fields are dropped */
+  /**
+   * Replaces the status when it changed; undefined fields are dropped. The write is conditional on
+   * the resourceVersion of the copy the reconcile works from (CloudNativePG #11617): a copy that
+   * predates another write (a watch event queued before the last reconcile's status write) must not
+   * write an older phase or time back, so the API server refuses it (StaleCopyError) and the
+   * reconcile of the newer copy decides instead. The copy takes the new resourceVersion, so the
+   * reconcile's next write applies to it.
+   */
   private async patchStatus(
     plural: string,
-    metadata: { name: string; namespace?: string },
-    current: object | undefined,
+    object: { metadata: { name: string; namespace?: string; resourceVersion?: string }; status?: object },
     update: object,
   ): Promise<void> {
+    const current = object.status;
     const merged = Object.fromEntries(
       Object.entries({ ...(current ?? {}), ...update }).filter(([, v]) => v !== undefined),
     );
     const canonical = (o: object) => JSON.stringify(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
     if (current && canonical(current) === canonical(merged)) return;
-    await this.customApi.patchNamespacedCustomObjectStatus({
-      group: API_GROUP,
-      version: API_VERSION,
-      namespace: metadata.namespace ?? 'default',
-      plural,
-      name: metadata.name,
-      body: [{ op: 'replace' as const, path: '/status', value: merged }],
-    });
+    const version = object.metadata.resourceVersion;
+    let written: { metadata?: { resourceVersion?: string } } | undefined;
+    try {
+      written = (await this.customApi.patchNamespacedCustomObjectStatus({
+        group: API_GROUP,
+        version: API_VERSION,
+        namespace: object.metadata.namespace ?? 'default',
+        plural,
+        name: object.metadata.name,
+        body: [
+          ...(version ? [{ op: 'test' as const, path: '/metadata/resourceVersion', value: version }] : []),
+          { op: 'replace' as const, path: '/status', value: merged },
+        ],
+      })) as { metadata?: { resourceVersion?: string } } | undefined;
+    } catch (err) {
+      // a failed test operation: the stored object changed since this copy was read
+      if (version && statusCode(err) === 422) throw new StaleCopyError(`${plural}/${object.metadata.name}`, version);
+      throw err;
+    }
+    if (written?.metadata?.resourceVersion) object.metadata.resourceVersion = written.metadata.resourceVersion;
   }
 
   private updateBackupStatus(backup: FirebirdBackup, status: NonNullable<FirebirdBackup['status']>): Promise<void> {
-    return this.patchStatus('firebirdbackups', backup.metadata, backup.status, status);
+    return this.patchStatus('firebirdbackups', backup, status);
   }
 
   private updateRestoreStatus(restore: FirebirdRestore, status: NonNullable<FirebirdRestore['status']>): Promise<void> {
-    return this.patchStatus('firebirdrestores', restore.metadata, restore.status, status);
+    return this.patchStatus('firebirdrestores', restore, status);
   }
 
   /**
@@ -901,6 +966,6 @@ export class FirebirdBackupController {
     scheduledBackup: FirebirdScheduledBackup,
     status: NonNullable<FirebirdScheduledBackup['status']>,
   ): Promise<void> {
-    return this.patchStatus('firebirdscheduledbackups', scheduledBackup.metadata, scheduledBackup.status, status);
+    return this.patchStatus('firebirdscheduledbackups', scheduledBackup, status);
   }
 }
