@@ -475,6 +475,14 @@ jobs:
           # the backups list, and a restore of the backup into a new file on the primary
           kubectl firebird backups repl | tee /tmp/plugin-backups.txt
           grep -qE '^plugin-backup +logical +Completed .*\(cluster\) +[^ ]*backup-plugin-backup.fbk$' /tmp/plugin-backups.txt
+          # --verify (or the cluster's backup.verify) restores and validates the backup
+          kubectl firebird backup repl --name plugin-verified --verify | tee /tmp/plugin-verified.txt
+          grep -q '(logical, verified)' /tmp/plugin-verified.txt
+          [ "$(kubectl get firebirdbackup plugin-verified -o jsonpath={.spec.verify})" = true ]
+          timeout 300 bash -c 'until [ "$(kubectl get firebirdbackup plugin-verified -o jsonpath={.status.phase})" = Completed ]; do
+            [ "$(kubectl get firebirdbackup plugin-verified -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done' \
+            || { kubectl get firebirdbackup plugin-verified -o yaml; kubectl logs job/backup-plugin-verified --all-containers || true; exit 1; }
+          [ "$(kubectl get firebirdbackup plugin-verified -o jsonpath={.status.verified})" = true ]
           # ... followed by the cluster's schedules, with the operator's last check (a suspended one: no next run)
           kubectl apply -f - <<'EOF'
           apiVersion: firebird.cloudnative-firebird.io/v1
@@ -573,6 +581,7 @@ jobs:
           grep -qE "^  $primary: " /tmp/plugin-report/versions.txt
           if grep -rq managedFields /tmp/plugin-report; then echo "managedFields in the report"; exit 1; fi
           ls /tmp/plugin-report /tmp/plugin-report/logs
+          kubectl delete firebirdbackup plugin-verified
           kubectl delete firebirdbackup plugin-backup
 
       - name: Verify backups and restores through the operator
