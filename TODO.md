@@ -95,3 +95,10 @@ From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
   the install manifest and the chart, with a README section. CloudNativePG's DBA samples (a
   port-forward role, a Role for one Secret) are not copied: `view` already covers what the
   plugin's read-only commands need.
+
+From the sweep of CloudNativePG's main branch to 2026-10-27 (2026-10-28):
+
+- [ ] **On-demand backups take the cluster's backup settings** (#11733): `kubectl firebird backup`
+  copies `spec.backup.s3` but not `target` (`prefer-standby`) or `verify`; take them from the
+  cluster too, with `--target` and `--verify` flags overriding them, as `kubectl cnpg backup`
+  now starts from the cluster's online configuration.

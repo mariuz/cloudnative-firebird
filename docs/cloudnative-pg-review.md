@@ -97,6 +97,20 @@ and 1.29.3, September 23, 2026). The changes merged to its `main` branch since t
 | The exec timeout applies to each retry (#11651) | The operator never execs into pods (Jobs and the segment servers do the work); the plugin runs `kubectl exec` once. | n/a |
 | `pg_basebackup` `additionalArgs` and `tablespaceMapping`, image extension paths, timeline-aware barman-cloud WAL markers, the replica cluster's system ID while PostgreSQL is down, 1.31 announced as the last release with native Barman Cloud, a TLA+ model of the primary Lease | PostgreSQL- or Barman-specific; the Lease protocol here is tested by unit tests and the kind CI, not modelled. | n/a |
 
+## Main branch to 2026-10-27 (swept 2026-10-28)
+
+The 18 commits merged to CloudNativePG's `main` after `10bfae1` (to `036d116`, October 27, 2026;
+still no release after 1.30.1) were read from their commit messages. Fourteen are dependency
+updates (Go modules, GitHub actions, container digests, boto3, rook, cert-manager,
+csi-driver-host-path 1.19.0, controller-tools) with nothing to compare. The other four:
+
+| CloudNativePG (main, PR) | Here | Status |
+|---|---|---|
+| `kubectl cnpg backup` starts from the cluster's online backup configuration and overrides only the options given; setting one option used to reset the others (#11733) | `kubectl firebird backup` copies the cluster's `spec.backup.s3` as a whole, so nothing is reset; but it leaves out the cluster's `target` (`prefer-standby`) and `verify`, which apply to the cluster's scheduled backups only. An on-demand backup should take them too, with flags to override them. Open item. | planned |
+| The e2e setup follows `deploy/kubernetes-latest` to the real `kubernetes-X.Y` directory, as raw.githubusercontent.com does not follow symlinks (csi-driver-host-path 1.19.0 dropped the hardcoded one) (#11760) | The kind CI clones csi-driver-host-path (pinned at v1.18.0) with git and runs `deploy/kubernetes-latest/deploy.sh` from the checkout, where the symlinks resolve; moving to 1.19.0 needs no change. | aligned |
+| The e2e tests retry read-only `psql` checks whose `kubectl exec` stream died (#11747) | The kind CI's login and query checks run in wait loops (`wait_login`, `gen_login` and the like), and clients that must not attach late read pod logs instead of `kubectl run -i` (v0.134.0). | aligned |
+| The upgrade spec dumps the plugin namespaces when it fails (#11748) | The CI's failure step prints the clusters, StatefulSets, Services, Leases, backups, Jobs and operator logs. | aligned |
+
 ## Not applicable
 
 - PgBouncer / `Pooler` features (image catalogs, TLS settings, `auth_user`, metrics): Firebird has
