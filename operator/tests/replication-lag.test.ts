@@ -7,7 +7,7 @@ import { startSegmentServer } from './helpers/segment-server';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { KubeConfig, V1Pod } from '@kubernetes/client-node';
-import { computeLag, parseArchived, parsePosition, SegmentClient, segmentRetention } from '../src/utils/replication-lag';
+import { computeLag, journalBehind, parseArchived, parsePosition, SegmentClient, segmentRetention } from '../src/utils/replication-lag';
 import { maxSegmentRetentionHours, REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { REPLICATION_LAG_ANNOTATION } from '../src/utils/routing';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
@@ -265,6 +265,20 @@ describe.skipIf(!hasPerl)('segment-server.pl keeps the segments after the offlin
   });
 });
 
+describe('a journal behind the replicas', () => {
+  const seg = (sequence: number) => ({ sequence, ageSeconds: 1 });
+  it('lists the replicas that applied a later segment than the primary archived', () => {
+    expect(journalBehind([seg(3), seg(5)], [{ name: 'db-1', appliedSequence: 62 }, { name: 'db-2', appliedSequence: 5 }, { name: 'db-3', error: 'x' }])).toEqual({
+      lastArchived: 5,
+      ahead: [{ name: 'db-1', appliedSequence: 62 }],
+    });
+  });
+  it('says nothing while replicas follow, or while nothing is archived (right after a promotion)', () => {
+    expect(journalBehind([seg(63)], [{ name: 'db-1', appliedSequence: 62 }, { name: 'db-2', appliedSequence: 63 }])).toBeUndefined();
+    expect(journalBehind([], [{ name: 'db-1', appliedSequence: 62 }])).toBeUndefined();
+  });
+});
+
 describe('replication lag reconciliation', () => {
   const cluster: FirebirdCluster = {
     apiVersion: 'firebird.cloudnative-firebird.io/v1',
@@ -365,6 +379,21 @@ describe('replication lag reconciliation', () => {
     await single.controller.reconcile({ ...cluster, spec: { ...cluster.spec, instances: 1 }, status: { replicationStatus: previous } });
     expect(single.client).toHaveBeenCalledWith('db-0.db-headless.prod.svc', 3051, 'masterkey RETAIN none');
     expect(single.status().replicationStatus.segmentRetention).toBeUndefined();
+  });
+
+  it('warns when replicas applied past what the primary archived (a journal restarted below them)', async () => {
+    const s = setup([pod('db-0'), pod('db-1'), pod('db-2')], {
+      'db-0 ARCHIVED': ['1 20', '5 5'],
+      'db-1 POSITION': ['OK 62 100 0'],
+      'db-2 POSITION': ['OK 5 100 0'],
+    });
+    await s.controller.reconcile(cluster);
+    const warnings = s.fn('createNamespacedEvent').mock.calls.map((c) => c[0].body).filter((e) => e.reason === 'JournalBehindReplicas');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({ type: 'Warning' });
+    expect(warnings[0].message).toBe(
+      'the journal of the primary db-0 is at segment 5, behind what db-1 (62) applied: they skip its new segments as applied already; re-seed them (reseed annotation)',
+    );
   });
 
   it('drops the annotation of a replica that cannot be measured', async () => {

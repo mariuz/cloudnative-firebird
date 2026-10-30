@@ -1366,6 +1366,10 @@ jobs:
           [ "$(count "$primary")" = "$before" ]
           for i in $(seq 301 305); do sql "$primary" "insert into app values ($i, 'after update'); commit;" >/dev/null; done
           for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$primary" ] || wait_count "$pod" $((before + 5)); done
+          # the restarted primary's journal continued after what the replicas applied (its init
+          # container raises a header behind the journal floor of the last promotion)
+          kubectl logs "$primary" -c replication-init
+          [ -z "$(kubectl get events --field-selector involvedObject.name=repl,reason=JournalBehindReplicas -o name)" ]
           echo "rolling update finished with the primary $primary last"
 
       - name: Verify resources are resized in place

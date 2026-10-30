@@ -160,7 +160,7 @@ describe('segment server: synchronous replication commands', () => {
         chmodSync(join(ws.dir, 'bin', name), 0o755);
       };
       bin('isql', `case "$*" in *" -i "*) in="";; *) in=$(cat);; esac; echo "isql $* $in" | tr '\\n' ' ' >> "${ws.dir}/calls"; echo >> "${ws.dir}/calls"
-case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || echo 1)";; *REPLICATION_SEQUENCE*) echo "V   15";; esac\n`);
+case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || echo 1)";; *REPLICATION_SEQUENCE*) echo "V   $(cat "${ws.dir}/live-seq" 2>/dev/null || perl -e 'open(F, "<:raw", $ARGV[0]); read(F, $p, 138); print unpack("Q<", substr($p, 130, 8))' "${db}")";; esac\n`);
       bin('gfix', `echo "gfix $*" >> "${ws.dir}/calls"\n${failGfix ? 'case "$*" in *none*) exit 1;; esac\n' : ''}exit 0\n`);
       const ctl = Buffer.alloc(40);
       ctl.write('FBREPLCTL', 0, 'latin1');
@@ -205,8 +205,11 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
       expect(existsSync(join(r.base, 'promoted'))).toBe(true);
       expect(existsSync(join(r.base, '.pause-pull'))).toBe(false);
       expect(await r.ask('POSITION')).toEqual(['OK primary']);
-      // repeated: already promoted
+      // the journal floor: the init container raises a header behind it at the next start
+      expect(readFileSync(join(r.base, 'journal-floor'), 'utf8')).toBe('12\n');
+      // repeated: already promoted (the server's sequence)
       writeFileSync(join(r.ws.dir, 'mode'), '0');
+      writeFileSync(join(r.ws.dir, 'live-seq'), '15');
       expect(await r.ask('PROMOTE none')).toEqual(['OK 15']);
       expect((await r.ask('PROMOTE x'))[0]).toBe('ERR bad request');
     }, 20_000);
@@ -224,6 +227,24 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
       expect(readFileSync(r.db).subarray(128, 140).readBigUInt64LE(2)).toBe(20n);
       expect(existsSync(join(r.base, 'sync-standby'))).toBe(false);
       expect(existsSync(join(r.base, 'sync-seen'))).toBe(false);
+    }, 20_000);
+
+    it('fails over to the offline promotion when the server would journal below the promotion point', async () => {
+      if (!hasPerl) return;
+      const r = await replica();
+      // the server kept a header without the sequence the promotion wrote (journal from segment 1)
+      writeFileSync(join(r.ws.dir, 'live-seq'), '0');
+      try {
+        expect(await r.ask('PROMOTE 12')).toEqual(['ERR the journal would continue after segment 0, not 12']);
+      } finally {
+        r.stop();
+      }
+      const calls = r.ws.calls();
+      // back to a replica, with its control file; not the primary, no floor
+      expect(calls.some((c) => c === 'gfix -replica read_only localhost:' + r.db)).toBe(true);
+      expect(readdirSync(join(r.base, 'source'))).toEqual(['{11111111-2222-3333-4444-555555555555}']);
+      expect(existsSync(join(r.base, 'promoted'))).toBe(false);
+      expect(existsSync(join(r.base, 'journal-floor'))).toBe(false);
     }, 20_000);
 
     it('leaves a replica the offline promotion can take over when it fails', async () => {

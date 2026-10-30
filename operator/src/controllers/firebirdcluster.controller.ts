@@ -202,6 +202,7 @@ import { READINESS_ROUTING, REPLICATION_LAG_ANNOTATION, computeReadRouting, isPo
 import {
   SegmentClient,
   computeLag,
+  journalBehind,
   parseArchived,
   parsePosition,
   segmentRequest,
@@ -2667,6 +2668,17 @@ export class FirebirdClusterController {
           log,
         );
       }
+    }
+    const behind = journalBehind(archived, replicas);
+    if (behind) {
+      const names = behind.ahead.map((r) => `${r.name} (${r.appliedSequence})`).join(', ');
+      await this.event(
+        cluster,
+        'Warning',
+        EventReason.JournalBehindReplicas,
+        `the journal of the primary ${primaryPod} is at segment ${behind.lastArchived}, behind what ${names} applied: ` +
+          'they skip its new segments as applied already; re-seed them (reseed annotation)',
+      );
     }
     // the primary keeps the segments the replicas (ready or not) have not applied yet
     const replicaNames = Array.from({ length: cluster.spec.instances }, (_, i) => `${name}-${i}`).filter(
