@@ -1031,10 +1031,11 @@ PodDisruptionBudget, NetworkPolicy, CronJobs, Role and RoleBinding that carry it
 controller (a `ResourcesAdopted` event lists them). Deleting the recreated cluster then deletes
 them too. The volumes keep no owner, as always, so deleting a cluster never deletes its data.
 A segment TLS Secret or peers ConfigMap made before v0.142.0 lacks the `managed-by` label and is
-adopted once the operator next writes it. Since v0.143.0 a cluster being deleted is not reconciled,
-and the adoption first checks that the cluster still exists under the same uid: a reconcile that
-started from the deleted cluster's copy would give everything back to it, and the garbage
-collector would then remove the StatefulSet (restarting the instances) and the rest. With it a `lease-holder` sidecar (from
+adopted once the operator next writes it. Since v0.143.0 a cluster being deleted is not reconciled, the
+operator's updates never set an owner an object does not have yet, and the adoption first checks
+that the cluster still exists under the same uid: a reconcile that started from the deleted
+cluster's copy would give everything back to it, and the garbage collector would then remove the
+StatefulSet (restarting the instances) and the rest. With it a `lease-holder` sidecar (from
 the operator image, like the segment TLS proxy) in every instance pod renews the Lease every
 third of `durationSeconds` while its pod is the primary and its database is online, through the
 pod's ServiceAccount (a Role on that one Lease and a RoleBinding the operator manages, and a

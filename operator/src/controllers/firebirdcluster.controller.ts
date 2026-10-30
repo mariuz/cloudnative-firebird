@@ -170,6 +170,7 @@ import {
   buildLease,
   leaseAdoption,
   leftoverAdoption,
+  ownersKept,
   buildNetworkPolicy,
   CloneTarget,
   cloneTargets,
@@ -2274,7 +2275,8 @@ export class FirebirdClusterController {
       }
       // a merge patch keeps the existing rollingUpdate settings, which OnDelete rejects
       // and keeps scheduling keys the desired template no longer has: they are sent as null
-      const patched = statefulSetPatchBody(existing, desired);
+      // the owner only once the cluster has it (adoption): ownersKept
+      const patched = ownersKept(existing, statefulSetPatchBody(existing, desired), cluster);
       const body =
         patched.spec?.updateStrategy?.type === 'OnDelete'
           ? { ...patched, spec: { ...patched.spec, updateStrategy: { type: 'OnDelete', rollingUpdate: null } } }
@@ -2721,7 +2723,7 @@ export class FirebirdClusterController {
           await this.batchApi.patchNamespacedCronJob({
             name: cronJobName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('Journal archive CronJob up to date, skipping');
@@ -2768,7 +2770,7 @@ export class FirebirdClusterController {
           await this.batchApi.patchNamespacedCronJob({
             name: backupName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('Backup CronJob up to date, skipping');
@@ -2956,7 +2958,7 @@ export class FirebirdClusterController {
           await this.policyApi.patchNamespacedPodDisruptionBudget({
             name: pdbName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('PodDisruptionBudget up to date, skipping');
@@ -3008,7 +3010,7 @@ export class FirebirdClusterController {
           await this.coreApi.patchNamespacedConfigMap({
             name: configName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('ConfigMap is up to date, skipping');
@@ -3049,7 +3051,7 @@ export class FirebirdClusterController {
           await this.batchApi.patchNamespacedCronJob({
             name: sweepName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('AutoSweep CronJob up to date, skipping');
@@ -3091,7 +3093,7 @@ export class FirebirdClusterController {
           await this.networkingApi.patchNamespacedNetworkPolicy({
             name: npName,
             namespace,
-            body: networkPolicyWireFormat(desired),
+            body: ownersKept(existing, networkPolicyWireFormat(desired), cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('NetworkPolicy is up to date, skipping');
@@ -3591,7 +3593,7 @@ export class FirebirdClusterController {
           await this.batchApi.patchNamespacedCronJob({
             name: cronJobName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('Diagnostics CronJob is up to date, skipping');
@@ -3631,7 +3633,7 @@ export class FirebirdClusterController {
           await this.coreApi.patchNamespacedConfigMap({
             name: cmName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('Grafana Dashboard ConfigMap is up to date, skipping');

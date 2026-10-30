@@ -1049,6 +1049,23 @@ export function leaseAdoption(
 }
 
 /**
+ * The desired object for a merge patch of an existing one: without owner references when the
+ * existing object is not this cluster's yet. Only the adoption of a deleted cluster's leftovers
+ * (leftoverAdoption) gives an object an owner, after checking that the cluster still exists: a
+ * reconcile from the copy of a cluster deleted meanwhile (orphan propagation) would otherwise put
+ * it back as the owner, and the garbage collector would delete the object.
+ */
+export function ownersKept<T extends { metadata?: { ownerReferences?: V1OwnerReference[] } }>(
+  existing: { metadata?: { ownerReferences?: V1OwnerReference[] } },
+  desired: T,
+  cluster: FirebirdCluster,
+): T {
+  const uid = cluster.metadata.uid;
+  if (!uid || (existing.metadata?.ownerReferences ?? []).some((r) => r.kind === RESOURCE_KIND && r.uid === uid)) return desired;
+  return { ...desired, metadata: { ...desired.metadata, ownerReferences: undefined } };
+}
+
+/**
  * The owner references a leftover of a deleted cluster of the same name takes when the recreated
  * cluster adopts it (the StatefulSet, Services, ConfigMaps, Secrets, PodDisruptionBudget,
  * NetworkPolicy, CronJobs, Role and RoleBinding the operator made: its labels say so). Undefined

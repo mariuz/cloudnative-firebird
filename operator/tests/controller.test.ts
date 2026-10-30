@@ -393,6 +393,21 @@ describe('FirebirdClusterController – basic reconciliation', () => {
       expect(mockCoordinationApi.patchNamespacedLease).not.toHaveBeenCalled();
     });
 
+    it('patches a StatefulSet it does not own yet without setting itself as owner', async () => {
+      // a leftover of a deleted cluster, with a template to update: the owner is the adoption's
+      // to give, once the cluster is checked to be current
+      const readNamespacedStatefulSetImpl = vi.fn().mockResolvedValue({
+        metadata: { name: 'test-cluster', resourceVersion: '3' },
+        spec: { replicas: 1, podManagementPolicy: 'Parallel', template: { spec: { containers: [] } } },
+        status: {},
+      });
+      const { mockKubeConfig, mockAppsApi } = makeMockKubeConfig({ readNamespacedStatefulSetImpl });
+      await new FirebirdClusterController(mockKubeConfig).reconcile(makeCluster());
+      const patch = (mockAppsApi.patchNamespacedStatefulSet as Mock).mock.calls.at(-1)?.[0].body;
+      expect(patch?.spec?.template).toBeDefined();
+      expect(JSON.parse(JSON.stringify(patch)).metadata?.ownerReferences).toBeUndefined();
+    });
+
     it('reconciles nothing for a cluster being deleted: its objects go with it, or stay for a recreated one', async () => {
       const { mockKubeConfig, mockAppsApi, mockCoreApi, mockCoordinationApi } = makeMockKubeConfig();
       const cluster = makeCluster();
