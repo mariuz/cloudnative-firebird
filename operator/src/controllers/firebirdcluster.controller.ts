@@ -358,6 +358,14 @@ export class FirebirdClusterController {
     const { name, namespace = 'default' } = cluster.metadata;
     const log = logger.child({ cluster: name, namespace });
 
+    // being deleted: what it owns goes with it, or stays without an owner (orphan propagation)
+    // for a cluster recreated under its name to adopt. A reconcile from this copy would put the
+    // deleted cluster back as their owner, and the garbage collector would remove them.
+    if (cluster.metadata.deletionTimestamp) {
+      log.info('FirebirdCluster is being deleted; nothing reconciled');
+      return;
+    }
+
     log.info('Reconciling FirebirdCluster');
 
     try {
@@ -3391,6 +3399,12 @@ export class FirebirdClusterController {
       return;
     }
     const holder = lease.spec?.holderIdentity || 'no instance';
+    // only for the cluster as it is now: a reconcile that started from the deleted cluster's copy
+    // (its deletion began meanwhile) would give everything back to it, for the garbage collector
+    if (!(await this.isCurrent(cluster))) {
+      log.info('The cluster was deleted or recreated meanwhile: nothing adopted from this copy');
+      return;
+    }
     // the other objects that cluster left first: a failure leaves the Lease unadopted, so the next
     // reconcile tries again
     await this.adoptLeftovers(cluster, log);
@@ -3404,6 +3418,18 @@ export class FirebirdClusterController {
       ],
     });
     await this.event(cluster, 'Normal', EventReason.LeaseAdopted, `adopted the Lease ${leaseName} a deleted cluster left; ${holder} stays the primary`);
+  }
+
+  /** Whether the cluster still exists as this copy has it: the same uid, not being deleted */
+  private async isCurrent(cluster: FirebirdCluster): Promise<boolean> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    try {
+      const live = (await this.customApi.getNamespacedCustomObject({ group: API_GROUP, version: API_VERSION, namespace, plural: RESOURCE_PLURAL, name })) as FirebirdCluster;
+      return live.metadata.uid === cluster.metadata.uid && !live.metadata.deletionTimestamp;
+    } catch (err) {
+      if (isNotFound(err)) return false;
+      throw err;
+    }
   }
 
   /**

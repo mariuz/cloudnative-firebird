@@ -961,6 +961,8 @@ export interface FirebirdCluster {
     generation?: number;
     labels?: Record<string, string>;
     annotations?: Record<string, string>;
+    /** Set while the cluster is being deleted (with orphan propagation, until its dependents are released) */
+    deletionTimestamp?: string | Date;
   };
   spec: FirebirdClusterSpec;
   status?: FirebirdClusterStatus;

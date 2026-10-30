@@ -285,7 +285,16 @@ describe('FirebirdClusterController – basic reconciliation', () => {
     });
 
     it('adopts the Lease a deleted cluster of the same name left, keeping its holder as the primary', async () => {
-      const { mockKubeConfig, mockCoordinationApi, mockAppsApi, mockCoreApi, mockBatchApi, mockPolicyApi, mockNetworkingApi, mockRbacApi } = makeMockKubeConfig();
+      const { mockKubeConfig, mockCoordinationApi, mockAppsApi, mockCoreApi, mockBatchApi, mockPolicyApi, mockNetworkingApi, mockRbacApi, mockCustomApi } = makeMockKubeConfig();
+      // the cluster as the API server has it now: this copy's (adoption checks it first)
+      const live = { current: makeCluster() as FirebirdCluster | undefined };
+      const getCustom = mockCustomApi.getNamespacedCustomObject as Mock;
+      const getOther = getCustom.getMockImplementation();
+      getCustom.mockImplementation(async (req: { plural: string }) => {
+        if (req.plural !== 'firebirdclusters') return getOther?.(req);
+        if (!live.current) throw notFoundError;
+        return live.current;
+      });
       const record = vi.spyOn(EventRecorder.prototype, 'record').mockResolvedValue(undefined);
       // what the deleted cluster left besides the Lease (found by the operator's labels)
       const labels = {
@@ -361,6 +370,19 @@ describe('FirebirdClusterController – basic reconciliation', () => {
       );
       record.mockRestore();
 
+      // a reconcile from a copy of a cluster that is gone (deleted, or recreated under another uid)
+      // adopts nothing: it would give everything back to the deleted cluster, for the garbage
+      // collector to remove
+      for (const now of [undefined, { ...makeCluster(), metadata: { ...makeCluster().metadata, uid: 'new-uid' } }, { ...makeCluster(), metadata: { ...makeCluster().metadata, deletionTimestamp: '2026-10-30T18:00:00Z' } }]) {
+        live.current = now;
+        mockCoordinationApi.patchNamespacedLease.mockClear();
+        lists.sts.mockClear();
+        await new FirebirdClusterController(mockKubeConfig).reconcile(cluster);
+        expect(mockCoordinationApi.patchNamespacedLease.mock.calls.filter((c) => c[0].body.some((op: { path: string }) => op.path === '/metadata/ownerReferences'))).toHaveLength(0);
+        expect(lists.sts).not.toHaveBeenCalled();
+      }
+      live.current = makeCluster();
+
       // owned by the cluster from then on: left alone
       mockCoordinationApi.patchNamespacedLease.mockClear();
       mockCoordinationApi.readNamespacedLease.mockResolvedValue({
@@ -369,6 +391,17 @@ describe('FirebirdClusterController – basic reconciliation', () => {
       });
       await new FirebirdClusterController(mockKubeConfig).reconcile(cluster);
       expect(mockCoordinationApi.patchNamespacedLease).not.toHaveBeenCalled();
+    });
+
+    it('reconciles nothing for a cluster being deleted: its objects go with it, or stay for a recreated one', async () => {
+      const { mockKubeConfig, mockAppsApi, mockCoreApi, mockCoordinationApi } = makeMockKubeConfig();
+      const cluster = makeCluster();
+      cluster.metadata.deletionTimestamp = '2026-10-30T18:00:00Z';
+      await new FirebirdClusterController(mockKubeConfig).reconcile(cluster);
+      expect(mockAppsApi.readNamespacedStatefulSet).not.toHaveBeenCalled();
+      expect(mockAppsApi.patchNamespacedStatefulSet).not.toHaveBeenCalled();
+      expect(mockCoreApi.createNamespacedService).not.toHaveBeenCalled();
+      expect(mockCoordinationApi.readNamespacedLease).not.toHaveBeenCalled();
     });
 
     it('creates the replacement on a later reconcile while the old StatefulSet is still being deleted', async () => {
