@@ -13,7 +13,7 @@ import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/s
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.140.0';
+export const PLUGIN_VERSION = '0.141.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -89,6 +89,7 @@ Commands:
   reseed <cluster> <instance>               discard a replica's database and seed it again
   backup <cluster> [--type logical|physical|volumeSnapshot] [--level 0|1|2]
                    [--snapshot-class name] [--name backup-name] [--database firebird-database]
+                   [--target primary|prefer-standby] [--verify|--no-verify]
                                             take an on-demand backup (FirebirdBackup)
   backups <cluster>                         the cluster's backups, newest first, and its schedules
   schedule on|off <cluster> <schedule>      resume or suspend a FirebirdScheduledBackup of the cluster
@@ -119,7 +120,7 @@ interface Parsed {
 }
 
 const VALUE_FLAGS = new Set(['namespace', 'context', 'type', 'level', 'name', 'snapshot-class', 'instance', 'container', 'tail', 'output', 'operator-namespace', 'database', 'target', 'clients', 'transactions']);
-const BOOLEAN_FLAGS = new Set(['replica', 'help', 'follow', 'no-logs', 'keep', 'no-reuse-pvc']);
+const BOOLEAN_FLAGS = new Set(['replica', 'help', 'follow', 'no-logs', 'keep', 'no-reuse-pvc', 'verify', 'no-verify']);
 const SHORT: Record<string, string> = { n: 'namespace', f: 'follow', o: 'output' };
 
 export function parseArgs(argv: string[]): Parsed {
@@ -635,7 +636,7 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
       }
 
       case 'backup': {
-        const [name] = need(parsed, 1, 'backup <cluster> [--type logical|physical|volumeSnapshot] [--level n] [--snapshot-class c] [--name n]');
+        const [name] = need(parsed, 1, 'backup <cluster> [--type logical|physical|volumeSnapshot] [--level n] [--snapshot-class c] [--name n] [--target t] [--verify|--no-verify]');
         const cluster = await api.getCluster(namespace, name);
         const type = (parsed.flags.get('type') as string | undefined) ?? 'logical';
         if (!['logical', 'physical', 'volumeSnapshot'].includes(type)) throw new UsageError(`--type must be logical, physical or volumeSnapshot, got ${type}`);
@@ -647,6 +648,18 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
         if (snapshotClass && type !== 'volumeSnapshot') throw new UsageError('--snapshot-class is for volumeSnapshot backups');
         const database = parsed.flags.get('database') as string | undefined;
         if (database && type !== 'logical') throw new UsageError('--database (a FirebirdDatabase) is for logical backups');
+        // the cluster's backup settings, as its scheduled backups have them (CloudNativePG #11733):
+        // the flags override them; target applies to Job backups, verify to logical ones
+        const targetFlag = parsed.flags.get('target') as string | undefined;
+        if (targetFlag !== undefined && !['primary', 'prefer-standby'].includes(targetFlag)) {
+          throw new UsageError(`--target must be primary or prefer-standby, got ${targetFlag}`);
+        }
+        if (targetFlag !== undefined && type === 'volumeSnapshot') throw new UsageError('--target is for logical and physical backups (a volume snapshot is of the primary)');
+        if (parsed.flags.has('verify') && parsed.flags.has('no-verify')) throw new UsageError('--verify and --no-verify exclude each other');
+        if (parsed.flags.has('verify') && type !== 'logical') throw new UsageError('--verify is for logical backups');
+        const target = type === 'volumeSnapshot' ? undefined : ((targetFlag as FirebirdBackup['spec']['target']) ?? cluster.spec.backup?.target);
+        const verify =
+          type !== 'logical' ? undefined : parsed.flags.has('verify') ? true : parsed.flags.has('no-verify') ? undefined : cluster.spec.backup?.verify || undefined;
         const stamp = io.now().toISOString().replace(/[-:T]/g, '').slice(0, 14);
         const backupName = (parsed.flags.get('name') as string | undefined) ?? `${cluster.metadata.name}-${stamp}`;
         // the backup's own S3 destination, as the cluster's scheduled backups have it
@@ -662,10 +675,18 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
             ...(s3 ? { s3 } : {}),
             ...(snapshotClass ? { volumeSnapshot: { className: snapshotClass } } : {}),
             ...(database ? { database } : {}),
+            ...(target ? { target } : {}),
+            ...(verify ? { verify } : {}),
           },
         };
         await api.createBackup(namespace, body);
-        io.out(`FirebirdBackup ${backupName} created (${type}${database ? ` of FirebirdDatabase ${database}` : ''}${s3 ? `, to s3://${s3.bucket}` : ''}); kubectl get firebirdbackup ${backupName} -n ${namespace} -w`);
+        const details = [
+          `${type}${database ? ` of FirebirdDatabase ${database}` : ''}`,
+          ...(s3 ? [`to s3://${s3.bucket}`] : []),
+          ...(target === 'prefer-standby' ? ['from a replica if one is ready'] : []),
+          ...(verify ? ['verified'] : []),
+        ];
+        io.out(`FirebirdBackup ${backupName} created (${details.join(', ')}); kubectl get firebirdbackup ${backupName} -n ${namespace} -w`);
         return 0;
       }
 

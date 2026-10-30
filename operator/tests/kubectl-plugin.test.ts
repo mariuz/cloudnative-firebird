@@ -403,6 +403,37 @@ describe('kubectl firebird', () => {
     expect(await exec('backup', 'db', '--type', 'physical', '--database', 'sales')).toBe(2);
   });
 
+  it("takes the cluster's backup target and verify, which the flags override (CloudNativePG #11733)", async () => {
+    const s3 = { bucket: 'bk', secretRef: { name: 's' } };
+    cluster.spec.backup = { enabled: true, s3, target: 'prefer-standby', verify: true };
+    const spec = () => api.createBackup.mock.calls.at(-1)[1].spec;
+    expect(await exec('backup', 'db')).toBe(0);
+    expect(spec()).toEqual({ clusterName: 'db', type: 'logical', s3, target: 'prefer-standby', verify: true });
+    expect(out.at(-1)).toContain('(logical, to s3://bk, from a replica if one is ready, verified)');
+    // a flag overrides one setting and keeps the other
+    expect(await exec('backup', 'db', '--target', 'primary')).toBe(0);
+    expect(spec()).toEqual({ clusterName: 'db', type: 'logical', s3, target: 'primary', verify: true });
+    expect(await exec('backup', 'db', '--no-verify')).toBe(0);
+    expect(spec()).toEqual({ clusterName: 'db', type: 'logical', s3, target: 'prefer-standby' });
+    // verify is for logical backups, target for Job backups: the cluster's are left out elsewhere
+    expect(await exec('backup', 'db', '--type', 'physical')).toBe(0);
+    expect(spec()).toEqual({ clusterName: 'db', type: 'physical', s3, target: 'prefer-standby' });
+    expect(await exec('backup', 'db', '--type', 'volumeSnapshot')).toBe(0);
+    expect(spec()).toEqual({ clusterName: 'db', type: 'volumeSnapshot' });
+    // without cluster settings, the flags alone
+    cluster.spec.backup = undefined;
+    expect(await exec('backup', 'db', '--verify', '--target', 'prefer-standby')).toBe(0);
+    expect(spec()).toEqual({ clusterName: 'db', type: 'logical', target: 'prefer-standby', verify: true });
+    for (const bad of [
+      ['--target', 'replica'],
+      ['--type', 'volumeSnapshot', '--target', 'primary'],
+      ['--type', 'physical', '--verify'],
+      ['--verify', '--no-verify'],
+    ]) {
+      expect(await exec('backup', 'db', ...bad), bad.join(' ')).toBe(2);
+    }
+  });
+
   it('runs isql in the firebird container of the primary or a replica', async () => {
     expect(await exec('isql', 'db', '--', '-q')).toBe(0);
     expect(kubectlArgs).toEqual(['-n', 'prod', 'exec', '-i', 'db-1', '-c', 'firebird', '--', 'isql', '-q', 'localhost:/var/lib/firebird/data/mydb.fdb']);
