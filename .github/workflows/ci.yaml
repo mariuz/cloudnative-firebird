@@ -2845,7 +2845,9 @@ jobs:
               || { echo "$obj was not adopted"; kubectl get $obj -o yaml; exit 1; }
           done
           kubectl get events --field-selector involvedObject.name=orphan,reason=ResourcesAdopted -o jsonpath='{.items[0].message}' | tee /tmp/adopted.txt; echo
-          grep -q 'StatefulSet orphan' /tmp/adopted.txt
+          # the StatefulSet may already be the new cluster's: its regular patch (the template the
+          # recreated cluster wants) sets its owner before the Lease is reconciled
+          grep -q 'Service orphan-headless' /tmp/adopted.txt
           # deleted again: the adopted Lease and objects go with it, the volume stays
           kubectl delete firebirdcluster orphan --wait=true --timeout=120s
           timeout 120 bash -c 'while kubectl get lease orphan-lease >/dev/null 2>&1; do sleep 2; done' \
