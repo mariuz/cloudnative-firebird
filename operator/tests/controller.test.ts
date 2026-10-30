@@ -159,7 +159,7 @@ function makeMockKubeConfig({
     return {} as unknown as CoreV1Api;
   });
 
-  return { mockKubeConfig, mockCoreApi, mockAppsApi, mockBatchApi, mockCustomApi, mockPolicyApi, mockNetworkingApi, mockCoordinationApi };
+  return { mockKubeConfig, mockCoreApi, mockAppsApi, mockBatchApi, mockCustomApi, mockPolicyApi, mockNetworkingApi, mockCoordinationApi, mockRbacApi };
 }
 
 // ---------------------------------------------------------------------------
@@ -285,8 +285,40 @@ describe('FirebirdClusterController – basic reconciliation', () => {
     });
 
     it('adopts the Lease a deleted cluster of the same name left, keeping its holder as the primary', async () => {
-      const { mockKubeConfig, mockCoordinationApi } = makeMockKubeConfig();
+      const { mockKubeConfig, mockCoordinationApi, mockAppsApi, mockCoreApi, mockBatchApi, mockPolicyApi, mockNetworkingApi, mockRbacApi } = makeMockKubeConfig();
       const record = vi.spyOn(EventRecorder.prototype, 'record').mockResolvedValue(undefined);
+      // what the deleted cluster left besides the Lease (found by the operator's labels)
+      const labels = {
+        'app.kubernetes.io/name': 'firebird',
+        'app.kubernetes.io/component': 'database',
+        'app.kubernetes.io/managed-by': 'cloudnative-firebird-operator',
+        'firebird.cloudnative-firebird.io/cluster': 'test-cluster',
+      };
+      const left = (name: string, ownerReferences?: object[]) => ({ metadata: { name, resourceVersion: '5', labels, ...(ownerReferences ? { ownerReferences } : {}) } });
+      const lists = {
+        sts: vi.fn().mockResolvedValue({ items: [left('test-cluster')] }),
+        svc: vi.fn().mockResolvedValue({ items: [left('test-cluster'), left('test-cluster-headless', [{ kind: 'FirebirdCluster', name: 'test-cluster', uid: 'old-uid', controller: true }])] }),
+        cm: vi.fn().mockResolvedValue({ items: [left('test-cluster-config', [{ kind: 'FirebirdCluster', name: 'test-cluster', uid: 'test-uid-1234', controller: true }])] }),
+        secret: vi.fn().mockResolvedValue({ items: [{ ...left('test-cluster-segment-tls'), data: { 'tls.crt': 'eA==' } }] }),
+        pdb: vi.fn().mockResolvedValue({ items: [] }),
+        np: vi.fn().mockResolvedValue({ items: [] }),
+        // a backup Job's CronJob owned by its FirebirdScheduledBackup: not the cluster's
+        cron: vi.fn().mockResolvedValue({ items: [left('sched-backup-nightly', [{ kind: 'FirebirdScheduledBackup', name: 'nightly', uid: 's', controller: true }])] }),
+        role: vi.fn().mockResolvedValue({ items: [left('test-cluster-primary-lease')] }),
+        binding: vi.fn().mockResolvedValue({ items: [] }),
+      };
+      Object.assign(mockAppsApi, { listNamespacedStatefulSet: lists.sts, patchNamespacedStatefulSet: vi.fn().mockResolvedValue({}) });
+      Object.assign(mockCoreApi, {
+        listNamespacedService: lists.svc,
+        patchNamespacedService: vi.fn().mockResolvedValue({}),
+        listNamespacedConfigMap: lists.cm,
+        listNamespacedSecret: lists.secret,
+        replaceNamespacedSecret: vi.fn().mockResolvedValue({}),
+      });
+      Object.assign(mockPolicyApi, { listNamespacedPodDisruptionBudget: lists.pdb });
+      Object.assign(mockNetworkingApi, { listNamespacedNetworkPolicy: lists.np });
+      Object.assign(mockBatchApi, { listNamespacedCronJob: lists.cron });
+      Object.assign(mockRbacApi, { listNamespacedRole: lists.role, patchNamespacedRole: vi.fn().mockResolvedValue({}), listNamespacedRoleBinding: lists.binding });
       // a cluster deleted with orphan propagation, whose primary was ordinal 1
       mockCoordinationApi.readNamespacedLease.mockResolvedValue({ metadata: { name: 'test-cluster-lease' }, spec: { holderIdentity: 'test-cluster-1' } });
       const cluster = makeCluster();
@@ -305,6 +337,27 @@ describe('FirebirdClusterController – basic reconciliation', () => {
       expect(JSON.stringify(adopt?.[0].body)).not.toContain('holderIdentity');
       expect(record.mock.calls.find((c) => c[2] === 'LeaseAdopted')?.[3]).toBe(
         'adopted the Lease test-cluster-lease a deleted cluster left; test-cluster-1 stays the primary',
+      );
+      // the other leftovers: listed by the operator's labels, adopted with a patch over the
+      // version read (a Secret replaced); what the cluster owns already, or another controller
+      // owns, is left alone
+      expect(lists.sts.mock.calls[0][0]).toEqual({
+        namespace: 'default',
+        labelSelector: 'firebird.cloudnative-firebird.io/cluster=test-cluster,app.kubernetes.io/managed-by=cloudnative-firebird-operator',
+      });
+      const ownerOps = (name: string) => [
+        { op: 'test', path: '/metadata/resourceVersion', value: '5' },
+        { op: 'add', path: '/metadata/ownerReferences', value: [expect.objectContaining({ kind: 'FirebirdCluster', uid: 'test-uid-1234', controller: true })] },
+      ].map((op) => ({ ...op, name }));
+      expect((mockAppsApi as unknown as Record<string, Mock>).patchNamespacedStatefulSet.mock.calls.map((c) => c[0].body.map((op: object) => ({ ...op, name: c[0].name })))).toEqual([ownerOps('test-cluster')]);
+      const services = (mockCoreApi as unknown as Record<string, Mock>).patchNamespacedService.mock.calls.filter((c) => Array.isArray(c[0].body)).map((c) => c[0].name);
+      expect(services).toEqual(['test-cluster', 'test-cluster-headless']);
+      const secret = (mockCoreApi as unknown as Record<string, Mock>).replaceNamespacedSecret.mock.calls[0][0];
+      expect(secret).toMatchObject({ name: 'test-cluster-segment-tls', body: { kind: 'Secret', data: { 'tls.crt': 'eA==' }, metadata: { resourceVersion: '5', ownerReferences: [expect.objectContaining({ uid: 'test-uid-1234' })] } } });
+      expect((mockRbacApi as unknown as Record<string, Mock>).patchNamespacedRole.mock.calls.map((c) => c[0].name)).toEqual(['test-cluster-primary-lease']);
+      expect(mockCoreApi.patchNamespacedConfigMap.mock.calls.filter((c: Array<{ body: unknown }>) => Array.isArray(c[0].body))).toHaveLength(0);
+      expect(record.mock.calls.find((c) => c[2] === 'ResourcesAdopted')?.[3]).toBe(
+        'adopted what a deleted cluster of this name left: StatefulSet test-cluster, Service test-cluster, Service test-cluster-headless, Secret test-cluster-segment-tls, Role test-cluster-primary-lease',
       );
       record.mockRestore();
 

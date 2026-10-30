@@ -2807,7 +2807,7 @@ jobs:
           kubectl delete firebirdcluster paused --wait=true --timeout=300s
           kubectl wait --for=delete pod/paused-0 --timeout=300s || true
 
-      - name: Verify a recreated cluster adopts the Lease it left
+      - name: Verify a recreated cluster adopts the Lease and the objects it left
         if: matrix.track.id == 'extended'
         run: |
           cat > /tmp/orphan.yaml <<'EOF'
@@ -2839,14 +2839,28 @@ jobs:
           timeout 60 bash -c 'until kubectl get events --field-selector involvedObject.name=orphan,reason=LeaseAdopted -o name | grep -q .; do sleep 2; done'
           kubectl get events --field-selector involvedObject.name=orphan,reason=LeaseAdopted -o jsonpath='{.items[0].message}' | grep -q "$holder stays the primary"
           timeout 180 bash -c 'until [ "$(kubectl get firebirdcluster orphan -o jsonpath={.status.phase})" = Running ]; do sleep 3; done'
-          # deleted again: the adopted Lease goes with it
+          # the other objects it left (v0.142.0): the StatefulSet and the Services, owned by the new cluster
+          for obj in statefulset/orphan service/orphan service/orphan-headless secret/orphan-segment-tls; do
+            [ "$(kubectl get $obj -o jsonpath={.metadata.ownerReferences[0].uid})" = "$new_uid" ] \
+              || { echo "$obj was not adopted"; kubectl get $obj -o yaml; exit 1; }
+          done
+          kubectl get events --field-selector involvedObject.name=orphan,reason=ResourcesAdopted -o jsonpath='{.items[0].message}' | tee /tmp/adopted.txt; echo
+          grep -q 'StatefulSet orphan' /tmp/adopted.txt
+          # deleted again: the adopted Lease and objects go with it, the volume stays
           kubectl delete firebirdcluster orphan --wait=true --timeout=120s
           timeout 120 bash -c 'while kubectl get lease orphan-lease >/dev/null 2>&1; do sleep 2; done' \
             || { echo "the adopted Lease was not deleted with its cluster"; kubectl get lease orphan-lease -o yaml; exit 1; }
-          # the first deletion's other leftovers are not adopted yet (TODO.md): removed here
-          kubectl delete statefulset,service,configmap,poddisruptionbudget,networkpolicy,secret,cronjob,pvc \
-            -l firebird.cloudnative-firebird.io/cluster=orphan --ignore-not-found --wait=false
-          kubectl delete pod orphan-0 --ignore-not-found --wait=false
+          timeout 120 bash -c 'while kubectl get statefulset orphan >/dev/null 2>&1 || kubectl get service orphan orphan-headless >/dev/null 2>&1; do sleep 2; done' \
+            || { echo "the adopted objects were not deleted with their cluster"; kubectl get statefulset,service -l firebird.cloudnative-firebird.io/cluster=orphan; exit 1; }
+          # the rest goes with it too (garbage collection takes a moment)
+          left() {
+            kubectl get statefulset,service,configmap,secret,poddisruptionbudget,networkpolicy,cronjob,role,rolebinding \
+              -l firebird.cloudnative-firebird.io/cluster=orphan,app.kubernetes.io/managed-by=cloudnative-firebird-operator -o name
+          }
+          for n in $(seq 1 40); do [ -z "$(left)" ] && break; sleep 3; done
+          [ -z "$(left)" ] || { echo "left behind: $(left)"; exit 1; }
+          kubectl get pvc firebird-data-orphan-0
+          kubectl delete pvc firebird-data-orphan-0 --wait=false
 
       - name: Verify refusing plain segment shipping
         if: matrix.track.id == 'extended'
