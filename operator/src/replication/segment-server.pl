@@ -174,6 +174,8 @@ sub contacted {
 # promoted in place (PROMOTE): the primary from now on, whatever the ConfigMap file still says;
 # removed when the instance restarts (init-instance.sh)
 my $promoted_flag = "$base/promoted";
+# the segment a promoted primary's journal continues after (init-instance.sh)
+my $journal_floor = "$base/journal-floor";
 # synchronous replication: the primary's sync_replica entry, and the standby's flag and last seen segment
 my $sync_file = "$base/sync.conf";
 my $standby_flag = "$base/sync-standby";
@@ -625,6 +627,9 @@ sub promote_here {
     }
     $shut or die 'full shutdown failed after ' . scalar(@failures) . ' attempts: ' . join('; ', @failures) . "\n";
     system('perl', "$ENV{SCRIPT_DIR}/set-repl-seq.pl", $database, $seq) == 0 or die "cannot set the replication sequence\n";
+    # the journal floor: at its next start the init container raises a header that fell behind it
+    # (init-instance.sh), so the journal never restarts below what the replicas applied
+    write_file($journal_floor, "$seq\n") or die "cannot write the journal floor\n";
     # the replica's journal and archive (the new journal starts empty) and the offline bootstrap
     # seed new replicas can start from, taken while nothing has the database open
     for my $d ($journal_dir, $dir) {
@@ -640,6 +645,11 @@ sub promote_here {
     $writable = 1;
     run_bounded($command_timeout, 'isql', '-q', '-b', '-i', "$ENV{SCRIPT_DIR}/enable-publication.sql", "localhost:$database")
       or die "cannot enable publication\n";
+    # the server journals after the sequence it read from the header: below $seq the replicas
+    # would skip every new segment as applied already (the offline promotion takes over)
+    my $live = live_value(q{RDB$GET_CONTEXT('SYSTEM', 'REPLICATION_SEQUENCE')});
+    die "cannot read the replication sequence\n" unless defined $live && $live =~ /^\d+$/;
+    die "the journal would continue after segment $live, not $seq\n" if $live < $seq;
     # complete: the replica's state goes (the new journal continues after $seq)
     write_file($promoted_flag, time . "\n");
     if (defined $lineage && !grep { $_ eq $lineage } split /\n/, slurp("$base/lineage")) {
@@ -670,7 +680,7 @@ sub promote_here {
     my $err = $@;
     # back to a replica the offline promotion can still take over
     run_bounded($command_timeout, 'gfix', '-replica', 'read_only', "localhost:$database") if $writable;
-    unlink "$bootstrap_seed.tmp";
+    unlink "$bootstrap_seed.tmp", $journal_floor;
     $fb->('prp_online_mode', 'prp_sm_normal') if $shut;
     print $client "ERR $err";
     print "promotion refused: $err";

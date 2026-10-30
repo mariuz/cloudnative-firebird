@@ -86,6 +86,7 @@ export const EventReason = {
   ScaleDownSwitchover: 'ScaleDownSwitchover',
   RollingUpdateCompleted: 'RollingUpdateCompleted',
   ReplicaLagging: 'ReplicaLagging',
+  JournalBehindReplicas: 'JournalBehindReplicas',
   VolumeResizing: 'VolumeResizing',
   VolumeResizeFailed: 'VolumeResizeFailed',
   ReconcileFailed: 'ReconcileFailed',

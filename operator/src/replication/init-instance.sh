@@ -50,7 +50,7 @@ field() { echo "$header" | sed -n "s/^[[:space:]]*$1:*[[:space:]]*\\([0-9{][0-9A
 pending() { t=$(awk -v p="$POD_NAME" '$1 == p { print $2 }' "$1" 2>/dev/null || true); [ -n "$t" ] && [ "$(cat "$2" 2>/dev/null || true)" != "$t" ] && echo "$t" || true; }
 wipe_replication_state() {
   find "$SOURCE_DIR" "$JOURNAL_DIR" "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-  rm -f "$STATE_FILE" "$REPLICATION_DIR/sync-standby" "$REPLICATION_DIR/sync-seen"
+  rm -f "$STATE_FILE" "$REPLICATION_DIR/sync-standby" "$REPLICATION_DIR/sync-seen" "$REPLICATION_DIR/journal-floor"
 }
 # offline copy of a database nothing has attached: a consistent bootstrap seed for new replicas.
 # Its replication sequence is recorded next to it (the segment server keeps the segments after it).
@@ -125,6 +125,7 @@ if [ -n "$promote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
   isql -q -i "$SCRIPT_DIR/enable-publication.sql" "$sw"
   wipe_replication_state
   write_seed "$sw"
+  echo "$seq" > "$REPLICATION_DIR/journal-floor"
   own -R firebird:firebird "$DATA_DIR"
   mv "$sw" "$DATABASE_PATH"
   if [ -f "$REPLICATION_DIR/.promote-lineage" ]; then
@@ -170,7 +171,7 @@ if [ -n "$reseed_token" ] && [ "$(cat "$REPLICATION_DIR/.reseeded" 2>/dev/null |
       ;;
     *)
       echo "re-seed requested: discarding the database and replication state"
-      rm -f "$DATABASE_PATH" "$STATE_FILE" "$REPLICATION_DIR/sync-standby" "$REPLICATION_DIR/sync-seen"
+      rm -f "$DATABASE_PATH" "$STATE_FILE" "$REPLICATION_DIR/sync-standby" "$REPLICATION_DIR/sync-seen" "$REPLICATION_DIR/journal-floor"
       find "$SOURCE_DIR" "$JOURNAL_DIR" "$ARCHIVE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
       ;;
   esac
@@ -219,6 +220,41 @@ if [ -f "$DATABASE_PATH" ] && ! is_primary && ! is_replica_db "$DATABASE_PATH" &
   echo "this instance's database is not a replica of $primary: keeping it as $keep and seeding a replica"
   mv "$DATABASE_PATH" "$keep"
   wipe_replication_state
+fi
+
+# The journal floor (journal-floor), written by both promotions: the segment the journal of the new
+# primary continues after, which its replicas applied. A database header behind it would restart
+# the journal below that (seen on Firebird 6 after an in-place promotion and a restart: segment 1
+# after 62), and the replicas would skip every new segment as applied already. Here, where no server
+# has the database open, the header is raised to it; the floor goes once the header reached it.
+floor_file="$REPLICATION_DIR/journal-floor"
+if [ -f "$floor_file" ] && [ -f "$DATABASE_PATH" ] && is_primary && ! is_replica_db "$DATABASE_PATH"; then
+  floor=$(cat "$floor_file")
+  current=$(seq_of "$DATABASE_PATH")
+  case "$floor" in
+    ''|*[!0-9]*) echo "ignoring an invalid journal floor: $floor"; rm -f "$floor_file" ;;
+    *)
+      if [ "$current" -lt "$floor" ]; then
+        echo "replication sequence $current of the database is behind the journal floor $floor (what the replicas applied): raising it, so the journal continues after segment $floor"
+        # segments archived since the promotion with a sequence up to the floor: the replicas skipped them
+        skipped=$(find "$ARCHIVE_DIR" -maxdepth 1 -name '*.journal-*' 2>/dev/null |
+          sed -n 's/.*\.journal-0*\([0-9][0-9]*\)$/\1/p' | awk -v f="$floor" '$1 <= f' | wc -l | tr -d ' ')
+        if [ "$skipped" -gt 0 ]; then
+          echo "$skipped segments were journaled below the floor since the promotion: the replicas skipped their changes, re-seed them (reseed annotation)"
+        fi
+        # and the journal's own segments up to the floor (after an unclean stop the server would
+        # continue one still in use): their changes are in the database, the replicas skip them
+        for f in "$JOURNAL_DIR"/*.journal-*; do
+          [ -f "$f" ] || continue
+          s=$(od -An -tu8 -j32 -N8 "$f" | tr -d ' ')
+          if [ "${s:-0}" -le "$floor" ]; then rm -f "$f"; fi
+        done
+        perl "$SCRIPT_DIR/set-repl-seq.pl" "$DATABASE_PATH" "$floor"
+        own firebird:firebird "$DATABASE_PATH"
+      else
+        rm -f "$floor_file"
+      fi ;;
+  esac
 fi
 
 # The offline bootstrap seed serves new replicas while every segment after it is still archived.

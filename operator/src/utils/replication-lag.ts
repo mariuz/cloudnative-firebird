@@ -130,6 +130,25 @@ export function computeLag(archived: ArchivedSegment[], applied: number): { lagS
 }
 
 /**
+ * Replicas that applied a later segment than the primary last archived: the primary's journal
+ * restarted below their position (they skip every new segment as applied already), or they applied
+ * segments of a lost primary that are not in this lineage. Either way they no longer follow the
+ * primary, and only a re-seed brings them back. Undefined while nothing is archived (right after a
+ * promotion the archive starts empty, and its first segment is past every replica).
+ */
+export function journalBehind(
+  archived: ArchivedSegment[],
+  replicas: ReplicaLagStatus[],
+): { lastArchived: number; ahead: { name: string; appliedSequence: number }[] } | undefined {
+  if (!archived.length) return undefined;
+  const lastArchived = Math.max(...archived.map((s) => s.sequence));
+  const ahead = replicas
+    .filter((r): r is ReplicaLagStatus & { appliedSequence: number } => r.appliedSequence !== undefined && r.appliedSequence > lastArchived)
+    .map((r) => ({ name: r.name, appliedSequence: r.appliedSequence }));
+  return ahead.length ? { lastArchived, ahead } : undefined;
+}
+
+/**
  * Segment retention floor: the primary keeps every archived segment after the lowest segment
  * applied by a replica (up to maxSegmentRetentionHours), so a slow or stopped replica can catch up
  * instead of being re-seeded. A replica that cannot be measured now (not ready, stopped) keeps its
