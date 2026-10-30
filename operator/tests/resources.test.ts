@@ -19,6 +19,8 @@ import {
   networkPolicyWireFormat,
   buildLease,
   leaseAdoption,
+  leftoverAdoption,
+  CLUSTER_LABEL,
   buildDiagnosticsCronJob,
   buildGrafanaDashboardConfigMap,
   clusterLabels,
@@ -818,6 +820,27 @@ describe('Leader Election Lease', () => {
     expect(leaseAdoption(stale, cluster)?.ownerReferences).toEqual([{ apiVersion: 'v1', kind: 'ConfigMap', name: 'keep', uid: 'k' }, owner]);
     // a cluster without a uid yet (never read from the API server): nothing to compare
     expect(leaseAdoption(orphan, { ...cluster, metadata: { ...cluster.metadata, uid: undefined } })).toBeUndefined();
+  });
+
+  it('adopts the other objects a deleted cluster left, and nothing else', () => {
+    const cluster = makeCluster();
+    const uid = cluster.metadata.uid!;
+    const owner = { apiVersion: 'firebird.cloudnative-firebird.io/v1', kind: 'FirebirdCluster', name: 'test-cluster', uid, controller: true, blockOwnerDeletion: true };
+    const labels = clusterLabels('test-cluster');
+    // left with no owner (orphan propagation removes it), or with the deleted cluster's
+    expect(leftoverAdoption({ labels }, cluster)).toEqual([owner]);
+    expect(leftoverAdoption({ labels, ownerReferences: [{ ...owner, uid: 'old-uid' }] }, cluster)).toEqual([owner]);
+    // a non-controller owner stays
+    const extra = { apiVersion: 'v1', kind: 'ConfigMap', name: 'keep', uid: 'k' };
+    expect(leftoverAdoption({ labels, ownerReferences: [extra] }, cluster)).toEqual([extra, owner]);
+    // already this cluster's, another controller's (a backup's Job, the StatefulSet's pods), not
+    // made by the operator for this cluster, or no uid to compare
+    expect(leftoverAdoption({ labels, ownerReferences: [owner] }, cluster)).toBeUndefined();
+    expect(leftoverAdoption({ labels, ownerReferences: [{ apiVersion: 'apps/v1', kind: 'StatefulSet', name: 's', uid: 's', controller: true }] }, cluster)).toBeUndefined();
+    expect(leftoverAdoption({ labels: { ...labels, [CLUSTER_LABEL]: 'other' } }, cluster)).toBeUndefined();
+    expect(leftoverAdoption({ labels: { [CLUSTER_LABEL]: 'test-cluster' } }, cluster)).toBeUndefined();
+    expect(leftoverAdoption(undefined, cluster)).toBeUndefined();
+    expect(leftoverAdoption({ labels }, { ...cluster, metadata: { ...cluster.metadata, uid: undefined } })).toBeUndefined();
   });
 
   it('serializes renewTime with microsecond precision as required by the Lease API', () => {

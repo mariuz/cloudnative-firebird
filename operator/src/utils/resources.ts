@@ -24,6 +24,7 @@ import {
   V1PodSecurityContext,
   V1PodSpec,
   V1SecurityContext,
+  V1OwnerReference,
 } from '@kubernetes/client-node';
 import {
   FirebirdCluster,
@@ -1045,6 +1046,29 @@ export function leaseAdoption(
     ownerReferences: [...refs.filter((r) => r.kind !== RESOURCE_KIND && !r.controller), owner],
     labels: { ...(lease.metadata?.labels ?? {}), ...clusterLabels(cluster.metadata.name) },
   };
+}
+
+/**
+ * The owner references a leftover of a deleted cluster of the same name takes when the recreated
+ * cluster adopts it (the StatefulSet, Services, ConfigMaps, Secrets, PodDisruptionBudget,
+ * NetworkPolicy, CronJobs, Role and RoleBinding the operator made: its labels say so). Undefined
+ * when it needs none: the cluster owns it already, or another controller does (a Job of a
+ * backup, the StatefulSet's pods). Volumes are never adopted: the StatefulSet's claims keep no
+ * owner, so deleting a cluster never deletes its data.
+ */
+export function leftoverAdoption(
+  metadata: { labels?: Record<string, string>; ownerReferences?: V1OwnerReference[] } | undefined,
+  cluster: FirebirdCluster,
+): V1OwnerReference[] | undefined {
+  const uid = cluster.metadata.uid;
+  if (!uid || !metadata) return undefined;
+  const labels = metadata.labels ?? {};
+  if (labels[CLUSTER_LABEL] !== cluster.metadata.name || labels['app.kubernetes.io/managed-by'] !== 'cloudnative-firebird-operator') return undefined;
+  const refs = metadata.ownerReferences ?? [];
+  if (refs.some((r) => r.kind === RESOURCE_KIND && r.uid === uid)) return undefined;
+  if (refs.some((r) => r.controller && r.kind !== RESOURCE_KIND)) return undefined;
+  const owner = buildLease(cluster).metadata!.ownerReferences![0];
+  return [...refs.filter((r) => r.kind !== RESOURCE_KIND && !r.controller), owner];
 }
 
 export function buildLease(cluster: FirebirdCluster): V1Lease {

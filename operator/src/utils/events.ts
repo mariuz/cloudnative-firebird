@@ -59,6 +59,7 @@ export const EventReason = {
   ReconciliationPaused: 'ReconciliationPaused',
   ReconciliationResumed: 'ReconciliationResumed',
   LeaseAdopted: 'LeaseAdopted',
+  ResourcesAdopted: 'ResourcesAdopted',
   MajorUpgradeStarted: 'MajorUpgradeStarted',
   MajorUpgradeConverting: 'MajorUpgradeConverting',
   MajorUpgradeStarting: 'MajorUpgradeStarting',

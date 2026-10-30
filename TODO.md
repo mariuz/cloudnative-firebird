@@ -64,10 +64,15 @@ From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
   adopts it and keeps its holder, which it takes as the primary: the instance whose volume held
   the primary's database. (CloudNativePG recreates the Lease when restoring over orphan PVCs; here
   that would make ordinal 0 the primary whatever its volume holds.)
-- [ ] **Adopt the other leftovers of a recreated cluster**: the StatefulSet, Services, ConfigMap,
-  PodDisruptionBudget, NetworkPolicy and CronJobs a cluster deleted with orphan propagation left
-  are used as they are but keep no owner (the StatefulSet only gets one when it is next patched),
-  so deleting the recreated cluster leaves them behind.
+- [x] **Adopt the other leftovers of a recreated cluster** (v0.142.0): when the recreated cluster
+  adopts the Lease, it first adopts the StatefulSet, Services, ConfigMaps, Secrets,
+  PodDisruptionBudget, NetworkPolicy, CronJobs, Role and RoleBinding with the operator's labels and
+  no other controller (never the volumes), so deleting it deletes them too.
+- [ ] **A recreated cluster keeps the deleted one's segment TLS setting**: finding a StatefulSet
+  on its first reconcile, a recreated cluster is taken for one an earlier version created and its
+  `segmentTLS.enabled` default is pinned to false, so a cluster that ran segment TLS rolls its
+  instances to plain segment shipping. The default could follow the leftover StatefulSet's pod
+  template (the segment TLS proxy present or not) instead.
 - [x] **Fence before the Lease expires** (#11357, v0.137.0): the sidecar fences at the renew
   deadline, two thirds of the duration (10 of 15 s), counted from when the last successful
   renewal was sent, with a check every second that a slow tick cannot hold back; ticks keep

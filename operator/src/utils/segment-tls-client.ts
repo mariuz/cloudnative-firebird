@@ -122,7 +122,7 @@ export async function ensureSegmentTlsSecret(core: CoreV1Api, cluster: FirebirdC
       metadata: {
         name,
         namespace,
-        labels: { 'app.kubernetes.io/name': 'cloudnative-firebird', [`${API_GROUP}/cluster`]: cluster.metadata.name },
+        labels: { 'app.kubernetes.io/name': 'cloudnative-firebird', 'app.kubernetes.io/managed-by': 'cloudnative-firebird-operator', [`${API_GROUP}/cluster`]: cluster.metadata.name },
         ownerReferences: [
           { apiVersion: `${API_GROUP}/v1`, kind: RESOURCE_KIND, name: cluster.metadata.name, uid: cluster.metadata.uid ?? '', controller: true },
         ],
@@ -195,7 +195,7 @@ export async function reconcileSegmentTlsPeers(core: CoreV1Api, cluster: Firebir
     metadata: {
       name,
       namespace,
-      labels: { 'app.kubernetes.io/name': 'cloudnative-firebird', [`${API_GROUP}/cluster`]: cluster.metadata.name },
+      labels: { 'app.kubernetes.io/name': 'cloudnative-firebird', 'app.kubernetes.io/managed-by': 'cloudnative-firebird-operator', [`${API_GROUP}/cluster`]: cluster.metadata.name },
       ownerReferences: [
         { apiVersion: `${API_GROUP}/v1`, kind: RESOURCE_KIND, name: cluster.metadata.name, uid: cluster.metadata.uid ?? '', controller: true },
       ],

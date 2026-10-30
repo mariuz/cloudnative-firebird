@@ -69,6 +69,8 @@ import {
   V1PodTemplateSpec,
   V1Service,
   V1Secret,
+  V1ObjectMeta,
+  V1OwnerReference,
   V1StatefulSet,
 } from '@kubernetes/client-node';
 import { Logger } from 'pino';
@@ -165,6 +167,7 @@ import {
   buildHeadlessService,
   buildLease,
   leaseAdoption,
+  leftoverAdoption,
   buildNetworkPolicy,
   CloneTarget,
   cloneTargets,
@@ -3386,6 +3389,9 @@ export class FirebirdClusterController {
       return;
     }
     const holder = lease.spec?.holderIdentity || 'no instance';
+    // the other objects that cluster left first: a failure leaves the Lease unadopted, so the next
+    // reconcile tries again
+    await this.adoptLeftovers(cluster, log);
     log.warn({ lease: leaseName, holder }, 'Adopting the Lease a deleted cluster left; its holder stays the primary');
     await this.coordinationApi.patchNamespacedLease({
       name: leaseName,
@@ -3396,6 +3402,87 @@ export class FirebirdClusterController {
       ],
     });
     await this.event(cluster, 'Normal', EventReason.LeaseAdopted, `adopted the Lease ${leaseName} a deleted cluster left; ${holder} stays the primary`);
+  }
+
+  /**
+   * The objects a cluster deleted with orphan propagation left, adopted by the cluster recreated
+   * under its name (leftoverAdoption): found by the operator's labels, given this cluster as their
+   * owner with a JSON patch that tests the version read (a Secret is replaced with it), so that
+   * deleting this cluster deletes them too. Volumes are not among them.
+   */
+  private async adoptLeftovers(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    const labelSelector = `${CLUSTER_LABEL}=${name},app.kubernetes.io/managed-by=cloudnative-firebird-operator`;
+    type Item = { metadata?: V1ObjectMeta };
+    const patch = (item: Item, ownerReferences: V1OwnerReference[]) => [
+      { op: 'test', path: '/metadata/resourceVersion', value: item.metadata?.resourceVersion },
+      { op: 'add', path: '/metadata/ownerReferences', value: ownerReferences },
+    ];
+    const kinds: Array<{ kind: string; list: () => Promise<{ items: Item[] }>; adopt: (item: Item, refs: V1OwnerReference[]) => Promise<unknown> }> = [
+      {
+        kind: 'StatefulSet',
+        list: () => this.appsApi.listNamespacedStatefulSet({ namespace, labelSelector }),
+        adopt: (i, refs) => this.appsApi.patchNamespacedStatefulSet({ name: i.metadata!.name!, namespace, body: patch(i, refs) }),
+      },
+      {
+        kind: 'Service',
+        list: () => this.coreApi.listNamespacedService({ namespace, labelSelector }),
+        adopt: (i, refs) => this.coreApi.patchNamespacedService({ name: i.metadata!.name!, namespace, body: patch(i, refs) }),
+      },
+      {
+        kind: 'ConfigMap',
+        list: () => this.coreApi.listNamespacedConfigMap({ namespace, labelSelector }),
+        adopt: (i, refs) => this.coreApi.patchNamespacedConfigMap({ name: i.metadata!.name!, namespace, body: patch(i, refs) }),
+      },
+      {
+        // the operator may update Secrets, not patch them: replaced with the version read
+        kind: 'Secret',
+        list: () => this.coreApi.listNamespacedSecret({ namespace, labelSelector }),
+        adopt: (i, refs) =>
+          this.coreApi.replaceNamespacedSecret({
+            name: i.metadata!.name!,
+            namespace,
+            body: { ...(i as V1Secret), apiVersion: 'v1', kind: 'Secret', metadata: { ...i.metadata, ownerReferences: refs } },
+          }),
+      },
+      {
+        kind: 'PodDisruptionBudget',
+        list: () => this.policyApi.listNamespacedPodDisruptionBudget({ namespace, labelSelector }),
+        adopt: (i, refs) => this.policyApi.patchNamespacedPodDisruptionBudget({ name: i.metadata!.name!, namespace, body: patch(i, refs) }),
+      },
+      {
+        kind: 'NetworkPolicy',
+        list: () => this.networkingApi.listNamespacedNetworkPolicy({ namespace, labelSelector }),
+        adopt: (i, refs) => this.networkingApi.patchNamespacedNetworkPolicy({ name: i.metadata!.name!, namespace, body: patch(i, refs) }),
+      },
+      {
+        kind: 'CronJob',
+        list: () => this.batchApi.listNamespacedCronJob({ namespace, labelSelector }),
+        adopt: (i, refs) => this.batchApi.patchNamespacedCronJob({ name: i.metadata!.name!, namespace, body: patch(i, refs) }),
+      },
+      {
+        kind: 'Role',
+        list: () => this.rbacApi.listNamespacedRole({ namespace, labelSelector }),
+        adopt: (i, refs) => this.rbacApi.patchNamespacedRole({ name: i.metadata!.name!, namespace, body: patch(i, refs) }),
+      },
+      {
+        kind: 'RoleBinding',
+        list: () => this.rbacApi.listNamespacedRoleBinding({ namespace, labelSelector }),
+        adopt: (i, refs) => this.rbacApi.patchNamespacedRoleBinding({ name: i.metadata!.name!, namespace, body: patch(i, refs) }),
+      },
+    ];
+    const adopted: string[] = [];
+    for (const { kind, list, adopt } of kinds) {
+      for (const item of (await list()).items ?? []) {
+        const refs = leftoverAdoption(item.metadata, cluster);
+        if (!refs) continue;
+        await adopt(item, refs);
+        adopted.push(`${kind} ${item.metadata!.name}`);
+      }
+    }
+    if (adopted.length === 0) return;
+    log.warn({ adopted }, 'Adopted the objects a deleted cluster left');
+    await this.event(cluster, 'Normal', EventReason.ResourcesAdopted, `adopted what a deleted cluster of this name left: ${adopted.join(', ')}`);
   }
 
   /**
