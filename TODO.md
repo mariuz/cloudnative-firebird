@@ -68,11 +68,10 @@ From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
   adopts the Lease, it first adopts the StatefulSet, Services, ConfigMaps, Secrets,
   PodDisruptionBudget, NetworkPolicy, CronJobs, Role and RoleBinding with the operator's labels and
   no other controller (never the volumes), so deleting it deletes them too.
-- [ ] **A recreated cluster keeps the deleted one's segment TLS setting**: finding a StatefulSet
-  on its first reconcile, a recreated cluster is taken for one an earlier version created and its
-  `segmentTLS.enabled` default is pinned to false, so a cluster that ran segment TLS rolls its
-  instances to plain segment shipping. The default could follow the leftover StatefulSet's pod
-  template (the segment TLS proxy present or not) instead.
+- [x] **A recreated cluster keeps the deleted one's settings** (v0.143.0): a StatefulSet the
+  cluster does not own (left by a deleted one) no longer pins the first defaults off; segment TLS,
+  the primary Lease and pod anti-affinity each follow its pod template where it shows them, and
+  take a new cluster's default where it does not (no Lease holder without failover).
 - [x] **Fence before the Lease expires** (#11357, v0.137.0): the sidecar fences at the renew
   deadline, two thirds of the duration (10 of 15 s), counted from when the last successful
   renewal was sent, with a check every second that a slow tick cannot hold back; ticks keep

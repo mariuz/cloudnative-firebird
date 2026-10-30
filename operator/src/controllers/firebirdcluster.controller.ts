@@ -14,6 +14,7 @@ import {
 } from '../utils/custom-queries';
 import { segmentTlsEnabled } from '../utils/segment-tls-pods';
 import { ensureSegmentTlsSecret, reconcileSegmentTlsPeers } from '../utils/segment-tls-client';
+import { FirstDefaults, leftByDeletedCluster, leftoverDefaults } from '../utils/leftover-defaults';
 import { nativeSidecarsSupported, segmentTlsDefault, segmentTlsRequired } from '../utils/segment-tls-default';
 import { MIGRATION_ANNOTATION, migrationInProgress, migrationMode, migrationStep, notMigrating } from '../utils/segment-tls-migration';
 import {
@@ -28,6 +29,7 @@ import {
   leaseAgeSeconds,
   leaseExpired,
   PRIMARY_LEASE_ANNOTATION,
+  PRIMARY_LEASE_ON,
   primaryLeaseDefault,
   primaryLeaseDurationSeconds,
   primaryLeaseEnabled,
@@ -168,6 +170,7 @@ import {
   buildLease,
   leaseAdoption,
   leftoverAdoption,
+  ownersKept,
   buildNetworkPolicy,
   CloneTarget,
   cloneTargets,
@@ -355,6 +358,14 @@ export class FirebirdClusterController {
   async reconcile(cluster: FirebirdCluster): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     const log = logger.child({ cluster: name, namespace });
+
+    // being deleted: what it owns goes with it, or stays without an owner (orphan propagation)
+    // for a cluster recreated under its name to adopt. A reconcile from this copy would put the
+    // deleted cluster back as their owner, and the garbage collector would remove them.
+    if (cluster.metadata.deletionTimestamp) {
+      log.info('FirebirdCluster is being deleted; nothing reconciled');
+      return;
+    }
 
     log.info('Reconciling FirebirdCluster');
 
@@ -2264,7 +2275,8 @@ export class FirebirdClusterController {
       }
       // a merge patch keeps the existing rollingUpdate settings, which OnDelete rejects
       // and keeps scheduling keys the desired template no longer has: they are sent as null
-      const patched = statefulSetPatchBody(existing, desired);
+      // the owner only once the cluster has it (adoption): ownersKept
+      const patched = ownersKept(existing, statefulSetPatchBody(existing, desired), cluster);
       const body =
         patched.spec?.updateStrategy?.type === 'OnDelete'
           ? { ...patched, spec: { ...patched.spec, updateStrategy: { type: 'OnDelete', rollingUpdate: null } } }
@@ -2711,7 +2723,7 @@ export class FirebirdClusterController {
           await this.batchApi.patchNamespacedCronJob({
             name: cronJobName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('Journal archive CronJob up to date, skipping');
@@ -2758,7 +2770,7 @@ export class FirebirdClusterController {
           await this.batchApi.patchNamespacedCronJob({
             name: backupName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('Backup CronJob up to date, skipping');
@@ -2946,7 +2958,7 @@ export class FirebirdClusterController {
           await this.policyApi.patchNamespacedPodDisruptionBudget({
             name: pdbName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('PodDisruptionBudget up to date, skipping');
@@ -2998,7 +3010,7 @@ export class FirebirdClusterController {
           await this.coreApi.patchNamespacedConfigMap({
             name: configName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('ConfigMap is up to date, skipping');
@@ -3039,7 +3051,7 @@ export class FirebirdClusterController {
           await this.batchApi.patchNamespacedCronJob({
             name: sweepName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('AutoSweep CronJob up to date, skipping');
@@ -3081,7 +3093,7 @@ export class FirebirdClusterController {
           await this.networkingApi.patchNamespacedNetworkPolicy({
             name: npName,
             namespace,
-            body: networkPolicyWireFormat(desired),
+            body: ownersKept(existing, networkPolicyWireFormat(desired), cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('NetworkPolicy is up to date, skipping');
@@ -3389,6 +3401,12 @@ export class FirebirdClusterController {
       return;
     }
     const holder = lease.spec?.holderIdentity || 'no instance';
+    // only for the cluster as it is now: a reconcile that started from the deleted cluster's copy
+    // (its deletion began meanwhile) would give everything back to it, for the garbage collector
+    if (!(await this.isCurrent(cluster))) {
+      log.info('The cluster was deleted or recreated meanwhile: nothing adopted from this copy');
+      return;
+    }
     // the other objects that cluster left first: a failure leaves the Lease unadopted, so the next
     // reconcile tries again
     await this.adoptLeftovers(cluster, log);
@@ -3402,6 +3420,18 @@ export class FirebirdClusterController {
       ],
     });
     await this.event(cluster, 'Normal', EventReason.LeaseAdopted, `adopted the Lease ${leaseName} a deleted cluster left; ${holder} stays the primary`);
+  }
+
+  /** Whether the cluster still exists as this copy has it: the same uid, not being deleted */
+  private async isCurrent(cluster: FirebirdCluster): Promise<boolean> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    try {
+      const live = (await this.customApi.getNamespacedCustomObject({ group: API_GROUP, version: API_VERSION, namespace, plural: RESOURCE_PLURAL, name })) as FirebirdCluster;
+      return live.metadata.uid === cluster.metadata.uid && !live.metadata.deletionTimestamp;
+    } catch (err) {
+      if (isNotFound(err)) return false;
+      throw err;
+    }
   }
 
   /**
@@ -3563,7 +3593,7 @@ export class FirebirdClusterController {
           await this.batchApi.patchNamespacedCronJob({
             name: cronJobName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('Diagnostics CronJob is up to date, skipping');
@@ -3603,7 +3633,7 @@ export class FirebirdClusterController {
           await this.coreApi.patchNamespacedConfigMap({
             name: cmName,
             namespace,
-            body: desired,
+            body: ownersKept(existing, desired, cluster),
           }, MERGE_PATCH);
         } else {
           log.debug('Grafana Dashboard ConfigMap is up to date, skipping');
@@ -3711,16 +3741,12 @@ export class FirebirdClusterController {
   private async defaultSegmentTls(cluster: FirebirdCluster, log: Logger): Promise<void> {
     if (typeof cluster.spec.segmentTLS?.enabled === 'boolean') return;
     const { name, namespace = 'default' } = cluster.metadata;
-    let existing = true;
-    try {
-      await this.appsApi.readNamespacedStatefulSet({ name, namespace });
-    } catch (err) {
-      if (!isNotFound(err)) throw err;
-      existing = false;
-    }
-    const enabled = !existing && segmentTlsDefault();
+    const statefulSet = await this.existingStatefulSet(cluster);
+    const existing = statefulSet !== undefined;
+    // a recreated cluster keeps what the StatefulSet it found runs (utils/leftover-defaults.ts)
+    const enabled = this.firstDefaults(cluster, statefulSet).segmentTls;
     // pinned by the operator, not chosen by the owner: SEGMENT_TLS_MIGRATE=pinned may move it later
-    const annotations = existing ? { [MIGRATION_ANNOTATION]: 'pinned' } : undefined;
+    const annotations = existing && !enabled ? { [MIGRATION_ANNOTATION]: 'pinned' } : undefined;
     await this.customApi.patchNamespacedCustomObject(
       {
         group: API_GROUP,
@@ -3734,9 +3760,48 @@ export class FirebirdClusterController {
     );
     cluster.spec.segmentTLS = { ...cluster.spec.segmentTLS, enabled };
     if (annotations) cluster.metadata.annotations = { ...cluster.metadata.annotations, ...annotations };
-    const reason = existing ? 'an existing cluster keeps plain segment shipping' : 'the operator default for new clusters';
+    const reason = !existing
+      ? 'the operator default for new clusters'
+      : enabled
+        ? 'the StatefulSet this cluster found runs segment TLS'
+        : 'an existing cluster keeps plain segment shipping';
     log.info({ enabled }, `Defaulted spec.segmentTLS.enabled: ${reason}`);
     await this.event(cluster, 'Normal', 'SegmentTLSDefaulted', `spec.segmentTLS.enabled set to ${enabled} (${reason})`);
+  }
+
+  /**
+   * The defaults a cluster's first reconcile records: a new cluster's (no StatefulSet yet), all
+   * off for one an earlier version created (its own StatefulSet: turning them on would restart
+   * its instances), or what the StatefulSet a deleted cluster of its name left runs
+   * (utils/leftover-defaults.ts). What is recorded already stays as it is.
+   */
+  private firstDefaults(cluster: FirebirdCluster, statefulSet: V1StatefulSet | undefined): FirstDefaults {
+    const recorded = {
+      segmentTls: cluster.spec.segmentTLS?.enabled,
+      primaryLease: cluster.metadata.annotations?.[PRIMARY_LEASE_ANNOTATION] ? PRIMARY_LEASE_ON.includes(cluster.metadata.annotations[PRIMARY_LEASE_ANNOTATION]) : undefined,
+      podAntiAffinity: cluster.metadata.annotations?.[POD_ANTI_AFFINITY_ANNOTATION] ? cluster.metadata.annotations[POD_ANTI_AFFINITY_ANNOTATION] === 'enabled' : undefined,
+    };
+    const fresh: FirstDefaults = {
+      segmentTls: recorded.segmentTls ?? segmentTlsDefault(),
+      primaryLease: recorded.primaryLease ?? primaryLeaseDefault(),
+      podAntiAffinity: recorded.podAntiAffinity ?? true,
+    };
+    if (!statefulSet) return fresh;
+    if (!leftByDeletedCluster(statefulSet, cluster)) {
+      return { segmentTls: recorded.segmentTls ?? false, primaryLease: recorded.primaryLease ?? false, podAntiAffinity: recorded.podAntiAffinity ?? false };
+    }
+    return leftoverDefaults(statefulSet, cluster, fresh);
+  }
+
+  /** The cluster's StatefulSet, or undefined when there is none yet */
+  private async existingStatefulSet(cluster: FirebirdCluster): Promise<V1StatefulSet | undefined> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    try {
+      return await this.appsApi.readNamespacedStatefulSet({ name, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+      return undefined;
+    }
   }
 
   /**
@@ -3753,14 +3818,10 @@ export class FirebirdClusterController {
   private async defaultPodAntiAffinity(cluster: FirebirdCluster, log: Logger): Promise<void> {
     if (cluster.metadata.annotations?.[POD_ANTI_AFFINITY_ANNOTATION]) return;
     const { name, namespace = 'default' } = cluster.metadata;
-    let existing = true;
-    try {
-      await this.appsApi.readNamespacedStatefulSet({ name, namespace });
-    } catch (err) {
-      if (!isNotFound(err)) throw err;
-      existing = false;
-    }
-    const value = existing ? 'pinned' : 'enabled';
+    const statefulSet = await this.existingStatefulSet(cluster);
+    const existing = statefulSet !== undefined;
+    const enabled = this.firstDefaults(cluster, statefulSet).podAntiAffinity;
+    const value = enabled ? 'enabled' : 'pinned';
     await this.customApi.patchNamespacedCustomObject(
       {
         group: API_GROUP,
@@ -3773,27 +3834,26 @@ export class FirebirdClusterController {
       MERGE_PATCH,
     );
     cluster.metadata.annotations = { ...cluster.metadata.annotations, [POD_ANTI_AFFINITY_ANNOTATION]: value };
-    const reason = existing ? 'an existing cluster keeps its scheduling' : 'the default for new clusters';
-    log.info({ enabled: !existing }, `Recorded the pod anti-affinity default: ${reason}`);
+    const reason = !existing
+      ? 'the default for new clusters'
+      : enabled
+        ? 'the StatefulSet this cluster found has it'
+        : 'an existing cluster keeps its scheduling';
+    log.info({ enabled }, `Recorded the pod anti-affinity default: ${reason}`);
     await this.event(
       cluster,
       'Normal',
       EventReason.PodAntiAffinityDefaulted,
-      `the instances repel each other (pod anti-affinity): ${!existing} (${reason}; spec.podAntiAffinity.enabled overrides it)`,
+      `the instances repel each other (pod anti-affinity): ${enabled} (${reason}; spec.podAntiAffinity.enabled overrides it)`,
     );
   }
 
   private async defaultPrimaryLease(cluster: FirebirdCluster, log: Logger): Promise<void> {
     if (cluster.metadata.annotations?.[PRIMARY_LEASE_ANNOTATION]) return;
     const { name, namespace = 'default' } = cluster.metadata;
-    let existing = true;
-    try {
-      await this.appsApi.readNamespacedStatefulSet({ name, namespace });
-    } catch (err) {
-      if (!isNotFound(err)) throw err;
-      existing = false;
-    }
-    const enabled = !existing && primaryLeaseDefault();
+    const statefulSet = await this.existingStatefulSet(cluster);
+    const existing = statefulSet !== undefined;
+    const enabled = this.firstDefaults(cluster, statefulSet).primaryLease;
     const value = enabled ? 'enabled' : 'pinned';
     await this.customApi.patchNamespacedCustomObject(
       {
@@ -3807,7 +3867,11 @@ export class FirebirdClusterController {
       MERGE_PATCH,
     );
     cluster.metadata.annotations = { ...cluster.metadata.annotations, [PRIMARY_LEASE_ANNOTATION]: value };
-    const reason = existing ? 'an existing cluster keeps its Lease with the operator' : 'the operator default for new clusters';
+    const reason = !existing
+      ? 'the operator default for new clusters'
+      : enabled
+        ? 'the StatefulSet this cluster found runs the Lease holder'
+        : 'an existing cluster keeps its Lease with the operator';
     log.info({ enabled }, `Recorded the primary Lease default: ${reason}`);
     await this.event(
       cluster,
