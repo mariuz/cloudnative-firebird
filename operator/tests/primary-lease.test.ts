@@ -362,6 +362,37 @@ describe('the primary Lease default', () => {
     expect(annotationPatches(api)).toEqual(['enabled']);
   });
 
+  it('follows what a leftover StatefulSet runs: a cluster recreated over what a deleted one left keeps it', async () => {
+    setServerVersion({ major: 1, minor: 31 });
+    // the StatefulSet the deleted cluster ran: segment TLS, the Lease holder and the anti-affinity
+    const spec = { instances: 3, replication: { enabled: true, failover: { enabled: true } } } as const;
+    const deleted = makeCluster({ ...spec, segmentTLS: { enabled: true } });
+    deleted.metadata.annotations = { [PRIMARY_LEASE_ANNOTATION]: 'enabled', 'firebird.cloudnative-firebird.io/pod-anti-affinity': 'enabled' };
+    // as the API server returns it: its own field order, and the deleted cluster's owner gone
+    const left = JSON.parse(JSON.stringify(buildStatefulSet(deleted)));
+    delete left.metadata.ownerReferences;
+    left.spec.template.spec.affinity = JSON.parse(JSON.stringify(left.spec.template.spec.affinity), (_k, v) =>
+      v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).reverse()) : v,
+    );
+    const { kubeConfig, api } = mockApi({
+      getNamespacedCustomObject: vi.fn().mockResolvedValue({}),
+      readNamespacedStatefulSet: vi.fn().mockResolvedValue(left),
+    });
+    const cluster = undecided(spec);
+    // nothing decided yet, segment TLS included (the factory records it as a first reconcile would)
+    delete cluster.spec.segmentTLS;
+    await new FirebirdClusterController(kubeConfig).reconcile(cluster);
+    expect(cluster.spec.segmentTLS?.enabled).toBe(true);
+    expect(cluster.metadata.annotations?.[PRIMARY_LEASE_ANNOTATION]).toBe('enabled');
+    expect(cluster.metadata.annotations?.['firebird.cloudnative-firebird.io/pod-anti-affinity']).toBe('enabled');
+    // not pinned for a migration: nothing to move
+    expect(cluster.metadata.annotations?.['firebird.cloudnative-firebird.io/segment-tls-migration']).toBeUndefined();
+    const messages = api('createNamespacedEvent').mock.calls.map((c) => c[0].body.message as string);
+    expect(messages).toContain('spec.segmentTLS.enabled set to true (the StatefulSet this cluster found runs segment TLS)');
+    expect(messages.some((m) => m.includes('the StatefulSet this cluster found runs the Lease holder'))).toBe(true);
+    expect(messages.some((m) => m.includes('pod anti-affinity): true (the StatefulSet this cluster found has it'))).toBe(true);
+  });
+
   it('pins a cluster that already has a StatefulSet, and records "pinned" when the default is off', async () => {
     setServerVersion({ major: 1, minor: 31 });
     const { kubeConfig, api } = mockApi({

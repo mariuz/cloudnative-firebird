@@ -14,6 +14,7 @@ import {
 } from '../utils/custom-queries';
 import { segmentTlsEnabled } from '../utils/segment-tls-pods';
 import { ensureSegmentTlsSecret, reconcileSegmentTlsPeers } from '../utils/segment-tls-client';
+import { FirstDefaults, leftByDeletedCluster, leftoverDefaults } from '../utils/leftover-defaults';
 import { nativeSidecarsSupported, segmentTlsDefault, segmentTlsRequired } from '../utils/segment-tls-default';
 import { MIGRATION_ANNOTATION, migrationInProgress, migrationMode, migrationStep, notMigrating } from '../utils/segment-tls-migration';
 import {
@@ -28,6 +29,7 @@ import {
   leaseAgeSeconds,
   leaseExpired,
   PRIMARY_LEASE_ANNOTATION,
+  PRIMARY_LEASE_ON,
   primaryLeaseDefault,
   primaryLeaseDurationSeconds,
   primaryLeaseEnabled,
@@ -3711,16 +3713,12 @@ export class FirebirdClusterController {
   private async defaultSegmentTls(cluster: FirebirdCluster, log: Logger): Promise<void> {
     if (typeof cluster.spec.segmentTLS?.enabled === 'boolean') return;
     const { name, namespace = 'default' } = cluster.metadata;
-    let existing = true;
-    try {
-      await this.appsApi.readNamespacedStatefulSet({ name, namespace });
-    } catch (err) {
-      if (!isNotFound(err)) throw err;
-      existing = false;
-    }
-    const enabled = !existing && segmentTlsDefault();
+    const statefulSet = await this.existingStatefulSet(cluster);
+    const existing = statefulSet !== undefined;
+    // a recreated cluster keeps what the StatefulSet it found runs (utils/leftover-defaults.ts)
+    const enabled = this.firstDefaults(cluster, statefulSet).segmentTls;
     // pinned by the operator, not chosen by the owner: SEGMENT_TLS_MIGRATE=pinned may move it later
-    const annotations = existing ? { [MIGRATION_ANNOTATION]: 'pinned' } : undefined;
+    const annotations = existing && !enabled ? { [MIGRATION_ANNOTATION]: 'pinned' } : undefined;
     await this.customApi.patchNamespacedCustomObject(
       {
         group: API_GROUP,
@@ -3734,9 +3732,48 @@ export class FirebirdClusterController {
     );
     cluster.spec.segmentTLS = { ...cluster.spec.segmentTLS, enabled };
     if (annotations) cluster.metadata.annotations = { ...cluster.metadata.annotations, ...annotations };
-    const reason = existing ? 'an existing cluster keeps plain segment shipping' : 'the operator default for new clusters';
+    const reason = !existing
+      ? 'the operator default for new clusters'
+      : enabled
+        ? 'the StatefulSet this cluster found runs segment TLS'
+        : 'an existing cluster keeps plain segment shipping';
     log.info({ enabled }, `Defaulted spec.segmentTLS.enabled: ${reason}`);
     await this.event(cluster, 'Normal', 'SegmentTLSDefaulted', `spec.segmentTLS.enabled set to ${enabled} (${reason})`);
+  }
+
+  /**
+   * The defaults a cluster's first reconcile records: a new cluster's (no StatefulSet yet), all
+   * off for one an earlier version created (its own StatefulSet: turning them on would restart
+   * its instances), or what the StatefulSet a deleted cluster of its name left runs
+   * (utils/leftover-defaults.ts). What is recorded already stays as it is.
+   */
+  private firstDefaults(cluster: FirebirdCluster, statefulSet: V1StatefulSet | undefined): FirstDefaults {
+    const recorded = {
+      segmentTls: cluster.spec.segmentTLS?.enabled,
+      primaryLease: cluster.metadata.annotations?.[PRIMARY_LEASE_ANNOTATION] ? PRIMARY_LEASE_ON.includes(cluster.metadata.annotations[PRIMARY_LEASE_ANNOTATION]) : undefined,
+      podAntiAffinity: cluster.metadata.annotations?.[POD_ANTI_AFFINITY_ANNOTATION] ? cluster.metadata.annotations[POD_ANTI_AFFINITY_ANNOTATION] === 'enabled' : undefined,
+    };
+    const fresh: FirstDefaults = {
+      segmentTls: recorded.segmentTls ?? segmentTlsDefault(),
+      primaryLease: recorded.primaryLease ?? primaryLeaseDefault(),
+      podAntiAffinity: recorded.podAntiAffinity ?? true,
+    };
+    if (!statefulSet) return fresh;
+    if (!leftByDeletedCluster(statefulSet, cluster)) {
+      return { segmentTls: recorded.segmentTls ?? false, primaryLease: recorded.primaryLease ?? false, podAntiAffinity: recorded.podAntiAffinity ?? false };
+    }
+    return leftoverDefaults(statefulSet, cluster, fresh);
+  }
+
+  /** The cluster's StatefulSet, or undefined when there is none yet */
+  private async existingStatefulSet(cluster: FirebirdCluster): Promise<V1StatefulSet | undefined> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    try {
+      return await this.appsApi.readNamespacedStatefulSet({ name, namespace });
+    } catch (err) {
+      if (!isNotFound(err)) throw err;
+      return undefined;
+    }
   }
 
   /**
@@ -3753,14 +3790,10 @@ export class FirebirdClusterController {
   private async defaultPodAntiAffinity(cluster: FirebirdCluster, log: Logger): Promise<void> {
     if (cluster.metadata.annotations?.[POD_ANTI_AFFINITY_ANNOTATION]) return;
     const { name, namespace = 'default' } = cluster.metadata;
-    let existing = true;
-    try {
-      await this.appsApi.readNamespacedStatefulSet({ name, namespace });
-    } catch (err) {
-      if (!isNotFound(err)) throw err;
-      existing = false;
-    }
-    const value = existing ? 'pinned' : 'enabled';
+    const statefulSet = await this.existingStatefulSet(cluster);
+    const existing = statefulSet !== undefined;
+    const enabled = this.firstDefaults(cluster, statefulSet).podAntiAffinity;
+    const value = enabled ? 'enabled' : 'pinned';
     await this.customApi.patchNamespacedCustomObject(
       {
         group: API_GROUP,
@@ -3773,27 +3806,26 @@ export class FirebirdClusterController {
       MERGE_PATCH,
     );
     cluster.metadata.annotations = { ...cluster.metadata.annotations, [POD_ANTI_AFFINITY_ANNOTATION]: value };
-    const reason = existing ? 'an existing cluster keeps its scheduling' : 'the default for new clusters';
-    log.info({ enabled: !existing }, `Recorded the pod anti-affinity default: ${reason}`);
+    const reason = !existing
+      ? 'the default for new clusters'
+      : enabled
+        ? 'the StatefulSet this cluster found has it'
+        : 'an existing cluster keeps its scheduling';
+    log.info({ enabled }, `Recorded the pod anti-affinity default: ${reason}`);
     await this.event(
       cluster,
       'Normal',
       EventReason.PodAntiAffinityDefaulted,
-      `the instances repel each other (pod anti-affinity): ${!existing} (${reason}; spec.podAntiAffinity.enabled overrides it)`,
+      `the instances repel each other (pod anti-affinity): ${enabled} (${reason}; spec.podAntiAffinity.enabled overrides it)`,
     );
   }
 
   private async defaultPrimaryLease(cluster: FirebirdCluster, log: Logger): Promise<void> {
     if (cluster.metadata.annotations?.[PRIMARY_LEASE_ANNOTATION]) return;
     const { name, namespace = 'default' } = cluster.metadata;
-    let existing = true;
-    try {
-      await this.appsApi.readNamespacedStatefulSet({ name, namespace });
-    } catch (err) {
-      if (!isNotFound(err)) throw err;
-      existing = false;
-    }
-    const enabled = !existing && primaryLeaseDefault();
+    const statefulSet = await this.existingStatefulSet(cluster);
+    const existing = statefulSet !== undefined;
+    const enabled = this.firstDefaults(cluster, statefulSet).primaryLease;
     const value = enabled ? 'enabled' : 'pinned';
     await this.customApi.patchNamespacedCustomObject(
       {
@@ -3807,7 +3839,11 @@ export class FirebirdClusterController {
       MERGE_PATCH,
     );
     cluster.metadata.annotations = { ...cluster.metadata.annotations, [PRIMARY_LEASE_ANNOTATION]: value };
-    const reason = existing ? 'an existing cluster keeps its Lease with the operator' : 'the operator default for new clusters';
+    const reason = !existing
+      ? 'the operator default for new clusters'
+      : enabled
+        ? 'the StatefulSet this cluster found runs the Lease holder'
+        : 'an existing cluster keeps its Lease with the operator';
     log.info({ enabled }, `Recorded the primary Lease default: ${reason}`);
     await this.event(
       cluster,

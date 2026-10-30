@@ -2826,6 +2826,12 @@ jobs:
           timeout 120 bash -c 'until [ -n "$(kubectl get lease orphan-lease -o jsonpath={.metadata.ownerReferences[0].uid} 2>/dev/null)" ]; do sleep 2; done'
           holder=$(kubectl get lease orphan-lease -o jsonpath={.spec.holderIdentity})
           old_uid=$(kubectl get firebirdcluster orphan -o jsonpath={.metadata.uid})
+          # the defaults its first reconcile recorded, which the recreated cluster keeps (v0.143.0)
+          tls=$(kubectl get firebirdcluster orphan -o jsonpath={.spec.segmentTLS.enabled})
+          lease_default=$(kubectl get firebirdcluster orphan -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/primary-lease}')
+          anti=$(kubectl get firebirdcluster orphan -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/pod-anti-affinity}')
+          pod_uid=$(kubectl get pod orphan-0 -o jsonpath={.metadata.uid})
+          echo "segmentTLS=$tls primary-lease=$lease_default pod-anti-affinity=$anti"
           # deleted keeping what it owns (as before a restore by a backup tool): the Lease stays, without its owner
           kubectl delete firebirdcluster orphan --cascade=orphan --wait=true --timeout=120s
           timeout 120 bash -c 'until [ -z "$(kubectl get lease orphan-lease -o jsonpath={.metadata.ownerReferences})" ]; do sleep 2; done'
@@ -2839,6 +2845,17 @@ jobs:
           timeout 60 bash -c 'until kubectl get events --field-selector involvedObject.name=orphan,reason=LeaseAdopted -o name | grep -q .; do sleep 2; done'
           kubectl get events --field-selector involvedObject.name=orphan,reason=LeaseAdopted -o jsonpath='{.items[0].message}' | grep -q "$holder stays the primary"
           timeout 180 bash -c 'until [ "$(kubectl get firebirdcluster orphan -o jsonpath={.status.phase})" = Running ]; do sleep 3; done'
+          # it keeps what the StatefulSet it found runs, instead of pinning everything off: the same
+          # defaults, no migration annotation, and the instance is not restarted for them
+          [ "$(kubectl get firebirdcluster orphan -o jsonpath={.spec.segmentTLS.enabled})" = "$tls" ]
+          [ "$(kubectl get firebirdcluster orphan -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/primary-lease}')" = "$lease_default" ]
+          [ "$(kubectl get firebirdcluster orphan -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/pod-anti-affinity}')" = "$anti" ]
+          if [ "$tls" = true ]; then
+            [ -z "$(kubectl get firebirdcluster orphan -o jsonpath='{.metadata.annotations.firebird\.cloudnative-firebird\.io/segment-tls-migration}')" ]
+          fi
+          sleep 15
+          [ "$(kubectl get pod orphan-0 -o jsonpath={.metadata.uid})" = "$pod_uid" ] \
+            || { echo "the recreated cluster restarted its instance"; kubectl get firebirdcluster orphan -o yaml; exit 1; }
           # the other objects it left (v0.142.0): the StatefulSet and the Services, owned by the new cluster
           for obj in statefulset/orphan service/orphan service/orphan-headless secret/orphan-segment-tls; do
             [ "$(kubectl get $obj -o jsonpath={.metadata.ownerReferences[0].uid})" = "$new_uid" ] \
