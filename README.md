@@ -911,9 +911,10 @@ reached its files yet (a `promoted` marker in its replication directory, removed
 container). A restart that finds the promote directive applies nothing twice.
 
 Since v0.147.0 the in-place promotion writes the header only once the server has closed the
-database after the full shutdown: it waits for the exclusive lock a SuperServer holds on an open
-database file, up to `PROMOTE_CLOSE_TIMEOUT_SECONDS` (30), and otherwise leaves the replica to the
-offline promotion ([ISSUES.md](ISSUES.md) issue 10). Both promotions also record the segment the new primary's journal continues after (a
+database after the full shutdown. It waits for the exclusive lock a SuperServer holds on an open
+database file, up to `PROMOTE_CLOSE_TIMEOUT_SECONDS` (30). Once the database is online it reads the
+sequence back, and repeats the round up to `PROMOTE_HEADER_ATTEMPTS` (3) if the server went online
+without it, before leaving the replica to the offline promotion ([ISSUES.md](ISSUES.md) issue 10). Both promotions also record the segment the new primary's journal continues after (a
 `journal-floor` file in its replication directory, since v0.144.0). Once its database is online
 again, the in-place promotion checks that the server journals after that segment, and fails over to
 the offline promotion otherwise. At the next restart the init container raises a database header
