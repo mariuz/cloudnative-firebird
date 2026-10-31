@@ -26,6 +26,12 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   neither the operator nor any replica has reached for `contactTimeoutSeconds`, before a cut-off
   primary is failed over (v0.63.0), since v0.78.0 also when cluster DNS fails with the partition
   (the peers known from the last answer and the addresses the operator publishes, v0.80.0).
+- [ ] **The journal restart of a primary promoted in place** ([ISSUES.md](ISSUES.md) issue 10):
+  seen once in the kind CI on the 6.0 snapshot, handled since v0.144.0 and v0.145.0 whatever the
+  cause. `hack/repro/promoted-journal.sh` replays the sequence, weekly in the "Firebird issues"
+  workflow, and has not reproduced it yet. A run that does gives the logs to find the cause in
+  Firebird; a `JournalBehindReplicas` warning in a real cluster would too (keep the primary's
+  replication-init and firebird logs from before its restart).
 - [ ] **Synchronous replication follow-ups** (one standby since v0.53.0, several since v0.61.0):
   an "any N of M" quorum (Firebird waits for every `sync_replica`). Attaching and detaching
   without the short write pause is not possible with Firebird 5 or 6: `sync_replica` is read

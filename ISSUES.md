@@ -32,6 +32,7 @@ to be filed.
 | 7 | Firebird 6 refuses header statistics for a database in full shutdown | Firebird 6 behaviour, handled | Yes, always (6.0 snapshot) |
 | 8 | Firebird 4 commits while a synchronous replica is unreachable | Firebird 4 behaviour, handled | Yes, always (4.0.7; CI 2026-10-24: 6 of 6); not on 5.0.4 or the 6.0 snapshot (0 of 6 each) |
 | 9 | `replication.conf` is read only when a database is opened: no reload | Firebird behaviour, handled | Yes, always (CI 2026-10-24: 6 of 6 on 4.0.7, 5.0.4 and the 6.0 snapshot) |
+| 10 | An in-place promotion loses the header's replication sequence: the journal restarts at segment 1 | Firebird 6 behaviour, cause open, handled | Sometimes: once in the kind CI (6.0 snapshot 2428); `promoted-journal.sh` 1 of 12 runs on the 6.0 snapshot (2026-10-31), 0 of 1 on 5.0 |
 
 ---
 
@@ -304,6 +305,59 @@ synchronous stream agree, so the pause would stay even with a reload. The sync-s
 reports how long writes were stopped (`status.synchronous.message`, v0.85.0). A reload (a
 service action, or re-reading the configuration at each attachment) would be a Firebird
 feature request; it would not remove the pause by itself.
+
+---
+
+## 10. An in-place promotion loses the header's replication sequence: the journal restarts at segment 1
+
+**What happened.** Once, in the kind CI on the 6.0 snapshot (`LI-T6.0.0.2428`, 2026-10-30), the
+journal of a primary promoted in place began again at segment 1 after its pod restarted. The
+replicas had applied up to segment 62. The instance had been re-seeded from a locked copy of a
+replica, and then promoted in place by a failover at segment 62: full shutdown, `HDR_repl_seq`
+set offline, journal and archive cleared, online, replica mode none, publication. Its re-seeded
+peer was seeded within seconds of the promotion. About 40 seconds later a rolling update
+restarted every pod, this primary last. After the restart its archive held segments 1 to 5, and
+the replicas, at 62, skipped them as already applied. Their rows stopped at 51 while the primary
+had 56. The pods' logs from before the restart were gone, so it is not known whether the header
+sequence was lost at the promotion or at the restart. Nothing on the restarted instance wrote the
+header offline (its init container found an existing database).
+
+**Reproduction.** [`hack/repro/promoted-journal.sh`](hack/repro/promoted-journal.sh) replays the sequence with the operator's own steps, each instance in its own container (recreated
+on restart, as pods are). It covers both in-place failovers, the re-seed from a replica's locked
+copy, a live locked copy of the new primary taken while the promotion prepares its seed copy, and
+the rolling restart. It prints where the new primary's journal continued. On the 6.0 snapshot it reproduced in 1 of
+12 runs (2026-10-31; 6 of them read the header with an embedded `gstat` between the promotion
+steps, none of those reproduced), at the second promotion, of the instance re-seeded from the replica's
+locked copy. Right after that promotion the server's live `REPLICATION_SEQUENCE` was already 0,
+and `gstat -h` showed no replication sequence. The header lost its `HDR_repl_seq` during the
+promotion itself, not at the restart, and the server journaled from segment 1 from then on. The
+first promotion of every run, and the second in the other runs, kept it:
+
+```sh
+hack/repro/promoted-journal.sh                     # the 6 snapshot; RUNS=5 for five runs
+IMAGE=firebirdsql/firebird:5 hack/repro/promoted-journal.sh
+```
+
+Also tried by hand on the 6.0 snapshot, all keeping the sequence (a single run each):
+- an in-place promotion followed by a clean or a killed server;
+- a promotion as soon as the replica server applied a segment (still attached), or once idle;
+- a promotion with the replica server applying;
+- a locked copy taken during and after the promotion;
+- a re-seeded copy promoted.
+
+A header page written while the database is under the backup lock and not shut down does lose
+it: `END BACKUP` brings the engine's cached header back, and the journal starts at 1. The
+in-place promotion never writes the header in that state, because the full shutdown is refused
+under the lock. The "Firebird issues" workflow runs the script weekly (three runs per image).
+
+**Handling.** The operator does not depend on the cause (v0.144.0, v0.145.0). Since the sequence
+is lost during the promotion, the check of the live sequence catches it, and the offline
+promotion takes over:
+- Both promotions record the segment the journal continues after (`journal-floor`).
+- The in-place promotion checks the live `REPLICATION_SEQUENCE` before it reports success.
+- The init container raises a header behind the floor before the server starts.
+- A replica that applied past what the primary archived raises a `JournalBehindReplicas`
+  warning and is re-seeded.
 
 ---
 
