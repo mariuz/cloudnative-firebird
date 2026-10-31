@@ -32,7 +32,7 @@ to be filed.
 | 7 | Firebird 6 refuses header statistics for a database in full shutdown | Firebird 6 behaviour, handled | Yes, always (6.0 snapshot) |
 | 8 | Firebird 4 commits while a synchronous replica is unreachable | Firebird 4 behaviour, handled | Yes, always (4.0.7; CI 2026-10-24: 6 of 6); not on 5.0.4 or the 6.0 snapshot (0 of 6 each) |
 | 9 | `replication.conf` is read only when a database is opened: no reload | Firebird behaviour, handled | Yes, always (CI 2026-10-24: 6 of 6 on 4.0.7, 5.0.4 and the 6.0 snapshot) |
-| 10 | An in-place promotion loses the header's replication sequence: the journal restarts at segment 1 | Firebird 6 behaviour, cause open, handled | Sometimes: once in the kind CI (6.0 snapshot 2428); `promoted-journal.sh` 1 of 6 runs on the 6.0 snapshot (2026-10-31) |
+| 10 | An in-place promotion loses the header's replication sequence: the journal restarts at segment 1 | Firebird 6 behaviour, cause open, handled | Sometimes: once in the kind CI (6.0 snapshot 2428); `promoted-journal.sh` 1 of 12 runs on the 6.0 snapshot (2026-10-31), 0 of 1 on 5.0 |
 
 ---
 
@@ -326,7 +326,8 @@ header offline (its init container found an existing database).
 on restart, as pods are). It covers both in-place failovers, the re-seed from a replica's locked
 copy, a live locked copy of the new primary taken while the promotion prepares its seed copy, and
 the rolling restart. It prints where the new primary's journal continued. On the 6.0 snapshot it reproduced in 1 of
-6 runs (2026-10-31), at the second promotion, of the instance re-seeded from the replica's
+12 runs (2026-10-31; 6 of them read the header with an embedded `gstat` between the promotion
+steps, none of those reproduced), at the second promotion, of the instance re-seeded from the replica's
 locked copy. Right after that promotion the server's live `REPLICATION_SEQUENCE` was already 0,
 and `gstat -h` showed no replication sequence. The header lost its `HDR_repl_seq` during the
 promotion itself, not at the restart, and the server journaled from segment 1 from then on. The
