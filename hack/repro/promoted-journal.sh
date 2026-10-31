@@ -63,6 +63,24 @@ value() { echo "SET LIST ON; SELECT $1 AS V FROM RDB\$DATABASE;" | isql -q local
 EOF
 )
 
+# the HDR_repl_seq clump of a header page (layout as in set-repl-seq.pl), "none" without it
+hdr_seq_pl=$(cat <<'EOF'
+open(my $fh, '<:raw', $ARGV[0]) or die "open: $!\n";
+read($fh, my $head, 20);
+my $size = unpack('v', substr($head, 16, 2));
+seek($fh, 0, 0); read($fh, my $page, $size);
+my ($end_at, $p) = @{{13 => [66, 128], 14 => [36, 148]}->{unpack('v', substr($page, 18, 2)) & 0x7fff} // die "unknown ODS\n"};
+my $end = unpack('v', substr($page, $end_at, 2));
+while ($p < $end) {
+  my ($type, $len) = unpack('C C', substr($page, $p, 2));
+  last if $type == 0;
+  if ($type == 11) { print unpack('Q<', substr($page, $p + 2, 8)); exit 0 }
+  $p += 2 + $len;
+}
+print "none";
+EOF
+)
+
 # start <i>: a fresh container on the instance's volume, its server running as firebird
 start() {
   docker rm -f "fbj$1" >/dev/null 2>&1 || true
@@ -86,13 +104,17 @@ count() { x "$1" "echo 'SET LIST ON; SELECT COUNT(*) AS V FROM app;' | isql -q l
 write() { for n in $(seq "$2" "$3"); do x "$1" "sql 'insert into app values ($n); commit;'" >/dev/null; done; }
 # applied <i>: the replica's control file position (u64 at 16)
 applied() { od -An -tu8 -j16 -N8 "$(ls -d "$work/i$1/s/"\{* | head -1)" | tr -d ' '; }
-header() { x "$1" "gstat -h \$DB | sed -n 's/^[[:space:]]*Replication sequence:[[:space:]]*\\([0-9]*\\).*/\\1/p'"; }
-# promote <i> <seq>: segment-server.pl promote_here, in place (the server keeps running)
+header() { x "$1" 'perl /w/hdr-seq.pl $DB'; }
+# promote <i> <seq>: segment-server.pl promote_here, in place (the server keeps running); the
+# header page's replication sequence, read from the file (not through an engine), is printed
+# after each step
 promote() {
-  x "$1" "fbsvcmgr localhost:service_mgr action_properties dbname \$DB prp_shutdown_mode prp_sm_full prp_force_shutdown 0 &&
-    perl /scripts/set-repl-seq.pl \$DB $2 >/dev/null && rm -f /data/j/* /data/a/* /data/seed.fdb && cp \$DB /data/seed.fdb.tmp &&
-    fbsvcmgr localhost:service_mgr action_properties dbname \$DB prp_online_mode prp_sm_normal &&
-    gfix -replica none localhost:\$DB && isql -q -b -i /scripts/enable-publication.sql localhost:\$DB && rm -f /data/s/*"
+  x "$1" "h() { printf '%s %s; ' \"\$1\" \"\$(perl /w/hdr-seq.pl \$DB)\"; }
+    fbsvcmgr localhost:service_mgr action_properties dbname \$DB prp_shutdown_mode prp_sm_full prp_force_shutdown 0 &&
+    perl /scripts/set-repl-seq.pl \$DB $2 >/dev/null && h set && rm -f /data/j/* /data/a/* /data/seed.fdb && cp \$DB /data/seed.fdb.tmp &&
+    fbsvcmgr localhost:service_mgr action_properties dbname \$DB prp_online_mode prp_sm_normal && h online &&
+    gfix -replica none localhost:\$DB && h replica-none && isql -q -b -i /scripts/enable-publication.sql localhost:\$DB && h published &&
+    rm -f /data/s/*; echo"
   echo "instance $1 promoted in place after segment $2; live sequence $(x "$1" "value \"RDB\\\$GET_CONTEXT('SYSTEM', 'REPLICATION_SEQUENCE')\"")"
 }
 # the promotion's bootstrap seed: the copy taken in full shutdown made a publishing primary database
@@ -125,6 +147,7 @@ for run in $(seq 1 "$RUNS"); do
   cleanup
   work=$(mktemp -d)
   printf '%s\n' "$env_sh" > "$work/env.sh"
+  printf '%s\n' "$hdr_seq_pl" > "$work/hdr-seq.pl"
 
   # 1. a primary and two replicas seeded offline
   mkdir -p "$work/i0"

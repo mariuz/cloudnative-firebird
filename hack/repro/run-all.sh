@@ -137,7 +137,7 @@ fi
 run promoted-journal env RUNS="${PROMOTED_RUNS:-3}" "$here/promoted-journal.sh"
 line=$(last '^runs: [0-9]+ of [0-9]+ restarted below' "$logs/promoted-journal.log")
 below=$(echo "$line" | sed -n 's/^runs: \([0-9]*\) of.*/\1/p')
-results=$( [ -f "$logs/promoted-journal.log" ] && grep -E '^run [0-9]+: journal (continued|restarted)' "$logs/promoted-journal.log" | sed 's/^run [0-9]*: //' | tr '\n' ';' || true)
+results=$( [ -f "$logs/promoted-journal.log" ] && grep -E '^run [0-9]+: journal (continued|restarted)' "$logs/promoted-journal.log" | sed 's/^run [0-9]*: //' | paste -sd ';' - | sed 's/;/; /g' || true)
 if [ -z "$below" ]; then
   verdict 10 "promoted-journal.sh, two in-place failovers and a rolling restart" unclear "${line:-no result}"
 elif [ "$below" -gt 0 ]; then
