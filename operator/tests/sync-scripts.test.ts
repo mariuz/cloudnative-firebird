@@ -141,7 +141,7 @@ describe('segment server: synchronous replication commands', () => {
 
   describe('promotes a replica in place (PROMOTE)', () => {
     /** A replica at control file position 9, with fake isql / gfix answering for the local server */
-    async function replica(failGfix = false) {
+    async function replica(failGfix = false, extraEnv: Record<string, string> = {}) {
       const data = mkdtempSync(join(tmpdir(), 'fb-data-'));
       const db = join(data, 'mydb.fdb');
       // ODS 13 header page: page size at 16, ODS version at 18, hdr_end at 66, clumps from 128
@@ -151,7 +151,7 @@ describe('segment server: synchronous replication commands', () => {
       page.writeUInt16LE(0x8000 | 13, 18);
       page.writeUInt16LE(128, 66);
       writeFileSync(db, Buffer.concat([page, Buffer.alloc(8192)]));
-      const r = await start('db-1', 'db-0', db);
+      const r = await start('db-1', 'db-0', db, extraEnv);
       const { ws, base } = r;
       writeFileSync(join(ws.dir, 'set-repl-seq.pl'), REPLICATION_SCRIPTS['set-repl-seq.pl']);
       writeFileSync(join(ws.dir, 'enable-publication.sql'), REPLICATION_SCRIPTS['enable-publication.sql']);
@@ -227,6 +227,47 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
       expect(readFileSync(r.db).subarray(128, 140).readBigUInt64LE(2)).toBe(20n);
       expect(existsSync(join(r.base, 'sync-standby'))).toBe(false);
       expect(existsSync(join(r.base, 'sync-seen'))).toBe(false);
+    }, 20_000);
+
+    /** a process holding the exclusive lock a SuperServer holds on a database it has open */
+    const holdOpen = (db: string, seconds: number) =>
+      new Promise<ChildProcess>((resolve) => {
+        const child = spawn('perl', ['-e', `use Fcntl ':flock'; open(my $f, '<', $ARGV[0]) or die; flock($f, LOCK_EX) or die; print "locked\n"; $| = 1; sleep ${seconds}`, db]);
+        servers.push(child);
+        child.stdout?.once('data', () => resolve(child));
+      });
+
+    it('writes the header only once the server closed the database after the full shutdown', async () => {
+      if (!hasPerl) return;
+      const r = await replica();
+      // the server still has it open for 2 seconds after the shutdown returns
+      await holdOpen(r.db, 2);
+      const t0 = Date.now();
+      try {
+        expect(await r.ask('PROMOTE 12')).toEqual(['OK 12']);
+      } finally {
+        r.stop();
+      }
+      expect(Date.now() - t0).toBeGreaterThanOrEqual(1500);
+      expect(readFileSync(r.db).subarray(128, 140).readBigUInt64LE(2)).toBe(12n);
+    }, 20_000);
+
+    it('leaves the replica to the offline promotion when the server keeps the database open', async () => {
+      if (!hasPerl) return;
+      const r = await replica(false, { PROMOTE_CLOSE_TIMEOUT_SECONDS: '1' });
+      await holdOpen(r.db, 15);
+      try {
+        expect(await r.ask('PROMOTE 12')).toEqual(['ERR the server still had the database open 1s after the full shutdown']);
+      } finally {
+        r.stop();
+      }
+      // the header untouched (no HDR_repl_seq clump), the database online again, still a replica
+      expect(readFileSync(r.db)[128]).toBe(0);
+      const calls = r.ws.calls();
+      expect(calls.filter((c) => /prp_online_mode/.test(c))).toHaveLength(1);
+      expect(calls.some((c) => /gfix -replica none/.test(c))).toBe(false);
+      expect(existsSync(join(r.base, 'promoted'))).toBe(false);
+      expect(existsSync(join(r.base, 'journal-floor'))).toBe(false);
     }, 20_000);
 
     it('fails over to the offline promotion when the server would journal below the promotion point', async () => {

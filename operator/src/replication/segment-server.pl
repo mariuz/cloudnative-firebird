@@ -121,6 +121,7 @@
 use strict;
 use warnings;
 use IO::Socket::INET;
+use Fcntl qw(:flock);
 #@include segment-auth.pl
 #@include stop-with-server.pl
 
@@ -568,6 +569,8 @@ sub nbackup_here {
 # Attempts at the in-place promotion's full shutdown, and the seconds between them
 my $promote_shutdown_attempts = ($ENV{PROMOTE_SHUTDOWN_ATTEMPTS} // '') =~ /^[1-9]\d*$/ ? $ENV{PROMOTE_SHUTDOWN_ATTEMPTS} : 5;
 my $promote_shutdown_pause = ($ENV{PROMOTE_SHUTDOWN_PAUSE} // '') =~ /^\d+$/ ? $ENV{PROMOTE_SHUTDOWN_PAUSE} : 3;
+# how long the promotion waits for the server to close the database after the full shutdown
+my $promote_close_timeout = ($ENV{PROMOTE_CLOSE_TIMEOUT_SECONDS} // '') =~ /^[1-9]\d*$/ ? $ENV{PROMOTE_CLOSE_TIMEOUT_SECONDS} : 30;
 
 sub promote_here {
   my ($client, $archived) = @_;
@@ -626,6 +629,18 @@ sub promote_here {
       sleep $promote_shutdown_pause if $attempt < $promote_shutdown_attempts;
     }
     $shut or die 'full shutdown failed after ' . scalar(@failures) . ' attempts: ' . join('; ', @failures) . "\n";
+    # The server can keep the database open, with its cached header page, for a moment after the
+    # full shutdown returns (an attachment still going away). Going online then writes that cached
+    # header back over the sequence written below, and the journal restarts at segment 1 (ISSUES.md,
+    # issue 10). A server in SuperServer mode holds an exclusive lock (flock) on the file while it has
+    # it open: the header is written once that lock can be taken, and the lock is held until the
+    # database goes online again.
+    open(my $closed, '<', $database) or die "cannot open $database: $!\n";
+    my $waited = time;
+    wait_for($promote_close_timeout, sub { flock($closed, LOCK_EX | LOCK_NB) })
+      or die "the server still had the database open ${promote_close_timeout}s after the full shutdown\n";
+    $waited = time - $waited;
+    print "the server closed the database ${waited}s after the full shutdown\n" if $waited > 0;
     system('perl', "$ENV{SCRIPT_DIR}/set-repl-seq.pl", $database, $seq) == 0 or die "cannot set the replication sequence\n";
     # the journal floor: at its next start the init container raises a header that fell behind it
     # (init-instance.sh), so the journal never restarts below what the replicas applied
@@ -639,6 +654,7 @@ sub promote_here {
     }
     unlink $bootstrap_seed, "$base/bootstrap-seed.seq";
     system('cp', $database, "$bootstrap_seed.tmp") == 0 or die "cannot copy the bootstrap seed\n";
+    close($closed);
     $fb->('prp_online_mode', 'prp_sm_normal') or die 'cannot bring the database online' . ($fb_out ne '' ? ": $fb_out" : '') . "\n";
     $shut = 0;
     run_bounded($command_timeout, 'gfix', '-replica', 'none', "localhost:$database") or die "cannot set replica mode none\n";

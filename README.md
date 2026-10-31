@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.146.0/cloudnative-firebird-0.146.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.147.0/cloudnative-firebird-0.147.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.146.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.147.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.146.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.147.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -910,7 +910,10 @@ A target promoted in place keeps the role until its next restart even if the Con
 reached its files yet (a `promoted` marker in its replication directory, removed by the init
 container). A restart that finds the promote directive applies nothing twice.
 
-Both promotions also record the segment the new primary's journal continues after (a
+Since v0.147.0 the in-place promotion writes the header only once the server has closed the
+database after the full shutdown: it waits for the exclusive lock a SuperServer holds on an open
+database file, up to `PROMOTE_CLOSE_TIMEOUT_SECONDS` (30), and otherwise leaves the replica to the
+offline promotion ([ISSUES.md](ISSUES.md) issue 10). Both promotions also record the segment the new primary's journal continues after (a
 `journal-floor` file in its replication directory, since v0.144.0). Once its database is online
 again, the in-place promotion checks that the server journals after that segment, and fails over to
 the offline promotion otherwise. At the next restart the init container raises a database header
