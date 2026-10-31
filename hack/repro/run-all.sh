@@ -5,6 +5,7 @@
 #
 #   hack/repro/run-all.sh [image] [log dir]         # default firebirdsql/firebird:5, logs in a temp dir
 #   RUNS=3 hack/repro/run-all.sh firebirdsql/firebird:6-snapshot   # issue 1 three times
+#   PROMOTED_RUNS=5 hack/repro/run-all.sh firebirdsql/firebird:6-snapshot   # issue 10 five times (3)
 #   PARSE_ONLY=1 hack/repro/run-all.sh firebirdsql/firebird:5 logs # the verdicts of logs kept earlier
 #
 # Needs Docker. Every script's output goes to the console and to <log dir>/<test>.log. The
@@ -130,6 +131,19 @@ elif [ "$r1" = "$r0" ]; then
   verdict 9 "sync-replica.sh, sync_replica removed while attached" "not reproduced" "the removal took effect while an attachment stayed open ($steps)"
 else
   verdict 9 "sync-replica.sh, sync_replica removed while attached" unclear "$steps"
+fi
+
+# 10: the journal of a replica promoted in place restarts below the promotion point after a restart
+run promoted-journal env RUNS="${PROMOTED_RUNS:-3}" "$here/promoted-journal.sh"
+line=$(last '^runs: [0-9]+ of [0-9]+ restarted below' "$logs/promoted-journal.log")
+below=$(echo "$line" | sed -n 's/^runs: \([0-9]*\) of.*/\1/p')
+results=$( [ -f "$logs/promoted-journal.log" ] && grep -E '^run [0-9]+: journal (continued|restarted)' "$logs/promoted-journal.log" | sed 's/^run [0-9]*: //' | tr '\n' ';' || true)
+if [ -z "$below" ]; then
+  verdict 10 "promoted-journal.sh, two in-place failovers and a rolling restart" unclear "${line:-no result}"
+elif [ "$below" -gt 0 ]; then
+  verdict 10 "promoted-journal.sh, two in-place failovers and a rolling restart" reproduced "${line#runs: }: $results"
+else
+  verdict 10 "promoted-journal.sh, two in-place failovers and a rolling restart" "not reproduced" "${line#runs: }: $results"
 fi
 
 server=$(docker run --rm --entrypoint sh "$image" -c 'isql -z </dev/null 2>&1 | head -n 1' 2>/dev/null | sed -n 's/.*\(LI-[A-Z][0-9.]*[0-9]\).*/\1/p')

@@ -916,7 +916,8 @@ again, the in-place promotion checks that the server journals after that segment
 the offline promotion otherwise. At the next restart the init container raises a database header
 that fell behind the floor, while no server has the database open. A Firebird 6 snapshot once
 restarted the journal of a primary promoted in place at segment 1 instead of 63 after a restart, and
-the replicas, at 62, skipped every new segment as already applied. The floor is removed once the
+the replicas, at 62, skipped every new segment as already applied ([ISSUES.md](ISSUES.md)
+issue 10). The floor is removed once the
 header has reached it. The operator records a `JournalBehindReplicas` warning when a replica has
 applied a later segment than the primary last archived. Such replicas no longer follow the primary,
 and since v0.145.0 the operator re-seeds them as the reseed annotation does. It first lists the
