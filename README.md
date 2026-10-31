@@ -1047,7 +1047,8 @@ them too. The volumes keep no owner, as always, so deleting a cluster never dele
 A segment TLS Secret or peers ConfigMap made before v0.142.0 lacks the `managed-by` label and is
 adopted once the operator next writes it. Since v0.143.0 a cluster being deleted is not reconciled, the
 operator's updates never set an owner (since v0.146.0 not even one the object had when it was
-read), and the adoption first checks that the cluster still exists under the same uid: a reconcile that started from the deleted
+read), a reconcile of a cluster the watch saw deleted or replaced creates nothing (v0.146.0), and
+the adoption first checks that the cluster still exists under the same uid: a reconcile that started from the deleted
 cluster's copy would give everything back to it, and the garbage collector would then remove the
 StatefulSet (restarting the instances) and the rest. With it a `lease-holder` sidecar (from
 the operator image, like the segment TLS proxy) in every instance pod renews the Lease every

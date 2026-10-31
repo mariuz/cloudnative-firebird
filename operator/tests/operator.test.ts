@@ -53,10 +53,12 @@ vi.mock('@kubernetes/client-node', () => {
 });
 
 // Mock the controller so we can track reconcile() calls without real K8s
+const mockMarkGone = vi.fn();
 const mockReconcile = vi.fn().mockResolvedValue(undefined);
 vi.mock('../src/controllers/firebirdcluster.controller', () => ({
   FirebirdClusterController: vi.fn().mockImplementation(() => ({
     reconcile: mockReconcile,
+    markGone: mockMarkGone,
   })),
 }));
 
@@ -271,6 +273,29 @@ describe('Operator – event handling', () => {
       capturedEventCallback!('DELETED', cluster);
       await Promise.resolve();
       expect(mockReconcile).not.toHaveBeenCalled();
+    });
+
+    it('tells the controller, so that its running reconciles create nothing more for it', async () => {
+      mockMarkGone.mockClear();
+      const cluster = makeCluster();
+      capturedEventCallback!('DELETED', cluster);
+      await Promise.resolve();
+      expect(mockMarkGone).toHaveBeenCalledWith(cluster.metadata.uid);
+    });
+
+    it('tells it too when the cluster is being deleted, or recreated under its name', async () => {
+      mockMarkGone.mockClear();
+      const cluster = makeCluster();
+      capturedEventCallback!('ADDED', cluster);
+      await Promise.resolve();
+      expect(mockMarkGone).not.toHaveBeenCalled();
+      capturedEventCallback!('MODIFIED', { ...cluster, metadata: { ...cluster.metadata, deletionTimestamp: '2026-10-31T12:00:00Z' } });
+      await Promise.resolve();
+      expect(mockMarkGone).toHaveBeenLastCalledWith(cluster.metadata.uid);
+      capturedEventCallback!('ADDED', { ...cluster, metadata: { ...cluster.metadata, uid: 'new-uid' } });
+      await Promise.resolve();
+      expect(mockMarkGone).toHaveBeenLastCalledWith(cluster.metadata.uid);
+      expect(mockMarkGone).not.toHaveBeenCalledWith('new-uid');
     });
 
     it("drops the deleted cluster's metrics", async () => {

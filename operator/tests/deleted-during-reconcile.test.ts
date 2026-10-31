@@ -62,3 +62,25 @@ describe('a cluster deleted with orphan propagation during its reconcile', () =>
     for (const body of patches) expect(JSON.parse(JSON.stringify(body)).metadata?.ownerReferences).toBeUndefined();
   });
 });
+
+describe('a cluster the watch saw deleted or replaced (markGone)', () => {
+  it('gets nothing created from a reconcile of its copy, and no failure recorded', async () => {
+    const cluster = makeCluster();
+    const { kubeConfig, api } = mockApi();
+    const controller = new FirebirdClusterController(kubeConfig);
+    controller.markGone(cluster.metadata.uid);
+    await expect(controller.reconcile(cluster)).resolves.toBeUndefined();
+    for (const m of ['createNamespacedStatefulSet', 'createNamespacedService', 'createNamespacedConfigMap', 'createNamespacedLease']) {
+      expect(api(m)).not.toHaveBeenCalled();
+    }
+    expect(api('createNamespacedEvent')).not.toHaveBeenCalled();
+  });
+
+  it('leaves another cluster of the name (another uid) alone', async () => {
+    const { kubeConfig, api } = mockApi();
+    const controller = new FirebirdClusterController(kubeConfig);
+    controller.markGone('old-uid');
+    await controller.reconcile(makeCluster());
+    expect(api('createNamespacedStatefulSet')).toHaveBeenCalled();
+  });
+});

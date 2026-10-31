@@ -566,6 +566,13 @@ export class Operator {
       case 'ADDED':
       case 'MODIFIED':
         if (!this.knownClusters.has(key)) this.reconcileCloneSource(cluster);
+        {
+          // a cluster recreated under the name: the deleted one's reconciles create nothing more
+          const previous = this.knownClusters.get(key)?.metadata.uid;
+          if (previous && previous !== cluster.metadata.uid) this.controller.markGone(previous);
+        }
+        // being deleted: nothing is created for it any more (orphan propagation removes its owners)
+        if (cluster.metadata.deletionTimestamp) this.controller.markGone(cluster.metadata.uid);
         this.knownClusters.set(key, cluster);
         // Status-only updates (including the operator's own) do not bump metadata.generation;
         // skip them to avoid a reconcile → status patch → MODIFIED feedback loop.
@@ -588,6 +595,7 @@ export class Operator {
         break;
 
       case 'DELETED':
+        this.controller.markGone(cluster.metadata.uid);
         this.knownClusters.delete(key);
         this.reconciledGenerations.delete(key);
         this.reconciledFencing.delete(key);

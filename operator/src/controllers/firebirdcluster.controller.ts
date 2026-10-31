@@ -245,6 +245,15 @@ import {
  * Request options for patches that send a whole desired object. The client defaults
  * to JSON Patch (an array of operations), which the API server rejects for object bodies.
  */
+const MAX_GONE_UIDS = 1000;
+
+/** The cluster was deleted or recreated while a reconcile of its copy ran (ensureCurrent) */
+class ClusterGoneError extends Error {
+  constructor() {
+    super('the cluster was deleted or recreated meanwhile');
+  }
+}
+
 const MERGE_PATCH = setHeaderOptions('Content-Type', PatchStrategy.MergePatch);
 
 /** Outcome of the switchover reconciliation */
@@ -332,6 +341,8 @@ export class FirebirdClusterController {
   private readonly networkingApi: NetworkingV1Api;
   private readonly policyApi: PolicyV1Api;
   private readonly events: EventRecorder;
+  /** uids of clusters the watch saw deleted or replaced (markGone), oldest first */
+  private readonly goneUids = new Set<string>();
   /** Clusters already warned about tls.secretName / tls.issuerRef */
   private readonly certificateWarned = new Set<string>();
   /** Firebird engine version per instance pod (by UID), from its segment server (VERSION) */
@@ -659,6 +670,10 @@ export class FirebirdClusterController {
 
       log.info('Reconciliation complete');
     } catch (err) {
+      if (err instanceof ClusterGoneError) {
+        log.info('Cluster deleted or recreated during reconciliation; nothing created for this copy');
+        return;
+      }
       // a cluster deleted while it was reconciled: its resources are garbage-collected under the
       // reconcile (e.g. the StatefulSet patch fails with 404), which is not a failure
       if (isNotFound(err) && !(await this.clusterExists(cluster))) {
@@ -1068,6 +1083,7 @@ export class FirebirdClusterController {
       await this.reconcileInheritedServiceMetadata(cluster, existing, log);
     } catch {
       log.info('Creating headless service');
+      await this.ensureCurrent(cluster);
       await this.coreApi.createNamespacedService({
         namespace,
         body: desired,
@@ -1088,6 +1104,7 @@ export class FirebirdClusterController {
       existing = await this.coreApi.readNamespacedService({ name, namespace });
     } catch {
       log.info('Creating cluster service');
+      await this.ensureCurrent(cluster);
       await this.coreApi.createNamespacedService({
         namespace,
         body: desired,
@@ -1113,6 +1130,7 @@ export class FirebirdClusterController {
     } catch {
       if (replicaServiceDisabled(cluster)) return;
       log.info('Creating replica service');
+      await this.ensureCurrent(cluster);
       await this.coreApi.createNamespacedService({
         namespace,
         body: desired,
@@ -1179,6 +1197,7 @@ export class FirebirdClusterController {
       }
       if (!existing) {
         log.info({ service: serviceName, selectorType: managed.selectorType }, 'Creating managed service');
+        await this.ensureCurrent(cluster);
         await this.coreApi.createNamespacedService({ namespace, body: desired });
         continue;
       }
@@ -1190,6 +1209,7 @@ export class FirebirdClusterController {
       if (managed.updateStrategy === 'replace') {
         log.info({ service: serviceName }, 'Replacing managed service');
         await this.coreApi.deleteNamespacedService({ name: serviceName, namespace });
+        await this.ensureCurrent(cluster);
         await this.coreApi.createNamespacedService({ namespace, body: desired });
       } else {
         log.info({ service: serviceName }, 'Updating managed service');
@@ -2233,6 +2253,7 @@ export class FirebirdClusterController {
       // the init SQL runs only now: every script it references must exist (utils/init-sql.ts)
       await this.checkInitSqlRefs(cluster);
       log.info('Creating StatefulSet');
+      await this.ensureCurrent(cluster);
       const created = await this.appsApi.createNamespacedStatefulSet({
         namespace,
         body: desired,
@@ -2263,6 +2284,7 @@ export class FirebirdClusterController {
       // still being deleted: the next reconcile creates it
       if (!gone) return { readyInstances: existing.status?.readyReplicas ?? 0, superuserSecretHash, statefulSetExisted: true, statefulSet: existing };
       if (desired.spec && existing.spec?.volumeClaimTemplates) desired.spec.volumeClaimTemplates = existing.spec.volumeClaimTemplates;
+      await this.ensureCurrent(cluster);
       const created = await this.appsApi.createNamespacedStatefulSet({ namespace, body: desired });
       return { readyInstances: existing.status?.readyReplicas ?? 0, superuserSecretHash, statefulSetExisted: true, statefulSet: created };
     }
@@ -2767,6 +2789,7 @@ export class FirebirdClusterController {
         }
       } catch {
         log.info('Creating journal archive CronJob');
+        await this.ensureCurrent(cluster);
         await this.batchApi.createNamespacedCronJob({
           namespace,
           body: desired,
@@ -2814,6 +2837,7 @@ export class FirebirdClusterController {
         }
       } catch {
         log.info('Creating backup CronJob');
+        await this.ensureCurrent(cluster);
         await this.batchApi.createNamespacedCronJob({
           namespace,
           body: desired,
@@ -2854,6 +2878,7 @@ export class FirebirdClusterController {
         log.debug('PodMonitor already exists, skipping');
       } catch {
         log.info('Creating PodMonitor');
+        await this.ensureCurrent(cluster);
         await this.customApi.createNamespacedCustomObject({
           group,
           version,
@@ -3002,6 +3027,7 @@ export class FirebirdClusterController {
         }
       } catch {
         log.info('Creating PodDisruptionBudget');
+        await this.ensureCurrent(cluster);
         await this.policyApi.createNamespacedPodDisruptionBudget({
           namespace,
           body: desired,
@@ -3054,6 +3080,7 @@ export class FirebirdClusterController {
         }
       } catch {
         log.info('Creating cluster ConfigMap');
+        await this.ensureCurrent(cluster);
         await this.coreApi.createNamespacedConfigMap({
           namespace,
           body: desired,
@@ -3095,6 +3122,7 @@ export class FirebirdClusterController {
         }
       } catch {
         log.info('Creating AutoSweep CronJob');
+        await this.ensureCurrent(cluster);
         await this.batchApi.createNamespacedCronJob({
           namespace,
           body: desired,
@@ -3137,6 +3165,7 @@ export class FirebirdClusterController {
         }
       } catch {
         log.info('Creating NetworkPolicy');
+        await this.ensureCurrent(cluster);
         await this.networkingApi.createNamespacedNetworkPolicy({
           namespace,
           body: desired,
@@ -3424,6 +3453,7 @@ export class FirebirdClusterController {
     } catch (err) {
       if (!isNotFound(err)) throw err;
       log.info('Creating leader lease');
+      await this.ensureCurrent(cluster);
       await this.coordinationApi.createNamespacedLease({
         namespace,
         body: desired,
@@ -3460,6 +3490,28 @@ export class FirebirdClusterController {
   }
 
   /** Whether the cluster still exists as this copy has it: the same uid, not being deleted */
+  /**
+   * Before the operator creates an object of the cluster: a reconcile that started before the
+   * cluster was deleted (or deleted and recreated) would otherwise create it for the deleted
+   * cluster, after the garbage collector removed what it owned. Such an object (a StatefulSet
+   * starting a pod on the volume) lingers until the garbage collector finds its owner gone.
+   */
+  private async ensureCurrent(cluster: FirebirdCluster): Promise<void> {
+    const uid = cluster.metadata.uid;
+    if (uid && this.goneUids.has(uid)) throw new ClusterGoneError();
+  }
+
+  /**
+   * The watch saw this cluster deleted (or its name taken by a new cluster): reconciles still
+   * running from its copy create nothing more for it (ensureCurrent). Without an API read, as
+   * the watch event comes before the garbage collector has removed what the cluster owned.
+   */
+  markGone(uid: string | undefined): void {
+    if (!uid) return;
+    this.goneUids.add(uid);
+    if (this.goneUids.size > MAX_GONE_UIDS) this.goneUids.delete(this.goneUids.values().next().value!);
+  }
+
   private async isCurrent(cluster: FirebirdCluster): Promise<boolean> {
     const { name, namespace = 'default' } = cluster.metadata;
     try {
@@ -3585,6 +3637,7 @@ export class FirebirdClusterController {
     } catch (err) {
       if (!isNotFound(err)) throw err;
       log.info({ role: name }, 'Creating the primary Lease Role');
+      await this.ensureCurrent(cluster);
       await this.rbacApi.createNamespacedRole({ namespace, body: role });
     }
     try {
@@ -3592,6 +3645,7 @@ export class FirebirdClusterController {
       await this.rbacApi.patchNamespacedRoleBinding({ name, namespace, body: binding }, MERGE_PATCH);
     } catch (err) {
       if (!isNotFound(err)) throw err;
+      await this.ensureCurrent(cluster);
       await this.rbacApi.createNamespacedRoleBinding({ namespace, body: binding });
     }
   }
@@ -3637,6 +3691,7 @@ export class FirebirdClusterController {
         }
       } catch {
         log.info('Creating Diagnostics CronJob');
+        await this.ensureCurrent(cluster);
         await this.batchApi.createNamespacedCronJob({
           namespace,
           body: desired,
@@ -3677,6 +3732,7 @@ export class FirebirdClusterController {
         }
       } catch {
         log.info('Creating Grafana Dashboard ConfigMap');
+        await this.ensureCurrent(cluster);
         await this.coreApi.createNamespacedConfigMap({
           namespace,
           body: desired,
@@ -3752,6 +3808,7 @@ export class FirebirdClusterController {
     const previous = existing?.metadata?.annotations?.[CUSTOM_QUERIES_ERRORS_ANNOTATION];
     if (!existing) {
       log.info({ queries: queries.length }, 'Creating the custom queries Secret');
+      await this.ensureCurrent(cluster);
       await this.coreApi.createNamespacedSecret({ namespace, body: desired });
     } else if (
       Buffer.from(existing.data?.[CUSTOM_QUERIES_KEY] ?? '', 'base64').toString('utf8') !== rendered ||
