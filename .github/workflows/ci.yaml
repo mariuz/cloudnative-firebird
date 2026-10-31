@@ -956,6 +956,27 @@ jobs:
           timeout 120 bash -c 'while kubectl get firebirdcluster repl -o jsonpath={.status.reseedingInstances} | grep -q repl-2; do sleep 5; done'
           echo "replica re-seeded and following the primary"
 
+      - name: Verify re-seeding a replica ahead of the primary's journal
+        if: matrix.track.id == 'core'
+        run: |
+          DB=/var/lib/firebird/data/mydb.fdb
+          count() { kubectl exec "$1" -c firebird -- bash -c "echo 'select count(*) from app;' | isql -q localhost:$DB" | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          rows=$(count repl-0)
+          old_uid=$(kubectl get pod repl-1 -o jsonpath={.metadata.uid})
+          # the replica's position goes past everything the primary journaled, as when the primary's
+          # journal restarts below it (v0.144.0): it would skip every new segment as applied already
+          kubectl exec repl-1 -c segment-server -- perl -e 'opendir(my $d, $ENV{SOURCE_DIR}) or die; my ($c) = grep { /^\{/ } readdir($d);
+            open(my $h, "+<:raw", "$ENV{SOURCE_DIR}/$c") or die; seek($h, 16, 0); print $h pack("Q<", 999999); close $h or die'
+          # the operator warns and re-seeds it (within a resync interval)
+          timeout 180 bash -c "until [ -n \"\$(kubectl get pod repl-1 -o jsonpath={.metadata.uid} 2>/dev/null)\" ] && [ \"\$(kubectl get pod repl-1 -o jsonpath={.metadata.uid} 2>/dev/null)\" != '$old_uid' ]; do sleep 3; done"
+          kubectl get events --field-selector involvedObject.name=repl,reason=JournalBehindReplicas -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' \
+            | tee /dev/stderr | grep -q 'behind what repl-1 (999999) applied'
+          kubectl wait pod/repl-1 --for=condition=Ready --timeout=300s
+          kubectl logs repl-1 -c replication-init | grep -q 're-seed requested'
+          [ "$(count repl-1)" = "$rows" ]
+          timeout 120 bash -c 'while kubectl get firebirdcluster repl -o jsonpath={.status.reseedingInstances} | grep -q repl-1; do sleep 5; done'
+          echo "replica ahead of the primary's journal re-seeded"
+
       - name: Verify re-creating a replica's volume
         if: matrix.track.id == 'core'
         run: |
@@ -1332,6 +1353,9 @@ jobs:
             echo "$1 has $(count "$1") rows, expected $2"; return 1
           }
           [ "$(kubectl get statefulset repl -o jsonpath={.spec.updateStrategy.type})" = "OnDelete" ]
+          # JournalBehindReplicas warnings so far (an earlier step causes one), counting repeats
+          behind() { kubectl get events --field-selector involvedObject.name=repl,reason=JournalBehindReplicas -o jsonpath='{range .items[*]}{.count}{"\n"}{end}' | awk '{ s += $1 } END { print s + 0 }'; }
+          behind_before=$(behind)
           primary=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
           before=$(count "$primary")
           last_failover=$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.startTime})
@@ -1369,7 +1393,7 @@ jobs:
           # the restarted primary's journal continued after what the replicas applied (its init
           # container raises a header behind the journal floor of the last promotion)
           kubectl logs "$primary" -c replication-init
-          [ -z "$(kubectl get events --field-selector involvedObject.name=repl,reason=JournalBehindReplicas -o name)" ]
+          [ "$(behind)" = "$behind_before" ]
           echo "rolling update finished with the primary $primary last"
 
       - name: Verify resources are resized in place

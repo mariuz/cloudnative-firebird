@@ -13,7 +13,7 @@ import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/s
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.144.0';
+export const PLUGIN_VERSION = '0.145.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;

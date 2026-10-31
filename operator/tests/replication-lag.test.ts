@@ -8,7 +8,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { KubeConfig, V1Pod } from '@kubernetes/client-node';
 import { computeLag, journalBehind, parseArchived, parsePosition, SegmentClient, segmentRetention } from '../src/utils/replication-lag';
-import { maxSegmentRetentionHours, REPLICATION_SCRIPTS } from '../src/utils/replication';
+import { maxSegmentRetentionHours, REPLICATION_SCRIPTS, RESEED_ANNOTATION } from '../src/utils/replication';
 import { REPLICATION_LAG_ANNOTATION } from '../src/utils/routing';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
 import { FirebirdCluster } from '../src/types';
@@ -392,8 +392,35 @@ describe('replication lag reconciliation', () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatchObject({ type: 'Warning' });
     expect(warnings[0].message).toBe(
-      'the journal of the primary db-0 is at segment 5, behind what db-1 (62) applied: they skip its new segments as applied already; re-seed them (reseed annotation)',
+      'the journal of the primary db-0 is at segment 5, behind what db-1 (62) applied: they skip its new segments as applied already; re-seeding them',
     );
+    // re-seeded as with the annotation; the replica that follows is left alone
+    const reseeds = s.fn('patchNamespacedPod').mock.calls.filter((c) => c[0].body?.metadata?.annotations?.[RESEED_ANNOTATION]);
+    expect(reseeds.map((c) => [c[0].name, c[0].body.metadata.annotations[RESEED_ANNOTATION]])).toEqual([['db-1', 'true']]);
+  });
+
+  it('does not take a segment archived while the replicas were measured for a journal behind them', async () => {
+    const s = setup([pod('db-0'), pod('db-1')], { 'db-1 POSITION': ['OK 22 100 0'] });
+    let lists = 0;
+    const inner = s.client as Mock;
+    const base = inner.getMockImplementation()!;
+    inner.mockImplementation(async (host: string, port: number, line: string) =>
+      line.endsWith(' ARCHIVED') ? (++lists === 1 ? ['21 10'] : ['21 10', '22 0']) : base(host, port, line),
+    );
+    await s.controller.reconcile({ ...cluster, spec: { ...cluster.spec, instances: 2 } });
+    expect(lists).toBe(2);
+    expect(s.fn('createNamespacedEvent').mock.calls.some((c) => c[0].body.reason === 'JournalBehindReplicas')).toBe(false);
+    expect(s.fn('patchNamespacedPod').mock.calls.some((c) => c[0].body?.metadata?.annotations?.[RESEED_ANNOTATION])).toBe(false);
+  });
+
+  it('leaves a replica already annotated for a re-seed as it is', async () => {
+    const s = setup([pod('db-0'), pod('db-1', { [RESEED_ANNOTATION]: 'true' })], {
+      'db-0 ARCHIVED': ['5 5'],
+      'db-1 POSITION': ['OK 62 100 0'],
+    });
+    await s.controller.reconcile({ ...cluster, spec: { ...cluster.spec, instances: 2 } });
+    const reseeds = s.fn('patchNamespacedPod').mock.calls.filter((c) => c[0].name === 'db-1' && c[0].body?.metadata?.annotations?.[RESEED_ANNOTATION]);
+    expect(reseeds).toEqual([]);
   });
 
   it('drops the annotation of a replica that cannot be measured', async () => {
