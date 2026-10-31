@@ -81,12 +81,15 @@ print "none";
 EOF
 )
 
+# files <commands>: as root in a container with the work directory at /w (the instances' files
+# belong to the containers' firebird user, which the host user may not be)
+files() { docker run --rm -v "$work:/w" --entrypoint sh "$IMAGE" -c "$1"; }
+
 # start <i>: a fresh container on the instance's volume, its server running as firebird
 start() {
   docker rm -f "fbj$1" >/dev/null 2>&1 || true
-  mkdir -p "$work/i$1/j" "$work/i$1/a" "$work/i$1/s"
   docker run -d --name "fbj$1" -v "$work/i$1:/data" -v "$work:/w" -v "$scripts:/scripts:ro" --entrypoint bash "$IMAGE" \
-    -c '. /w/env.sh; chown -R firebird:firebird /data; su -s /bin/sh firebird -c "/opt/firebird/bin/firebird"' >/dev/null
+    -c '. /w/env.sh; mkdir -p /data/j /data/a /data/s; chown -R firebird:firebird /data; su -s /bin/sh firebird -c "/opt/firebird/bin/firebird"' >/dev/null
   for _ in $(seq 1 30); do x "$1" 'value 1' 2>/dev/null | grep -q 1 && return 0; sleep 1; done
   echo "instance $1 did not start"; docker logs "fbj$1"; return 1
 }
@@ -96,14 +99,13 @@ x() { docker exec "fbj$1" bash -c ". /w/env.sh; $2"; }
 pull() {
   local f=$1; shift
   for t in "$@"; do
-    cp -n "$work/i$f/a/"* "$work/i$t/s/" 2>/dev/null || true
-    docker exec "fbj$t" chown -R firebird:firebird /data/s
+    docker exec "fbj$t" sh -c "cp -n /w/i$f/a/* /data/s/ 2>/dev/null; chown -R firebird:firebird /data/s"
   done
 }
 count() { x "$1" "echo 'SET LIST ON; SELECT COUNT(*) AS V FROM app;' | isql -q localhost:\$DB" | awk '$1 == "V" { print $2 }'; }
 write() { for n in $(seq "$2" "$3"); do x "$1" "sql 'insert into app values ($n); commit;'" >/dev/null; done; }
 # applied <i>: the replica's control file position (u64 at 16)
-applied() { od -An -tu8 -j16 -N8 "$(ls -d "$work/i$1/s/"\{* | head -1)" | tr -d ' '; }
+applied() { docker exec "fbj$1" sh -c 'od -An -tu8 -j16 -N8 "$(ls -d /data/s/{* | head -1)"' | tr -d ' '; }
 header() { x "$1" 'perl /w/hdr-seq.pl $DB'; }
 # promote <i> <seq>: segment-server.pl promote_here, in place (the server keeps running); the
 # header page's replication sequence, read from the file (not through an engine), is printed
@@ -123,9 +125,8 @@ prepare_seed() { x "$1" 'gfix -online normal /data/seed.fdb.tmp && gfix -replica
 # reseed_from_replica <from> <to>: locked copy of a replica with its control file (seed_from_replica)
 reseed_from_replica() {
   docker rm -f "fbj$2" >/dev/null 2>&1 || true
-  rm -rf "$work/i$2"; mkdir -p "$work/i$2/s"
   x "$1" "sql 'ALTER DATABASE BEGIN BACKUP;'"
-  cp "$work/i$1/db.fdb" "$work/i$2/db.fdb"; cp "$work/i$1/s/"\{* "$work/i$2/s/"
+  docker exec "fbj$1" sh -c "rm -rf /w/i$2 && mkdir -p /w/i$2/s && cp /data/db.fdb /w/i$2/ && cp /data/s/{* /w/i$2/s/"
   x "$1" "sql 'ALTER DATABASE END BACKUP;'"
   docker run --rm -v "$work/i$2:/data" --entrypoint sh "$IMAGE" -c 'PATH=/opt/firebird/bin:$PATH nbackup -SEQ -F /data/db.fdb' >/dev/null
   start "$2"
@@ -133,9 +134,8 @@ reseed_from_replica() {
 # reseed_live <from> <to>: live locked copy of the primary (seed_from_primary without a bootstrap seed)
 reseed_live() {
   docker rm -f "fbj$2" >/dev/null 2>&1 || true
-  rm -rf "$work/i$2"; mkdir -p "$work/i$2/s"
   x "$1" "sql 'ALTER DATABASE BEGIN BACKUP;'"
-  cp "$work/i$1/db.fdb" "$work/i$2/db.fdb"
+  docker exec "fbj$1" sh -c "rm -rf /w/i$2 && mkdir -p /w/i$2/s && cp /data/db.fdb /w/i$2/"
   x "$1" "sql 'ALTER DATABASE END BACKUP;'"
   docker run --rm -v "$work/i$2:/data" -v "$work:/w" --entrypoint bash "$IMAGE" -c '. /w/env.sh; nbackup -SEQ -F $DB >/dev/null;
     echo "ALTER DATABASE DISABLE PUBLICATION; COMMIT;" | isql -q $DB; gfix -replica read_only $DB' >/dev/null
@@ -150,12 +150,11 @@ for run in $(seq 1 "$RUNS"); do
   printf '%s\n' "$hdr_seq_pl" > "$work/hdr-seq.pl"
 
   # 1. a primary and two replicas seeded offline
-  mkdir -p "$work/i0"
   docker run --rm -v "$work/i0:/data" -v "$work:/w" -v "$scripts:/scripts:ro" --entrypoint bash "$IMAGE" -c '. /w/env.sh
     echo "CREATE DATABASE '\''$DB'\'' USER SYSDBA; CREATE TABLE app (id INT PRIMARY KEY); COMMIT;" | isql -q
     isql -q -i /scripts/enable-publication.sql $DB' >/dev/null
   for i in 1 2; do
-    mkdir -p "$work/i$i"; cp "$work/i0/db.fdb" "$work/i$i/db.fdb"
+    files "mkdir -p /w/i$i && cp /w/i0/db.fdb /w/i$i/db.fdb"
     docker run --rm -v "$work/i$i:/data" -v "$work:/w" --entrypoint bash "$IMAGE" -c '. /w/env.sh
       echo "ALTER DATABASE DISABLE PUBLICATION; COMMIT;" | isql -q $DB; gfix -replica read_only $DB' >/dev/null
   done
@@ -188,7 +187,7 @@ for run in $(seq 1 "$RUNS"); do
 
   # 5. rows on the primary: where its journal continues
   write 0 3010 3014; sleep 5
-  first=$(ls "$work/i0/a" 2>/dev/null | sed -n 's/.*\.journal-0*\([0-9][0-9]*\)$/\1/p' | sort -n | head -1)
+  first=$(docker exec fbj0 ls /data/a 2>/dev/null | sed -n 's/.*\.journal-0*\([0-9][0-9]*\)$/\1/p' | sort -n | head -1)
   pull 0 1 2; sleep 8
   echo "run $run: i0 rows $(count 0), i1 $(count 1), i2 $(count 2)"
   if [ -n "$first" ] && [ "$first" -le "$p0" ]; then
