@@ -2669,7 +2669,17 @@ export class FirebirdClusterController {
         );
       }
     }
-    const behind = journalBehind(archived, replicas);
+    let behind = journalBehind(archived, replicas);
+    if (behind) {
+      // the primary may have archived (and a replica applied) segments since the list was read:
+      // only a list read after the positions shows a replica ahead of the primary
+      try {
+        behind = journalBehind(parseArchived(await this.segmentClient(host(primaryPod), SEGMENT_PORT, `${token} ARCHIVED`)), replicas);
+      } catch (err) {
+        log.debug({ err }, 'Could not list the primary archived segments again');
+        behind = undefined;
+      }
+    }
     if (behind) {
       const names = behind.ahead.map((r) => `${r.name} (${r.appliedSequence})`).join(', ');
       await this.event(
@@ -2677,8 +2687,23 @@ export class FirebirdClusterController {
         'Warning',
         EventReason.JournalBehindReplicas,
         `the journal of the primary ${primaryPod} is at segment ${behind.lastArchived}, behind what ${names} applied: ` +
-          'they skip its new segments as applied already; re-seed them (reseed annotation)',
+          'they skip its new segments as applied already; re-seeding them',
       );
+      // re-seeded as with the reseed annotation (resolveReseeds): a seed of the primary's lineage
+      // starts at its journal's position
+      const byName = new Map(pods.map((p) => [p.metadata?.name, p]));
+      for (const { name: podName } of behind.ahead) {
+        if (byName.get(podName)?.metadata?.annotations?.[RESEED_ANNOTATION]) continue;
+        log.warn({ pod: podName, lastArchived: behind.lastArchived }, 'Replica ahead of the primary journal: re-seeding it');
+        await this.ifPodExists(
+          this.coreApi.patchNamespacedPod(
+            { name: podName, namespace, body: { metadata: { annotations: { [RESEED_ANNOTATION]: 'true' } } } },
+            MERGE_PATCH,
+          ),
+          podName,
+          log,
+        );
+      }
     }
     // the primary keeps the segments the replicas (ready or not) have not applied yet
     const replicaNames = Array.from({ length: cluster.spec.instances }, (_, i) => `${name}-${i}`).filter(
