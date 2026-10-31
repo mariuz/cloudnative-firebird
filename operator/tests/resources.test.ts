@@ -20,7 +20,7 @@ import {
   buildLease,
   leaseAdoption,
   leftoverAdoption,
-  ownersKept,
+  withoutOwners,
   CLUSTER_LABEL,
   buildDiagnosticsCronJob,
   buildGrafanaDashboardConfigMap,
@@ -823,17 +823,15 @@ describe('Leader Election Lease', () => {
     expect(leaseAdoption(orphan, { ...cluster, metadata: { ...cluster.metadata, uid: undefined } })).toBeUndefined();
   });
 
-  it('keeps an update patch from setting an owner the object does not have yet', () => {
+  it('never lets an update patch set an owner', () => {
     const cluster = makeCluster();
     const desired = { metadata: { name: 'x', ownerReferences: [{ apiVersion: 'v1', kind: 'FirebirdCluster', name: 'test-cluster', uid: cluster.metadata.uid! }] }, spec: { a: 1 } };
-    // this cluster's already: patched as built
-    expect(ownersKept({ metadata: { ownerReferences: desired.metadata.ownerReferences } }, desired, cluster)).toBe(desired);
-    // a leftover without an owner, or the deleted cluster's: left to the adoption
-    for (const existing of [{ metadata: {} }, { metadata: { ownerReferences: [{ ...desired.metadata.ownerReferences[0], uid: 'old-uid' }] } }]) {
-      const patch = ownersKept(existing, desired, cluster);
-      expect(patch.metadata.ownerReferences).toBeUndefined();
-      expect(JSON.parse(JSON.stringify(patch))).toEqual({ metadata: { name: 'x' }, spec: { a: 1 } });
-    }
+    // a merge patch leaves the object's owners as they are, this cluster's included: one read
+    // while the deleted cluster still owned it cannot put that owner back
+    const patch = withoutOwners(desired);
+    expect(patch.metadata.ownerReferences).toBeUndefined();
+    expect(JSON.parse(JSON.stringify(patch))).toEqual({ metadata: { name: 'x' }, spec: { a: 1 } });
+    expect(desired.metadata.ownerReferences).toHaveLength(1);
   });
 
   it('adopts the other objects a deleted cluster left, and nothing else', () => {

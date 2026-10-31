@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.145.0/cloudnative-firebird-0.145.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.146.0/cloudnative-firebird-0.146.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.145.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.146.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.145.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.146.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -1046,8 +1046,8 @@ controller (a `ResourcesAdopted` event lists them). Deleting the recreated clust
 them too. The volumes keep no owner, as always, so deleting a cluster never deletes its data.
 A segment TLS Secret or peers ConfigMap made before v0.142.0 lacks the `managed-by` label and is
 adopted once the operator next writes it. Since v0.143.0 a cluster being deleted is not reconciled, the
-operator's updates never set an owner an object does not have yet, and the adoption first checks
-that the cluster still exists under the same uid: a reconcile that started from the deleted
+operator's updates never set an owner (since v0.146.0 not even one the object had when it was
+read), and the adoption first checks that the cluster still exists under the same uid: a reconcile that started from the deleted
 cluster's copy would give everything back to it, and the garbage collector would then remove the
 StatefulSet (restarting the instances) and the rest. With it a `lease-holder` sidecar (from
 the operator image, like the segment TLS proxy) in every instance pod renews the Lease every
