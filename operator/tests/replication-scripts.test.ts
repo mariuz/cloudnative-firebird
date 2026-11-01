@@ -10,7 +10,8 @@ const SCRIPTS: Record<string, string> = { ...REPLICATION_SCRIPTS, ...JOB_SCRIPTS
 
 const hasPerl = spawnSync('perl', ['-v']).status === 0;
 /** Modules of the Firebird images' perl-base that the scripts use (checked in the image) */
-const PERL_BASE_MODULES = ['IO::Select', 'IO::Socket::INET', 'POSIX', 'Socket'];
+// Fcntl: checked in firebirdsql/firebird:4, 5 and 6-snapshot (perl -e 'use Fcntl qw(:flock)'), v0.147.0
+const PERL_BASE_MODULES = ['Fcntl', 'IO::Select', 'IO::Socket::INET', 'POSIX', 'Socket'];
 const dir = mkdtempSync(join(tmpdir(), 'fb-repl-scripts-'));
 
 describe('replication scripts shipped to instance pods', () => {

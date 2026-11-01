@@ -19,19 +19,22 @@
 #
 #   hack/repro/promoted-journal.sh                            # firebirdsql/firebird:6-snapshot
 #   IMAGE=firebirdsql/firebird:5 RUNS=3 hack/repro/promoted-journal.sh
+#   WAIT_CLOSED=1 RUNS=10 hack/repro/promoted-journal.sh       # the header written once closed
 #
 # Prints per run "journal continued after segment P (first new segment N)" or "journal restarted
 # below the promotion point P (first new segment N)", then "runs: <k> of <n> restarted below".
 # Needs Docker only.
 set -eu
 IMAGE=${IMAGE:-firebirdsql/firebird:6-snapshot}
+# container names: <NAME>0, <NAME>1, <NAME>2 (two runs side by side need different names)
+NAME=${NAME:-fbj}
 RUNS=${RUNS:-1}
 here=$(cd "$(dirname "$0")" && pwd)
 scripts=$(cd "$here/../../operator/src/replication" && pwd)
 work=
 cleanup() {
   [ -n "$work" ] || return 0
-  for i in 0 1 2; do docker rm -f "fbj$i" >/dev/null 2>&1 || true; done
+  for i in 0 1 2; do docker rm -f "${NAME}$i" >/dev/null 2>&1 || true; done
   # the data belongs to the containers' user: removed with the image's own rm
   docker run --rm -v "$work:/w" --entrypoint sh "$IMAGE" -c 'rm -rf /w/*' >/dev/null 2>&1 || true
   rm -rf "$work" 2>/dev/null || true
@@ -85,27 +88,46 @@ EOF
 # belong to the containers' firebird user, which the host user may not be)
 files() { docker run --rm -v "$work:/w" --entrypoint sh "$IMAGE" -c "$1"; }
 
+# closed.pl <database> <wait> <command...>: runs the command (the header write) holding the
+# exclusive lock a SuperServer holds on a database it has open, and tells whether the server still
+# had it open after the full shutdown. With <wait> 1 it first waits up to 30 s for the server to
+# close it, as segment-server.pl does since v0.147.0; with 0 it writes at once, as before.
+closed_pl=$(cat <<'EOF'
+use Fcntl qw(:flock);
+my ($db, $wait, @cmd) = @ARGV;
+open(my $fh, '<', $db) or die "open $db: $!\n";
+my $start = time;
+my $locked = flock($fh, LOCK_EX | LOCK_NB);
+printf '%s; ', $locked ? 'closed at the shutdown' : 'still open at the shutdown';
+if (!$locked && $wait) {
+  until ($locked = flock($fh, LOCK_EX | LOCK_NB)) { die "still open after 30 s\n" if time - $start >= 30; sleep 1 }
+  printf 'closed after %ds; ', time - $start;
+}
+exit(system(join(' ', map { quotemeta } @cmd) . ' >/dev/null') == 0 ? 0 : 1);
+EOF
+)
+
 # start <i>: a fresh container on the instance's volume, its server running as firebird
 start() {
-  docker rm -f "fbj$1" >/dev/null 2>&1 || true
-  docker run -d --name "fbj$1" -v "$work/i$1:/data" -v "$work:/w" -v "$scripts:/scripts:ro" --entrypoint bash "$IMAGE" \
+  docker rm -f "${NAME}$1" >/dev/null 2>&1 || true
+  docker run -d --name "${NAME}$1" -v "$work/i$1:/data" -v "$work:/w" -v "$scripts:/scripts:ro" --entrypoint bash "$IMAGE" \
     -c '. /w/env.sh; mkdir -p /data/j /data/a /data/s; chown -R firebird:firebird /data; su -s /bin/sh firebird -c "/opt/firebird/bin/firebird"' >/dev/null
   for _ in $(seq 1 30); do x "$1" 'value 1' 2>/dev/null | grep -q 1 && return 0; sleep 1; done
-  echo "instance $1 did not start"; docker logs "fbj$1"; return 1
+  echo "instance $1 did not start"; docker logs "${NAME}$1"; return 1
 }
 # x <i> <commands>: in the instance's container, with env.sh
-x() { docker exec "fbj$1" bash -c ". /w/env.sh; $2"; }
+x() { docker exec "${NAME}$1" bash -c ". /w/env.sh; $2"; }
 # pull <from> <to...>: the segment puller, archived segments of the primary into the replicas' source
 pull() {
   local f=$1; shift
   for t in "$@"; do
-    docker exec "fbj$t" sh -c "cp -n /w/i$f/a/* /data/s/ 2>/dev/null; chown -R firebird:firebird /data/s"
+    docker exec "${NAME}$t" sh -c "cp -n /w/i$f/a/* /data/s/ 2>/dev/null; chown -R firebird:firebird /data/s"
   done
 }
 count() { x "$1" "echo 'SET LIST ON; SELECT COUNT(*) AS V FROM app;' | isql -q localhost:\$DB" | awk '$1 == "V" { print $2 }'; }
 write() { for n in $(seq "$2" "$3"); do x "$1" "sql 'insert into app values ($n); commit;'" >/dev/null; done; }
 # applied <i>: the replica's control file position (u64 at 16)
-applied() { docker exec "fbj$1" sh -c 'od -An -tu8 -j16 -N8 "$(ls -d /data/s/{* | head -1)"' | tr -d ' '; }
+applied() { docker exec "${NAME}$1" sh -c 'od -An -tu8 -j16 -N8 "$(ls -d /data/s/{* | head -1)"' | tr -d ' '; }
 header() { x "$1" 'perl /w/hdr-seq.pl $DB'; }
 # promote <i> <seq>: segment-server.pl promote_here, in place (the server keeps running); the
 # header page's replication sequence, read from the file (not through an engine), is printed
@@ -113,7 +135,7 @@ header() { x "$1" 'perl /w/hdr-seq.pl $DB'; }
 promote() {
   x "$1" "h() { printf '%s %s; ' \"\$1\" \"\$(perl /w/hdr-seq.pl \$DB)\"; }
     fbsvcmgr localhost:service_mgr action_properties dbname \$DB prp_shutdown_mode prp_sm_full prp_force_shutdown 0 &&
-    perl /scripts/set-repl-seq.pl \$DB $2 >/dev/null && h set && rm -f /data/j/* /data/a/* /data/seed.fdb && cp \$DB /data/seed.fdb.tmp &&
+    perl /w/closed.pl \$DB ${WAIT_CLOSED:-0} perl /scripts/set-repl-seq.pl \$DB $2 && h set && rm -f /data/j/* /data/a/* /data/seed.fdb && cp \$DB /data/seed.fdb.tmp &&
     fbsvcmgr localhost:service_mgr action_properties dbname \$DB prp_online_mode prp_sm_normal && h online &&
     gfix -replica none localhost:\$DB && h replica-none && isql -q -b -i /scripts/enable-publication.sql localhost:\$DB && h published &&
     rm -f /data/s/*; echo"
@@ -124,18 +146,18 @@ prepare_seed() { x "$1" 'gfix -online normal /data/seed.fdb.tmp && gfix -replica
   isql -q -b -i /scripts/enable-publication.sql /data/seed.fdb.tmp && mv /data/seed.fdb.tmp /data/seed.fdb'; }
 # reseed_from_replica <from> <to>: locked copy of a replica with its control file (seed_from_replica)
 reseed_from_replica() {
-  docker rm -f "fbj$2" >/dev/null 2>&1 || true
+  docker rm -f "${NAME}$2" >/dev/null 2>&1 || true
   x "$1" "sql 'ALTER DATABASE BEGIN BACKUP;'"
-  docker exec "fbj$1" sh -c "rm -rf /w/i$2 && mkdir -p /w/i$2/s && cp /data/db.fdb /w/i$2/ && cp /data/s/{* /w/i$2/s/"
+  docker exec "${NAME}$1" sh -c "rm -rf /w/i$2 && mkdir -p /w/i$2/s && cp /data/db.fdb /w/i$2/ && cp /data/s/{* /w/i$2/s/"
   x "$1" "sql 'ALTER DATABASE END BACKUP;'"
   docker run --rm -v "$work/i$2:/data" --entrypoint sh "$IMAGE" -c 'PATH=/opt/firebird/bin:$PATH nbackup -SEQ -F /data/db.fdb' >/dev/null
   start "$2"
 }
 # reseed_live <from> <to>: live locked copy of the primary (seed_from_primary without a bootstrap seed)
 reseed_live() {
-  docker rm -f "fbj$2" >/dev/null 2>&1 || true
+  docker rm -f "${NAME}$2" >/dev/null 2>&1 || true
   x "$1" "sql 'ALTER DATABASE BEGIN BACKUP;'"
-  docker exec "fbj$1" sh -c "rm -rf /w/i$2 && mkdir -p /w/i$2/s && cp /data/db.fdb /w/i$2/"
+  docker exec "${NAME}$1" sh -c "rm -rf /w/i$2 && mkdir -p /w/i$2/s && cp /data/db.fdb /w/i$2/"
   x "$1" "sql 'ALTER DATABASE END BACKUP;'"
   docker run --rm -v "$work/i$2:/data" -v "$work:/w" --entrypoint bash "$IMAGE" -c '. /w/env.sh; nbackup -SEQ -F $DB >/dev/null;
     echo "ALTER DATABASE DISABLE PUBLICATION; COMMIT;" | isql -q $DB; gfix -replica read_only $DB' >/dev/null
@@ -148,6 +170,7 @@ for run in $(seq 1 "$RUNS"); do
   work=$(mktemp -d)
   printf '%s\n' "$env_sh" > "$work/env.sh"
   printf '%s\n' "$hdr_seq_pl" > "$work/hdr-seq.pl"
+  printf '%s\n' "$closed_pl" > "$work/closed.pl"
 
   # 1. a primary and two replicas seeded offline
   docker run --rm -v "$work/i0:/data" -v "$work:/w" -v "$scripts:/scripts:ro" --entrypoint bash "$IMAGE" -c '. /w/env.sh
@@ -164,7 +187,7 @@ for run in $(seq 1 "$RUNS"); do
   echo "run $run: i0 rows $(count 0), i1 $(count 1), i2 $(count 2); i1 applied $(applied 1)"
 
   # 2. i0 lost: i1 promoted in place, i0 re-seeded from the replica i2
-  docker rm -f fbj0 >/dev/null
+  docker rm -f ${NAME}0 >/dev/null
   p1=$(applied 1)
   promote 1 "$p1"; prepare_seed 1
   reseed_from_replica 2 0
@@ -173,7 +196,7 @@ for run in $(seq 1 "$RUNS"); do
   echo "run $run: i1 rows $(count 1), i0 $(count 0), i2 $(count 2); i0 applied $(applied 0)"
 
   # 3. i1 lost: i0 promoted in place, i1 re-seeded at once from a live locked copy of i0
-  docker rm -f fbj1 >/dev/null
+  docker rm -f ${NAME}1 >/dev/null
   p0=$(applied 0)
   promote 0 "$p0"
   reseed_live 0 1 &
@@ -187,7 +210,7 @@ for run in $(seq 1 "$RUNS"); do
 
   # 5. rows on the primary: where its journal continues
   write 0 3010 3014; sleep 5
-  first=$(docker exec fbj0 ls /data/a 2>/dev/null | sed -n 's/.*\.journal-0*\([0-9][0-9]*\)$/\1/p' | sort -n | head -1)
+  first=$(docker exec ${NAME}0 ls /data/a 2>/dev/null | sed -n 's/.*\.journal-0*\([0-9][0-9]*\)$/\1/p' | sort -n | head -1)
   pull 0 1 2; sleep 8
   echo "run $run: i0 rows $(count 0), i1 $(count 1), i2 $(count 2)"
   if [ -n "$first" ] && [ "$first" -le "$p0" ]; then

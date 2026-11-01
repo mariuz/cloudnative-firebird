@@ -121,6 +121,7 @@
 use strict;
 use warnings;
 use IO::Socket::INET;
+use Fcntl qw(:flock);
 #@include segment-auth.pl
 #@include stop-with-server.pl
 
@@ -568,6 +569,10 @@ sub nbackup_here {
 # Attempts at the in-place promotion's full shutdown, and the seconds between them
 my $promote_shutdown_attempts = ($ENV{PROMOTE_SHUTDOWN_ATTEMPTS} // '') =~ /^[1-9]\d*$/ ? $ENV{PROMOTE_SHUTDOWN_ATTEMPTS} : 5;
 my $promote_shutdown_pause = ($ENV{PROMOTE_SHUTDOWN_PAUSE} // '') =~ /^\d+$/ ? $ENV{PROMOTE_SHUTDOWN_PAUSE} : 3;
+# rounds of full shutdown, header and online until the server holds the sequence written
+my $promote_header_attempts = ($ENV{PROMOTE_HEADER_ATTEMPTS} // '') =~ /^[1-9]\d*$/ ? $ENV{PROMOTE_HEADER_ATTEMPTS} : 3;
+# how long the promotion waits for the server to close the database after the full shutdown
+my $promote_close_timeout = ($ENV{PROMOTE_CLOSE_TIMEOUT_SECONDS} // '') =~ /^[1-9]\d*$/ ? $ENV{PROMOTE_CLOSE_TIMEOUT_SECONDS} : 30;
 
 sub promote_here {
   my ($client, $archived) = @_;
@@ -614,33 +619,57 @@ sub promote_here {
       $lineage = "$seq $archived";
       $seq = $archived;
     }
-    # the full shutdown can fail while the server is busy (seen under load): it is tried a few
-    # times before the operator falls back to the offline promotion (a restart)
-    my @failures;
-    for my $attempt (1 .. $promote_shutdown_attempts) {
-      if ($fb->('prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0')) { $shut = 1; last }
-      push @failures, $fb_out ne '' ? $fb_out : 'no message';
-      # a shutdown that went through despite the error
-      if ((database_state() // '') eq 'shutdown') { $shut = 1; last }
-      print "full shutdown attempt $attempt of $promote_shutdown_attempts failed: $failures[-1]\n";
-      sleep $promote_shutdown_pause if $attempt < $promote_shutdown_attempts;
+    # The header is written while the server has the database closed, and read back through the
+    # server once it is online again: a server that went online with its cached header page (the
+    # sequence lost, ISSUES.md issue 10) gets the round again, the database still a replica.
+    for my $round (1 .. $promote_header_attempts) {
+      # the full shutdown can fail while the server is busy (seen under load): it is tried a few
+      # times before the operator falls back to the offline promotion (a restart)
+      my @failures;
+      for my $attempt (1 .. $promote_shutdown_attempts) {
+        if ($fb->('prp_shutdown_mode', 'prp_sm_full', 'prp_force_shutdown', '0')) { $shut = 1; last }
+        push @failures, $fb_out ne '' ? $fb_out : 'no message';
+        # a shutdown that went through despite the error
+        if ((database_state() // '') eq 'shutdown') { $shut = 1; last }
+        print "full shutdown attempt $attempt of $promote_shutdown_attempts failed: $failures[-1]\n";
+        sleep $promote_shutdown_pause if $attempt < $promote_shutdown_attempts;
+      }
+      $shut or die 'full shutdown failed after ' . scalar(@failures) . ' attempts: ' . join('; ', @failures) . "\n";
+      # The server can keep the database open, with its cached header page, for a moment after the
+      # full shutdown returns (an attachment still going away). Going online then writes that cached
+      # header back over the sequence written below, and the journal restarts at segment 1 (ISSUES.md,
+      # issue 10). A server in SuperServer mode holds an exclusive lock (flock) on the file while it has
+      # it open: the header is written once that lock can be taken, and the lock is held until the
+      # database goes online again.
+      open(my $closed, '<', $database) or die "cannot open $database: $!\n";
+      my $waited = time;
+      wait_for($promote_close_timeout, sub { flock($closed, LOCK_EX | LOCK_NB) })
+        or die "the server still had the database open ${promote_close_timeout}s after the full shutdown\n";
+      $waited = time - $waited;
+      print "the server closed the database ${waited}s after the full shutdown\n" if $waited > 0;
+      system('perl', "$ENV{SCRIPT_DIR}/set-repl-seq.pl", $database, $seq) == 0 or die "cannot set the replication sequence\n";
+      # the journal floor: at its next start the init container raises a header that fell behind it
+      # (init-instance.sh), so the journal never restarts below what the replicas applied
+      write_file($journal_floor, "$seq\n") or die "cannot write the journal floor\n";
+      # the replica's journal and archive (the new journal starts empty) and the offline bootstrap
+      # seed new replicas can start from, taken while nothing has the database open
+      for my $d ($journal_dir, $dir) {
+        next unless $d ne '' && opendir(my $dh, $d);
+        unlink map { "$d/$_" } grep { -f "$d/$_" } readdir($dh);
+        closedir($dh);
+      }
+      unlink $bootstrap_seed, "$base/bootstrap-seed.seq";
+      system('cp', $database, "$bootstrap_seed.tmp") == 0 or die "cannot copy the bootstrap seed\n";
+      close($closed);
+      $fb->('prp_online_mode', 'prp_sm_normal') or die 'cannot bring the database online' . ($fb_out ne '' ? ": $fb_out" : '') . "\n";
+      $shut = 0;
+      my $online = live_value(q{RDB$GET_CONTEXT('SYSTEM', 'REPLICATION_SEQUENCE')});
+      last if defined $online && $online =~ /^\d+$/ && $online >= $seq;
+      my $got = defined $online && $online ne '' ? $online : 'unreadable';
+      die "the server kept a replication sequence of $got instead of $seq after $promote_header_attempts attempts\n"
+        if $round == $promote_header_attempts;
+      print "online with replication sequence $got instead of $seq (attempt $round of $promote_header_attempts): writing the header again\n";
     }
-    $shut or die 'full shutdown failed after ' . scalar(@failures) . ' attempts: ' . join('; ', @failures) . "\n";
-    system('perl', "$ENV{SCRIPT_DIR}/set-repl-seq.pl", $database, $seq) == 0 or die "cannot set the replication sequence\n";
-    # the journal floor: at its next start the init container raises a header that fell behind it
-    # (init-instance.sh), so the journal never restarts below what the replicas applied
-    write_file($journal_floor, "$seq\n") or die "cannot write the journal floor\n";
-    # the replica's journal and archive (the new journal starts empty) and the offline bootstrap
-    # seed new replicas can start from, taken while nothing has the database open
-    for my $d ($journal_dir, $dir) {
-      next unless $d ne '' && opendir(my $dh, $d);
-      unlink map { "$d/$_" } grep { -f "$d/$_" } readdir($dh);
-      closedir($dh);
-    }
-    unlink $bootstrap_seed, "$base/bootstrap-seed.seq";
-    system('cp', $database, "$bootstrap_seed.tmp") == 0 or die "cannot copy the bootstrap seed\n";
-    $fb->('prp_online_mode', 'prp_sm_normal') or die 'cannot bring the database online' . ($fb_out ne '' ? ": $fb_out" : '') . "\n";
-    $shut = 0;
     run_bounded($command_timeout, 'gfix', '-replica', 'none', "localhost:$database") or die "cannot set replica mode none\n";
     $writable = 1;
     run_bounded($command_timeout, 'isql', '-q', '-b', '-i', "$ENV{SCRIPT_DIR}/enable-publication.sql", "localhost:$database")
