@@ -111,6 +111,19 @@ csi-driver-host-path 1.19.0, controller-tools) with nothing to compare. The othe
 | The e2e tests retry read-only `psql` checks whose `kubectl exec` stream died (#11747) | The kind CI's login and query checks run in wait loops (`wait_login`, `gen_login` and the like), and clients that must not attach late read pod logs instead of `kubectl run -i` (v0.134.0). | aligned |
 | The upgrade spec dumps the plugin namespaces when it fails (#11748) | The CI's failure step prints the clusters, StatefulSets, Services, Leases, backups, Jobs and operator logs. | aligned |
 
+## Main branch to 2026-10-30 (swept 2026-11-01)
+
+The 8 commits merged to CloudNativePG's `main` after `036d116` (to `4383dbf`, October 30, 2026;
+still no release after 1.30.1) were read from their commit messages. Four are dependency, CI or
+test-matrix updates (openshift-preflight, GitHub actions, Kubernetes patches 0.37.2, the
+PostgreSQL versions of the e2e tests, the docs build moving to npm), and one is the CRA
+stewardship statement in `SECURITY.md`. The others:
+
+| CloudNativePG (main, PR) | Here | Status |
+|---|---|---|
+| A replica keeps a hot standby parameter (e.g. `max_connections`) at the value `pg_controldata` recorded while it is higher than the one it would start with, so removing the parameter from the spec no longer crash-loops a replica restarted before the primary; a configuration reload that arrived while PostgreSQL was starting is kept pending instead of lost (#11236) | Firebird replicas have no such constraint: they apply the primary's journal (or receive it synchronously) whatever their own `firebird.conf` says, and nothing in the replica checks the primary's settings. `firebird.conf` is read only when the server starts, so `config.settings` changes always restart the instances (supervised or not, primary last) and there is no reload to lose. | n/a |
+| The OpenShift e2e pipeline deletes the GCP disks a destroyed cluster left (#11780) | The kind CI runs on a disposable node; its volumes go with it. | n/a |
+
 ## Not applicable
 
 - PgBouncer / `Pooler` features (image catalogs, TLS settings, `auth_user`, metrics): Firebird has
