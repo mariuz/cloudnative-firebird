@@ -1628,6 +1628,36 @@ export function buildGrafanaDashboardConfigMap(cluster: FirebirdCluster): V1Conf
           },
         ],
       },
+      // a replica that skipped the primary's segments (JournalBehindReplicas), and its re-seeds
+      {
+        title: 'Replicas Ahead of the Primary Journal',
+        type: 'stat',
+        targets: [
+          {
+            expr: `sum(firebird_replication_ahead_of_primary{namespace="${namespace}",cluster="${name}"}) or vector(0)`,
+            legendFormat: 'Ahead',
+          },
+          {
+            expr: `sum(increase(firebird_replication_ahead_reseeds_total{namespace="${namespace}",cluster="${name}"}[1d])) or vector(0)`,
+            legendFormat: 'Re-seeded (1d)',
+          },
+        ],
+      },
+      // promotions by kind and mode, and the in-place header rounds repeated (ISSUES.md issue 10)
+      {
+        title: 'Promotions (1d)',
+        type: 'timeseries',
+        targets: [
+          {
+            expr: `sum by (kind, mode) (increase(firebird_promotions_total{namespace="${namespace}",cluster="${name}"}[1d]))`,
+            legendFormat: '{{kind}} {{mode}}',
+          },
+          {
+            expr: `sum(increase(firebird_promotion_header_retries_total{namespace="${namespace}",cluster="${name}"}[1d]))`,
+            legendFormat: 'header retries',
+          },
+        ],
+      },
     ],
   });
 
