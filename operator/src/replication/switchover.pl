@@ -17,8 +17,9 @@
 #   4. with PROMOTE_IN_PLACE=true, promote the target without a restart (its segment server's
 #      PROMOTE, ARCHIVED: the journal archive's last segment or "none").
 #
-# Exits 0 when the target can be promoted, with "inplace <S>" in its result (RESULT_FILE, the
-# termination message) when step 4 promoted it, or "restart <reason>" otherwise. The operator then
+# Exits 0 when the target can be promoted, with "inplace <S> <R>" in its result (RESULT_FILE, the
+# termination message; <R> the rounds the header took) when step 4 promoted it, or
+# "restart <reason>" otherwise. The operator then
 # moves the primary and restarts the old primary, whose init container demotes it offline, and
 # (without "inplace") the target, whose init container promotes it offline (init-instance.sh).
 # On failure the operator brings the old primary back online.
@@ -149,8 +150,10 @@ if (($ENV{PROMOTE_IN_PLACE} // '') eq 'true') {
   my $archived = ($ENV{ARCHIVED} // '') =~ /^(\d+)$/ ? $1 : 'none';
   my $r = request($target, "PROMOTE $archived");
   my $reply = $r ? ($r->[0] // 'no reply') : 'segment server not reachable';
-  if ($reply =~ /^OK (\d+)$/) {
-    $outcome = "inplace $1";
+  # "OK <S> <R>": <R> rounds of full shutdown, header and online (segment-server.pl); "OK <S>"
+  # from a segment server that promoted it already, or from one before v0.149.0
+  if ($reply =~ /^OK (\d+)(?: (\d+))?$/) {
+    $outcome = "inplace $1 " . ($2 // 1);
     print "$target promoted in place: its journal continues after segment $1\n";
   } else {
     $outcome = "restart $reply";

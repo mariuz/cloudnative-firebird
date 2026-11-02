@@ -180,7 +180,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
       if (!hasPerl) return;
       const r = await replica();
       try {
-        expect(await r.ask('PROMOTE 12')).toEqual(['OK 12']);
+        expect(await r.ask('PROMOTE 12')).toEqual(['OK 12 1']);
       } finally {
         r.stop();
       }
@@ -220,7 +220,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
       writeFileSync(join(r.base, 'sync-standby'), '');
       writeFileSync(join(r.base, 'sync-seen'), '20\n');
       try {
-        expect(await r.ask('PROMOTE none')).toEqual(['OK 20']);
+        expect(await r.ask('PROMOTE none')).toEqual(['OK 20 1']);
       } finally {
         r.stop();
       }
@@ -244,7 +244,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
       await holdOpen(r.db, 2);
       const t0 = Date.now();
       try {
-        expect(await r.ask('PROMOTE 12')).toEqual(['OK 12']);
+        expect(await r.ask('PROMOTE 12')).toEqual(['OK 12 1']);
       } finally {
         r.stop();
       }
@@ -297,7 +297,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
       // the first online keeps the header the server had cached (no sequence); the second holds it
       writeFileSync(join(r.ws.dir, 'live-seq-once'), '0');
       try {
-        expect(await r.ask('PROMOTE 12')).toEqual(['OK 12']);
+        expect(await r.ask('PROMOTE 12')).toEqual(['OK 12 2']);
       } finally {
         r.stop();
       }

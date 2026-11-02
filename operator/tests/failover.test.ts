@@ -237,6 +237,14 @@ describe('automatic failover', () => {
     await done2.controller.reconcile(makeCluster({ switchover: { ...promoting, promotedInPlace: true } }));
     expect(done2.status().switchover).toMatchObject({ phase: 'Completed' });
 
+    // the header took two rounds (v0.149.0): promoted in place all the same, with a warning
+    const twice = setup({ pods, job: promoteJob('OK 41 2'), jobPods: [promotePod('OK 41 2\n')] });
+    await twice.controller.reconcile(makeCluster({ switchover: promoting }));
+    expect(twice.status().switchover).toMatchObject({ promotedInPlace: true });
+    const warning = twice.fn('createNamespacedEvent').mock.calls.map((c) => c[0].body).find((e) => e.reason === 'PromotionHeaderRetried');
+    expect(warning?.message).toContain('db-2 went online without the replication sequence written 1 time(s) before holding it (failover, 2 rounds');
+    expect(promoted.fn('createNamespacedEvent').mock.calls.some((c) => c[0].body.reason === 'PromotionHeaderRetried')).toBe(false);
+
     const refused = setup({ pods, job: promoteJob('ERR'), jobPods: [promotePod('ERR this instance is a synchronous standby\n')] });
     await refused.controller.reconcile(makeCluster({ switchover: promoting }));
     expect(refused.status().switchover).toMatchObject({ promotedInPlace: false, message: expect.stringContaining('restarting it') });
