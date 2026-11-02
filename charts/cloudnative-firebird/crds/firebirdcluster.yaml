@@ -1648,6 +1648,9 @@ spec:
                           lagSeconds:
                             description: Age of the oldest archived segment not applied yet (0 when up to date)
                             type: integer
+                          aheadOfPrimary:
+                            description: The replica applied a later segment than the primary last archived; it no longer follows the primary and is re-seeded
+                            type: boolean
                           error:
                             type: string
                     segmentRetention:

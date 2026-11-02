@@ -723,6 +723,11 @@ export interface ReplicaLagStatus {
   lagSegments?: number;
   /** Age of the oldest archived segment not applied yet (0 when up to date) */
   lagSeconds?: number;
+  /**
+   * The replica applied a later segment than the primary last archived: it no longer follows the
+   * primary (JournalBehindReplicas) and is re-seeded
+   */
+  aheadOfPrimary?: boolean;
   /** Why the position could not be measured */
   error?: string;
 }
