@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.148.0/cloudnative-firebird-0.148.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.149.0/cloudnative-firebird-0.149.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.148.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.149.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.148.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.149.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -802,6 +802,8 @@ alerting on it needs no exporter sidecar:
 | `firebird_replication_applied_sequence` | `namespace`, `cluster`, `pod` | Segment applied by the replica |
 | `firebird_replication_ahead_of_primary` | `namespace`, `cluster`, `pod` | 1 when the replica applied a later segment than the primary last archived: it no longer follows the primary and is re-seeded (`JournalBehindReplicas`, `status.replicationStatus.replicas[].aheadOfPrimary`; v0.148.0) |
 | `firebird_replication_ahead_reseeds_total` | `namespace`, `cluster`, `pod` | Re-seeds the operator started for replicas ahead of the primary's journal (counter, v0.148.0) |
+| `firebird_promotions_total` | `namespace`, `cluster`, `kind`, `mode` | Promotions of a new primary by `kind` (`switchover`, `failover`) and `mode` (`in_place`, or `offline`: the target restarted to be promoted) (counter, v0.149.0) |
+| `firebird_promotion_header_retries_total` | `namespace`, `cluster` | Header rounds in-place promotions repeated because the server went online without the replication sequence written (counter, `PromotionHeaderRetried` warnings; ISSUES.md issue 10; v0.149.0) |
 | `firebird_operator_reconciles_total` | `namespace`, `cluster`, `result` | Reconciles by result (`success`, `error`) |
 
 A replica that cannot be measured has no lag series (alert on `absent()` or on
@@ -820,6 +822,12 @@ generated Grafana dashboard has ready-instance and replication-lag panels. For e
   for: 10m
 - alert: FirebirdReplicasReseededAheadOfPrimary
   expr: increase(firebird_replication_ahead_reseeds_total[1d]) > 2
+# in-place promotions that fall back to the offline promotion (a restart of the target), or whose
+# header needed another round: the in-place promotion is not working as it should here
+- alert: FirebirdPromotionsOffline
+  expr: increase(firebird_promotions_total{mode="offline"}[1d]) > 0
+- alert: FirebirdPromotionHeaderRetried
+  expr: increase(firebird_promotion_header_retries_total[7d]) > 0
 ```
 
 ### Custom Metrics Queries
@@ -2252,7 +2260,7 @@ The operator records Kubernetes events on its resources (CloudNativePG 1.29 / 1.
 
 | Resource | Reasons |
 |---|---|
-| `FirebirdCluster` | `ImageCatalogChanged`, `ImageCatalogUnresolved` (warning); `ManagedServiceConflict` (warning); `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`, `PodAntiAffinityDefaulted`, `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging`, `JournalBehindReplicas` (warnings); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReplicaClusterRepositioning`, `ReplicaClusterFollowFailed` (warning), `ReplicaClusterPromoting`, `ReplicaClusterPromoted`; `ImageCheckStarted`, `ImageChecked`, `ImageRefused` (warning); `MajorUpgradeStarted`, `MajorUpgradeConverting`, `MajorUpgradeStarting`, `MajorUpgradeCompleted`, `MajorUpgradeFailed` (warning), `MajorUpgradeAbandoned`; `ReconcileFailed` (warning) |
+| `FirebirdCluster` | `ImageCatalogChanged`, `ImageCatalogUnresolved` (warning); `ManagedServiceConflict` (warning); `SwitchoverStarted`, `SwitchoverPromoting`, `SwitchoverCompleted`, `SwitchoverFailed` (warning); `PrimaryNotReady`, `FailoverStarted`, `FailingOver`, `FailoverFailed` (warnings), `FailoverCancelled`, `FailoverCompleted`, `PrimaryRejoined`, `PrimaryLeaseHeld`, `PrimaryLeaseDefaulted`, `PodAntiAffinityDefaulted`, `PrimaryLeaseMigrationStarted`, `PrimaryLeaseMigrated`, `PrimaryLeaseMigrationSkipped`; `SyncStandbyAttaching`, `SyncStandbyAttached`, `SyncStandbyDetaching`, `SyncStandbyDetached`, `SyncStandbyFailed` (warning); `TLSCertificateIgnored` (warning); `InstanceFenced`, `InstanceUnfenced`, `FencingFailed` (warning); `ReseedStarted`, `ReseedCompleted`; `RollingUpdate`, `RollingUpdateCompleted`; `ReplicaLagging`, `JournalBehindReplicas`, `PromotionHeaderRetried` (warnings); `VolumeResizing`, `VolumeResizeFailed` (warning); `ReplicaClusterRepositioning`, `ReplicaClusterFollowFailed` (warning), `ReplicaClusterPromoting`, `ReplicaClusterPromoted`; `ImageCheckStarted`, `ImageChecked`, `ImageRefused` (warning); `MajorUpgradeStarted`, `MajorUpgradeConverting`, `MajorUpgradeStarting`, `MajorUpgradeCompleted`, `MajorUpgradeFailed` (warning), `MajorUpgradeAbandoned`; `ReconcileFailed` (warning) |
 | `FirebirdBackup` | `BackupStarted`, `BackupCompleted`, `BackupFailed` (warning) |
 | `FirebirdRestore` | `RestoreStarted`, `RestoreCompleted`, `RestoreFailed` (warning) |
 | `FirebirdUser` | `UserApplied`, `UserFailed` (warning), `UserDropped` |

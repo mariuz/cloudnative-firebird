@@ -87,6 +87,7 @@ export const EventReason = {
   RollingUpdateCompleted: 'RollingUpdateCompleted',
   ReplicaLagging: 'ReplicaLagging',
   JournalBehindReplicas: 'JournalBehindReplicas',
+  PromotionHeaderRetried: 'PromotionHeaderRetried',
   VolumeResizing: 'VolumeResizing',
   VolumeResizeFailed: 'VolumeResizeFailed',
   ReconcileFailed: 'ReconcileFailed',

@@ -138,7 +138,7 @@ describe('the in-place promotion (segment-server.pl promote_here)', () => {
   it('checks the sequence the server journals after before it reports the promotion', () => {
     const check = promote.indexOf('die "the journal would continue after segment $live, not $seq\\n" if $live < $seq;');
     expect(check).toBeGreaterThan(promote.indexOf('enable-publication.sql'));
-    expect(check).toBeLessThan(promote.indexOf('print $client "OK $seq\\n";\n    print "promoted in place'));
+    expect(check).toBeLessThan(promote.indexOf('print $client "OK $seq $rounds\\n";\n    print "promoted in place'));
     expect(check).toBeLessThan(promote.indexOf('write_file($promoted_flag, time . "\\n");\n    if (defined $lineage'));
   });
 });

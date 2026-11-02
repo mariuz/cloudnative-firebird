@@ -280,3 +280,16 @@ export function parseElection(message: string): { target: string; sequence: numb
   }
   return { target: m[1], sequence: Number(m[2]), positions };
 }
+
+/**
+ * The rounds of full shutdown, header and online an in-place promotion took, from the segment
+ * server's reply ("OK <S> <R>") or the switchover Job's outcome ("inplace <S> <R>"); 1 when the
+ * reply has none (promoted already, or a segment server before v0.149.0), undefined when the
+ * promotion was not in place. More than one: the server went online without the sequence written
+ * (ISSUES.md issue 10).
+ */
+export function promotionRounds(reply: string | undefined): number | undefined {
+  const m = /^(?:OK|inplace) \d+(?: (\d+))?$/.exec((reply ?? '').trim());
+  if (!m) return undefined;
+  return m[1] ? Number(m[1]) : 1;
+}

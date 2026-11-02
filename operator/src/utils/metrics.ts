@@ -137,3 +137,21 @@ export function recordReconcile(cluster: FirebirdCluster, result: 'success' | 'e
     { namespace: cluster.metadata.namespace ?? 'default', cluster: cluster.metadata.name, result },
   );
 }
+
+/**
+ * Counts a promotion of a switchover or failover: in place, or offline (a restart of the target,
+ * when the in-place promotion was not requested or failed), and the extra header rounds an
+ * in-place promotion took (the server went online without the sequence written, ISSUES.md issue 10)
+ */
+export function recordPromotion(cluster: FirebirdCluster, kind: 'switchover' | 'failover', mode: 'in_place' | 'offline', rounds = 1): void {
+  const base = { namespace: cluster.metadata.namespace ?? 'default', cluster: cluster.metadata.name };
+  metrics.inc('firebird_promotions_total', 'Promotions of a new primary by kind (switchover, failover) and mode (in_place, offline)', { ...base, kind, mode });
+  if (rounds > 1) {
+    metrics.inc(
+      'firebird_promotion_header_retries_total',
+      'Header rounds an in-place promotion repeated because the server went online without the replication sequence written',
+      base,
+      rounds - 1,
+    );
+  }
+}

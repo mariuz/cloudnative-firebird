@@ -66,8 +66,9 @@
 #   "<token> STANDBY off <S>\n" -> "OK": back to journal shipping after segment S (the primary's
 #                                 last segment, in full shutdown): the replica control file and the
 #                                 puller's position move to S
-#   "<token> PROMOTE <A>|none\n" -> "OK <S>": planned switchover, promotes this replica in place (no
-#                                 restart): after every received segment is applied, a short full
+#   "<token> PROMOTE <A>|none\n" -> "OK <S> <R>": planned switchover, promotes this replica in place (no
+#                                 restart; <R>: the rounds the header took, "OK <S>" when promoted
+#                                 already): after every received segment is applied, a short full
 #                                 shutdown sets the replication sequence S (the control file
 #                                 position, or the journal archive's last segment A when higher),
 #                                 replaces the replication state and the offline bootstrap seed,
@@ -622,7 +623,9 @@ sub promote_here {
     # The header is written while the server has the database closed, and read back through the
     # server once it is online again: a server that went online with its cached header page (the
     # sequence lost, ISSUES.md issue 10) gets the round again, the database still a replica.
+    my $rounds = 0;
     for my $round (1 .. $promote_header_attempts) {
+      $rounds = $round;
       # the full shutdown can fail while the server is busy (seen under load): it is tried a few
       # times before the operator falls back to the offline promotion (a restart)
       my @failures;
@@ -689,8 +692,9 @@ sub promote_here {
       closedir($dh);
     }
     unlink $state_file, $standby_seen, $standby_flag;
-    print $client "OK $seq\n";
-    print "promoted in place: the journal continues after segment $seq\n";
+    # the rounds the header took (more than one: the server went online without it, issue 10)
+    print $client "OK $seq $rounds\n";
+    print "promoted in place: the journal continues after segment $seq" . ($rounds > 1 ? " (header written $rounds times)" : '') . "\n";
     # the copy taken in full shutdown becomes what the offline promotion's seed is: online, not a
     # replica, publishing (a file no server has open, as the init container's tools use them);
     # without it new replicas seed from a ready replica

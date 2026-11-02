@@ -124,7 +124,7 @@ import {
   pendingDropsConfigMapName,
 } from '../utils/pending-drops';
 import { firebirdUsername } from '../utils/users';
-import { metrics, recordAheadReseed, recordClusterMetrics, recordReconcile } from '../utils/metrics';
+import { metrics, recordAheadReseed, recordClusterMetrics, recordPromotion, recordReconcile } from '../utils/metrics';
 import { RESEED_VOLUME, dataClaimName, planVolumeRecreation } from '../utils/volume-recreation';
 import { UNSCHEDULABLE_GRACE_SECONDS, maintenanceRecreatesVolumes, maintenanceVolumeRecreations } from '../utils/maintenance';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
@@ -153,6 +153,7 @@ import {
   switchoverDelaySeconds,
   switchoverJobName,
   promoteJobName,
+  promotionRounds,
 } from '../utils/switchover';
 import {
   buildFencingJob,
@@ -1701,6 +1702,7 @@ export class FirebirdClusterController {
       await persist(phase);
       await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
       log.info({ primary: phase.target, demoted: phase.from, promotedInPlace, outcome }, 'Promoting the switchover target');
+      await this.recordPromotionOutcome(cluster, phase, promotedInPlace, targetPromoted ? undefined : outcome);
     }
 
     // Promoting (idempotent): Lease, directives and restarts of pods still running as before
@@ -1768,6 +1770,7 @@ export class FirebirdClusterController {
             : `in-place promotion of ${phase.target} failed (${promoted.reply}): restarting it to promote it offline`,
         };
         await persist(phase);
+        await this.recordPromotionOutcome(cluster, phase, promoted.ok, promoted.ok ? promoted.reply : undefined);
         if (!promoted.ok && stillOld(phase.target, phase.targetToken)) result.restart.push(phase.target);
       }
     }
@@ -1812,7 +1815,28 @@ export class FirebirdClusterController {
       jobPods.items.map((p) => p.status?.containerStatuses?.[0]?.state?.terminated?.message ?? '').find((m) => m !== '')?.trim() ??
       'no reply';
     await this.batchApi.deleteNamespacedJob({ name: jobName, namespace, propagationPolicy: 'Background' });
-    return { ok: complete && /^OK \d+$/.test(reply), reply: failed ? `Job failed: ${reply}` : reply };
+    return { ok: complete && /^OK \d+( \d+)?$/.test(reply), reply: failed ? `Job failed: ${reply}` : reply };
+  }
+
+  /**
+   * The promotion of a switchover or failover in the metrics (in place or offline), and a warning
+   * when the in-place promotion's header took more than one round (the server went online without
+   * the replication sequence written, ISSUES.md issue 10). `reply`: the segment server's reply or
+   * the switchover Job's outcome, when promoted in place.
+   */
+  private async recordPromotionOutcome(cluster: FirebirdCluster, phase: SwitchoverStatus, inPlace: boolean, reply: string | undefined): Promise<void> {
+    const kind = phase.kind === 'failover' ? 'failover' : 'switchover';
+    const rounds = inPlace ? (promotionRounds(reply) ?? 1) : 1;
+    recordPromotion(cluster, kind, inPlace ? 'in_place' : 'offline', rounds);
+    if (rounds > 1) {
+      await this.event(
+        cluster,
+        'Warning',
+        EventReason.PromotionHeaderRetried,
+        `${phase.target} went online without the replication sequence written ${rounds - 1} time(s) before holding it ` +
+          `(${kind}, ${rounds} rounds of full shutdown, header and online)`,
+      );
+    }
   }
 
   /**

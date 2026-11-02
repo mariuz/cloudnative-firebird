@@ -5,7 +5,8 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { KubeConfig, V1Job } from '@kubernetes/client-node';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
-import { TARGET_PRIMARY_ANNOTATION, buildSwitchoverJob } from '../src/utils/switchover';
+import { TARGET_PRIMARY_ANNOTATION, buildSwitchoverJob, promotionRounds } from '../src/utils/switchover';
+import { metrics } from '../src/utils/metrics';
 import { REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { fakeSegmentServer } from './helpers/segment-auth';
 import { FirebirdCluster, SwitchoverStatus } from '../src/types';
@@ -194,6 +195,44 @@ describe('planned switchover', () => {
     const finished = setup({ pods: [pod('db-0', 'new0'), pod('db-1', 'u1'), pod('db-2', 'u2')] });
     await finished.controller.reconcile(makeCluster('db-1', { switchover: promoting }));
     expect(finished.status().switchover).toMatchObject({ phase: 'Completed' });
+  });
+
+  it('counts the promotion, and warns when the in-place header took more than one round', async () => {
+    const outcome = (message: string) => ({ metadata: { name: 'db-switchover-x' }, status: { containerStatuses: [{ state: { terminated: { exitCode: 0, message } } }] } });
+    const value = (series: string) => Number(new RegExp(`^${series.replace(/[{}]/g, '\\$&')} (\\d+)$`, 'm').exec(metrics.render())?.[1] ?? 0);
+    const inPlace = () => value('firebird_promotions_total{namespace="default",cluster="db",kind="switchover",mode="in_place"}');
+    const retries = () => value('firebird_promotion_header_retries_total{namespace="default",cluster="db"}');
+    const [p0, r0] = [inPlace(), retries()];
+    const s = setup({ job: done('Complete'), jobPods: [outcome('inplace 41 3')] });
+    await s.controller.reconcile(makeCluster('db-1', { switchover: { target: 'db-1', from: 'db-0', phase: 'Stopping' } }));
+    const exported = metrics.render();
+    expect(exported).toMatch(/firebird_promotions_total\{namespace="default",cluster="db",kind="switchover",mode="in_place"\} \d+/);
+    expect(inPlace()).toBe(p0 + 1);
+    expect(retries()).toBe(r0 + 2);
+    const warning = s.fn('createNamespacedEvent').mock.calls.map((c) => c[0].body).find((e) => e.reason === 'PromotionHeaderRetried');
+    expect(warning).toMatchObject({ type: 'Warning' });
+    expect(warning.message).toBe('db-1 went online without the replication sequence written 2 time(s) before holding it (switchover, 3 rounds of full shutdown, header and online)');
+
+    // one round, or a segment server before v0.149.0: counted, no warning, no retry
+    for (const message of ['inplace 41 1', 'inplace 41']) {
+      const one = setup({ job: done('Complete'), jobPods: [outcome(message)] });
+      await one.controller.reconcile(makeCluster('db-1', { switchover: { target: 'db-1', from: 'db-0', phase: 'Stopping' } }));
+      expect(one.fn('createNamespacedEvent').mock.calls.some((c) => c[0].body.reason === 'PromotionHeaderRetried')).toBe(false);
+    }
+    expect(retries()).toBe(r0 + 2);
+    // not in place: counted as offline
+    const offline = setup({ job: done('Complete'), jobPods: [outcome('restart ERR full shutdown failed')] });
+    await offline.controller.reconcile(makeCluster('db-1', { switchover: { target: 'db-1', from: 'db-0', phase: 'Stopping' } }));
+    expect(metrics.render()).toMatch(/firebird_promotions_total\{namespace="default",cluster="db",kind="switchover",mode="offline"\} [1-9]/);
+  });
+
+  it('reads the header rounds from the reply or the Job outcome', () => {
+    expect(promotionRounds('OK 12 2')).toBe(2);
+    expect(promotionRounds('inplace 41 3')).toBe(3);
+    expect(promotionRounds('OK 12')).toBe(1);
+    expect(promotionRounds('inplace 41')).toBe(1);
+    expect(promotionRounds('restart ERR x')).toBeUndefined();
+    expect(promotionRounds(undefined)).toBeUndefined();
   });
 
   it('passes the journal archive position to the Job, which promotes in place', async () => {
@@ -537,8 +576,11 @@ describe('switchover.pl with Firebird 6', () => {
       server.close();
       return { code, requests, result: readFileSync(join(dir, 'result'), 'utf8') };
     };
-    const promoted = await run('OK 53');
-    expect(promoted).toMatchObject({ code: 0, result: 'inplace 53' });
+    const promoted = await run('OK 53 1');
+    expect(promoted).toMatchObject({ code: 0, result: 'inplace 53 1' });
+    // the header took two rounds; a segment server before v0.149.0 (or promoted already) gives none
+    expect(await run('OK 53 2')).toMatchObject({ code: 0, result: 'inplace 53 2' });
+    expect(await run('OK 53')).toMatchObject({ code: 0, result: 'inplace 53 1' });
     expect(promoted.requests).toEqual(['POSITION', 'PROMOTE 50']);
     // a failed promotion still lets the operator promote the target offline
     expect(await run('ERR full shutdown failed')).toMatchObject({ code: 0, result: 'restart ERR full shutdown failed' });
