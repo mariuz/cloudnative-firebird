@@ -397,6 +397,18 @@ describe('replication lag reconciliation', () => {
     // re-seeded as with the annotation; the replica that follows is left alone
     const reseeds = s.fn('patchNamespacedPod').mock.calls.filter((c) => c[0].body?.metadata?.annotations?.[RESEED_ANNOTATION]);
     expect(reseeds.map((c) => [c[0].name, c[0].body.metadata.annotations[RESEED_ANNOTATION]])).toEqual([['db-1', 'true']]);
+    // in status, the gauge (both replicas) and the re-seed counter
+    expect(s.status().replicationStatus.replicas).toMatchObject([
+      { name: 'db-1', appliedSequence: 62, aheadOfPrimary: true },
+      { name: 'db-2', appliedSequence: 5 },
+    ]);
+    expect(s.status().replicationStatus.replicas[1].aheadOfPrimary).toBeUndefined();
+    const exported = metrics.render();
+    expect(exported).toContain('firebird_replication_ahead_of_primary{namespace="prod",cluster="db",pod="db-1"} 1\n');
+    expect(exported).toContain('firebird_replication_ahead_of_primary{namespace="prod",cluster="db",pod="db-2"} 0\n');
+    expect(exported).toContain('# TYPE firebird_replication_ahead_reseeds_total counter');
+    expect(exported).toMatch(/firebird_replication_ahead_reseeds_total\{namespace="prod",cluster="db",pod="db-1"\} [1-9]/);
+    expect(exported).not.toContain('firebird_replication_ahead_reseeds_total{namespace="prod",cluster="db",pod="db-2"}');
   });
 
   it('does not take a segment archived while the replicas were measured for a journal behind them', async () => {

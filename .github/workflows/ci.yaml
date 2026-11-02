@@ -975,6 +975,15 @@ jobs:
           kubectl logs repl-1 -c replication-init | grep -q 're-seed requested'
           [ "$(count repl-1)" = "$rows" ]
           timeout 120 bash -c 'while kubectl get firebirdcluster repl -o jsonpath={.status.reseedingInstances} | grep -q repl-1; do sleep 5; done'
+          # the operator counted the re-seed, and the replica, measured again, follows the primary
+          OP=$(kubectl get lease cloudnative-firebird-operator -n cloudnative-firebird-system -o jsonpath={.spec.holderIdentity})
+          metrics() { kubectl get --raw "/api/v1/namespaces/cloudnative-firebird-system/pods/$OP:8080/proxy/metrics"; }
+          metrics | grep -E '^firebird_replication_ahead_reseeds_total\{namespace="default",cluster="repl",pod="repl-1"\} [1-9]'
+          for n in $(seq 1 24); do
+            metrics | grep -q '^firebird_replication_ahead_of_primary{namespace="default",cluster="repl",pod="repl-1"} 0$' && break
+            sleep 5
+          done
+          metrics | grep '^firebird_replication_ahead_of_primary{namespace="default",cluster="repl",pod="repl-1"} 0$'
           echo "replica ahead of the primary's journal re-seeded"
 
       - name: Verify re-creating a replica's volume

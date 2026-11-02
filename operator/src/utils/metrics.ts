@@ -85,7 +85,14 @@ export function recordClusterMetrics(cluster: FirebirdCluster, status: Partial<F
   const base = { namespace: cluster.metadata.namespace ?? 'default', cluster: cluster.metadata.name };
   // lag series of replicas that are gone (scaled away, promoted, unmeasured) must not linger
   metrics.removeFamilies(
-    ['firebird_replication_lag_seconds', 'firebird_replication_lag_segments', 'firebird_replication_pending_segments', 'firebird_replication_applied_sequence', 'firebird_replication_last_archived_sequence'],
+    [
+      'firebird_replication_lag_seconds',
+      'firebird_replication_lag_segments',
+      'firebird_replication_pending_segments',
+      'firebird_replication_applied_sequence',
+      'firebird_replication_ahead_of_primary',
+      'firebird_replication_last_archived_sequence',
+    ],
     base,
   );
   metrics.set('firebird_cluster_instances', 'Instances requested by spec.instances', base, cluster.spec.instances);
@@ -104,7 +111,22 @@ export function recordClusterMetrics(cluster: FirebirdCluster, status: Partial<F
     metrics.set('firebird_replication_lag_segments', 'Archived journal segments the replica has not applied', labels, r.lagSegments ?? 0);
     metrics.set('firebird_replication_pending_segments', 'Segments received by the replica but not applied yet', labels, r.pendingSegments ?? 0);
     metrics.set('firebird_replication_applied_sequence', 'Journal segment applied by the replica', labels, r.appliedSequence ?? 0);
+    metrics.set(
+      'firebird_replication_ahead_of_primary',
+      '1 when the replica applied a later segment than the primary last archived (it no longer follows the primary)',
+      labels,
+      r.aheadOfPrimary ? 1 : 0,
+    );
   }
+}
+
+/** Counts a re-seed the operator started for a replica ahead of the primary's journal */
+export function recordAheadReseed(cluster: FirebirdCluster, pod: string): void {
+  metrics.inc(
+    'firebird_replication_ahead_reseeds_total',
+    'Re-seeds the operator started for replicas ahead of the primary journal (JournalBehindReplicas)',
+    { namespace: cluster.metadata.namespace ?? 'default', cluster: cluster.metadata.name, pod },
+  );
 }
 
 /** Counts a reconcile of the cluster by result (success or error) */

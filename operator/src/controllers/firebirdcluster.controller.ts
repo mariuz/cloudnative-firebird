@@ -124,7 +124,7 @@ import {
   pendingDropsConfigMapName,
 } from '../utils/pending-drops';
 import { firebirdUsername } from '../utils/users';
-import { metrics, recordClusterMetrics, recordReconcile } from '../utils/metrics';
+import { metrics, recordAheadReseed, recordClusterMetrics, recordReconcile } from '../utils/metrics';
 import { RESEED_VOLUME, dataClaimName, planVolumeRecreation } from '../utils/volume-recreation';
 import { UNSCHEDULABLE_GRACE_SECONDS, maintenanceRecreatesVolumes, maintenanceVolumeRecreations } from '../utils/maintenance';
 import { EventReason, EventRecorder, EventType } from '../utils/events';
@@ -2703,6 +2703,9 @@ export class FirebirdClusterController {
       }
     }
     if (behind) {
+      // in status.replicationStatus and the firebird_replication_ahead_of_primary gauge
+      const ahead = new Set(behind.ahead.map((r) => r.name));
+      for (const r of replicas) if (ahead.has(r.name)) r.aheadOfPrimary = true;
       const names = behind.ahead.map((r) => `${r.name} (${r.appliedSequence})`).join(', ');
       await this.event(
         cluster,
@@ -2717,7 +2720,7 @@ export class FirebirdClusterController {
       for (const { name: podName } of behind.ahead) {
         if (byName.get(podName)?.metadata?.annotations?.[RESEED_ANNOTATION]) continue;
         log.warn({ pod: podName, lastArchived: behind.lastArchived }, 'Replica ahead of the primary journal: re-seeding it');
-        await this.ifPodExists(
+        const annotated = await this.ifPodExists(
           this.coreApi.patchNamespacedPod(
             { name: podName, namespace, body: { metadata: { annotations: { [RESEED_ANNOTATION]: 'true' } } } },
             MERGE_PATCH,
@@ -2725,6 +2728,7 @@ export class FirebirdClusterController {
           podName,
           log,
         );
+        if (annotated) recordAheadReseed(cluster, podName);
       }
     }
     // the primary keeps the segments the replicas (ready or not) have not applied yet
