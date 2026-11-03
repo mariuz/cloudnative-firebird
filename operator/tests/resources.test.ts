@@ -1,3 +1,5 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { describe, it, expect } from 'vitest';
 import { V1CronJob } from '@kubernetes/client-node';
 import {
@@ -883,6 +885,24 @@ describe('Diagnostics & Grafana Dashboard Builders', () => {
     expect(cm.metadata?.name).toBe('test-cluster-grafana-dashboard');
     expect(cm.metadata?.labels?.['grafana_dashboard']).toBe('1');
     expect(cm.data?.['firebird-test-cluster.json']).toContain('Active Attachments');
+  });
+
+  it("charts the operator's replication and promotion metrics, by their exported names", () => {
+    const cluster = makeCluster({ monitoring: { enableGrafanaDashboard: true } });
+    const dashboard = JSON.parse(buildGrafanaDashboardConfigMap(cluster).data!['firebird-test-cluster.json']);
+    const panel = (title: string) => dashboard.panels.find((p: { title: string }) => p.title === title);
+    const exprs = (title: string) => panel(title).targets.map((t: { expr: string }) => t.expr).join('\n');
+    expect(exprs('Replicas Ahead of the Primary Journal')).toContain('firebird_replication_ahead_of_primary{namespace="default",cluster="test-cluster"}');
+    expect(exprs('Replicas Ahead of the Primary Journal')).toContain('increase(firebird_replication_ahead_reseeds_total{namespace="default",cluster="test-cluster"}[1d])');
+    expect(exprs('Promotions (1d)')).toContain('sum by (kind, mode) (increase(firebird_promotions_total{namespace="default",cluster="test-cluster"}[1d]))');
+    expect(exprs('Promotions (1d)')).toContain('firebird_promotion_header_retries_total');
+    // every operator metric the dashboard queries is one utils/metrics.ts exports
+    const source = readFileSync(join(__dirname, '..', 'src', 'utils', 'metrics.ts'), 'utf8');
+    const queried = new Set(
+      dashboard.panels.flatMap((p: { targets: { expr: string }[] }) => p.targets.flatMap((t) => t.expr.match(/firebird_(?:cluster|replication|promotion|promotions|operator)_\w+/g) ?? [])),
+    );
+    expect(queried.size).toBeGreaterThan(5);
+    for (const name of queried) expect(source).toContain(`'${name}'`);
   });
 
 });

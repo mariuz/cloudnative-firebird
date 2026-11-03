@@ -1488,10 +1488,12 @@ jobs:
           fenced=no
           renewed=""
           for n in $(seq 1 120); do
-            # the last renewal of the cut-off primary, before the failover takes the Lease over
-            if [ "$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})" = "$primary" ]; then
-              renewed=$(kubectl get lease repl-lease -o jsonpath={.spec.renewTime})
-            fi
+            # the last renewal of the cut-off primary, before the failover takes the Lease over: holder
+            # and renewal in one read (read apart, the takeover that writes both can land in between,
+            # pairing the old holder with the new one's renewal); none after the fence, which the
+            # cut-off primary cannot renew past
+            read -r holder renew <<<"$(kubectl get lease repl-lease -o jsonpath='{.spec.holderIdentity} {.spec.renewTime}')"
+            if [ "$fenced" = no ] && [ "$holder" = "$primary" ]; then renewed=$renew; fi
             if [ "$fenced" = no ] && [ "$(kubectl get pod "$primary" -o jsonpath={.metadata.uid} 2>/dev/null)" = "$old_uid" ] &&
               kubectl logs "$primary" -c lease-holder 2>/dev/null | tee /tmp/lease-holder.log | grep -q 'fenced: the Lease could not be renewed'; then
               fenced=yes
