@@ -1110,6 +1110,11 @@ jobs:
           [ "$(kubectl get pod repl-1 -o jsonpath={.metadata.uid})" = "$target_uid" ]
           kubectl logs repl-1 -c segment-server | grep 'promoted in place'
           kubectl logs repl-0 -c replication-init | grep 'demoted to replica'
+          # counted by the operator's leader (v0.149.0): the Job's outcome carried the header rounds
+          OP=$(kubectl get lease cloudnative-firebird-operator -n cloudnative-firebird-system -o jsonpath={.spec.holderIdentity})
+          kubectl get --raw "/api/v1/namespaces/cloudnative-firebird-system/pods/$OP:8080/proxy/metrics" > /tmp/promotion-metrics.txt
+          grep -E '^firebird_promotions_total\{namespace="default",cluster="repl",kind="switchover",mode="in_place"\} [1-9]' /tmp/promotion-metrics.txt
+          grep '^firebird_promotion_header_retries_total{namespace="default",cluster="repl"}' /tmp/promotion-metrics.txt || echo "no header round repeated"
           # nothing was lost, the new primary takes writes and both replicas follow it
           [ "$(count repl-1)" = "$before" ]
           for i in $(seq 101 110); do sql repl-1 "insert into app values ($i, 'new primary'); commit;" >/dev/null; done
@@ -1251,6 +1256,11 @@ jobs:
           # promoted in place by the promote Job (no restart of the elected replica)
           [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.promotedInPlace})" = "true" ]
           kubectl logs "$new" -c segment-server | grep 'promoted in place'
+          # counted by the operator's leader (v0.149.0), from the segment server's reply with its rounds
+          OP=$(kubectl get lease cloudnative-firebird-operator -n cloudnative-firebird-system -o jsonpath={.spec.holderIdentity})
+          kubectl get --raw "/api/v1/namespaces/cloudnative-firebird-system/pods/$OP:8080/proxy/metrics" > /tmp/promotion-metrics.txt
+          grep -E '^firebird_promotions_total\{namespace="default",cluster="repl",kind="failover",mode="in_place"\} [1-9]' /tmp/promotion-metrics.txt
+          grep '^firebird_promotion_header_retries_total{namespace="default",cluster="repl"}' /tmp/promotion-metrics.txt || echo "no header round repeated"
           # no writes happened while the primary was down: nothing is lost here
           [ "$(count "$new")" = "$before" ]
           for i in $(seq 201 210); do sql "$new" "insert into app values ($i, 'after failover'); commit;" >/dev/null; done
