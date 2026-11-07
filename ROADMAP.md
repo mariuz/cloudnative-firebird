@@ -4,13 +4,21 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.125.0):** journal replication (experimental) with replica re-seeding and lag metrics,
-> planned switchover, automatic failover and rolling updates with the primary last, Kubernetes events, backups/restores, instance fencing and declarative users work against the official `firebirdsql/firebird` image (section 7). Some items below
-> were marked done before they were implemented; they are annotated where that is the case
-> (failover, synchronous replication; both are implemented now). The latest CloudNativePG changes
-> (1.28 – 1.30.1) are reviewed in [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md).
-> Firebird-level problems found along the way are in [ISSUES.md](ISSUES.md), open work in
-> [TODO.md](TODO.md).
+> **Status note (v0.150.0):** every item below is done; open work is in [TODO.md](TODO.md).
+> Journal replication (still experimental, see TODO.md) works against the official
+> `firebirdsql/firebird` image (Firebird 4, 5 and the 6 snapshot). It covers replica re-seeding,
+> lag metrics, planned switchover, automatic failover with a primary Lease, and rolling updates with
+> the primary last. Around it come backups and restores with PITR, instance fencing, declarative
+> users, roles and databases, and the Kubernetes events. Since v0.134.0 the
+> operator follows CloudNativePG's main branch after 1.30.1: Lease fencing at the renew deadline,
+> conditional status writes, generated passwords, and adoption of what a deleted cluster left. The
+> journal sequence is kept across in-place promotions (v0.144.0 – v0.147.0, ISSUES.md issue 10),
+> with metrics and dashboard panels for replicas ahead of the primary and for promotions
+> (v0.148.0 – v0.150.0). Items marked done before they were implemented are annotated where that
+> is the case (failover, synchronous replication; both are implemented now). Since 1.28 the
+> CloudNativePG changes are reviewed in
+> [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md), and Firebird-level problems found
+> along the way are in [ISSUES.md](ISSUES.md).
 
 ---
 
