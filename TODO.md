@@ -64,7 +64,18 @@ Nothing open.
 
 From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
 [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md)), most important first. The sweeps
-of 2026-10-28 (to `036d116`) and 2026-11-01 (to `4383dbf`) added nothing open:
+of 2026-10-28 (to `036d116`) and 2026-11-01 (to `4383dbf`) added nothing open; the one of
+2026-11-07 (to `db022ef`) added the first two below:
+
+- [ ] **Server-side encryption for S3** (CloudNativePG #11775, SSE-C): backups, journal archiving
+  and restores write and read objects without any server-side encryption setting. Add one to
+  `S3BackupConfiguration` (SSE-S3 or SSE-KMS by key id, and SSE-C with the key from a Secret,
+  passed to the `aws` CLI as `--sse`/`--sse-kms-key-id` or `--sse-c`/`--sse-c-key`), for every
+  Job that uploads or downloads, and document that an SSE-C key must never change.
+- [ ] **Skip status writes that change nothing** (CloudNativePG #11789): the cluster reconcile
+  replaces the whole status on every pass, every resync, even when nothing changed. Compare with
+  the stored status first (conditions keep their `lastTransitionTime` while unchanged) and write
+  only a difference, which also quiets `kubectl get firebirdcluster -w`.
 
 - [x] **Adopt an orphan primary Lease** (CloudNativePG #11609, v0.134.0): a cluster recreated
   over the resources a deleted one left keeps `<cluster>-lease` without its owner (or with the
