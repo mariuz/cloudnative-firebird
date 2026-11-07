@@ -1,6 +1,6 @@
 import { V1Container } from '@kubernetes/client-node';
 import { FirebirdCluster } from '../types';
-import { s3ClientEnv, s3ClientImage, s3Uri } from './backup';
+import { s3ClientEnv, s3ClientImage, s3ClientMounts, s3Uri, sseCustomerKeyFile } from './backup';
 import { FIREBIRD_DATA_DIR } from './resources';
 import { replicationDirectories, UPGRADE_SCRIPTS } from './replication';
 
@@ -47,12 +47,13 @@ export function buildArchiveFollowerContainer(cluster: FirebirdCluster): V1Conta
       { name: 'REPLICATION_DIR', value: dirs.base },
       { name: 'JOURNALS', value: s3Uri(replica.journalS3, 'journals/') },
       ...(replica.journalS3.endpoint ? [{ name: 'S3_ENDPOINT', value: replica.journalS3.endpoint }] : []),
+      ...(replica.journalS3.sseCustomerKey ? [{ name: 'S3_SSE_C_KEY_FILE', value: sseCustomerKeyFile('follow') }] : []),
       { name: 'POLL_SECONDS', value: String(replica.pollIntervalSeconds ?? DEFAULT_FOLLOW_POLL_SECONDS) },
       // the aws CLI may write a cache under HOME, whatever user the container runs as
       { name: 'HOME', value: '/tmp' },
     ],
     resources: { requests: { cpu: '10m', memory: '64Mi' } },
-    volumeMounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }],
+    volumeMounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }, ...s3ClientMounts(replica.journalS3, 'follow')],
   };
 }
 
@@ -87,6 +88,7 @@ export function replicaClusterErrors(cluster: FirebirdCluster): string[] {
   if (!replica) return [];
   const errors: string[] = [];
   if (!replica.journalS3?.bucket) errors.push('replica.journalS3.bucket is required (the source cluster\'s journal archive)');
+  if (replica.journalS3?.sseCustomerKey && !replica.journalS3.sseCustomerKey.name) errors.push('replica.journalS3.sseCustomerKey.name is required');
   const poll = replica.pollIntervalSeconds;
   if (poll !== undefined && (!Number.isInteger(poll) || poll < 5 || poll > 3600)) {
     errors.push('replica.pollIntervalSeconds must be an integer from 5 to 3600');

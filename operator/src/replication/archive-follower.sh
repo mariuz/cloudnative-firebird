@@ -20,7 +20,7 @@
 #   FOLLOW: "applied=<n> archived=<n>" plus " restart=<U>" or " error=<message>".
 #
 # Environment: SOURCE_DIR, REPLICATION_DIR, JOURNALS (s3://bucket/prefix/journals/), S3_ENDPOINT
-# (optional), POLL_SECONDS, BATCH.
+# (optional), S3_SSE_C_KEY_FILE (optional: the SSE-C key of the archive), POLL_SECONDS, BATCH.
 set -u
 # as the container's PID 1, sh ignores SIGTERM without a trap; the follower can stop at once (its
 # downloads go through temporary names)
@@ -94,7 +94,7 @@ while :; do
     awk -v a="$applied" -v l="$limit" '$1 > a && $1 <= l { print $2 }' "$W/segments" | head -n "$BATCH" > "$W/wanted"
     while read -r name; do
       [ -f "$SOURCE_DIR/$name" ] && continue
-      if aws_s3 cp --only-show-errors "$JOURNALS$name" "$SOURCE_DIR/.$name.tmp" 2> "$W/cp.err"; then
+      if aws_s3 cp --only-show-errors ${S3_SSE_C_KEY_FILE:+--sse-c AES256 --sse-c-key "fileb://$S3_SSE_C_KEY_FILE"} "$JOURNALS$name" "$SOURCE_DIR/.$name.tmp" 2> "$W/cp.err"; then
         chmod 644 "$SOURCE_DIR/.$name.tmp"
         mv "$SOURCE_DIR/.$name.tmp" "$SOURCE_DIR/$name"
       else
