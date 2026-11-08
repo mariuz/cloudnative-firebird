@@ -71,10 +71,9 @@ of 2026-10-28 (to `036d116`) and 2026-11-01 (to `4383dbf`) added nothing open; t
   (`AES256` or `aws:kms` with `kmsKeyId`) and `sseCustomerKey` (SSE-C, the key from a Secret) in
   `S3BackupConfiguration`, passed to the `aws` CLI by every Job and container that uploads or
   downloads. The README documents that an SSE-C key must never change.
-- [ ] **Skip status writes that change nothing** (CloudNativePG #11789): the cluster reconcile
-  replaces the whole status on every pass, every resync, even when nothing changed. Compare with
-  the stored status first (conditions keep their `lastTransitionTime` while unchanged) and write
-  only a difference, which also quiets `kubectl get firebirdcluster -w`.
+- [x] **Skip status writes that change nothing** (CloudNativePG #11789, v0.152.0): conditions
+  keep their `lastTransitionTime` while their status is unchanged, and the cluster reconcile
+  writes its status only when it differs from the stored one.
 
 - [x] **Adopt an orphan primary Lease** (CloudNativePG #11609, v0.134.0): a cluster recreated
   over the resources a deleted one left keeps `<cluster>-lease` without its owner (or with the

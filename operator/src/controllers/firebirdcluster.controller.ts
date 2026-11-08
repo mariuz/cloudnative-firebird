@@ -219,6 +219,7 @@ import {
 } from '../utils/replication';
 import { planVolumeExpansion } from '../utils/storage';
 import { validateClusterSpec } from '../utils/validation';
+import { canonicalStatus, keepTransitionTimes } from '../utils/status-diff';
 import {
   API_GROUP,
   API_VERSION,
@@ -342,6 +343,12 @@ export class FirebirdClusterController {
   private readonly networkingApi: NetworkingV1Api;
   private readonly policyApi: PolicyV1Api;
   private readonly events: EventRecorder;
+  /**
+   * Per cluster (namespace/name): the status as stored, in its canonical form, from the copy the
+   * reconcile started with or this controller's last write. A status write equal to it is skipped
+   * (CloudNativePG #11789); a status patch of another kind forgets it.
+   */
+  private readonly storedStatus = new Map<string, string>();
   /** uids of clusters the watch saw deleted or replaced (markGone), oldest first */
   private readonly goneUids = new Set<string>();
   /** Clusters already warned about tls.secretName / tls.issuerRef */
@@ -376,9 +383,12 @@ export class FirebirdClusterController {
     // for a cluster recreated under its name to adopt. A reconcile from this copy would put the
     // deleted cluster back as their owner, and the garbage collector would remove them.
     if (cluster.metadata.deletionTimestamp) {
+      this.storedStatus.delete(`${namespace}/${name}`);
       log.info('FirebirdCluster is being deleted; nothing reconciled');
       return;
     }
+    // before anything changes the status of this copy in memory
+    this.storedStatus.set(`${namespace}/${name}`, canonicalStatus(cluster.status));
 
     log.info('Reconciling FirebirdCluster');
 
@@ -1342,6 +1352,7 @@ export class FirebirdClusterController {
     // each phase change is stored before it is acted upon, so a failed or concurrent reconcile
     // resumes the phase instead of repeating the previous one
     const persist = async (status: SwitchoverStatus, reason?: string) => {
+      this.storedStatus.delete(`${namespace}/${name}`);
       await this.customApi.patchNamespacedCustomObjectStatus({
         group: API_GROUP,
         version: API_VERSION,
@@ -3386,6 +3397,7 @@ export class FirebirdClusterController {
         : [];
     const persist = async (status: SynchronousStatus | undefined) => {
       if (JSON.stringify(status) === JSON.stringify(stored)) return;
+      this.storedStatus.delete(`${namespace}/${name}`);
       await this.customApi.patchNamespacedCustomObjectStatus({
         group: API_GROUP,
         version: API_VERSION,
@@ -4202,17 +4214,17 @@ export class FirebirdClusterController {
     status: Partial<FirebirdClusterStatus>,
   ): Promise<boolean> {
     const { name, namespace = 'default' } = cluster.metadata;
+    const key = `${namespace}/${name}`;
+    const value: FirebirdClusterStatus = { ...cluster.status, ...status };
+    if (value.conditions) value.conditions = keepTransitionTimes(cluster.status?.conditions, value.conditions);
+    const canonical = canonicalStatus(value);
+    // nothing changed: no write, no new resourceVersion, no watch event (CloudNativePG #11789)
+    if (this.storedStatus.get(key) === canonical) {
+      logger.debug({ cluster: name, namespace }, 'Cluster status unchanged; not written');
+      return true;
+    }
 
-    const patch = [
-      {
-        op: 'replace' as const,
-        path: '/status',
-        value: {
-          ...cluster.status,
-          ...status,
-        },
-      },
-    ];
+    const patch = [{ op: 'replace' as const, path: '/status', value }];
 
     try {
       await this.customApi.patchNamespacedCustomObjectStatus({
@@ -4223,7 +4235,9 @@ export class FirebirdClusterController {
         name,
         body: patch,
       });
+      this.storedStatus.set(key, canonical);
     } catch (err) {
+      this.storedStatus.delete(key);
       if (isNotFound(err)) {
         logger.debug({ cluster: name, namespace }, 'Cluster no longer exists; status not updated');
         return false;

@@ -748,6 +748,98 @@ describe('FirebirdClusterController – basic reconciliation', () => {
       await controller.reconcile(makeCluster());
       expect(mockAppsApi.createNamespacedStatefulSet).not.toHaveBeenCalled();
     });
+
+    describe('skipped when nothing changed (CloudNativePG #11789)', () => {
+      type StatusOf = { status?: Record<string, unknown> };
+      const written = (mock: Mock) => mock.mock.calls.map(([call]) => call.body[0].value as Record<string, unknown>);
+      const setup = () => {
+        let stored: StatusOf['status'];
+        const patch = vi.fn().mockImplementation(async ({ body }: { body: Array<{ value: Record<string, unknown> }> }) => {
+          stored = body[0].value;
+          return {};
+        });
+        const cluster = makeCluster();
+        const { mockKubeConfig } = makeMockKubeConfig({
+          patchNamespacedCustomObjectStatusImpl: patch,
+          // the stored cluster, with the status last written
+          getNamespacedCustomObjectImpl: vi.fn().mockImplementation(async () => ({ ...cluster, status: stored })),
+        });
+        // the copy a watch event or resync brings: the status as stored
+        const copy = () => ({ ...cluster, status: structuredClone(stored) });
+        return { controller: new FirebirdClusterController(mockKubeConfig), patch, cluster, copy };
+      };
+
+      it('a reconcile of an unchanged cluster writes no status, and the conditions keep their time', async () => {
+        const { controller, patch, cluster, copy } = setup();
+        await controller.reconcile(cluster);
+        expect(patch).toHaveBeenCalled();
+        const first = written(patch).at(-1)!;
+        expect(first.phase).toBe('Running');
+        patch.mockClear();
+
+        await new Promise((r) => setTimeout(r, 5));
+        await controller.reconcile(copy());
+        // what it computed again is what is stored
+        for (const value of written(patch)) expect(value).toEqual(first);
+        expect(patch).not.toHaveBeenCalled();
+      });
+
+      it('writes again when something changed, and a condition that changed status gets a new time', async () => {
+        const { controller, patch, cluster } = setup();
+        const at = '2026-01-01T00:00:00.000Z';
+        const prior = {
+          ...cluster,
+          status: {
+            phase: 'Running',
+            conditions: [
+              { type: 'Ready', status: 'True', reason: 'AllReady', message: 'old message', lastTransitionTime: at },
+              { type: 'Progressing', status: 'True', reason: 'Old', message: 'm', lastTransitionTime: at },
+            ],
+          },
+        } as unknown as typeof cluster;
+        await controller.updateStatus(prior, {
+          phaseReason: 'changed',
+          conditions: [
+            { type: 'Ready', status: 'True', reason: 'AllReady', message: 'new message', lastTransitionTime: new Date().toISOString() },
+            { type: 'Progressing', status: 'False', reason: 'Done', message: 'm', lastTransitionTime: '2026-02-01T00:00:00.000Z' },
+          ],
+        });
+        const [value] = written(patch);
+        const conditions = value.conditions as Array<{ type: string; message: string; lastTransitionTime: string }>;
+        // a new message is no transition
+        expect(conditions[0]).toMatchObject({ message: 'new message', lastTransitionTime: at });
+        expect(conditions[1].lastTransitionTime).toBe('2026-02-01T00:00:00.000Z');
+      });
+
+      it('compares with the copy the reconcile started from, not the status changed in memory since', async () => {
+        const { controller, patch, cluster, copy } = setup();
+        await controller.reconcile(cluster);
+        patch.mockClear();
+        const c = copy();
+        // the reconcile starts from this copy...
+        await controller.reconcile(c);
+        expect(patch).not.toHaveBeenCalled();
+        // ... then a step changes the status in memory and writes it with nothing more
+        c.status = { ...c.status, recreatingVolumes: ['test-cluster-1'] };
+        await controller.updateStatus(c, {});
+        expect(written(patch)).toEqual([expect.objectContaining({ recreatingVolumes: ['test-cluster-1'] })]);
+        // and the same again is skipped
+        await controller.updateStatus(c, {});
+        expect(patch).toHaveBeenCalledTimes(1);
+      });
+
+      it('writes again after a failed write', async () => {
+        const { controller, patch, cluster, copy } = setup();
+        await controller.reconcile(cluster);
+        const c = copy();
+        await controller.reconcile(c);
+        patch.mockClear();
+        patch.mockRejectedValueOnce(new Error('API error'));
+        await controller.updateStatus(c, { phaseReason: 'x' });
+        await controller.updateStatus(c, { phaseReason: 'x' });
+        expect(patch).toHaveBeenCalledTimes(2);
+      });
+    });
   });
 
   describe('reconcile() PodDisruptionBudget management', () => {
