@@ -234,6 +234,48 @@ export function s3ClientEnv(s3: S3BackupConfiguration): V1EnvVar[] {
   return [...keys, { name: 'AWS_DEFAULT_REGION', value: s3.region ?? 'us-east-1' }];
 }
 
+const SSE_C_DIR = '/var/run/s3-sse-c';
+
+/** The pod volume holding an SSE-C key (named after its use, as a pod can read two configurations) */
+function sseCustomerKeyVolumeName(id: string): string {
+  return `${id}-sse-c`;
+}
+
+/** The file of the SSE-C key in the S3 client containers */
+export function sseCustomerKeyFile(id = 's3'): string {
+  return `${SSE_C_DIR}/${id}/key`;
+}
+
+/** The Secret volume of an SSE-C key, for the pods of the S3 client containers */
+export function s3ClientVolumes(s3: S3BackupConfiguration, id = 's3'): V1Volume[] {
+  if (!s3.sseCustomerKey) return [];
+  return [
+    {
+      name: sseCustomerKeyVolumeName(id),
+      secret: {
+        secretName: s3.sseCustomerKey.name,
+        items: [{ key: s3.sseCustomerKey.key ?? 'SSE_C_KEY', path: 'key' }],
+        defaultMode: 0o444,
+      },
+    },
+  ];
+}
+
+export function s3ClientMounts(s3: S3BackupConfiguration, id = 's3'): V1VolumeMount[] {
+  if (!s3.sseCustomerKey) return [];
+  return [{ name: sseCustomerKeyVolumeName(id), mountPath: `${SSE_C_DIR}/${id}`, readOnly: true }];
+}
+
+/**
+ * The server-side encryption arguments of `aws s3 cp` and `aws s3 sync`: SSE-S3 or SSE-KMS for
+ * uploads only, SSE-C (the key from the mounted Secret) both ways
+ */
+export function s3TransferArgs(s3: S3BackupConfiguration, direction: 'upload' | 'download', id = 's3'): string {
+  if (s3.sseCustomerKey) return ` --sse-c AES256 --sse-c-key fileb://${sseCustomerKeyFile(id)}`;
+  if (direction === 'download' || !s3.encryption) return '';
+  return ` --sse ${s3.encryption}` + (s3.encryption === 'aws:kms' && s3.kmsKeyId ? ` --sse-kms-key-id ${shellQuote(s3.kmsKeyId)}` : '');
+}
+
 export function s3ClientImage(s3: S3BackupConfiguration): string {
   return s3.clientImage ?? DEFAULT_S3_CLIENT_IMAGE;
 }
@@ -399,9 +441,9 @@ export function buildBackupPodSpec(
           `set -eu; f=$(cat ${WORK_DIR}/.name); ` +
             // a replica's position first: an uploaded nbackup taken on a replica has its .ctl
             (physical
-              ? `if [ -f "${WORK_DIR}/$f.ctl" ]; then ${awsCommand(s3)} s3 cp "${WORK_DIR}/$f.ctl" "s3://${s3.bucket}/${s3KeyPrefix(s3)}$f.ctl"; fi; `
+              ? `if [ -f "${WORK_DIR}/$f.ctl" ]; then ${awsCommand(s3)} s3 cp${s3TransferArgs(s3, 'upload')} "${WORK_DIR}/$f.ctl" "s3://${s3.bucket}/${s3KeyPrefix(s3)}$f.ctl"; fi; `
               : '') +
-            `${awsCommand(s3)} s3 cp "${WORK_DIR}/$f" "s3://${s3.bucket}/${s3KeyPrefix(s3)}$f"` +
+            `${awsCommand(s3)} s3 cp${s3TransferArgs(s3, 'upload')} "${WORK_DIR}/$f" "s3://${s3.bucket}/${s3KeyPrefix(s3)}$f"` +
             (options.retention?.policy
               ? `; ${s3RetentionScript(
                   s3,
@@ -412,10 +454,10 @@ export function buildBackupPodSpec(
               : ''),
         ],
         env: s3ClientEnv(s3),
-        volumeMounts: [workMount],
+        volumeMounts: [workMount, ...s3ClientMounts(s3)],
       },
     ],
-    volumes: physical ? [workVolume, configVolume(cluster)] : [workVolume],
+    volumes: [workVolume, ...(physical ? [configVolume(cluster)] : []), ...s3ClientVolumes(s3)],
   });
 }
 
@@ -643,10 +685,12 @@ export function buildRestoreJob(
           command: ['/bin/sh', '-c'],
           args: [
             'set -eu; ' +
-              keys.map((k, i) => `${awsCommand(s3)} s3 cp ${shellQuote(s3Uri(s3, k))} ${WORK_DIR}/${serverNames[i]}`).join('; '),
+              keys
+                .map((k, i) => `${awsCommand(s3)} s3 cp${s3TransferArgs(s3, 'download')} ${shellQuote(s3Uri(s3, k))} ${WORK_DIR}/${serverNames[i]}`)
+                .join('; '),
           ],
           env: s3ClientEnv(s3),
-          volumeMounts: [workMount],
+          volumeMounts: [workMount, ...s3ClientMounts(s3)],
         },
       ],
       containers: [
@@ -663,7 +707,7 @@ export function buildRestoreJob(
           volumeMounts: [workMount, configMount],
         },
       ],
-      volumes: [workVolume, configVolume(cluster)],
+      volumes: [workVolume, configVolume(cluster), ...s3ClientVolumes(s3)],
     });
   } else if (source.s3) {
     const s3 = source.s3;
@@ -674,9 +718,9 @@ export function buildRestoreJob(
           name: 'download',
           image: s3ClientImage(s3),
           command: ['/bin/sh', '-c'],
-          args: [`set -eu; ${awsCommand(s3)} s3 cp ${shellQuote(s3Uri(s3, source.path))} ${WORK_DIR}/backup.fbk`],
+          args: [`set -eu; ${awsCommand(s3)} s3 cp${s3TransferArgs(s3, 'download')} ${shellQuote(s3Uri(s3, source.path))} ${WORK_DIR}/backup.fbk`],
           env: s3ClientEnv(s3),
-          volumeMounts: [workMount],
+          volumeMounts: [workMount, ...s3ClientMounts(s3)],
         },
       ],
       containers: [
@@ -689,7 +733,7 @@ export function buildRestoreJob(
           volumeMounts: [workMount],
         },
       ],
-      volumes: [workVolume],
+      volumes: [workVolume, ...s3ClientVolumes(s3)],
     });
   } else {
     const script =
@@ -813,13 +857,15 @@ function replayPodSpec(
           command: ['/bin/sh', '-c'],
           args: [
             `set -eu; mkdir -p ${WORK_DIR}/chain; ` +
-              chain.keys.map((k, i) => `${awsCommand(chain.s3)} s3 cp ${shellQuote(s3Uri(chain.s3, k))} ${WORK_DIR}/chain/${i}.nbk`).join('; ') +
+              chain.keys
+                .map((k, i) => `${awsCommand(chain.s3)} s3 cp${s3TransferArgs(chain.s3, 'download', 'chain')} ${shellQuote(s3Uri(chain.s3, k))} ${WORK_DIR}/chain/${i}.nbk`)
+                .join('; ') +
               // taken on a replica: its position at the copy, next to the last file of the chain
               `; if ${awsCommand(chain.s3)} s3 ls ${shellQuote(s3Uri(chain.s3, `${chain.keys[chain.keys.length - 1]}.ctl`))} >/dev/null 2>&1; then ` +
-              `${awsCommand(chain.s3)} s3 cp ${shellQuote(s3Uri(chain.s3, `${chain.keys[chain.keys.length - 1]}.ctl`))} ${WORK_DIR}/chain/position.ctl; fi`,
+              `${awsCommand(chain.s3)} s3 cp${s3TransferArgs(chain.s3, 'download', 'chain')} ${shellQuote(s3Uri(chain.s3, `${chain.keys[chain.keys.length - 1]}.ctl`))} ${WORK_DIR}/chain/position.ctl; fi`,
           ],
           env: s3ClientEnv(chain.s3),
-          volumeMounts: [workMount],
+          volumeMounts: [workMount, ...s3ClientMounts(chain.s3, 'chain')],
         },
       ]
     : [];
@@ -837,7 +883,7 @@ function replayPodSpec(
         'for r in $W/req/*.req; do [ -f "$r" ] || continue; err=""; ' +
         'for s in $(cat "$r"); do ' +
         'case "$s" in *[!A-Za-z0-9._-]*) err="invalid segment name $s"; break ;; esac; ' +
-        `${awsCommand(journalS3)} s3 cp --only-show-errors ${shellQuote(journals)}"$s" "$W/segments/$s" 2> $W/cp.err || ` +
+        `${awsCommand(journalS3)} s3 cp --only-show-errors${s3TransferArgs(journalS3, 'download', 'journals')} ${shellQuote(journals)}"$s" "$W/segments/$s" 2> $W/cp.err || ` +
         '{ err="$s: $(cat $W/cp.err)"; break; }; done; ' +
         'if [ -z "$err" ]; then mv "$r" "${r%.req}.ok"; else echo "$err" > "${r%.req}.err"; rm -f "$r"; fi; done; ' +
         // the Firebird container writes the time while it runs: stop when it was killed
@@ -845,7 +891,7 @@ function replayPodSpec(
         'fail "the Firebird container stopped"; sleep 1; done',
     ],
     env: s3ClientEnv(journalS3),
-    volumeMounts: [workMount],
+    volumeMounts: [workMount, ...s3ClientMounts(journalS3, 'journals')],
   };
   return jobPodSpec(cluster, {
     restartPolicy: 'Never',
@@ -867,7 +913,13 @@ function replayPodSpec(
       },
       fetcher,
     ],
-    volumes: [workVolume, configVolume(cluster), ...(options.volumes ?? [])],
+    volumes: [
+      workVolume,
+      configVolume(cluster),
+      ...(chain ? s3ClientVolumes(chain.s3, 'chain') : []),
+      ...s3ClientVolumes(journalS3, 'journals'),
+      ...(options.volumes ?? []),
+    ],
   });
 }
 
@@ -1014,9 +1066,9 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
     command: ['/bin/sh', '-c'],
     // no --delete: the primary prunes segments locally after segmentRetentionHours, while
     // the object store keeps the full history for point-in-time recovery
-    args: [`set -eu; ${awsCommand(s3)} s3 sync ${WORK_DIR}/segments/ ${shellQuote(journals)}`],
+    args: [`set -eu; ${awsCommand(s3)} s3 sync${s3TransferArgs(s3, 'upload')} ${WORK_DIR}/segments/ ${shellQuote(journals)}`],
     env: s3ClientEnv(s3),
-    volumeMounts: [workMount],
+    volumeMounts: [workMount, ...s3ClientMounts(s3)],
   };
   const report: V1Container = {
     // after a successful upload: every listed segment is in the bucket (pruneAppliedSegments
@@ -1070,7 +1122,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
       ...(reportUploads ? [upload] : []),
     ],
     containers: reportUploads ? [report] : [upload],
-    volumes: [workVolume, { name: 'cluster-config', configMap: { name: `${name}-config` } }],
+    volumes: [workVolume, { name: 'cluster-config', configMap: { name: `${name}-config` } }, ...s3ClientVolumes(s3)],
   });
 
   return cronJob(
@@ -1183,9 +1235,9 @@ export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Contai
         name: 'bootstrap-download',
         image: s3ClientImage(s3),
         command: ['/bin/sh', '-c'],
-        args: [guard + `${awsCommand(s3)} s3 cp ${shellQuote(s3Uri(s3, key))} ${WORK_DIR}/backup.fbk`],
+        args: [guard + `${awsCommand(s3)} s3 cp${s3TransferArgs(s3, 'download')} ${shellQuote(s3Uri(s3, key))} ${WORK_DIR}/backup.fbk`],
         env: [...env, ...s3ClientEnv(s3)],
-        volumeMounts: [...mounts, workMount],
+        volumeMounts: [...mounts, workMount, ...s3ClientMounts(s3)],
       },
       restore(`${WORK_DIR}/backup.fbk`, [workMount]),
     ];
@@ -1196,5 +1248,5 @@ export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Contai
 /** Volumes needed by the bootstrap init containers, beyond the data and config volumes */
 export function bootstrapVolumes(cluster: FirebirdCluster): V1Volume[] {
   const recovery = cluster.spec.bootstrap?.recovery;
-  return recovery?.s3 && !recovery.pointInTime ? [workVolume] : [];
+  return recovery?.s3 && !recovery.pointInTime ? [workVolume, ...s3ClientVolumes(recovery.s3)] : [];
 }

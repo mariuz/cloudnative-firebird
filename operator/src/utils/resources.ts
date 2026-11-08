@@ -32,7 +32,7 @@ import {
   RESOURCE_KIND,
 } from '../types';
 import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
-import { bootstrapVolumes, buildBootstrapInitContainers } from './backup';
+import { bootstrapVolumes, buildBootstrapInitContainers, s3ClientVolumes } from './backup';
 import { databaseOnlineCheck } from './fencing';
 import { PENDING_DROPS_DIR, pendingDropsConfigMapName, pendingDropsInitScript } from './pending-drops';
 import {
@@ -408,6 +408,8 @@ export function buildStatefulSet(
     ...(spec.runAsFirebirdUser ? [{ name: FIREBIRD_HOME_VOLUME, emptyDir: {} }] : []),
     { name: PENDING_DROPS_VOLUME, configMap: { name: pendingDropsConfigMapName(name), optional: true } },
     ...bootstrapVolumes(cluster),
+    // the archive follower's SSE-C key
+    ...(replication && replicaClusterFollowing(cluster) ? s3ClientVolumes(cluster.spec.replica!.journalS3, 'follow') : []),
     ...(initSqlVolume(cluster) ? [initSqlVolume(cluster)!] : []),
     ...(projectedVolume(cluster) ? [projectedVolume(cluster)!] : []),
     ...(tempVolume(cluster) ? [tempVolume(cluster)!] : []),

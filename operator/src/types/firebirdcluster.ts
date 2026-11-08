@@ -102,6 +102,24 @@ export interface S3BackupConfiguration {
   prefix?: string;
   /** Image providing the `aws` CLI for uploads and downloads (default "amazon/aws-cli:2.37.4") */
   clientImage?: string;
+  /**
+   * Server-side encryption of the objects written: "AES256" (SSE-S3, keys managed by S3) or
+   * "aws:kms" (SSE-KMS). Reading them needs no setting. Without it the bucket's default applies.
+   */
+  encryption?: 'AES256' | 'aws:kms';
+  /** SSE-KMS: the KMS key (id, ARN or alias) instead of the AWS-managed one; with encryption "aws:kms" */
+  kmsKeyId?: string;
+  /**
+   * SSE-C: the objects are encrypted with this key, held by the client and sent with every
+   * upload and download. A Secret holding the 32-byte key itself (not base64-encoded inside the
+   * Secret's data, e.g. `kubectl create secret generic s3-key --from-file=SSE_C_KEY=key.bin`),
+   * under `key` (default "SSE_C_KEY"). The key must never change: the objects written with it
+   * cannot be read with another one. Not combined with encryption.
+   */
+  sseCustomerKey?: {
+    name: string;
+    key?: string;
+  };
 }
 
 /**

@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.150.0/cloudnative-firebird-0.150.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.151.0/cloudnative-firebird-0.151.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.150.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.151.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.150.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.151.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -1510,6 +1510,37 @@ spec:
     enabled: true
     s3: { bucket: firebird-backups, region: eu-west-1 }
 ```
+
+**Server-side encryption of the S3 objects** (v0.151.0, CloudNativePG #11775). Every S3
+configuration (backups, scheduled backups, restores, bootstrap recovery, journal archiving,
+replica clusters) takes one of:
+
+- `encryption: AES256` (SSE-S3) or `encryption: aws:kms` (SSE-KMS), with `kmsKeyId` for a
+  customer-managed key (id, ARN or alias) instead of the AWS-managed one. The objects written get
+  `--sse` (and `--sse-kms-key-id`); reading them needs no setting. Without `encryption` the
+  bucket's default encryption applies.
+- `sseCustomerKey` (SSE-C): a Secret holding the 32-byte key itself, under `SSE_C_KEY` or the
+  given `key`. It is mounted read-only into the S3 client containers (never into the Firebird
+  ones) and sent with every upload and download (`--sse-c AES256 --sse-c-key fileb://...`).
+  S3 keeps no copy of it.
+
+```yaml
+# head -c 32 /dev/urandom > sse-c.key
+# kubectl create secret generic backup-sse-c --from-file=SSE_C_KEY=sse-c.key
+spec:
+  backup:
+    enabled: true
+    s3: { bucket: firebird-backups, region: eu-west-1, sseCustomerKey: { name: backup-sse-c } }
+```
+
+**An SSE-C key must never change.** Every object written with it can only be read with the same
+key, so a backup, a journal segment or a restore source written with an earlier key fails to
+download. Keep the key as long as any object written with it is kept (a backup within its
+retention, the journal archive a point-in-time recovery or a replica cluster reads), and keep a
+copy outside the cluster: losing it loses those backups. To move to a new key, write to a new
+bucket or prefix with it. Every configuration that reads the same objects (a restore source,
+`bootstrap.recovery.s3`, `pointInTime.journalS3`, a replica cluster's `replica.journalS3`) names
+the same key. `encryption` and `sseCustomerKey` cannot be combined.
 
 **Pod settings and inherited metadata** (v0.106.0, CloudNativePG `priorityClassName`,
 `schedulerName`, `imagePullPolicy`, `imagePullSecrets` and `inheritedMetadata`). Every pod of the

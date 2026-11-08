@@ -207,6 +207,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       if (spec.replication.journalArchiveS3.secretRef && (!spec.replication.journalArchiveS3.secretRef.name || spec.replication.journalArchiveS3.secretRef.name.trim() === '')) {
         throw new ValidationError('Replication journalArchiveS3 secretRef name is required');
       }
+      validateS3Encryption('spec.replication.journalArchiveS3', spec.replication.journalArchiveS3);
     }
   }
 
@@ -243,6 +244,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       if (s3.secretRef && (!s3.secretRef.name || s3.secretRef.name.trim() === '')) {
         throw new ValidationError('Bootstrap recovery S3 secretRef name is required');
       }
+      validateS3Encryption('spec.bootstrap.recovery.s3', s3);
     }
     const { pointInTime, incrementalPaths } = spec.bootstrap.recovery;
     if (incrementalPaths?.length && !pointInTime) {
@@ -300,6 +302,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       if (spec.backup.s3.secretRef && (!spec.backup.s3.secretRef.name || spec.backup.s3.secretRef.name.trim() === '')) {
         throw new ValidationError('S3 backup secretRef name is required');
       }
+      validateS3Encryption('spec.backup.s3', spec.backup.s3);
     }
     validateBackupDestination('spec.backup', spec.backup.type, spec.backup.verify);
     validateRetention('spec.backup', spec.backup.retentionPolicy);
@@ -433,6 +436,28 @@ function validateS3(field: string, s3?: S3BackupConfiguration): void {
   if (!s3.bucket || s3.bucket.trim() === '') throw new ValidationError(`${field}.s3.bucket is required`);
   if (s3.secretRef && (!s3.secretRef.name || s3.secretRef.name.trim() === '')) {
     throw new ValidationError(`${field}.s3.secretRef.name is required`);
+  }
+  validateS3Encryption(`${field}.s3`, s3);
+}
+
+/** encryption (SSE-S3 or SSE-KMS) or sseCustomerKey (SSE-C), at the path of the S3 configuration */
+export function validateS3Encryption(path: string, s3: S3BackupConfiguration): void {
+  if (s3.encryption !== undefined && s3.encryption !== 'AES256' && s3.encryption !== 'aws:kms') {
+    throw new ValidationError(`${path}.encryption "${s3.encryption}" is invalid: use "AES256" (SSE-S3) or "aws:kms" (SSE-KMS)`);
+  }
+  if (s3.kmsKeyId !== undefined && (s3.encryption !== 'aws:kms' || s3.kmsKeyId.trim() === '')) {
+    throw new ValidationError(`${path}.kmsKeyId needs encryption "aws:kms" and a key id`);
+  }
+  if (s3.sseCustomerKey) {
+    if (!s3.sseCustomerKey.name || s3.sseCustomerKey.name.trim() === '') {
+      throw new ValidationError(`${path}.sseCustomerKey.name is required`);
+    }
+    if (s3.sseCustomerKey.key !== undefined && !/^[-._a-zA-Z0-9]+$/.test(s3.sseCustomerKey.key)) {
+      throw new ValidationError(`${path}.sseCustomerKey.key "${s3.sseCustomerKey.key}" is not a valid Secret key`);
+    }
+    if (s3.encryption !== undefined) {
+      throw new ValidationError(`${path}.sseCustomerKey and ${path}.encryption cannot be combined: SSE-C is the encryption`);
+    }
   }
 }
 

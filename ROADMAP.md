@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.150.0):** every item below is done; open work is in [TODO.md](TODO.md).
+> **Status note (v0.151.0):** every item below is done; open work is in [TODO.md](TODO.md).
 > Journal replication (still experimental, see TODO.md) works against the official
 > `firebirdsql/firebird` image (Firebird 4, 5 and the 6 snapshot). It covers replica re-seeding,
 > lag metrics, planned switchover, automatic failover with a primary Lease, and rolling updates with
@@ -14,7 +14,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 > conditional status writes, generated passwords, and adoption of what a deleted cluster left. The
 > journal sequence is kept across in-place promotions (v0.144.0 – v0.147.0, ISSUES.md issue 10),
 > with metrics and dashboard panels for replicas ahead of the primary and for promotions
-> (v0.148.0 – v0.150.0). Items marked done before they were implemented are annotated where that
+> (v0.148.0 – v0.150.0), and server-side encryption of the S3 objects (v0.151.0). Items marked done before they were implemented are annotated where that
 > is the case (failover, synchronous replication; both are implemented now). Since 1.28 the
 > CloudNativePG changes are reviewed in
 > [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md), and Firebird-level problems found
@@ -74,6 +74,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `FirebirdBackup`: On-demand backup custom resource.
   - `FirebirdScheduledBackup`: Cron-based scheduled backup custom resource with retention rules.
   - `FirebirdRestore`: Declarative restore custom resource for target database recovery.
+- [x] **Server-side encryption for S3** *(v0.151.0, CloudNativePG #11775)*
+  - Every S3 configuration (backups, scheduled backups, restores, bootstrap recovery, journal archiving, replica clusters) takes `encryption: AES256` (SSE-S3) or `encryption: aws:kms` with an optional `kmsKeyId` (SSE-KMS). These are passed to the `aws` CLI on uploads as `--sse`/`--sse-kms-key-id`; reads need no setting.
+  - `sseCustomerKey` (SSE-C) names a Secret holding the 32-byte key. It is mounted read-only into the S3 client containers and passed on every upload and download as `--sse-c AES256 --sse-c-key fileb://...`, also by a replica cluster's archive follower. The key must never change: objects written with it cannot be read with another one.
 
 ---
 
