@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.151.0):** every item below is done; open work is in [TODO.md](TODO.md).
+> **Status note (v0.152.0):** every item below is done; open work is in [TODO.md](TODO.md).
 > Journal replication (still experimental, see TODO.md) works against the official
 > `firebirdsql/firebird` image (Firebird 4, 5 and the 6 snapshot). It covers replica re-seeding,
 > lag metrics, planned switchover, automatic failover with a primary Lease, and rolling updates with
@@ -14,7 +14,7 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 > conditional status writes, generated passwords, and adoption of what a deleted cluster left. The
 > journal sequence is kept across in-place promotions (v0.144.0 – v0.147.0, ISSUES.md issue 10),
 > with metrics and dashboard panels for replicas ahead of the primary and for promotions
-> (v0.148.0 – v0.150.0), and server-side encryption of the S3 objects (v0.151.0). Items marked done before they were implemented are annotated where that
+> (v0.148.0 – v0.150.0), server-side encryption of the S3 objects (v0.151.0), and no status write when nothing changed (v0.152.0). Items marked done before they were implemented are annotated where that
 > is the case (failover, synchronous replication; both are implemented now). Since 1.28 the
 > CloudNativePG changes are reviewed in
 > [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md), and Firebird-level problems found
@@ -185,6 +185,9 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **Cluster status writes that change nothing are skipped** *(v0.152.0; CloudNativePG #11789)*
+  - The cluster reconcile replaced the whole `FirebirdCluster` status on every pass, every resync, even when nothing changed, and every condition got a new `lastTransitionTime` each time. So each pass made a new `resourceVersion` and a watch event (`kubectl get firebirdcluster -w` printed the cluster again). A condition now keeps its `lastTransitionTime` while its status is the same, as the Kubernetes API conventions define it; a new reason or message is not a transition. A status write equal to the stored status is skipped. That status is the one of the copy the reconcile started from, taken before any step changes it in memory, or of the controller's own last write. After a failed write or a status patch of another kind (switchover, synchronous replication) the next write always goes out.
+  - Unit tests: a second reconcile of an unchanged cluster writes nothing, a change is written, the comparison is with the copy before the in-memory changes, a failed write is retried, and the condition times. They fail against the previous code.
 - [x] **Dashboard panels for replicas ahead and promotions** *(v0.150.0)*
   - The generated Grafana dashboard (`monitoring.enableGrafanaDashboard`) charts the metrics of v0.148.0 and v0.149.0. "Replicas Ahead of the Primary Journal" shows the replicas the gauge counts and their re-seeds over a day. "Promotions (1d)" shows promotions by kind and mode, and the in-place header rounds repeated.
   - A unit test checks the panels' queries, and that every operator metric the dashboard queries is one `utils/metrics.ts` exports, so a renamed metric cannot leave a panel empty.

@@ -310,6 +310,29 @@ jobs:
           [ "$image" = "$want" ]
           kubectl exec test-cluster-0 -c firebird -- sh -c 'isql -z </dev/null | head -n 1'
 
+      - name: Verify an unchanged cluster's status is not rewritten
+        run: |
+          # CloudNativePG #11789: every resync (10 s here) replaced the status, with new condition
+          # times, so the resourceVersion moved on each pass. A running cluster where nothing happens
+          # now keeps it: find 35 s (three resyncs) without a write within two minutes.
+          timeout 120 bash -c 'until [ "$(kubectl get firebirdcluster test-cluster -o jsonpath={.status.phase}/{.status.readyInstances})" = "Running/1" ]; do sleep 3; done'
+          deadline=$(( $(date +%s) + 120 ))
+          version=$(kubectl get firebirdcluster test-cluster -o jsonpath='{.metadata.resourceVersion}')
+          since=$(date +%s)
+          while [ $(( $(date +%s) - since )) -lt 35 ]; do
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "the cluster was rewritten at least every 35 s:"
+              kubectl get firebirdcluster test-cluster -o jsonpath='{.status}'; echo
+              exit 1
+            fi
+            sleep 5
+            now=$(kubectl get firebirdcluster test-cluster -o jsonpath='{.metadata.resourceVersion}')
+            if [ "$now" != "$version" ]; then echo "written: $version -> $now"; version=$now; since=$(date +%s); fi
+          done
+          echo "resourceVersion $version unchanged for 35 s"
+          # the conditions kept their transition times through those resyncs
+          kubectl get firebirdcluster test-cluster -o jsonpath='{range .status.conditions[*]}{.type}={.status} since {.lastTransitionTime}{"\n"}{end}'
+
       - name: Verify spec updates are patched onto the StatefulSet
         run: |
           kubectl patch firebirdcluster test-cluster --type merge -p '{"spec":{"instances":2}}'
