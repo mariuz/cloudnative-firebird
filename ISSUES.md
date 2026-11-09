@@ -17,8 +17,9 @@ below records the runs made by hand while the issues were found; the workflow's 
 
 Last swept on 2026-10-23 against Firebird `master` at `4fed06f` (2026-10-18, the local source
 checkout): the code behind issues 1, 2 and 9 is unchanged there (notes under each issue), and
-the weekly "Firebird formats" check of 2026-10-19 passed for Firebird 4, 5 and the 6 snapshot
-(TODO.md, "Firebird internal formats"). Nothing was closed; the two upstream reports are still
+the "Firebird formats" check passed for Firebird 4, 5 and the 6 snapshot (2026-10-19; again on
+2026-11-09 for the snapshot built from `master` at `67dbeb4`, TODO.md, "Firebird internal
+formats"). Nothing was closed; the two upstream reports are still
 to be filed.
 
 | # | Issue | Kind | Reproduces |
