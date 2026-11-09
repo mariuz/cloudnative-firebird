@@ -33,7 +33,7 @@ to be filed.
 | 7 | Firebird 6 refuses header statistics for a database in full shutdown | Firebird 6 behaviour, handled | Yes, always (6.0 snapshot) |
 | 8 | Firebird 4 commits while a synchronous replica is unreachable | Firebird 4 behaviour, handled | Yes, always (4.0.7; CI 2026-10-24: 6 of 6); not on 5.0.4 or the 6.0 snapshot (0 of 6 each) |
 | 9 | `replication.conf` is read only when a database is opened: no reload | Firebird behaviour, handled | Yes, always (CI 2026-10-24: 6 of 6 on 4.0.7, 5.0.4 and the 6.0 snapshot) |
-| 10 | An in-place promotion loses the header's replication sequence: the journal restarts at segment 1 | Firebird 6 behaviour (the server goes online with its cached header), handled | Sometimes: once in the kind CI (6.0 snapshot 2428); `promoted-journal.sh` 2 of 21 runs on the 6.0 snapshot, then 0 of 20 (2026-10-31); 0 of 1 on 5.0 |
+| 10 | An in-place promotion loses the header's replication sequence: the journal restarts at segment 1 | Firebird bug, all versions: an attachment refused for the full shutdown writes the header page it read before the offline write (report drafted); handled | Yes, made deterministic: `refused-attachment.sh` lost the header change in 9, 5 and 4 of 10 cycles on 4.0, 5.0 and the 6.0 snapshot, 0 of 10 with the operator's lock (2026-11-09). Unprovoked: once in the kind CI (6.0 snapshot 2428), `promoted-journal.sh` 2 of 21 runs (2026-10-31), then 0 of 50 |
 
 ---
 
@@ -343,9 +343,9 @@ instance 0 promoted in place after segment 40; live sequence 0
 ```
 
 The sequence was in the file right after it was written and gone once the database was online.
-Going online writes the header page from the server's page cache, so the server still had the
-header from before the write: the database had not been closed between the full shutdown and the
-write. The server's live `REPLICATION_SEQUENCE` read 0 from then on, and the journal started at
+At first this was read as the server going online with the header it had cached before the write
+(the database not closed between the full shutdown and the write). The cause turned out to be
+another one (below). The server's live `REPLICATION_SEQUENCE` read 0 from then on, and the journal started at
 segment 1. In the source (`master` at `b6df3a2`), `Database::getReplSequence` reads the clump
 through the page cache (`PAG_get_clump`), and the journal is created from it
 (`Replication::Manager`).
@@ -370,7 +370,39 @@ A header page written while the database is under the backup lock and not shut d
 same way: `END BACKUP` brings the engine's cached header back. The in-place promotion never writes
 the header in that state, because the full shutdown is refused under the lock.
 
+**Cause** (found 2026-11-09). An attachment refused because the database is in full shutdown
+still writes the header page. In `internalAttachDatabase` (`src/jrd/jrd.cpp`, `master` at
+`67dbeb4`), `PAG_attachment_id` (line 1921) fetches the header page for write, increments
+`hdr_attachment_id` and marks it dirty. Only after that does the attachment find the database in
+full shutdown and fail (`isc_shutdown`, lines 2038–2064). Releasing the database flushes the page.
+During an in-place promotion, the replica server keeps retrying its attachment while the database
+is shut down (`replication.log`: `database ... shutdown`). An attempt that read the header page
+before `set-repl-seq.pl` wrote the clump flushes it afterwards, and the clump is gone. The window
+is a few milliseconds per attempt, which is why the earlier probes did not catch it.
+[`hack/repro/refused-attachment.sh`](hack/repro/refused-attachment.sh) shows both:
+
+- in full shutdown, five refused attachments move "Next attachment ID" in the file by five;
+- with four clients retrying an attachment during the full shutdown, the header clump written
+  offline was lost in 9, 5 and 4 of 10 cycles on 4.0.7, 5.0.4 and the 6.0 snapshot (T6.0.0.2455,
+  `67dbeb4`). In some cycles it was gone before the database went online. Written while holding
+  the file's `flock`, taken once the server closed the file, it was lost in 0 of 10 on each.
+
+So it is not specific to Firebird 6 or to re-seeded instances. The promotion only lost the
+sequence when a refused attachment overlapped the write, and the replica server's retries are a
+few seconds apart. Without provoking it, `promoted-journal.sh` kept the sequence in 30 of 30 runs
+(60 promotions) on 2026-11-09. A probe that sampled the server's open descriptors every 3 ms for
+3 s after each of 300 full shutdowns (Firebird 5 and the 6 snapshot) never saw the file open. A
+held attachment doesn't keep it open either: the forced shutdown returns once it is purged. The
+report for the Firebird tracker is drafted in
+[docs/upstream/03-refused-attachment-writes-header.md](docs/upstream/03-refused-attachment-writes-header.md).
+
 **Handling.**
+
+The handling of v0.147.0 below prevents this cause. The server cannot open the file while the
+operator holds its lock. Once the lock can be taken, no attachment that read the header earlier
+is left to flush it. The comment in `segment-server.pl` still gives the earlier explanation (an
+attachment still going away when the shutdown returns). It will be corrected with the next change
+to that script, since changing the script restarts the instances.
 
 Since v0.147.0 the in-place promotion:
 - waits after the full shutdown until the server has closed the file (the `flock`, up to

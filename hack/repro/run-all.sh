@@ -6,6 +6,7 @@
 #   hack/repro/run-all.sh [image] [log dir]         # default firebirdsql/firebird:5, logs in a temp dir
 #   RUNS=3 hack/repro/run-all.sh firebirdsql/firebird:6-snapshot   # issue 1 three times
 #   PROMOTED_RUNS=5 hack/repro/run-all.sh firebirdsql/firebird:6-snapshot   # issue 10 five times (3)
+#   (issue 10's cause, refused-attachment.sh, runs once: CYCLES=10 header writes each way)
 #   PARSE_ONLY=1 hack/repro/run-all.sh firebirdsql/firebird:5 logs # the verdicts of logs kept earlier
 #
 # Needs Docker. Every script's output goes to the console and to <log dir>/<test>.log. The
@@ -144,6 +145,23 @@ elif [ "$below" -gt 0 ]; then
   verdict 10 "promoted-journal.sh, two in-place failovers and a rolling restart" reproduced "${line#runs: }: $results"
 else
   verdict 10 "promoted-journal.sh, two in-place failovers and a rolling restart" "not reproduced" "${line#runs: }: $results"
+fi
+
+# 10, the cause: an attachment refused for a full shutdown writes the header page it read, over a
+# header change made offline meanwhile; the operator's lock (held during the write) prevents it
+run refused-attachment "$here/refused-attachment.sh"
+log=$logs/refused-attachment.log
+counter=$(last '^attachment id ' "$log")
+unlocked=$(last '^unlocked: lost [0-9]+ of [0-9]+' "$log")
+locked=$(last '^locked: lost [0-9]+ of [0-9]+' "$log")
+lost=$(echo "$unlocked" | sed -n 's/^unlocked: lost \([0-9]*\) of.*/\1/p')
+details="${counter:-no counter}; ${unlocked:-no unlocked result}; ${locked:-no locked result}"
+if [ -z "$lost" ]; then
+  verdict 10 "refused-attachment.sh, attachments retried during a full shutdown" unclear "$details"
+elif [ "$lost" -gt 0 ]; then
+  verdict 10 "refused-attachment.sh, attachments retried during a full shutdown" reproduced "$details"
+else
+  verdict 10 "refused-attachment.sh, attachments retried during a full shutdown" "not reproduced" "$details"
 fi
 
 server=$(docker run --rm --entrypoint sh "$image" -c 'isql -z </dev/null 2>&1 | head -n 1' 2>/dev/null | sed -n 's/.*\(LI-[A-Z][0-9.]*[0-9]\).*/\1/p')

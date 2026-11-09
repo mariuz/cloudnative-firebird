@@ -26,13 +26,14 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   neither the operator nor any replica has reached for `contactTimeoutSeconds`, before a cut-off
   primary is failed over (v0.63.0), since v0.78.0 also when cluster DNS fails with the partition
   (the peers known from the last answer and the addresses the operator publishes, v0.80.0).
-- [ ] **The journal restart of a primary promoted in place** ([ISSUES.md](ISSUES.md) issue 10):
-  the step is known (the server goes online with its cached header, without the sequence just
-  written) and handled since v0.147.0 (wait for the server to close the file, read the sequence
-  back, repeat). What keeps the server's cached header across the full shutdown was not observed
-  directly: a `promoted-journal.sh` run that loses the sequence while reporting the file closed at
-  the write would point to another cause than an attachment still open; report it upstream once
-  that is settled.
+- [ ] **File the refused-attachment header write upstream** ([ISSUES.md](ISSUES.md) issue 10,
+  the root cause found 2026-11-09): an attachment refused for a full shutdown writes the header
+  page it read (`PAG_attachment_id` before the shutdown check in `internalAttachDatabase`), which
+  overwrote the replication sequence written offline. Reproduced on 4.0, 5.0 and the 6.0 snapshot
+  (`hack/repro/refused-attachment.sh`). The report is ready in
+  [docs/upstream](docs/upstream/03-refused-attachment-writes-header.md). The operator's handling
+  since v0.147.0 (the file's lock held during the write) prevents it. Correct the explanation in
+  `segment-server.pl`'s comment with its next change.
 - [ ] **Synchronous replication follow-ups** (one standby since v0.53.0, several since v0.61.0):
   an "any N of M" quorum (Firebird waits for every `sync_replica`). Attaching and detaching
   without the short write pause is not possible with Firebird 5 or 6: `sync_replica` is read
