@@ -27,7 +27,7 @@ describe('the Rust agent in the instance pods', () => {
     expect(JSON.stringify(pod(withAgent(cluster, 'perl')))).toBe(JSON.stringify(pod(cluster)));
   });
 
-  it('is copied from the operator image by the first init container, next to the segment server', () => {
+  it('is copied from the operator image by an init container, next to the segment server', () => {
     const cluster = withAgent(makeCluster({ replication: { enabled: true } }));
     expect(agentMode(cluster)).toBe('rust');
     const spec = pod(cluster);
@@ -45,15 +45,33 @@ describe('the Rust agent in the instance pods', () => {
     expect(server.env).toContainEqual({ name: 'FB_AGENT', value: '/opt/fb-agent/fb-agent' });
     // the segment server still runs the Perl script
     expect(server.command).toEqual(['perl', '/etc/firebird-operator/segment-server.pl']);
-    // only there
-    for (const c of spec.containers.filter((c) => c.name !== 'segment-server')) {
+    // and in the puller, which runs from it
+    const puller = spec.containers.find((c) => c.name === 'segment-puller')!;
+    expect(puller.command).toEqual(['/opt/fb-agent/fb-agent', 'puller']);
+    expect(puller.volumeMounts).toContainEqual({ name: 'fb-agent', mountPath: '/opt/fb-agent', readOnly: true });
+    // with the environment of the Perl puller
+    const perl = pod(makeCluster({ replication: { enabled: true } })).containers.find((c) => c.name === 'segment-puller')!;
+    expect(perl.command).toEqual(['perl', '/etc/firebird-operator/segment-puller.pl']);
+    expect(puller.env).toEqual([...perl.env!, { name: 'FB_AGENT', value: '/opt/fb-agent/fb-agent' }]);
+    // nowhere else
+    for (const c of spec.containers.filter((c) => !['segment-server', 'segment-puller'].includes(c.name))) {
       expect(c.volumeMounts?.map((m) => m.name) ?? []).not.toContain('fb-agent');
     }
   });
 
+  it('runs the puller from the agent with segment TLS and the primary Lease too', () => {
+    const cluster = withAgent(makeCluster({ replication: { enabled: true, failover: { enabled: true, primaryLease: { enabled: true } } }, segmentTLS: { enabled: true } }));
+    const puller = pod(cluster).containers.find((c) => c.name === 'segment-puller')!;
+    expect(puller.command).toEqual(['/opt/fb-agent/fb-agent', 'puller']);
+    // the installer comes after the native sidecars, which stay first, and before the replication init
+    expect(pod(cluster).initContainers!.map((c) => c.name)).toEqual(['segment-tls', 'lease-holder', 'agent-install', 'security-db-init', 'replication-init']);
+    // through the TLS proxy's client side, as the Perl puller
+    expect(puller.env).toContainEqual({ name: 'SEGMENT_PROXY', value: '127.0.0.1:3052' });
+  });
+
   it('reaches the backup file server of a cluster without replication', () => {
     const spec = pod(withAgent(makeCluster()));
-    expect(spec.initContainers![0].name).toBe('agent-install');
+    expect(spec.initContainers!.map((c) => c.name)).toContain('agent-install');
     expect(spec.containers.find((c) => c.name === 'backup-files')!.volumeMounts).toContainEqual({ name: 'fb-agent', mountPath: '/opt/fb-agent', readOnly: true });
   });
 

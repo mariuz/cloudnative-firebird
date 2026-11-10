@@ -1,6 +1,6 @@
 # A Rust agent for the instance pods (roadmap proposal)
 
-Status: **Phases 0 and 1 done** (v0.154.0, results below); the later phases are a proposal. It answers
+Status: **Phases 0, 1 and 2 done** (v0.154.0); results below. The later phases are a proposal. It answers
 the question of whether a Rust core should replace the Perl scripts and the parts critical for
 performance.
 
@@ -78,6 +78,30 @@ at a time under a lock), the same seed on all three versions: every probe answer
 
 So the case for the later phases rests on persistent Firebird connections, fewer runtimes in
 the pod (Node for TLS and the Lease holder) and typed, tested formats, not on raw speed.
+
+## Phase 2 results (2026-11-10)
+
+`fb-agent puller` is a port of `segment-puller.pl` with the same environment, files, flags and
+log lines. `hack/bench/puller.sh` runs both against one real segment server, side by side, with
+a 16 MB segment appearing in the primary's archive every 1 or 2 seconds (Firebird 5 image):
+
+| | Perl puller | Rust puller |
+|---|---|---|
+| Archive to replica, poll every 5 s: median / longest | 2.48 s / 5.04 s | 2.59 s / 5.04 s |
+| Archive to replica, poll every 1 s: median / longest | 0.65 s / 1.10 s | 0.69 s / 1.06 s |
+| Peak memory | 8.4 MB | 0.5 MB |
+| CPU for 30 segments (480 MB) | 0.17 s user + 0.46 s system | 0.05 s user + 0.51 s system |
+
+**The port does not make replication faster, and was not expected to.** The delay is the poll
+interval: a segment waits, on average, half of `POLL_SECONDS` before the next LIST sees it, and
+the transfer itself is a small part. The CPU is the kernel's copy either way. What changes is
+8 MB of memory per instance, and that the puller no longer depends on the image's Perl.
+
+Lower lag needs a protocol change, not a faster client: the puller waiting on the server for
+the next segment (a long poll) instead of asking every few seconds. With the segment server
+answering requests concurrently since v0.154.0 that is possible, and it belongs to Phase 3,
+where the server is ported. One request per connection stays as it is until then: the Perl
+server closes after each reply.
 
 ## Where time goes
 
@@ -196,7 +220,11 @@ lag, memory and TXNS measurements.*
 - The Firebird access spike, which picks (a), (b) or (c).
 - *Exit:* the binary reaches a pod in kind and answers PING; the conformance suite passes.
 
-**Phase 2: the puller (lowest risk).**
+**Phase 2: the puller (lowest risk).** *Done in v0.154.0: clusters with the annotation run
+`fb-agent puller`; `tests/puller-conformance.test.ts` runs eight scenarios against both pullers;
+the kind CI replicates through it, with segment TLS. Persistent connections were left out (the
+Perl server closes each connection), and `segment-request.pl` stays for the scripts that call
+it.*
 - `puller` and `segment-request` in Rust, with persistent connections and native HMAC. They are
   clients only and call no Firebird tools.
 - Opt-in, plus a kind CI job with `agent: rust`.
@@ -244,5 +272,7 @@ Not planned: rewriting the orchestration shell scripts or the TypeScript operato
 
 ## Next step
 
-Phase 2: the puller as the first component that runs from the agent, and the missing Phase 0
-measurements (replication lag at a commit rate, the sidecars' memory) to compare it against.
+Phase 3, the segment server, is the large one and the first that changes what users can
+measure: persistent Firebird connections instead of a process per query, mTLS inside the agent,
+and a long poll for the pullers. It should start with its own design note (the commands in
+groups, which stay in Perl longest, and how a cluster moves between the two servers).

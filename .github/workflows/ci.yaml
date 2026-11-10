@@ -87,13 +87,16 @@ jobs:
           cache-dependency-path: operator/package-lock.json
 
       # the Perl, TypeScript and Rust implementations of the signed request protocol against
-      # each other (skipped in the unit tests job, which has no binary)
+      # each other, and the Perl and Rust pullers through the same scenarios (the Rust side is
+      # skipped in the unit tests job, which has no binary)
       - name: Conformance (Perl, TypeScript, Rust)
         working-directory: operator
         run: |
           npm ci
-          FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" npx vitest run tests/agent-conformance.test.ts 2>&1 | tee /tmp/conformance.txt
-          grep -q '4 passed' /tmp/conformance.txt
+          FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" \
+            npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts 2>&1 | tee /tmp/conformance.txt
+          # none skipped: 4 protocol cases, and 8 puller scenarios for each implementation
+          grep -q 'Tests  20 passed (20)' /tmp/conformance.txt
 
   integration-tests:
     # one run per Firebird version: the operator's FIREBIRD_DEFAULT_IMAGE (unset: latest, Firebird 5)
@@ -389,10 +392,10 @@ jobs:
       - name: Verify the Rust agent reaches an instance pod
         run: |
           # docs/rust-agent-roadmap.md, Phase 1: the annotation has the operator image's fb-agent
-          # binary copied into the instance pods (an init container, a rolling restart). Nothing
-          # runs it yet: here it asks the pod's own segment server, which is the Perl script.
+          # binary copied into the instance pods (an init container, a rolling restart). Without
+          # replication nothing runs it: here it asks the pod's own segment server, the Perl script.
           kubectl annotate firebirdcluster test-cluster firebird.cloudnative-firebird.io/agent=rust
-          timeout 240 bash -c 'until [ "$(kubectl get pod test-cluster-0 -o jsonpath="{.spec.initContainers[0].name}" 2>/dev/null)" = "agent-install" ]; do sleep 3; done'
+          timeout 240 bash -c 'until kubectl get pod test-cluster-0 -o jsonpath="{.spec.initContainers[*].name}" 2>/dev/null | grep -qw agent-install; do sleep 3; done'
           kubectl wait pod/test-cluster-0 --for=condition=Ready --timeout=300s
           kubectl exec test-cluster-0 -c backup-files -- sh -c '$FB_AGENT version' | tee /tmp/agent-version.txt
           grep -q '^fb-agent [0-9]' /tmp/agent-version.txt
@@ -1850,7 +1853,9 @@ jobs:
           replica=$(echo "$replicas" | head -1)
           # supervised: the rolling update restarts the replicas with the proxy and leaves the
           # primary plain until it is let go below, so the mixed mode can be checked
-          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"segmentTLS":{"enabled":true},"primaryUpdateStrategy":"supervised"}}'
+          # with the same restart the replicas get the Rust agent, and run their segment puller
+          # from it (docs/rust-agent-roadmap.md, Phase 2): what follows replicates through it
+          kubectl patch firebirdcluster repl --type merge -p '{"metadata":{"annotations":{"firebird.cloudnative-firebird.io/agent":"rust"}},"spec":{"segmentTLS":{"enabled":true},"primaryUpdateStrategy":"supervised"}}'
           # the operator creates the cluster's CA and certificate
           timeout 60 bash -c 'until kubectl get secret repl-segment-tls >/dev/null 2>&1; do sleep 2; done'
           [ "$(kubectl get secret repl-segment-tls -o jsonpath={.type})" = kubernetes.io/tls ]
@@ -1871,6 +1876,14 @@ jobs:
           for i in $(seq 401 405); do sql "$primary" "insert into app values ($i, 'mixed'); commit;" >/dev/null; done
           for pod in $replicas; do wait_count "$pod" $((before + 5)); done
           echo "replicas running the proxy kept replicating from the plain primary"
+          # ... pulled by the Rust puller, through the proxy
+          for pod in $replicas; do
+            [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="segment-puller")].command}')" = '["/opt/fb-agent/fb-agent","puller"]' ]
+            kubectl logs "$pod" -c segment-puller | grep -q '^segment puller: source='
+            kubectl logs "$pod" -c segment-puller | grep -q "^fetched .* from $primary"
+          done
+          [ "$(kubectl get pod "$primary" -o jsonpath='{.spec.containers[?(@.name=="segment-puller")].command}')" = '["perl","/etc/firebird-operator/segment-puller.pl"]' ]
+          echo "the replicas' Rust pullers fetched the segments from the primary, which still runs the Perl one"
           # ... and a plain client (the primary, no proxy yet) still reaches a replica's proxy
           kubectl exec "$primary" -c segment-server -- perl /etc/firebird-operator/segment-request.pl "$replica.repl-headless" PING | tee /tmp/mixed-ping.txt
           grep -q '^OK' /tmp/mixed-ping.txt
@@ -1894,6 +1907,7 @@ jobs:
           for i in $(seq 406 410); do sql "$primary" "insert into app values ($i, 'over tls'); commit;" >/dev/null; done
           for pod in $replicas; do wait_count "$pod" $((before + 5)); done
           echo "replicas applied the rows shipped over TLS"
+          for pod in $replicas; do kubectl logs "$pod" -c segment-puller | grep -q "^fetched .* from $primary"; done
           # the operator reaches the segment servers over TLS too: the lag is measured again
           timeout 120 bash -c "until [ \"\$(kubectl get pod $replica -o jsonpath='{.metadata.annotations.firebird\\.cloudnative-firebird\\.io/replication-lag-seconds}')\" = 0 ]; do sleep 5; done" \
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.replicationStatus}'; exit 1; }

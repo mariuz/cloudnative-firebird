@@ -1,4 +1,5 @@
-//! The instance pods' agent (docs/rust-agent-roadmap.md). Phase 1: the signed request protocol.
+//! The instance pods' agent (docs/rust-agent-roadmap.md): the signed request protocol (Phase 1)
+//! and the replicas' segment puller (Phase 2).
 //!
 //!   fb-agent version
 //!   fb-agent request <host> <request...>   one request to a segment server, the reply on stdout
@@ -7,63 +8,27 @@
 //!   fb-agent serve                         answers PING to signed requests, on SEGMENT_LISTEN
 //!                                          (host:port) or SEGMENT_PORT (0: a free port);
 //!                                          ISC_PASSWORD, AUTH_WINDOW_SECONDS
+//!   fb-agent puller                        the replicas' segment puller (puller.rs)
 
+mod client;
+mod puller;
+
+use client::{now, var};
 use sig1::Verifier;
 use std::env;
-use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// As the Perl server: a client that sends nothing is dropped after this long.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
-fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
-}
-
-fn var(name: &str) -> String {
-    env::var(name).unwrap_or_default()
-}
-
-/// 16 random bytes in hex, from the kernel.
-fn nonce() -> io::Result<String> {
-    let mut bytes = [0u8; 16];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-}
-
-fn connect(host: &str, port: u16) -> io::Result<TcpStream> {
-    let mut last = io::Error::new(io::ErrorKind::NotFound, format!("{host}: no address"));
-    for address in (host, port).to_socket_addrs()? {
-        match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
-            Ok(stream) => return Ok(stream),
-            Err(err) => last = err,
-        }
-    }
-    Err(last)
-}
-
 fn request(host: &str, request: &str) -> io::Result<()> {
-    let port: u16 = var("SEGMENT_PORT").parse().unwrap_or(3051);
-    // segment TLS: through the local proxy, which opens mutual TLS to the host named on the first line
-    let mut stream = match var("SEGMENT_PROXY").rsplit_once(':') {
-        Some((proxy_host, proxy_port)) => {
-            let proxy_port = proxy_port
-                .parse()
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SEGMENT_PROXY: bad port"))?;
-            let mut stream = connect(proxy_host, proxy_port)?;
-            writeln!(stream, "CONNECT {host} {port}")?;
-            stream
-        }
-        None => connect(host, port)?,
-    };
-    writeln!(stream, "{}", sig1::sign(var("ISC_PASSWORD").as_bytes(), request, now(), &nonce()?))?;
-    io::copy(&mut stream, &mut io::stdout().lock())?;
+    let mut reply = client::open(host, request, None)?;
+    io::copy(&mut reply, &mut io::stdout().lock())?;
     Ok(())
 }
 
@@ -110,8 +75,9 @@ fn main() -> ExitCode {
         }
         ["request", host, words @ ..] if !words.is_empty() => request(host, &words.join(" ")),
         ["serve"] => serve(),
+        ["puller"] => puller::run(),
         _ => {
-            eprintln!("usage: fb-agent version | request <host> <request...> | serve");
+            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller");
             return ExitCode::from(2);
         }
     };
