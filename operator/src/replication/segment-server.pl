@@ -621,8 +621,8 @@ sub promote_here {
       $seq = $archived;
     }
     # The header is written while the server has the database closed, and read back through the
-    # server once it is online again: a server that went online with its cached header page (the
-    # sequence lost, ISSUES.md issue 10) gets the round again, the database still a replica.
+    # server once it is online again: a header page written back over the sequence (ISSUES.md
+    # issue 10) gets the round again, the database still a replica.
     my $rounds = 0;
     for my $round (1 .. $promote_header_attempts) {
       $rounds = $round;
@@ -638,12 +638,14 @@ sub promote_here {
         sleep $promote_shutdown_pause if $attempt < $promote_shutdown_attempts;
       }
       $shut or die 'full shutdown failed after ' . scalar(@failures) . ' attempts: ' . join('; ', @failures) . "\n";
-      # The server can keep the database open, with its cached header page, for a moment after the
-      # full shutdown returns (an attachment still going away). Going online then writes that cached
-      # header back over the sequence written below, and the journal restarts at segment 1 (ISSUES.md,
-      # issue 10). A server in SuperServer mode holds an exclusive lock (flock) on the file while it has
-      # it open: the header is written once that lock can be taken, and the lock is held until the
-      # database goes online again.
+      # An attachment refused for the full shutdown still writes the header page: the engine reads it,
+      # takes a new attachment id in it and only then refuses the attachment, and releasing the
+      # database flushes the page (ISSUES.md, issue 10). One that read the header before the sequence
+      # is written below (the replica server retries its attachment meanwhile) would write it back
+      # without the sequence, and the journal would restart at segment 1. A server in SuperServer mode
+      # holds an exclusive lock (flock) on the file while it has it open: the header is written once
+      # that lock can be taken (no attachment is left holding an older header page), and the lock is
+      # held until the database goes online again, so none can open the file meanwhile.
       open(my $closed, '<', $database) or die "cannot open $database: $!\n";
       my $waited = time;
       wait_for($promote_close_timeout, sub { flock($closed, LOCK_EX | LOCK_NB) })

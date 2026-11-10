@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.152.0):** every item below is done; open work is in [TODO.md](TODO.md).
+> **Status note (v0.153.0):** every item below is done; open work is in [TODO.md](TODO.md).
 > Journal replication (still experimental, see TODO.md) works against the official
 > `firebirdsql/firebird` image (Firebird 4, 5 and the 6 snapshot). It covers replica re-seeding,
 > lag metrics, planned switchover, automatic failover with a primary Lease, and rolling updates with
@@ -185,6 +185,8 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
+- [x] **The promotion's comments give the cause of issue 10** *(v0.153.0)*
+  - The in-place promotion in `segment-server.pl` explained its wait for the server to close the file with the earlier reading of ISSUES.md issue 10 (a server going online with a header it cached before the write). Its comments now give the cause found on 2026-11-09: an attachment refused for the full shutdown flushes the header page it read. The behaviour is unchanged. The scripts are part of the instances' replication configuration hash, so an upgrade to v0.153.0 restarts the instances of replicated clusters once, primary last, as any change to the scripts does.
 - [x] **The cause of the lost replication sequence** *(2026-11-09, documentation and reproduction)*
   - ISSUES.md issue 10 has its cause: an attachment refused because the database is in full shutdown still writes the header page it read (Firebird's `PAG_attachment_id` runs before the shutdown check). During an in-place promotion, the replica server's retried attachment flushed a header page read before the offline write of `HDR_repl_seq`. `hack/repro/refused-attachment.sh` reproduces it on Firebird 4, 5 and the 6 snapshot, and shows that the lock held since v0.147.0 prevents it. The "Firebird issues" workflow runs it weekly, and the report for the Firebird tracker is drafted in docs/upstream.
 - [x] **Cluster status writes that change nothing are skipped** *(v0.152.0; CloudNativePG #11789)*

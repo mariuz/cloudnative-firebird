@@ -32,8 +32,8 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   overwrote the replication sequence written offline. Reproduced on 4.0, 5.0 and the 6.0 snapshot
   (`hack/repro/refused-attachment.sh`). The report is ready in
   [docs/upstream](docs/upstream/03-refused-attachment-writes-header.md). The operator's handling
-  since v0.147.0 (the file's lock held during the write) prevents it. Correct the explanation in
-  `segment-server.pl`'s comment with its next change.
+  since v0.147.0 (the file's lock held during the write) prevents it, and since v0.153.0
+  `segment-server.pl` explains it with this cause.
 - [ ] **Synchronous replication follow-ups** (one standby since v0.53.0, several since v0.61.0):
   an "any N of M" quorum (Firebird waits for every `sync_replica`). Attaching and detaching
   without the short write pause is not possible with Firebird 5 or 6: `sync_replica` is read

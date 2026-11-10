@@ -400,9 +400,8 @@ report for the Firebird tracker is drafted in
 
 The handling of v0.147.0 below prevents this cause. The server cannot open the file while the
 operator holds its lock. Once the lock can be taken, no attachment that read the header earlier
-is left to flush it. The comment in `segment-server.pl` still gives the earlier explanation (an
-attachment still going away when the shutdown returns). It will be corrected with the next change
-to that script, since changing the script restarts the instances.
+is left to flush it. Since v0.153.0 the comments in `segment-server.pl` give this cause instead
+of the earlier explanation.
 
 Since v0.147.0 the in-place promotion:
 - waits after the full shutdown until the server has closed the file (the `flock`, up to
