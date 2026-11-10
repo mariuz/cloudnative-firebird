@@ -55,13 +55,17 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   for the Firebird 6 release and every later major version (an unknown ODS is refused, not
   guessed), or replace them with supported mechanisms if Firebird adds any.
 
-- [ ] **Measure the segment server, and serve long requests concurrently** (Phase 0 of the
-  [Rust agent proposal](docs/rust-agent-roadmap.md)): the segment server answers one request at a
-  time, and GET, SEED, TXNS, PLAN and STATE run inline, so a long live seed from the primary
-  delays the replicas' pulls, the operator's checks and the lease holder's STATE. Reproduce
-  whether a seed longer than a minute lets the primary's Lease expire or fences it
-  (`fenceWhenUnreached`); benchmark lag, request latency and sidecar resources; fork the long
-  commands as FILE already is. The numbers decide the proposal's later phases.
+- [x] **Measure the segment server, and serve long requests concurrently** (v0.154.0, Phase 0 of
+  the [Rust agent proposal](docs/rust-agent-roadmap.md)): reproduced (a seed longer than
+  `contactTimeoutSeconds` fenced the primary) and fixed: GET, SEED, TXNS and PLAN are answered by
+  child processes. The measurements are in the proposal.
+
+- [ ] **Rust agent, Phase 3** ([docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md)): the
+  segment server. Start with a design note: the commands in groups, persistent Firebird
+  connections (`firebird-wire`), mTLS in the agent, a long poll for the pullers (the only change
+  that lowers replication lag), and how a cluster moves between the Perl and the Rust server.
+  Phases 0 to 2 are done (v0.154.0): the puller runs from the agent on clusters that
+  opt in.
 
 ## Backups and restore
 

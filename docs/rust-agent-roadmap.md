@@ -1,7 +1,8 @@
 # A Rust agent for the instance pods (roadmap proposal)
 
-Status: **proposal**, nothing implemented. It answers the question of whether a Rust core should
-replace the Perl scripts and the parts critical for performance.
+Status: **Phases 0, 1 and 2 done** (v0.154.0); results below. The later phases are a proposal. It answers
+the question of whether a Rust core should replace the Perl scripts and the parts critical for
+performance.
 
 ## Short answer
 
@@ -41,9 +42,70 @@ Two Node sidecars from the operator image also run in the instance pods. The **l
 renews the primary Lease, and **segment-tls** is the mutual TLS proxy in front of the segment
 server. TLS moved there because a pure-Perl cipher reached under 1 MB/s (ROADMAP.md, segment TLS).
 
+## Phase 0 results (2026-11-10)
+
+Measured with `hack/bench/segment-server.sh` (Docker, one primary with its segment server and
+isolation check, a client on the host), on Firebird 4.0.7, 5.0.4 and the 6 snapshot
+(T6.0.0.2455):
+
+| | Firebird 4 | Firebird 5 | Firebird 6 |
+|---|---|---|---|
+| PING: connection, pure-Perl signature, reply (median) | 2 ms | 2 ms | 2 ms |
+| STATE: one `fbsvcmgr` per request (median) | 70 ms | 70 ms | 92 ms |
+| GET of a 256 MB segment | 562 MB/s | 600 MB/s | 531 MB/s |
+
+**The hypothesis was true.** A live seed of a 275 MB database, downloaded at 3 MB/s (91 s), on
+the server before v0.154.0 (Firebird 5):
+
+- none of the STATE and PING requests sent every second was answered within 10 s;
+- after 62 s the isolation check put the primary's database into full shutdown ("neither the
+  operator nor any replica has reached this primary for 62s").
+
+With the fix of v0.154.0 (GET, SEED, TXNS and PLAN answered by child processes, the copies one
+at a time under a lock), the same seed on all three versions: every probe answered (slowest
+85 ms, 242 ms and 79 ms on Firebird 5, 6 and 4), and the primary not fenced.
+
+**What the numbers say about Rust:**
+
+- The pure-Perl signature and the 64 KiB copy loop are not bottlenecks. A signed request costs
+  2 ms, and a segment is served at more than 500 MB/s, above what most pod networks carry.
+  Hot spots 3 and 5 below do not justify a rewrite.
+- The process per Firebird query is the measurable cost: 70–90 ms for each STATE, against
+  0.2–0.7 ms over a persistent connection (the Firebird access spike of Phase 1). It matters for
+  what asks often: the Lease holder every 5 s, the metrics exporter per query and scrape.
+- Not measured yet: replication lag at a given commit rate, the sidecars' memory, and TXNS and
+  PLAN on a large archive.
+
+So the case for the later phases rests on persistent Firebird connections, fewer runtimes in
+the pod (Node for TLS and the Lease holder) and typed, tested formats, not on raw speed.
+
+## Phase 2 results (2026-11-10)
+
+`fb-agent puller` is a port of `segment-puller.pl` with the same environment, files, flags and
+log lines. `hack/bench/puller.sh` runs both against one real segment server, side by side, with
+a 16 MB segment appearing in the primary's archive every 1 or 2 seconds (Firebird 5 image):
+
+| | Perl puller | Rust puller |
+|---|---|---|
+| Archive to replica, poll every 5 s: median / longest | 2.48 s / 5.04 s | 2.59 s / 5.04 s |
+| Archive to replica, poll every 1 s: median / longest | 0.65 s / 1.10 s | 0.69 s / 1.06 s |
+| Peak memory | 8.4 MB | 0.5 MB |
+| CPU for 30 segments (480 MB) | 0.17 s user + 0.46 s system | 0.05 s user + 0.51 s system |
+
+**The port does not make replication faster, and was not expected to.** The delay is the poll
+interval: a segment waits, on average, half of `POLL_SECONDS` before the next LIST sees it, and
+the transfer itself is a small part. The CPU is the kernel's copy either way. What changes is
+8 MB of memory per instance, and that the puller no longer depends on the image's Perl.
+
+Lower lag needs a protocol change, not a faster client: the puller waiting on the server for
+the next segment (a long poll) instead of asking every few seconds. With the segment server
+answering requests concurrently since v0.154.0 that is possible, and it belongs to Phase 3,
+where the server is ported. One request per connection stays as it is until then: the Perl
+server closes after each reply.
+
 ## Where time goes
 
-These come from reading the code, not from measurements; Phase 0 measures them.
+These come from reading the code. Phase 0 measured 1, 2, 3 and 5 (above).
 
 1. **The segment server answers one request at a time.** It runs a single accept loop
    (`segment-server.pl` ~902–1141). Only FILE, STORE, PROMOTE and NBACKUP fork. GET (a segment),
@@ -103,7 +165,9 @@ It would not change:
   into an emptyDir, and the sidecars keep running in the Firebird image. That way they still
   have the Firebird tools (`fbsvcmgr`, `gfix`, `nbackup`) and the data volume. The operator
   already copies `/opt/firebird` into an emptyDir the same way.
-- **Firebird access.** This is the first decision, made with a spike in Phase 1:
+- **Firebird access.** Decided by the spike of Phase 1
+  ([rust-agent-firebird-access.md](rust-agent-firebird-access.md)): option (c) with the
+  `firebird-wire` crate, option (b) as the fallback. The options were:
   - (a) keep calling `isql` and `fbsvcmgr`: simplest, but keeps hot spot 2;
   - (b) `libfbclient` through FFI: needs a glibc build that matches each image's libc and works
     with Firebird 4, 5 and 6;
@@ -122,7 +186,8 @@ It would not change:
 
 ## Phases
 
-**Phase 0: measure, and fix the sequential server (no Rust).**
+**Phase 0: measure, and fix the sequential server (no Rust).** *Done in v0.154.0, except the
+lag, memory and TXNS measurements.*
 - Benchmarks:
   - segment GET throughput;
   - request latency under concurrency (seed plus pulls plus STATE);
@@ -135,8 +200,19 @@ It would not change:
   queued work. It is worth doing whatever is decided about Rust.
 - *Exit:* numbers in this document, and a go or no-go for each later phase.
 
-**Phase 1: foundation.**
-- A Cargo workspace in `agent/`.
+**Phase 1: foundation.** *Done in v0.154.0:*
+- *`operator/agent/`: the `sig1` crate and the `fb-agent` binary (`version`, `request`, and
+  `serve`, which answers PING), 490 kB static, built into the operator image for amd64 and arm64
+  without emulation.*
+- *The conformance suite (`tests/agent-conformance.test.ts`): each client against each server,
+  and the same refused lines with the same replies from the Perl and the Rust server.*
+- *Delivery: the annotation `firebird.cloudnative-firebird.io/agent: rust` has an init container
+  copy the binary into the instance pods. The kind CI runs it there against the pod's Perl
+  segment server.*
+- *Firebird access: `firebird-wire`, with `libfbclient` as the fallback.*
+
+*The plan was:*
+- A Cargo workspace in `operator/agent/` (inside the operator image's build context).
 - CI: `fmt`, `clippy`, tests, static amd64 and arm64 builds.
 - Packaging, and the init container that copies the binary.
 - A SIG1 crate with a conformance suite that runs the same requests against the Perl, Node and
@@ -144,7 +220,11 @@ It would not change:
 - The Firebird access spike, which picks (a), (b) or (c).
 - *Exit:* the binary reaches a pod in kind and answers PING; the conformance suite passes.
 
-**Phase 2: the puller (lowest risk).**
+**Phase 2: the puller (lowest risk).** *Done in v0.154.0: clusters with the annotation run
+`fb-agent puller`; `tests/puller-conformance.test.ts` runs eight scenarios against both pullers;
+the kind CI replicates through it, with segment TLS. Persistent connections were left out (the
+Perl server closes each connection), and `segment-request.pl` stays for the scripts that call
+it.*
 - `puller` and `segment-request` in Rust, with persistent connections and native HMAC. They are
   clients only and call no Firebird tools.
 - Opt-in, plus a kind CI job with `agent: rust`.
@@ -190,8 +270,9 @@ Not planned: rewriting the orchestration shell scripts or the TypeScript operato
 - **Firebird access.** Option (b) depends on each image's `libfbclient` and libc; option (c) on a
   third-party protocol implementation keeping up with Firebird 6.
 
-## Suggested next step
+## Next step
 
-Phase 0 only. Measure, reproduce hypothesis 1, and fix the sequential segment server in Perl.
-That addresses the most likely real-world problem within days, and gives the numbers to decide
-whether Phases 1–6 are worth their cost.
+Phase 3, the segment server, is the large one and the first that changes what users can
+measure: persistent Firebird connections instead of a process per query, mTLS inside the agent,
+and a long poll for the pullers. It should start with its own design note (the commands in
+groups, which stay in Perl longest, and how a cluster moves between the two servers).

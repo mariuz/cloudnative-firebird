@@ -452,6 +452,16 @@ sub standby_off {
   return undef;
 }
 
+# One at a time: a seed copy, an nbackup and the in-place promotion pause the segment puller, take
+# the backup lock or shut the database down, and the seeds share one copy file. Each runs in its
+# own process (below), so they wait here for each other instead of in the server's accept loop, as
+# they did while the server answered one request at a time. Held until the process exits.
+my $exclusive;
+sub exclusive {
+  open($exclusive, '>>', "$base/.exclusive.lock") or die "cannot open the lock $base/.exclusive.lock: $!\n";
+  flock($exclusive, LOCK_EX) or die "cannot lock $base/.exclusive.lock: $!\n";
+}
+
 sub send_seed {
   my ($client, $db, $ctl, $kind) = @_;
   open(my $fh, '<:raw', $db) or return print $client "ERR cannot read seed copy\n";
@@ -491,6 +501,7 @@ sub seed_from_replica {
   my ($client) = @_;
   my $guid = live_value('MON$GUID') // '';
   my $control = "$source/$guid";
+  if (!eval { exclusive(); 1 }) { print $client "ERR $@"; return; }
   unlink $pause_ack;
   if (open(my $flag, '>', $pause_flag)) { close $flag; }
   my $ok = eval {
@@ -523,6 +534,7 @@ sub seed_from_replica {
 # (control file written) or "OK".
 sub nbackup_here {
   my ($client, $level, $file) = @_;
+  if (!eval { exclusive(); 1 }) { print $client "ERR $@"; return; }
   unlink "$data_dir/$file.ctl";
   my $replica = !is_primary() && !-e $standby_flag;
   my $ok = eval {
@@ -588,6 +600,7 @@ sub promote_here {
     $fb_out =~ s/^ | $//g;
     return $ok;
   };
+  if (!eval { exclusive(); 1 }) { print $client "ERR $@"; return; }
   my ($shut, $writable) = (0, 0);
   my $ok = eval {
     my $mode = live_value('MON$REPLICA_MODE');
@@ -742,6 +755,7 @@ sub seed_from_primary {
     print "seed refused: no usable bootstrap seed and live seeding is not allowed\n";
     return;
   }
+  if (!eval { exclusive(); 1 }) { print $client "ERR $@"; return; }
   if (locked_copy()) {
     send_seed($client, $seed_file, undef, 'live');
     print "served live seed copy of the primary\n";
@@ -898,6 +912,23 @@ sub start_monitor {
 }
 start_monitor();
 
+# Requests that take as long as a file is large or wait for something (a segment, a seed, a backup
+# file, the plan of a seed, a promotion, an nbackup) are answered by a child process, so the
+# server keeps answering the others meanwhile: the replicas' pullers, the operator's checks, and
+# the Lease holder's STATE. Answered in this loop, a seed of a large database held them all for as
+# long as it was downloaded: the Lease was not renewed, and the isolation check fenced a primary
+# that nothing had reached (hack/bench/segment-server.sh). True when the child was started.
+sub in_child {
+  my ($client, $serve) = @_;
+  my $pid = fork;
+  if (!defined $pid) { print $client "ERR fork: $!\n"; return 0; }
+  return 1 if $pid;
+  close $server;
+  $serve->();
+  close $client;
+  exit 0;
+}
+
 my $last_prune = 0;
 while (1) {
   exit_when_stopped();
@@ -927,31 +958,37 @@ while (1) {
     print $client "$_\n" for segments();
     print $client ".\n";
   } elsif ($cmd eq 'GET' && defined $arg && $arg =~ $name_re && -f "$dir/$arg") {
-    open(my $fh, '<:raw', "$dir/$arg") or do { print $client "ERR cannot read\n"; close $client; next };
-    print $client "OK " . (-s $fh) . "\n";
-    binmode $client;
-    my $buf;
-    while (read($fh, $buf, 65536)) { print $client $buf; }
-    close $fh;
+    in_child($client, sub {
+      open(my $fh, '<:raw', "$dir/$arg") or do { print $client "ERR cannot read\n"; return };
+      print $client "OK " . (-s $fh) . "\n";
+      binmode $client;
+      my $buf;
+      while (read($fh, $buf, 65536)) { print $client $buf or last; }
+      close $fh;
+    });
   } elsif ($cmd eq 'TXNS' && defined $arg && $arg =~ /^(\d+) ([\d,]*)$/) {
     my ($upto, %wanted) = ($1, map { $_ => 1 } grep { length } split /,/, $2);
-    # the segment active at lock time is archived shortly after the lock switched it out
-    if (!wait_for(120, sub { my @s = archived_sequences(); @s && $s[-1] >= $upto })) {
-      print $client "ERR segment $upto not archived yet\n";
-    } else {
-      my $first = first_segments($upto, \%wanted);
-      print $client "$_ $first->{$_}[0]\n" for sort { $a <=> $b } keys %$first;
-      print $client ".\n";
-    }
+    in_child($client, sub {
+      # the segment active at lock time is archived shortly after the lock switched it out
+      if (!wait_for(120, sub { my @s = archived_sequences(); @s && $s[-1] >= $upto })) {
+        print $client "ERR segment $upto not archived yet\n";
+      } else {
+        my $first = first_segments($upto, \%wanted);
+        print $client "$_ $first->{$_}[0]\n" for sort { $a <=> $b } keys %$first;
+        print $client ".\n";
+      }
+    });
   } elsif ($cmd eq 'PLAN' && defined $arg && $arg =~ /^(\d+) (\d+) ([\d,]*)$/) {
     my ($upto, $next, %wanted) = ($1, $2, map { $_ => 1 } grep { length } split /,/, $3);
-    if (!wait_for(120, sub { my @s = archived_sequences(); @s && $s[-1] >= $upto })) {
-      print $client "ERR segment $upto not archived yet\n";
-    } else {
-      my $first = first_segments($upto, \%wanted, $next);
-      print $client "$_ $first->{$_}[0] $first->{$_}[1]\n" for sort { $a <=> $b } keys %$first;
-      print $client ".\n";
-    }
+    in_child($client, sub {
+      if (!wait_for(120, sub { my @s = archived_sequences(); @s && $s[-1] >= $upto })) {
+        print $client "ERR segment $upto not archived yet\n";
+      } else {
+        my $first = first_segments($upto, \%wanted, $next);
+        print $client "$_ $first->{$_}[0] $first->{$_}[1]\n" for sort { $a <=> $b } keys %$first;
+        print $client ".\n";
+      }
+    });
   } elsif ($cmd eq 'HEADER') {
     my $seq = header_sequence($database);
     print $client (defined $seq ? "OK $seq\n" : "ERR cannot read the header of $database\n");
@@ -1091,37 +1128,15 @@ while (1) {
     print $client "OK\n";
   } elsif (($cmd eq 'FILE' && defined $arg && $arg =~ $backup_re && -f "$data_dir/$arg") ||
            ($cmd eq 'STORE' && defined $arg && $arg =~ /^(\S+) (\d+)$/ && $1 =~ $backup_re)) {
-    my $pid = fork;
-    if (!defined $pid) {
-      print $client "ERR fork: $!\n";
-    } elsif ($pid == 0) {
-      close $server;
+    in_child($client, sub {
       if ($cmd eq 'FILE') { send_file($client, $arg); } else { my ($n, $size) = split / /, $arg; store_file($client, $n, $size); }
-      close $client;
-      exit 0;
-    }
+    });
   } elsif ($cmd eq 'PROMOTE' && !$files_only && defined $arg && $arg =~ /^(\d+|none)$/) {
     my $archived = $1 eq 'none' ? undef : $1;
-    my $pid = fork;
-    if (!defined $pid) {
-      print $client "ERR fork: $!\n";
-    } elsif ($pid == 0) {
-      close $server;
-      promote_here($client, $archived);
-      close $client;
-      exit 0;
-    }
+    in_child($client, sub { promote_here($client, $archived) });
   } elsif ($cmd eq 'NBACKUP' && !$files_only && defined $arg && $arg =~ /^([0-2]) ([A-Za-z0-9][A-Za-z0-9._-]*\.nbk)$/) {
     my ($level, $file) = ($1, $2);
-    my $pid = fork;
-    if (!defined $pid) {
-      print $client "ERR fork: $!\n";
-    } elsif ($pid == 0) {
-      close $server;
-      nbackup_here($client, $level, $file);
-      close $client;
-      exit 0;
-    }
+    in_child($client, sub { nbackup_here($client, $level, $file) });
   } elsif ($cmd eq 'REMOVE' && defined $arg && $arg =~ $backup_re) {
     if (!-e "$data_dir/$arg" || unlink "$data_dir/$arg") { print $client "OK\n"; } else { print $client "ERR remove $arg: $!\n"; }
   } elsif ($cmd eq 'FILES') {
@@ -1133,7 +1148,7 @@ while (1) {
   } elsif ($cmd eq 'EXISTS' && defined $arg && $arg =~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/) {
     print $client (-e "$data_dir/$arg" ? "OK yes\n" : "OK no\n");
   } elsif ($cmd eq 'SEED') {
-    is_primary() ? seed_from_primary($client) : seed_from_replica($client);
+    in_child($client, sub { is_primary() ? seed_from_primary($client) : seed_from_replica($client) });
   } else {
     print $client "ERR bad request\n";
   }

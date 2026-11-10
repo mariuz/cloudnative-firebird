@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.153.0/cloudnative-firebird-0.153.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.154.0/cloudnative-firebird-0.154.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.153.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.154.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.153.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.154.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -712,6 +712,15 @@ other instances are read-only replicas:
   transaction open in the copy from its first archived segment, so they are replayed, and a
   transaction whose start is no longer archived fails the seed rather than being replayed
   partially.
+- **Rust agent (opt-in).** The annotation `firebird.cloudnative-firebird.io/agent: rust` on a
+  cluster has an init container copy the `fb-agent` binary of the operator image into its
+  instance pods (`/opt/fb-agent/fb-agent`, since v0.154.0), and the
+  `segment-puller` sidecar runs from it (`fb-agent puller`) instead of `segment-puller.pl`. It
+  behaves as the Perl puller (the same files, flags and log lines), ships segments as fast (the
+  poll interval decides that) and uses 0.5 MB of memory instead of 8 MB. The segment server and
+  everything else stay in Perl; the planned steps are in
+  [docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md). Setting or removing the annotation
+  restarts the instances, primary last; `perl` (or no annotation) is the default.
 - The seed stays usable: while no replica holds segments back (a single instance), the primary
   keeps the segments after the seed up to `maxSegmentRetentionHours` (7 days by default), so an
   instance added later can be seeded from it. Once they are pruned, the primary's init container
@@ -719,6 +728,14 @@ other instances are read-only replicas:
   update, a restart). After an unclean stop the server goes on writing the journal segment it
   had open, so the refresh waits for the next clean restart. Until then a new replica is seeded
   from a live copy (unless `allowLiveSeedFromPrimary: false`).
+- The segment server answers its long requests (a segment, a seed, a backup file, the plan of a
+  seed, a promotion, an nbackup) from child processes, so it keeps answering the pullers, the
+  operator and the Lease holder meanwhile (since v0.154.0). Seed copies, nbackups and the
+  in-place promotion still run one at a time. Before, a seed served by the primary held every
+  other request for as long as it was downloaded: with automatic failover, one that took longer
+  than `contactTimeoutSeconds` (60 s) had the isolation check shut the primary's database down,
+  and its Lease was not renewed meanwhile. On earlier versions, seed new replicas of a large
+  database from a ready replica, or raise `contactTimeoutSeconds`.
 
 ```yaml
 spec:
