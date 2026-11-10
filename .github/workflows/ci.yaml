@@ -93,10 +93,11 @@ jobs:
         working-directory: operator
         run: |
           npm ci
-          FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" \
+          FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" NO_COLOR=1 \
             npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts 2>&1 | tee /tmp/conformance.txt
           # none skipped: 4 protocol cases, and 8 puller scenarios for each implementation
-          grep -q 'Tests  20 passed (20)' /tmp/conformance.txt
+          # (colour codes stripped: the runner's output has them)
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +20 passed \(20\)'
 
   integration-tests:
     # one run per Firebird version: the operator's FIREBIRD_DEFAULT_IMAGE (unset: latest, Firebird 5)
