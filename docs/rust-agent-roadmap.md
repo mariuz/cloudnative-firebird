@@ -1,6 +1,7 @@
 # A Rust agent for the instance pods (roadmap proposal)
 
-Status: **Phases 0, 1 and 2 done** (v0.154.0); results below. The later phases are a proposal. It answers
+Status: **Phases 0, 1 and 2 done** (v0.154.0), **Phase 3 started** (v0.155.0: the segment server's
+front, and pullers that wait instead of polling). Results below. It answers
 the question of whether a Rust core should replace the Perl scripts and the parts critical for
 performance.
 
@@ -231,7 +232,11 @@ it.*
 - *Exit:* the same lag or better in the Phase 0 benchmark; the full kind matrix green with the
   agent on.
 
-**Phase 3: the segment server (largest).**
+**Phase 3: the segment server (largest).** *In steps, designed in
+[rust-agent-segment-server.md](rust-agent-segment-server.md). Step 1 is done in v0.155.0: a
+front that answers PING, LIST, GET and the new WAIT and runs the Perl server behind it for the
+rest. A segment now reaches a replica 0.08 s after it is archived instead of 2.4 s (median). The
+plan was:*
 - Every command in Rust, async, with a limit per command class.
 - mTLS inside the agent, which replaces the segment-tls sidecar.
 - A header cache, and `sendfile` or `copy_file_range` for GET, SEED and FILE.
@@ -272,7 +277,6 @@ Not planned: rewriting the orchestration shell scripts or the TypeScript operato
 
 ## Next step
 
-Phase 3, the segment server, is the large one and the first that changes what users can
-measure: persistent Firebird connections instead of a process per query, mTLS inside the agent,
-and a long poll for the pullers. It should start with its own design note (the commands in
-groups, which stay in Perl longest, and how a cluster moves between the two servers).
+Phase 3, step 2 ([rust-agent-segment-server.md](rust-agent-segment-server.md)): the state
+commands through a persistent Firebird connection, starting with STATE, which the Lease holder
+asks every five seconds and which costs a process each time today.

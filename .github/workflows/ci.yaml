@@ -94,10 +94,10 @@ jobs:
         run: |
           npm ci
           FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" NO_COLOR=1 \
-            npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts 2>&1 | tee /tmp/conformance.txt
-          # none skipped: 4 protocol cases, and 8 puller scenarios for each implementation
-          # (colour codes stripped: the runner's output has them)
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +20 passed \(20\)'
+            npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts 2>&1 | tee /tmp/conformance.txt
+          # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, and 6 for
+          # the segment server's front (colour codes stripped: the runner's output has them)
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +26 passed \(26\)'
 
   integration-tests:
     # one run per Firebird version: the operator's FIREBIRD_DEFAULT_IMAGE (unset: latest, Firebird 5)
@@ -1854,8 +1854,9 @@ jobs:
           replica=$(echo "$replicas" | head -1)
           # supervised: the rolling update restarts the replicas with the proxy and leaves the
           # primary plain until it is let go below, so the mixed mode can be checked
-          # with the same restart the replicas get the Rust agent, and run their segment puller
-          # from it (docs/rust-agent-roadmap.md, Phase 2): what follows replicates through it
+          # with the same restart the instances get the Rust agent: the segment puller runs from it,
+          # and the segment server is its front with the Perl server behind (docs/rust-agent-roadmap.md,
+          # Phases 2 and 3): what follows replicates through them
           kubectl patch firebirdcluster repl --type merge -p '{"metadata":{"annotations":{"firebird.cloudnative-firebird.io/agent":"rust"}},"spec":{"segmentTLS":{"enabled":true},"primaryUpdateStrategy":"supervised"}}'
           # the operator creates the cluster's CA and certificate
           timeout 60 bash -c 'until kubectl get secret repl-segment-tls >/dev/null 2>&1; do sleep 2; done'
@@ -1901,6 +1902,10 @@ jobs:
           kubectl logs "$primary" -c segment-tls | grep -q 'accepting on 0.0.0.0:3051'
           # the segment server listens on localhost only, behind the proxy
           kubectl logs "$primary" -c segment-server | grep -q 'listening on 127.0.0.1:3061'
+          # that is the agent's front, with the Perl server behind it on its own local port
+          [ "$(kubectl get pod "$primary" -o jsonpath='{.spec.containers[?(@.name=="segment-server")].command}')" = '["/opt/fb-agent/fb-agent","segment-server","--","perl","/etc/firebird-operator/segment-server.pl"]' ]
+          kubectl logs "$primary" -c segment-server | grep -q 'segment server (fb-agent .*) listening on 127.0.0.1:3061'
+          kubectl logs "$primary" -c segment-server | grep -q 'segment server listening on 127.0.0.1:3071'
           timeout 120 bash -c 'until [ -z "$(kubectl get configmap repl-segment-tls-peers -o jsonpath={.data.plain-peers})" ]; do sleep 5; done'
 
           # replication flows over TLS
@@ -1909,6 +1914,12 @@ jobs:
           for pod in $replicas; do wait_count "$pod" $((before + 5)); done
           echo "replicas applied the rows shipped over TLS"
           for pod in $replicas; do kubectl logs "$pod" -c segment-puller | grep -q "^fetched .* from $primary"; done
+          # the front answers WAIT (the pullers wait there for the next segment), through the proxies;
+          # a request it does not answer itself comes back from the Perl server behind it
+          kubectl exec "$replica" -c segment-puller -- /opt/fb-agent/fb-agent request "$primary.repl-headless" WAIT 1 | tee /tmp/wait.txt
+          grep -Eq '^OK (new|timeout)$' /tmp/wait.txt
+          kubectl exec "$replica" -c segment-puller -- /opt/fb-agent/fb-agent request "$primary.repl-headless" ARCHIVED | tail -1 | grep -qx '\.'
+          kubectl exec "$replica" -c segment-puller -- /opt/fb-agent/fb-agent request "$primary.repl-headless" STATE | grep -qx 'OK online'
           # the operator reaches the segment servers over TLS too: the lag is measured again
           timeout 120 bash -c "until [ \"\$(kubectl get pod $replica -o jsonpath='{.metadata.annotations.firebird\\.cloudnative-firebird\\.io/replication-lag-seconds}')\" = 0 ]; do sleep 5; done" \
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.replicationStatus}'; exit 1; }

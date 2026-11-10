@@ -60,12 +60,16 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   `contactTimeoutSeconds` fenced the primary) and fixed: GET, SEED, TXNS and PLAN are answered by
   child processes. The measurements are in the proposal.
 
-- [ ] **Rust agent, Phase 3** ([docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md)): the
-  segment server. Start with a design note: the commands in groups, persistent Firebird
-  connections (`firebird-wire`), mTLS in the agent, a long poll for the pullers (the only change
-  that lowers replication lag), and how a cluster moves between the Perl and the Rust server.
-  Phases 0 to 2 are done (v0.154.0): the puller runs from the agent on clusters that
-  opt in.
+- [ ] **Rust agent, Phase 3, step 2** ([docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md)):
+  the state commands in the front through a persistent Firebird connection (`firebird-wire`, with
+  a deadline around each call), starting with STATE. Step 1 is done (v0.155.0): the front answers
+  PING, LIST, GET and WAIT, and the Rust pullers wait for the next segment instead of polling.
+  Later steps: backup files, seeds, the changes of role, TLS in the agent, then no Perl server.
+- [ ] **An atomic journal archive command**: copy to a temporary name and rename, so the archive
+  never holds a segment that is still being copied. The servers only offer complete segments
+  since v0.155.0, which covers the replicas; other readers of the archive (the journal archive
+  Job reads through the segment server's LIST and is covered too) would get it for free. It
+  changes `replication.conf`, so it restarts the instances.
 
 ## Backups and restore
 

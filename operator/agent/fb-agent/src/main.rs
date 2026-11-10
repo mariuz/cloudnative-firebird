@@ -1,5 +1,5 @@
 //! The instance pods' agent (docs/rust-agent-roadmap.md): the signed request protocol (Phase 1)
-//! and the replicas' segment puller (Phase 2).
+//! the replicas' segment puller (Phase 2) and the segment server's front (Phase 3).
 //!
 //!   fb-agent version
 //!   fb-agent request <host> <request...>   one request to a segment server, the reply on stdout
@@ -9,9 +9,12 @@
 //!                                          (host:port) or SEGMENT_PORT (0: a free port);
 //!                                          ISC_PASSWORD, AUTH_WINDOW_SECONDS
 //!   fb-agent puller                        the replicas' segment puller (puller.rs)
+//!   fb-agent segment-server -- <command>   the segment server's front, with the Perl server
+//!                                          behind it (server.rs)
 
 mod client;
 mod puller;
+mod server;
 
 use client::{now, var};
 use sig1::Verifier;
@@ -76,8 +79,9 @@ fn main() -> ExitCode {
         ["request", host, words @ ..] if !words.is_empty() => request(host, &words.join(" ")),
         ["serve"] => serve(),
         ["puller"] => puller::run(),
+        ["segment-server", "--", backend @ ..] => server::run(&backend.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
         _ => {
-            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller");
+            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | segment-server -- <backend command...>");
             return ExitCode::from(2);
         }
     };

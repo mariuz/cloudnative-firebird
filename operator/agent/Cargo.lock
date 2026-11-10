@@ -59,8 +59,9 @@ dependencies = [
 
 [[package]]
 name = "fb-agent"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "libc",
  "sig1",
  "signal-hook",
 ]
@@ -103,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "sig1"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hmac",
  "sha2",
