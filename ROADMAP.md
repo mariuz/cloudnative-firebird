@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.153.0):** every item below is done; open work is in [TODO.md](TODO.md).
+> **Status note (v0.154.0):** every item below is done; open work is in [TODO.md](TODO.md).
 > Journal replication (still experimental, see TODO.md) works against the official
 > `firebirdsql/firebird` image (Firebird 4, 5 and the 6 snapshot). It covers replica re-seeding,
 > lag metrics, planned switchover, automatic failover with a primary Lease, and rolling updates with
@@ -185,7 +185,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - The security database moved from the container filesystem to the instance volume, so users survive pod restarts.
 - [x] **Replica re-seeding** *(v0.12.0, CloudNativePG 1.28 `unrecoverable`)*
   - `firebird.cloudnative-firebird.io/reseed=true` on a replica pod: the replication init discards the database and replication state and seeds it again from a ready replica. The volume and its security database (users) are kept; the primary is never re-seeded.
-- [x] **CloudNativePG main-branch sweep to 2026-11-10** *(2026-11-10, documentation)*
+- [x] **The segment server answers during a seed** *(v0.154.0)*
+  - The segment server answered one request at a time, and a seed (the whole database) was sent from that loop. While a new replica downloaded one from the primary, nothing else was answered: the Lease holder's STATE, the pullers, the operator. `hack/bench/segment-server.sh` reproduces it with Docker: during a 91 s seed of a 275 MB database (3 MB/s), no STATE or PING was answered, and after 62 s the isolation check put the primary's database into full shutdown (`fenceWhenUnreached`, `contactTimeoutSeconds` 60).
+  - GET, SEED, TXNS and PLAN are now answered by child processes, as FILE, STORE, PROMOTE and NBACKUP were. With the same seed every probe is answered (slowest 85 ms) and the primary is not fenced. A lock keeps seed copies, nbackups and the in-place promotion one at a time, as the single loop did: they pause the puller, take the backup lock or shut the database down, and the seeds share one copy file.
+  - Phase 0 of the Rust agent proposal (docs/rust-agent-roadmap.md), which records the measurements: a signed request costs 2 ms, a STATE 70 ms (one `fbsvcmgr`), a segment is served at about 600 MB/s. Unit tests cover a stalled segment download and a stalled seed (other requests answered, a second seed waits); they fail against the previous server. The scripts changed, so the instances of replicated clusters restart once on the upgrade, primary last.
   - The 12 commits after `db022ef` (to `a11083b`) were read and recorded in docs/cloudnative-pg-review.md. Six are dependency, CI or e2e updates. Four are aligned or have no Firebird counterpart: the sidecar plugin rollout (#11858), the failover docs on Lease timings and a hung kubelet (#11887, #11838), the warning about the Barman Cloud removal (#11725), and the `/failsafe` callers (#11872). Nothing new is open. The two items of the previous sweep are done (v0.151.0, v0.152.0).
 - [x] **The promotion's comments give the cause of issue 10** *(v0.153.0)*
   - The in-place promotion in `segment-server.pl` explained its wait for the server to close the file with the earlier reading of ISSUES.md issue 10 (a server going online with a header it cached before the write). Its comments now give the cause found on 2026-11-09: an attachment refused for the full shutdown flushes the header page it read. The behaviour is unchanged. The scripts are part of the instances' replication configuration hash, so an upgrade to v0.153.0 restarts the instances of replicated clusters once, primary last, as any change to the scripts does.

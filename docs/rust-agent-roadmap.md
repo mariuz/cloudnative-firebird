@@ -1,7 +1,8 @@
 # A Rust agent for the instance pods (roadmap proposal)
 
-Status: **proposal**, nothing implemented. It answers the question of whether a Rust core should
-replace the Perl scripts and the parts critical for performance.
+Status: **Phase 0 done** (v0.154.0, results below); the later phases are a proposal. It answers
+the question of whether a Rust core should replace the Perl scripts and the parts critical for
+performance.
 
 ## Short answer
 
@@ -41,9 +42,46 @@ Two Node sidecars from the operator image also run in the instance pods. The **l
 renews the primary Lease, and **segment-tls** is the mutual TLS proxy in front of the segment
 server. TLS moved there because a pure-Perl cipher reached under 1 MB/s (ROADMAP.md, segment TLS).
 
+## Phase 0 results (2026-11-10)
+
+Measured with `hack/bench/segment-server.sh` (Docker, one primary with its segment server and
+isolation check, a client on the host), on Firebird 4.0.7, 5.0.4 and the 6 snapshot
+(T6.0.0.2455):
+
+| | Firebird 4 | Firebird 5 | Firebird 6 |
+|---|---|---|---|
+| PING: connection, pure-Perl signature, reply (median) | 2 ms | 2 ms | 2 ms |
+| STATE: one `fbsvcmgr` per request (median) | 70 ms | 70 ms | 92 ms |
+| GET of a 256 MB segment | 562 MB/s | 600 MB/s | 531 MB/s |
+
+**The hypothesis was true.** A live seed of a 275 MB database, downloaded at 3 MB/s (91 s), on
+the server before v0.154.0 (Firebird 5):
+
+- none of the STATE and PING requests sent every second was answered within 10 s;
+- after 62 s the isolation check put the primary's database into full shutdown ("neither the
+  operator nor any replica has reached this primary for 62s").
+
+With the fix of v0.154.0 (GET, SEED, TXNS and PLAN answered by child processes, the copies one
+at a time under a lock), the same seed on all three versions: every probe answered (slowest
+85 ms, 242 ms and 79 ms on Firebird 5, 6 and 4), and the primary not fenced.
+
+**What the numbers say about Rust:**
+
+- The pure-Perl signature and the 64 KiB copy loop are not bottlenecks. A signed request costs
+  2 ms, and a segment is served at more than 500 MB/s, above what most pod networks carry.
+  Hot spots 3 and 5 below do not justify a rewrite.
+- The process per Firebird query is the measurable cost: 70–90 ms for each STATE, against
+  0.2–0.7 ms over a persistent connection (the Firebird access spike of Phase 1). It matters for
+  what asks often: the Lease holder every 5 s, the metrics exporter per query and scrape.
+- Not measured yet: replication lag at a given commit rate, the sidecars' memory, and TXNS and
+  PLAN on a large archive.
+
+So the case for the later phases rests on persistent Firebird connections, fewer runtimes in
+the pod (Node for TLS and the Lease holder) and typed, tested formats, not on raw speed.
+
 ## Where time goes
 
-These come from reading the code, not from measurements; Phase 0 measures them.
+These come from reading the code. Phase 0 measured 1, 2, 3 and 5 (above).
 
 1. **The segment server answers one request at a time.** It runs a single accept loop
    (`segment-server.pl` ~902–1141). Only FILE, STORE, PROMOTE and NBACKUP fork. GET (a segment),
@@ -122,7 +160,8 @@ It would not change:
 
 ## Phases
 
-**Phase 0: measure, and fix the sequential server (no Rust).**
+**Phase 0: measure, and fix the sequential server (no Rust).** *Done in v0.154.0, except the
+lag, memory and TXNS measurements.*
 - Benchmarks:
   - segment GET throughput;
   - request latency under concurrency (seed plus pulls plus STATE);
@@ -136,7 +175,7 @@ It would not change:
 - *Exit:* numbers in this document, and a go or no-go for each later phase.
 
 **Phase 1: foundation.**
-- A Cargo workspace in `agent/`.
+- A Cargo workspace in `operator/agent/` (inside the operator image's build context).
 - CI: `fmt`, `clippy`, tests, static amd64 and arm64 builds.
 - Packaging, and the init container that copies the binary.
 - A SIG1 crate with a conformance suite that runs the same requests against the Perl, Node and
@@ -190,8 +229,7 @@ Not planned: rewriting the orchestration shell scripts or the TypeScript operato
 - **Firebird access.** Option (b) depends on each image's `libfbclient` and libc; option (c) on a
   third-party protocol implementation keeping up with Firebird 6.
 
-## Suggested next step
+## Next step
 
-Phase 0 only. Measure, reproduce hypothesis 1, and fix the sequential segment server in Perl.
-That addresses the most likely real-world problem within days, and gives the numbers to decide
-whether Phases 1–6 are worth their cost.
+Phase 1: the workspace, the SIG1 crate with its conformance suite, the delivery of the binary
+into the pods, and the Firebird access decision.
