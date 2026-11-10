@@ -42,6 +42,59 @@ jobs:
         working-directory: .
         run: hack/release/chart.sh check
 
+  rust-agent:
+    # the instance pods' agent (operator/agent, docs/rust-agent-roadmap.md)
+    name: Rust agent
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: operator/agent
+    steps:
+      - uses: actions/checkout@v4
+
+      # the toolchain of rust-toolchain.toml, installed by rustup on first use
+      - name: Toolchain
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build the static binaries (amd64, arm64)
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+        run: |
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            cargo build --release --locked --target "$target"
+            file "target/$target/release/fb-agent" | tee /dev/stderr | grep -q 'statically linked\|static-pie linked'
+            ls -l "target/$target/release/fb-agent"
+          done
+          target/x86_64-unknown-linux-musl/release/fb-agent version
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: operator/package-lock.json
+
+      # the Perl, TypeScript and Rust implementations of the signed request protocol against
+      # each other (skipped in the unit tests job, which has no binary)
+      - name: Conformance (Perl, TypeScript, Rust)
+        working-directory: operator
+        run: |
+          npm ci
+          FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" npx vitest run tests/agent-conformance.test.ts 2>&1 | tee /tmp/conformance.txt
+          grep -q '4 passed' /tmp/conformance.txt
+
   integration-tests:
     # one run per Firebird version: the operator's FIREBIRD_DEFAULT_IMAGE (unset: latest, Firebird 5)
     # applies to every cluster below; only the major upgrade check sets spec.imageName
@@ -332,6 +385,25 @@ jobs:
           echo "resourceVersion $version unchanged for 35 s"
           # the conditions kept their transition times through those resyncs
           kubectl get firebirdcluster test-cluster -o jsonpath='{range .status.conditions[*]}{.type}={.status} since {.lastTransitionTime}{"\n"}{end}'
+
+      - name: Verify the Rust agent reaches an instance pod
+        run: |
+          # docs/rust-agent-roadmap.md, Phase 1: the annotation has the operator image's fb-agent
+          # binary copied into the instance pods (an init container, a rolling restart). Nothing
+          # runs it yet: here it asks the pod's own segment server, which is the Perl script.
+          kubectl annotate firebirdcluster test-cluster firebird.cloudnative-firebird.io/agent=rust
+          timeout 240 bash -c 'until [ "$(kubectl get pod test-cluster-0 -o jsonpath="{.spec.initContainers[0].name}" 2>/dev/null)" = "agent-install" ]; do sleep 3; done'
+          kubectl wait pod/test-cluster-0 --for=condition=Ready --timeout=300s
+          kubectl exec test-cluster-0 -c backup-files -- sh -c '$FB_AGENT version' | tee /tmp/agent-version.txt
+          grep -q '^fb-agent [0-9]' /tmp/agent-version.txt
+          # the segment server listens on localhost behind the TLS proxy when segment TLS is on
+          kubectl exec test-cluster-0 -c backup-files -- sh -c \
+            'p=${SEGMENT_LISTEN:+${SEGMENT_LISTEN##*:}}; SEGMENT_PROXY= SEGMENT_PORT=${p:-$SEGMENT_PORT} $FB_AGENT request 127.0.0.1 PING' | tee /tmp/agent-ping.txt
+          [ "$(cat /tmp/agent-ping.txt)" = "OK" ]
+          # a wrong password is refused by the Perl server
+          kubectl exec test-cluster-0 -c backup-files -- sh -c \
+            'p=${SEGMENT_LISTEN:+${SEGMENT_LISTEN##*:}}; ISC_PASSWORD=wrong SEGMENT_PROXY= SEGMENT_PORT=${p:-$SEGMENT_PORT} $FB_AGENT request 127.0.0.1 PING' | grep -q 'ERR unauthorized (signature)'
+          timeout 120 bash -c 'until [ "$(kubectl get firebirdcluster test-cluster -o jsonpath={.status.phase}/{.status.readyInstances})" = "Running/1" ]; do sleep 3; done'
 
       - name: Verify spec updates are patched onto the StatefulSet
         run: |

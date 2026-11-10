@@ -33,6 +33,7 @@ import {
 } from '../types';
 import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
 import { bootstrapVolumes, buildBootstrapInitContainers, s3ClientVolumes } from './backup';
+import { withAgent } from './agent';
 import { databaseOnlineCheck } from './fencing';
 import { PENDING_DROPS_DIR, pendingDropsConfigMapName, pendingDropsInitScript } from './pending-drops';
 import {
@@ -478,7 +479,8 @@ export function buildStatefulSet(
         // segment TLS: the proxy sidecar, the certificates, the segment server on localhost;
         // the primary Lease: its holder sidecar and token
         // the pull policy last, for the sidecars too
-        spec: withPodPullPolicy(cluster, withSegmentTls(cluster, withPrimaryLease(cluster, {
+        // the Rust agent's binary, for clusters that opted in (utils/agent.ts)
+        spec: withPodPullPolicy(cluster, withAgent(cluster, withSegmentTls(cluster, withPrimaryLease(cluster, {
           ...clusterPodSettings(cluster),
           ...terminationGracePeriod(cluster),
           securityContext: instancePodSecurityContext(cluster),
@@ -491,7 +493,7 @@ export function buildStatefulSet(
             : {}),
           containers: containers.map(secured),
           ...(volumes.length > 0 ? { volumes } : {}),
-        }, superuserClientEnv(cluster)), true)),
+        }, superuserClientEnv(cluster)), true))),
       },
       volumeClaimTemplates: [
         {

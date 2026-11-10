@@ -60,6 +60,11 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   `contactTimeoutSeconds` fenced the primary) and fixed: GET, SEED, TXNS and PLAN are answered by
   child processes. The measurements are in the proposal.
 
+- [ ] **Rust agent, Phase 2** ([docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md)): the
+  segment puller as the first component run from `fb-agent` (opt-in), compared with the Perl one
+  on replication lag and memory, which Phase 0 has not measured yet. Phases 0 and 1 are done
+  (v0.154.0).
+
 ## Backups and restore
 
 Nothing open.

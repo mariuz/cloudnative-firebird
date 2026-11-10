@@ -6,6 +6,7 @@ import { lifecycleErrors } from './lifecycle';
 import { managedServicesErrors } from './managed-services';
 import { imageCatalogRefErrors } from './image-catalog';
 import { replicaClusterErrors } from './replica-cluster';
+import { agentErrors } from './agent';
 import { parseCron } from './cron';
 import { volumeSnapshotRecoveryErrors, volumeSnapshotSpecErrors } from './volume-snapshot';
 import { API_GROUP, FirebirdCluster, FirebirdBackup, FirebirdRestore, PointInTimeRecovery, S3BackupConfiguration } from '../types';
@@ -29,6 +30,8 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     throw new ValidationError('FirebirdCluster spec is required');
   }
 
+  const agentProblems = agentErrors(cluster);
+  if (agentProblems.length > 0) throw new ValidationError(agentProblems.join('; '));
   const replicaErrors = replicaClusterErrors(cluster);
   if (replicaErrors.length > 0) throw new ValidationError(replicaErrors.join('; '));
   const catalogErrors = imageCatalogRefErrors(cluster);

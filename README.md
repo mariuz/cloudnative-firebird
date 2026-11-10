@@ -712,6 +712,14 @@ other instances are read-only replicas:
   transaction open in the copy from its first archived segment, so they are replayed, and a
   transaction whose start is no longer archived fails the seed rather than being replayed
   partially.
+- **Rust agent (opt-in, since v0.154.0, nothing uses it yet).** The annotation
+  `firebird.cloudnative-firebird.io/agent: rust` on a cluster has an init container copy the
+  `fb-agent` binary of the operator image into its instance pods (`/opt/fb-agent/fb-agent` in
+  the segment server's container). It is the foundation of a planned replacement of the Perl
+  sidecars ([docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md)); today the instances keep
+  running the Perl scripts, and the binary only speaks the segment servers' signed request
+  protocol (`fb-agent request <host> PING`). Setting or removing the annotation restarts the
+  instances, primary last.
 - The seed stays usable: while no replica holds segments back (a single instance), the primary
   keeps the segments after the seed up to `maxSegmentRetentionHours` (7 days by default), so an
   instance added later can be seeded from it. Once they are pruned, the primary's init container

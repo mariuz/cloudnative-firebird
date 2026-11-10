@@ -1,0 +1,10 @@
+[package]
+name = "fb-agent"
+description = "The instance pods' agent of cloudnative-firebird (docs/rust-agent-roadmap.md)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sig1 = { path = "../sig1" }

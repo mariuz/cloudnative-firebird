@@ -1,6 +1,6 @@
 # A Rust agent for the instance pods (roadmap proposal)
 
-Status: **Phase 0 done** (v0.154.0, results below); the later phases are a proposal. It answers
+Status: **Phases 0 and 1 done** (v0.154.0, results below); the later phases are a proposal. It answers
 the question of whether a Rust core should replace the Perl scripts and the parts critical for
 performance.
 
@@ -141,7 +141,9 @@ It would not change:
   into an emptyDir, and the sidecars keep running in the Firebird image. That way they still
   have the Firebird tools (`fbsvcmgr`, `gfix`, `nbackup`) and the data volume. The operator
   already copies `/opt/firebird` into an emptyDir the same way.
-- **Firebird access.** This is the first decision, made with a spike in Phase 1:
+- **Firebird access.** Decided by the spike of Phase 1
+  ([rust-agent-firebird-access.md](rust-agent-firebird-access.md)): option (c) with the
+  `firebird-wire` crate, option (b) as the fallback. The options were:
   - (a) keep calling `isql` and `fbsvcmgr`: simplest, but keeps hot spot 2;
   - (b) `libfbclient` through FFI: needs a glibc build that matches each image's libc and works
     with Firebird 4, 5 and 6;
@@ -174,7 +176,18 @@ lag, memory and TXNS measurements.*
   queued work. It is worth doing whatever is decided about Rust.
 - *Exit:* numbers in this document, and a go or no-go for each later phase.
 
-**Phase 1: foundation.**
+**Phase 1: foundation.** *Done in v0.154.0:*
+- *`operator/agent/`: the `sig1` crate and the `fb-agent` binary (`version`, `request`, and
+  `serve`, which answers PING), 490 kB static, built into the operator image for amd64 and arm64
+  without emulation.*
+- *The conformance suite (`tests/agent-conformance.test.ts`): each client against each server,
+  and the same refused lines with the same replies from the Perl and the Rust server.*
+- *Delivery: the annotation `firebird.cloudnative-firebird.io/agent: rust` has an init container
+  copy the binary into the instance pods. The kind CI runs it there against the pod's Perl
+  segment server.*
+- *Firebird access: `firebird-wire`, with `libfbclient` as the fallback.*
+
+*The plan was:*
 - A Cargo workspace in `operator/agent/` (inside the operator image's build context).
 - CI: `fmt`, `clippy`, tests, static amd64 and arm64 builds.
 - Packaging, and the init container that copies the binary.
@@ -231,5 +244,5 @@ Not planned: rewriting the orchestration shell scripts or the TypeScript operato
 
 ## Next step
 
-Phase 1: the workspace, the SIG1 crate with its conformance suite, the delivery of the binary
-into the pods, and the Firebird access decision.
+Phase 2: the puller as the first component that runs from the agent, and the missing Phase 0
+measurements (replication lag at a commit rate, the sidecars' memory) to compare it against.
