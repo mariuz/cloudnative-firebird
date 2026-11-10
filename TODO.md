@@ -55,6 +55,14 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   for the Firebird 6 release and every later major version (an unknown ODS is refused, not
   guessed), or replace them with supported mechanisms if Firebird adds any.
 
+- [ ] **Measure the segment server, and serve long requests concurrently** (Phase 0 of the
+  [Rust agent proposal](docs/rust-agent-roadmap.md)): the segment server answers one request at a
+  time, and GET, SEED, TXNS, PLAN and STATE run inline, so a long live seed from the primary
+  delays the replicas' pulls, the operator's checks and the lease holder's STATE. Reproduce
+  whether a seed longer than a minute lets the primary's Lease expire or fences it
+  (`fenceWhenUnreached`); benchmark lag, request latency and sidecar resources; fork the long
+  commands as FILE already is. The numbers decide the proposal's later phases.
+
 ## Backups and restore
 
 Nothing open.
