@@ -1,4 +1,4 @@
-# CloudNativePG review (1.28 – 1.30.1, and main to October 2026)
+# CloudNativePG review (1.28 – 1.30.1, and main to November 2026)
 
 cloudnative-firebird follows [CloudNativePG](https://github.com/cloudnative-pg/cloudnative-pg)
 where Firebird allows it. This review walks through the CloudNativePG changes from 1.28.0
@@ -136,16 +136,31 @@ OSPS Baseline files, the CVD policy's response times, the architecture docs). Th
 |---|---|---|
 | The bootstrap init container leaves a volume that already holds the instance untouched: it runs only while the pod carries a `bootstrapPending` annotation, so a pod recreated as it was (a restore of the pod with its PVCs, a recreated sandbox) no longer re-initializes the data directory (#11608); a PVC stays initializing until its bootstrap container reports (#11801) | `init-instance.sh` creates or seeds a database only where none exists ("database exists, nothing to initialise"), keeps a database of its own on a non-primary instance aside instead of deleting it, and discards a replica's database only for a re-seed token it has not applied yet. Volume states come from the claims and the pods' readiness, not from an init container's status. | aligned |
 | Instance status HTTP errors are no longer retried five times, which delayed the primary label after a switchover (#11793) | The operator's segment server requests are made once, with a time limit (`SEGMENT_REQUEST_TIMEOUT_MS`); a server that answers with an error is not asked again in the same reconcile. | aligned |
-| The admission guard no longer clears `status.phaseReason` on every validation, which made the status flap and be rewritten several times a second (#11789) | Nothing clears the status here outside the reconcile, so there is no flapping. The reconcile does write the whole status on every pass (every resync, 10 s), even when nothing changed. | **planned** (TODO.md: skip status writes that change nothing) |
+| The admission guard no longer clears `status.phaseReason` on every validation, which made the status flap and be rewritten several times a second (#11789) | Nothing clears the status here outside the reconcile, so there is no flapping. Since v0.152.0 the reconcile writes the status only when it changed, and conditions keep their `lastTransitionTime` while their status is the same. | **done** (v0.152.0) |
 | A replica times the primary Lease from the pending failover marker instead of from its election (#11798) | The operator promotes only once the old primary's Lease expired, counted from its last renewal (`renewTime`), not from the election. The failover's own delay (`failover.delaySeconds`, 30 s by default) is longer than the Lease (15 s by default), so the Lease has usually expired by the election and adds nothing to the failover. | aligned |
 | A primary superseded by another target stops even with the isolation check disabled, when a peer names another target primary (#11795) | A replica is promoted only by automatic failover, and the isolation check and the primary Lease (on by default for new clusters) run whenever automatic failover is enabled. A planned switchover shuts the old primary down itself, before promoting. | aligned |
 | A primary stepping down on a stale Lease tries a fast shutdown first, so the WAL not yet streamed still reaches the replicas (#11805) | The fence is a full shutdown of the database: committed changes are in the journal, and closing the database archives the active segment, which the segment server keeps serving to replicas that still reach it. The failover promotes after every segment the archive may hold. | aligned |
-| SSE-C customer-provided keys for object stores, with the instance manager granted the key's Secret (#11775) | S3 backups, journal archiving and restores have no server-side encryption setting at all (no SSE-S3, SSE-KMS or SSE-C). The `aws` CLI the Jobs run takes `--sse-c` and `--sse-c-key`. | **planned** (TODO.md: server-side encryption for S3) |
+| SSE-C customer-provided keys for object stores, with the instance manager granted the key's Secret (#11775) | Since v0.151.0 every S3 configuration takes `encryption` (SSE-S3 or SSE-KMS) or `sseCustomerKey` (SSE-C, the key from a Secret mounted into the S3 client containers only). | **done** (v0.151.0) |
 | Online volume snapshot backups skip the WAL volume (#11734); replicas started from an online snapshot use its backup label (#11847) | There is no separate journal volume to skip: the journal lives on the instance volume, and a snapshot of it is taken under the backup lock (nbackup) like the database. | n/a |
 | Per-role client certificate duration and renewal window (#11342) | Firebird users authenticate with SRP passwords (generated ones are renewed since v0.140.0); there are no client certificates per user. | n/a |
 | `USAGE` and `CREATE` schema privileges in the `Database` resource (#10910) | Firebird has schemas only from 6.0 (not released). `FirebirdDatabase` manages databases, not schemas; worth revisiting once 6.0 is released. | n/a (Firebird 6) |
 | WAL count metrics exclude partial, backup and history files (#9967) | Archived segments are matched by an anchored name (`*.journal-<n>` and nothing after it) in the segment server and in the lag metrics. | aligned |
 | The defaulting webhook logs at debug, as it runs on every reconcile (#11790) | The operator logs a default only when it records one (the first reconcile, or a recreated cluster), not on every reconcile. | aligned |
+
+## Main branch to 2026-11-10 (swept 2026-11-10)
+
+The 12 commits merged to CloudNativePG's `main` after `db022ef` (to `a11083b`, November 10, 2026;
+still no release after 1.30.1) were read from their commit messages. Six are dependency, CI, e2e
+or adopters-list updates (golang.org/x/term, boto3, the ubi-micro digest, the e2e tests'
+`amazon/aws-cli` 2.39.6, Renovate's pin of the OSPS publish workflow, OpenShift skips for plugin
+snapshot specs). The others:
+
+| CloudNativePG (main, PR) | Here | Status |
+|---|---|---|
+| A sidecar plugin enabled on a running cluster: pods created before it lacked its socket, so the instance manager failed every loop with `Unknown plugin`, and a primary in that state could not demote itself in a switchover (#11858) | There are no plugins. The sidecars (replication, segment TLS proxy, lease holder, archive follower) are part of the pod template: enabling one is a template change, and the rolling update recreates every instance with it, primary last. Nothing in a pod asks for a sidecar it does not have. | aligned |
+| Failover docs: the primary Lease timings corrected (#11887), and the recovery when both the kubelet and the instance manager of the primary hang (#11838) | README: the lease holder renews every third of `durationSeconds`, and fences at the renew deadline (two thirds). A primary whose kubelet hangs while its database and lease holder still run keeps the Lease and is not replaced. If the lease holder hangs too, the Lease expires and a replica is promoted. When the old primary resumes, its lease holder sees the Lease name another instance and fences it, and it is re-seeded. | aligned |
+| Backup and ScheduledBackup webhooks warn about the native Barman Cloud method removed in 1.32 (#11725) | No backup method is deprecated here: logical (gbak) and physical (nbackup) backups, to the volume or to S3. | n/a |
+| The technical architecture lists only the primary's instance manager as the caller of `/failsafe` (#11872) | The isolation check's peers are reached through the segment servers (README, "Isolation check"). | n/a |
 
 ## Not applicable
 

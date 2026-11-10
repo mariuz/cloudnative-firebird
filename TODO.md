@@ -68,7 +68,8 @@ Nothing open.
 From the sweep of CloudNativePG's main branch after 1.30.1 (2026-10-26,
 [docs/cloudnative-pg-review.md](docs/cloudnative-pg-review.md)), most important first. The sweeps
 of 2026-10-28 (to `036d116`) and 2026-11-01 (to `4383dbf`) added nothing open; the one of
-2026-11-07 (to `db022ef`) added the first two below:
+2026-11-07 (to `db022ef`) added the first two below (both done); the one of 2026-11-10 (to
+`a11083b`) added nothing open:
 
 - [x] **Server-side encryption for S3** (CloudNativePG #11775, v0.151.0): `encryption`
   (`AES256` or `aws:kms` with `kmsKeyId`) and `sseCustomerKey` (SSE-C, the key from a Secret) in
