@@ -2069,7 +2069,7 @@ jobs:
           kubectl logs "$replica" -c segment-server | grep -q 'promoted in place: the journal continues after segment'
           # the old primary comes back as a replica, and every instance follows the new primary
           timeout 600 bash -c 'until [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.phase}/{.status.readyInstances})" = "Running/3" ]; do sleep 5; done'
-          for i in $(seq 411 415); do sql "$replica" "insert into app values ($i, 'after the agent promoted'); commit;" >/dev/null; done
+          for i in $(seq 411 415); do sql "$replica" "insert into app values ($i, 'agent promoted'); commit;" >/dev/null; done
           for pod in repl-0 repl-1 repl-2; do wait_count "$pod" $((before + 5)); done
           echo "switchover to $replica: promoted in place by the agent, all instances follow it"
 
