@@ -10,8 +10,8 @@ import { signLine } from './helpers/segment-auth';
 
 /**
  * The segment server's front (`fb-agent segment-server`, docs/rust-agent-segment-server.md): it
- * answers PING, LIST, GET and WAIT itself and forwards the other requests to segment-server.pl,
- * which it runs behind it. The same requests go to the Perl server alone and to the front: the
+ * answers PING, LIST, GET, WAIT and the requests about the instance's state itself and forwards
+ * the other requests to segment-server.pl, which it runs behind it. The same requests go to the Perl server alone and to the front: the
  * replies must be the same, except for WAIT, which only the front knows.
  *
  * Needs the fb-agent binary (FB_AGENT_BIN, or a build in agent/target); skipped without it. The
@@ -133,6 +133,103 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     const [p, f] = await both('STATE');
     expect(p).toEqual([`ERR cannot read the state of ${join(root, 'data', 'mydb.fdb')}`]);
     expect(f).toEqual(p);
+  });
+
+  it('answers the requests about the instance from its files, as the Perl server does', async () => {
+    const inBoth = (name: string, content: string | Buffer | null) => {
+      for (const dir of ['repl-perl', 'repl-front']) {
+        if (content === null) rmSync(join(root, dir, name), { force: true });
+        else writeFileSync(join(root, dir, name), content);
+      }
+    };
+    const requests = [
+      'HEADER', 'ISOLATION', 'POSITION', 'PRIMARYSEEN', 'FOLLOW', 'SYNCTO', 'POINTS 7', 'POINTS 8', 'LINEAGE', 'ARCHIVED',
+      // refused arguments: the Perl server's words, through the front
+      'POINTS x', 'POINTS', 'UPLOADED', 'UPLOADED x', 'RETAIN', 'RETAIN x',
+    ];
+    /** every request to both; the ages in two replies may be a second apart, so a difference is asked again */
+    const same = async (stage: string) => {
+      const replies: Record<string, string[]> = {};
+      for (const request of requests) {
+        let [a, b] = await both(request);
+        for (let i = 0; i < 3 && JSON.stringify(a) !== JSON.stringify(b); i++) [a, b] = await both(request);
+        expect(b, `${stage}: ${request}`).toEqual(a);
+        expect(a.length, `${stage}: ${request}`).toBeGreaterThan(0);
+        replies[request] = b;
+      }
+      return replies;
+    };
+
+    // the primary, with nothing recorded yet and no database file
+    let r = await same('empty primary');
+    expect(r['POSITION']).toEqual(['OK primary']);
+    expect(r['ISOLATION']).toEqual(['OK online']);
+    expect(r['HEADER'][0]).toMatch(/^ERR cannot read the header of /);
+
+    // a database header (ODS 13) with the replication sequence clump after another one
+    const page = Buffer.alloc(8192);
+    page[0] = 1;
+    page.writeUInt16LE(13 | 0x8000, 18);
+    Buffer.from([5, 2, 9, 9, 11, 8]).copy(page, 128);
+    page.writeBigUInt64LE(77n, 134);
+    page.writeUInt16LE(143, 66);
+    writeFileSync(join(root, 'data', 'mydb.fdb'), page);
+    inBoth('self-fenced', '1700000000 lease\n');
+    inBoth('primary-seen', `${Math.floor(Date.now() / 1000) - 60} db-1.db-headless\n`);
+    inBoth('follow.state', 'applied 12\n');
+    inBoth('sync.conf', 'sync_replica = db-1.db-headless:3050/x\n# sync_replica = no:1\nsync_replica=db-2.db-headless:1\n');
+    for (const dir of ['repl-perl', 'repl-front']) mkdirSync(join(root, dir, 'points'), { recursive: true });
+    inBoth('points/7', '100 48\nbad\n101 96\n102 1');
+    inBoth('lineage', '3 1700000000\nx\n4 1700000100 \n');
+    r = await same('primary with records');
+    expect(r['HEADER']).toEqual(['OK 77']);
+    expect(r['ISOLATION']).toEqual(['OK fenced 1700000000 lease']);
+    expect(r['PRIMARYSEEN'][0]).toMatch(/^OK (59|6\d) db-1\.db-headless$/);
+    expect(r['FOLLOW']).toEqual(['OK applied 12']);
+    expect(r['SYNCTO']).toEqual(['OK db-1.db-headless,db-2.db-headless']);
+    expect(r['POINTS 7']).toEqual(['100 48', '101 96', '.']);
+    expect(r['POINTS 8']).toEqual(['.']);
+    expect(r['LINEAGE']).toEqual(['mydb.fdb.lineage-3-1700000000', 'mydb.fdb.lineage-4-1700000100', '.']);
+    // segments 7 and 8 (still being copied, but with its header); 9 has no segment header
+    expect(r['ARCHIVED'].length).toBe(3);
+    expect(r['ARCHIVED'][0]).toMatch(/^7 \d$/);
+
+    // a replica: its control file, and the segments fetched after it
+    writeFileSync(join(root, 'primary'), 'db-1.db-headless\n');
+    expect((await same('replica without a control file'))['POSITION']).toEqual(['ERR no replica control file']);
+    const control = Buffer.alloc(40);
+    control.write('FBREPLCTL\0', 0, 'latin1');
+    control.writeUInt16LE(1, 10);
+    control.writeBigUInt64LE(41n, 16);
+    control.writeUInt32LE(1234, 24);
+    writeFileSync(join(root, 'source', '{6A0B3C1D-0000-4000-8000-000000000001}'), control);
+    for (const n of [41, 42, 43]) writeFileSync(join(root, 'source', `mydb.fdb.journal-0000000${n}`), segment(n, 100));
+    expect((await same('replica'))['POSITION']).toEqual(['OK 41 1234 2']);
+    // a synchronous standby that has seen the end of the archive
+    inBoth('sync-standby', '');
+    inBoth('sync-seen', '57\n');
+    expect((await same('synchronous standby'))['POSITION']).toEqual(['OK 57 0 0']);
+    // promoted in place: the primary, whatever the file still says
+    inBoth('promoted', '');
+    expect((await same('promoted'))['POSITION']).toEqual(['OK primary']);
+
+    // the numbers the pruning reads
+    for (const [dir, port] of [['repl-perl', perl.port], ['repl-front', front.port]] as const) {
+      expect(await lines(port, 'UPLOADED 12'), dir).toEqual(['OK']);
+      expect(readFileSync(join(root, dir, 'uploaded-floor'), 'utf8'), dir).toBe('12\n');
+      expect(await lines(port, 'RETAIN 9'), dir).toEqual(['OK']);
+      expect(readFileSync(join(root, dir, 'retain-floor'), 'utf8'), dir).toBe('9\n');
+      expect(await lines(port, 'RETAIN none'), dir).toEqual(['OK']);
+      expect(existsSync(join(root, dir, 'retain-floor')), dir).toBe(false);
+      // these too are contact for the isolation check
+      rmSync(join(root, dir, 'last-contact'), { force: true });
+      await lines(port, 'POSITION');
+      expect(existsSync(join(root, dir, 'last-contact')), dir).toBe(true);
+    }
+    // the Perl server has no local Firebird to ask here, and neither has the front
+    const [pv, fv] = await both('VERSION');
+    expect(pv).toEqual(['ERR cannot read the engine version']);
+    expect(fv).toEqual(pv);
   });
 
   it('refuses what the Perl server refuses, in its words', async () => {

@@ -13,12 +13,17 @@
 //!                              check) or "OK fenced lease" (by the Lease holder), from a service
 //!                              attachment that stays open (state.rs). Passed to the Perl server
 //!                              when that cannot tell.
+//!   VERSION                 -> "OK <engine version>", from the same attachment; else the Perl server.
+//!   HEADER, ISOLATION, POSITION, PRIMARYSEEN, FOLLOW, SYNCTO, POINTS <segment>, LINEAGE,
+//!   ARCHIVED, UPLOADED <segment>, RETAIN <segment>|none
+//!                           -> from the files on the instance's volume, as the Perl server
+//!                              answers them (status.rs).
 //!
 //! A segment is complete once its file holds the length its header announces. Firebird archives a
 //! segment with a plain copy, and its replica skips a file shorter than its header says, so a
 //! segment listed while it is still being copied would be fetched short and never applied.
 //!
-//! Environment: ARCHIVE_DIR, REPLICATION_DIR, ISC_PASSWORD, SEGMENT_LISTEN (host:port) or
+//! Environment: ARCHIVE_DIR, REPLICATION_DIR, SOURCE_DIR, PRIMARY_FILE, POD_NAME, ISC_PASSWORD, SEGMENT_LISTEN (host:port) or
 //! SEGMENT_PORT, AUTH_WINDOW_SECONDS, BACKEND_PORT (3071; 0: a free port); for STATE:
 //! DATABASE_PATH, ISC_USER (SYSDBA), FIREBIRD_PORT (3050), LOCAL_QUERY_TIMEOUT_SECONDS (10),
 //! NATIVE_STATE (false: always the Perl server). The backend command
@@ -26,6 +31,7 @@
 
 use crate::client::{now, var};
 use crate::state::{Probe, State};
+use crate::status::Files;
 use sig1::Verifier;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -110,6 +116,8 @@ struct Front {
     /// The local server's state, with REPLICATION_DIR/self-fenced: who shut the database down
     state: Option<Probe>,
     self_fenced: Option<PathBuf>,
+    /// The instance's files, for the requests answered from them
+    files: Option<Files>,
 }
 
 impl Front {
@@ -202,7 +210,22 @@ impl Front {
                 // not told: the Perl server asks with fbsvcmgr
                 None => self.forward(client, reader, &line),
             },
-            // not taken over yet: the Perl server answers, with the request as it came
+            ("VERSION", _) if self.state.is_some() => {
+                self.contacted();
+                match self.state.as_ref().and_then(Probe::version) {
+                    Some(version) => writeln!(client, "OK {version}"),
+                    // not told: the Perl server asks with isql
+                    None => self.forward(client, reader, &line),
+                }
+            }
+            (command, _) if self.files.is_some() => match self.files.as_ref().and_then(|files| from_files(files, command, argument)) {
+                Some(reply) => {
+                    self.contacted();
+                    client.write_all(reply.as_bytes())
+                }
+                // not taken over yet: the Perl server answers, with the request as it came
+                None => self.forward(client, reader, &line),
+            },
             _ => self.forward(client, reader, &line),
         }
     }
@@ -264,6 +287,27 @@ impl Front {
     }
 }
 
+/// The reply to a request that is answered from the instance's files; None for any other, and for
+/// an argument the Perl server would refuse (it then says so).
+fn from_files(files: &Files, command: &str, argument: Option<&str>) -> Option<String> {
+    let number = argument.filter(|a| !a.is_empty() && a.bytes().all(|b| b.is_ascii_digit()));
+    Some(match command {
+        "HEADER" => files.header(),
+        "ISOLATION" => files.isolation(),
+        "POSITION" => files.position(),
+        "PRIMARYSEEN" => files.primary_seen(now()),
+        "FOLLOW" => files.follow(),
+        "SYNCTO" => files.sync_to(),
+        "LINEAGE" => files.lineage(),
+        "ARCHIVED" => files.archived(now()),
+        "POINTS" => files.points(number?),
+        "UPLOADED" => files.record("uploaded-floor", Some(number?)),
+        "RETAIN" if argument == Some("none") => files.record("retain-floor", None),
+        "RETAIN" => files.record("retain-floor", Some(number?)),
+        _ => return None,
+    })
+}
+
 fn free_port() -> io::Result<u16> {
     Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
 }
@@ -316,6 +360,17 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
             )
         }),
         self_fenced: (!base.is_empty()).then(|| Path::new(&base).join("self-fenced")),
+        files: [var("DATABASE_PATH"), var("SOURCE_DIR"), base.clone(), var("PRIMARY_FILE")]
+            .iter()
+            .all(|value| !value.is_empty())
+            .then(|| Files {
+                database: PathBuf::from(var("DATABASE_PATH")),
+                archive: PathBuf::from(var("ARCHIVE_DIR")),
+                source: PathBuf::from(var("SOURCE_DIR")),
+                base: PathBuf::from(&base),
+                primary_file: PathBuf::from(var("PRIMARY_FILE")),
+                pod: var("POD_NAME"),
+            }),
     });
     println!(
         "segment server (fb-agent {}) listening on {}, serving {}; other requests go to {backend}",
@@ -416,6 +471,7 @@ mod tests {
             backend: SocketAddr::from(([127, 0, 0, 1], 1)),
             state: None,
             self_fenced: None,
+            files: None,
         };
         assert_eq!(front.newest().as_deref(), Some("db.fdb.journal-000000004"));
         fs::write(dir.join("db.fdb.journal-000000006"), segment(1000, 400)).unwrap();

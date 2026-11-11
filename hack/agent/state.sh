@@ -1,5 +1,5 @@
 #!/bin/bash
-# Checks the agent's STATE (docs/rust-agent-segment-server.md, step 2) against real Firebird
+# Checks the agent's STATE and VERSION (docs/rust-agent-segment-server.md, step 2) against real Firebird
 # servers: the segment server's front answers it from a service attachment that stays open, the
 # Perl server behind it with one fbsvcmgr per request. Both are asked in every state of the
 # database and must say the same: online, full shutdown, fenced by the Lease holder, fenced by the
@@ -34,8 +34,8 @@ export DATABASE_PATH=/data/db.fdb ARCHIVE_DIR=/data/a SOURCE_DIR=/data/s REPLICA
 export PRIMARY_FILE=/data/primary POD_NAME=db-0 SCRIPT_DIR=/w
 start_firebird() { su -s /bin/sh firebird -c "/opt/firebird/bin/firebird" & }
 # the front's answer and the Perl server's (its own port behind the front)
-front() { SEGMENT_PORT=3051 /w/fb-agent request 127.0.0.1 STATE; }
-perl_server() { SEGMENT_PORT=3071 /w/fb-agent request 127.0.0.1 STATE; }
+front() { SEGMENT_PORT=3051 /w/fb-agent request 127.0.0.1 ${1:-STATE}; }
+perl_server() { SEGMENT_PORT=3071 /w/fb-agent request 127.0.0.1 ${1:-STATE}; }
 shut() { fbsvcmgr localhost:service_mgr action_properties dbname $DATABASE_PATH prp_shutdown_mode prp_sm_full prp_force_shutdown 0; }
 online() { fbsvcmgr localhost:service_mgr action_properties dbname $DATABASE_PATH prp_online_mode prp_sm_normal; }
 ENV
@@ -63,6 +63,10 @@ for image in "${images[@]}"; do
   }
   echo "server: $(x 'isql -z </dev/null 2>/dev/null | head -n 1')"
   same "online" "OK online"
+  # the engine version: the front reads it from the server's version string, the Perl server
+  # asks the database
+  fv=$(x 'front VERSION' 2>&1); pv=$(x 'perl_server VERSION' 2>&1)
+  if [ "$fv" = "$pv" ] && echo "$fv" | grep -Eq '^OK [0-9]+\.[0-9]+\.[0-9]+$'; then echo "ok: engine version: $fv"; else echo "FAILED: engine version: front \"$fv\", Perl server \"$pv\""; failed=1; fi
   x 'grep -q "database state from a service attachment" /data/front.log' || { echo "FAILED: the front did not attach to the services:"; x 'cat /data/front.log'; failed=1; }
   x 'shut'
   same "full shutdown" "OK shutdown"
@@ -84,6 +88,11 @@ for image in "${images[@]}"; do
     [ "$who" = front ] && front_ms=$ms || perl_ms=$ms
   done
   [ "$front_ms" -lt "$perl_ms" ] || { echo "FAILED: the front's STATE is not faster than the Perl server's"; failed=1; }
+
+  for who in front perl_server; do
+    ms=$(x "s=\$(date +%s%N); for i in \$(seq 1 30); do $who VERSION >/dev/null; done; echo \$(( (\$(date +%s%N) - s) / 30000000 ))")
+    echo "$who: $ms ms per VERSION"
+  done
 
   # the server stopped: neither can tell; back: the front attaches again
   x 'pkill -x firebird; for i in $(seq 1 20); do pgrep -x firebird >/dev/null || break; sleep 0.5; done'

@@ -95,9 +95,9 @@ jobs:
           npm ci
           FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" NO_COLOR=1 \
             npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts 2>&1 | tee /tmp/conformance.txt
-          # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, and 7 for
+          # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, and 8 for
           # the segment server's front (colour codes stripped: the runner's output has them)
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +27 passed \(27\)'
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +28 passed \(28\)'
 
       # STATE from the front's service attachment and from the Perl server's fbsvcmgr, side by
       # side in every state of the database, on real servers (docs/rust-agent-segment-server.md)
@@ -1936,6 +1936,20 @@ jobs:
           kubectl exec "$replica" -c segment-puller -- /opt/fb-agent/fb-agent request "$primary.repl-headless" STATE | grep -qx 'OK online'
           kubectl logs "$primary" -c segment-server | grep -q 'database state from a service attachment to the local server'
           kubectl exec "$primary" -c segment-server -- sh -c 'SEGMENT_PROXY= SEGMENT_PORT=3071 /opt/fb-agent/fb-agent request 127.0.0.1 STATE' | grep -qx 'OK online'
+          # the requests about an instance's state are the front's too (v0.157.0), with the Perl
+          # server's replies: a replica's position, the primary's, the engine version
+          for request in POSITION HEADER VERSION ISOLATION SYNCTO; do
+            for pod in "$primary" "$replica"; do
+              kubectl exec "$pod" -c segment-server -- sh -c "SEGMENT_PROXY= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 $request" > /tmp/front.txt
+              kubectl exec "$pod" -c segment-server -- sh -c "SEGMENT_PROXY= SEGMENT_PORT=3071 /opt/fb-agent/fb-agent request 127.0.0.1 $request" > /tmp/perl.txt
+              echo "$pod $request: $(cat /tmp/front.txt)"
+              grep -q '^OK ' /tmp/front.txt
+              # a replica's position and the header's sequence move with the journal: the others
+              # are compared
+              case "$request $pod" in "POSITION $replica"|HEADER*) ;; *) diff /tmp/front.txt /tmp/perl.txt ;; esac
+            done
+          done
+          kubectl exec "$primary" -c segment-server -- sh -c 'SEGMENT_PROXY= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 POSITION' | grep -qx 'OK primary'
           # the operator reaches the segment servers over TLS too: the lag is measured again
           timeout 120 bash -c "until [ \"\$(kubectl get pod $replica -o jsonpath='{.metadata.annotations.firebird\\.cloudnative-firebird\\.io/replication-lag-seconds}')\" = 0 ]; do sleep 5; done" \
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.replicationStatus}'; exit 1; }
