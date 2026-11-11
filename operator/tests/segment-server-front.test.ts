@@ -10,7 +10,7 @@ import { signLine } from './helpers/segment-auth';
 
 /**
  * The segment server's front (`fb-agent segment-server`, docs/rust-agent-segment-server.md): it
- * answers PING, LIST, GET, WAIT, the requests about the instance's state and the backup files itself and forwards
+ * answers PING, LIST, GET, WAIT, the requests about the instance's state, the backup files and the seeds itself and forwards
  * the other requests to segment-server.pl, which it runs behind it. The same requests go to the Perl server alone and to the front: the
  * replies must be the same, except for WAIT, which only the front knows.
  *
@@ -244,6 +244,47 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
       expect(await lines(port, once)).toEqual(['ERR unauthorized (replay)']);
       expect(await lines(port, signLine('tok PING', Math.floor(Date.now() / 1000) - 1000))).toEqual(['ERR unauthorized (clock)']);
     }
+  });
+
+  it('tells where transactions begin in the archive, and refuses a seed, as the Perl server does', async () => {
+    /** a segment with blocks of [transaction, flags, payload size] */
+    const withBlocks = (sequence: number, blocks: Array<[number, number, number]>): Buffer => {
+      const body = Buffer.concat(
+        blocks.map(([transaction, flags, size]) => {
+          const b = Buffer.alloc(16 + size);
+          b.writeBigUInt64LE(BigInt(transaction), 0);
+          b.writeUInt16LE(1, 8);
+          b.writeUInt16LE(flags, 10);
+          b.writeUInt32LE(size, 12);
+          return b;
+        }),
+      );
+      const header = Buffer.alloc(48);
+      header.write('FBCHANGELOG\0', 0, 'latin1');
+      header.writeBigUInt64LE(BigInt(sequence), 32);
+      header.writeBigUInt64LE(BigInt(48 + body.length), 40);
+      return Buffer.concat([header, body]);
+    };
+    writeFileSync(join(archive(), 'mydb.fdb.journal-000000010'), withBlocks(10, [[50, 1, 5], [51, 0, 0], [50, 0, 7]]));
+    writeFileSync(join(archive(), 'mydb.fdb.journal-000000011'), withBlocks(11, [[51, 0, 3], [52, 1, 2], [0, 0, 4], [60, 1, 0]]));
+    const requests = [
+      'TXNS 11 50,52,53', 'TXNS 10 50,52', 'TXNS 11 ', 'PLAN 11 52 51', 'PLAN 11 99 ', 'PLAN 10 0 ',
+      // refused arguments
+      'TXNS', 'TXNS 11', 'TXNS x 1', 'TXNS 11 a', 'PLAN 11 1', 'PLAN 11 x 1',
+      // no bootstrap seed, and a live copy of the primary is not allowed here
+      'SEED',
+    ];
+    const replies: Record<string, string[]> = {};
+    for (const request of requests) {
+      const [a, b] = await both(request);
+      expect(b, request).toEqual(a);
+      expect(a.length, request).toBeGreaterThan(0);
+      replies[request] = b;
+    }
+    expect(replies['TXNS 11 50,52,53']).toEqual(['50 10', '52 11', '.']);
+    // (the other fixture segments are filled with one byte, which also reads as blocks of huge transaction numbers)
+    expect(replies['PLAN 11 52 51'].filter((l) => !/^\d{6,} /.test(l))).toEqual(['51 10 0', '52 11 1', '60 11 1', '.']);
+    expect(replies['SEED'][0]).toMatch(/^ERR no safe seed source on the primary/);
   });
 
   it('copies, lists and removes the backup files as the Perl server does', async () => {

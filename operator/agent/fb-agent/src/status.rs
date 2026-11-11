@@ -98,7 +98,12 @@ fn control(source: &Path) -> Option<(u64, u32)> {
                 && name.ends_with('}')
                 && name[1..name.len() - 1].bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
         })?;
-    let data = fs::read(source.join(name)).ok()?;
+    control_file(&source.join(name))
+}
+
+/// A control file's (sequence, offset); None when it is not one.
+pub fn control_file(path: &Path) -> Option<(u64, u32)> {
+    let data = fs::read(path).ok()?;
     if data.len() < 40 || !data.starts_with(b"FBREPLCTL") {
         return None;
     }
@@ -109,7 +114,7 @@ fn control(source: &Path) -> Option<(u64, u32)> {
 }
 
 impl Files {
-    fn is_primary(&self) -> bool {
+    pub fn is_primary(&self) -> bool {
         if self.base.join("promoted").exists() {
             return true;
         }

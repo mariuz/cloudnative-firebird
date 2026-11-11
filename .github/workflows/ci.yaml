@@ -95,9 +95,9 @@ jobs:
           npm ci
           FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" NO_COLOR=1 \
             npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts 2>&1 | tee /tmp/conformance.txt
-          # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, and 10 for
+          # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, and 11 for
           # the segment server's front (colour codes stripped: the runner's output has them)
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +30 passed \(30\)'
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +31 passed \(31\)'
 
       # STATE from the front's service attachment and from the Perl server's fbsvcmgr, side by
       # side in every state of the database, on real servers (docs/rust-agent-segment-server.md)
@@ -110,6 +110,18 @@ jobs:
         working-directory: .
         continue-on-error: true
         run: hack/agent/state.sh firebirdsql/firebird:6-snapshot
+
+      # SEED from the front (its own SQL attachments: the backup lock, the replication sequence,
+      # the database's GUID) and from the Perl server (isql): a live, an offline and a replica
+      # seed from each, and every copy opened as a database
+      - name: Seeds against Firebird 4 and 5
+        working-directory: .
+        run: hack/agent/seed.sh firebirdsql/firebird:4 firebirdsql/firebird:5
+
+      - name: Seeds against the Firebird 6 snapshot
+        working-directory: .
+        continue-on-error: true
+        run: hack/agent/seed.sh firebirdsql/firebird:6-snapshot
 
   integration-tests:
     # one run per Firebird version: the operator's FIREBIRD_DEFAULT_IMAGE (unset: latest, Firebird 5)
@@ -1962,6 +1974,21 @@ jobs:
             done
           done
           kubectl exec "$primary" -c segment-server -- sh -c 'SEGMENT_PROXY= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 POSITION' | grep -qx 'OK primary'
+          # a seed is the front's too (v0.159.0): a replica is re-seeded, and the instance it took
+          # its copy from made it itself (its own SQL attachments for the backup lock) or sent the
+          # primary's offline bootstrap seed
+          old_uid=$(kubectl get pod "$replica" -o jsonpath={.metadata.uid})
+          kubectl annotate pod "$replica" firebird.cloudnative-firebird.io/reseed=true
+          timeout 180 bash -c "until [ -n \"\$(kubectl get pod $replica -o jsonpath={.metadata.uid} 2>/dev/null)\" ] && [ \"\$(kubectl get pod $replica -o jsonpath={.metadata.uid} 2>/dev/null)\" != '$old_uid' ]; do sleep 3; done"
+          kubectl wait pod/"$replica" --for=condition=Ready --timeout=300s
+          kubectl logs "$replica" -c replication-init | tee /tmp/agent-reseed.log
+          grep -q 'seeded replica from' /tmp/agent-reseed.log
+          for pod in $(kubectl get pods -l "$SEL" -o name); do
+            kubectl logs "$pod" -c segment-server | grep -E 'locked copy|served .* seed' || true
+          done | tee /tmp/agent-seed-source.log
+          grep -Eq '^locked copy \(fb-agent\): locked=1 copied=1 unlocked=1|^served offline bootstrap seed' /tmp/agent-seed-source.log
+          if grep -q '^locked copy: ' /tmp/agent-seed-source.log; then echo "the Perl server made the seed copy, not the front"; exit 1; fi
+          timeout 120 bash -c "while kubectl get firebirdcluster repl -o jsonpath={.status.reseedingInstances} | grep -q $replica; do sleep 5; done"
           # the operator reaches the segment servers over TLS too: the lag is measured again
           timeout 120 bash -c "until [ \"\$(kubectl get pod $replica -o jsonpath='{.metadata.annotations.firebird\\.cloudnative-firebird\\.io/replication-lag-seconds}')\" = 0 ]; do sleep 5; done" \
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.replicationStatus}'; exit 1; }
