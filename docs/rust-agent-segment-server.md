@@ -3,7 +3,7 @@
 Phase 3 of the [Rust agent roadmap](rust-agent-roadmap.md). The segment server
 (`segment-server.pl`, about 1,150 lines, more than 30 commands) is the centre of an instance: the
 journal archive, seeds, backup files, the promotion, the fences. This note says how it moves,
-in which order, and what the steps done so far contain (v0.155.0 to v0.157.0).
+in which order, and what the steps done so far contain (v0.155.0 to v0.158.0).
 
 ## The approach: a front, with the Perl server behind it
 
@@ -15,7 +15,8 @@ with the request line as it came, to the Perl server it runs on a local port (30
 puller / operator / Job ──► [TLS proxy] ──► fb-agent front ──► segment-server.pl (127.0.0.1:3071)
                                               answers: PING, LIST, GET, WAIT,     answers: the rest
                                                        STATE, VERSION, and
-                                                       the instance's state
+                                                       the instance's state,
+                                                       the backup files
 ```
 
 Why a front instead of a second server or a rewrite in one go:
@@ -182,13 +183,36 @@ server reads them from files on the instance's volume, and so does the front.
 in each state of an instance: an empty primary, a primary with its records, a replica without
 and with a control file, a synchronous standby, promoted in place.
 
+## Step 3 (v0.158.0): the backup files
+
+Backup and restore Jobs copy nbackup and gbak files to and from an instance's data directory
+through its segment server. The front answers those requests now:
+
+| Request | Reply |
+|---|---|
+| `FILES` | the backup files (`*.nbk`, `*.fbk`, `*.nbk.ctl`), sorted, then `.` |
+| `EXISTS <name>` | `OK yes` or `OK no` |
+| `FILE <name>` | `OK <size>` and the bytes (the kernel copies the file to the socket) |
+| `STORE <name> <size>` | reads `<size>` bytes into a hidden partial file, renames it, `OK`; `ERR short write ...` and nothing left behind when the client stops early |
+| `REMOVE <name>` | `OK` (also when the file is not there) |
+
+- **Instances without replication.** They have no segment server but a `backup-files`
+  container: the Perl server in its files-only mode (`FILES_ONLY`). With the annotation that
+  container runs the front too, in the same mode: PING and the backup files are its own, and
+  everything else goes to the Perl server, which refuses it as it does alone.
+- **Errors of the system stay the Perl server's.** A file that cannot be opened, created or
+  removed is reported with the system's error text. The front does not imitate that text: it
+  passes such a request on before it has sent or read anything.
+- **Not a speed-up.** A 1 GB download and upload take the same time through either (0.9 to
+  4.5 s on the test machine, the disk decides), and the files are identical. The step is here
+  because the commands have to move before the Perl server can go, and because uploads and
+  downloads no longer pass through two processes.
+
 ## The next steps
 
 Each is its own release, opt-in through the same annotation, with the comparison test extended
 to its commands.
 
-3. **Backup files.** FILE, STORE, REMOVE, FILES, EXISTS, and with them the `backup-files`
-   container of clusters without replication.
 4. **Seeds.** SEED, TXNS, PLAN, with the lock that keeps copies one at a time (v0.154.0).
 5. **Changes of role.** PROMOTE, STANDBY, SYNC, FENCE, REJOIN, NBACKUP, then the isolation check
    and the recovery-point sampler, which become threads of the agent. The promotion keeps its

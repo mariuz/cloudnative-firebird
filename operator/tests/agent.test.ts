@@ -79,8 +79,14 @@ describe('the Rust agent in the instance pods', () => {
     expect(spec.initContainers!.map((c) => c.name)).toContain('agent-install');
     const files = spec.containers.find((c) => c.name === 'backup-files')!;
     expect(files.volumeMounts).toContainEqual({ name: 'fb-agent', mountPath: '/opt/fb-agent', readOnly: true });
-    // the backup file server stays the Perl script
-    expect(files.command).toEqual(['perl', '/etc/firebird-operator/segment-server.pl']);
+    // the backup file server is the front too, in its files-only mode, with the Perl script behind it
+    expect(files.command).toEqual(['/opt/fb-agent/fb-agent', 'segment-server', '--', 'perl', '/etc/firebird-operator/segment-server.pl']);
+    expect(files.env).toContainEqual({ name: 'FILES_ONLY', value: 'true' });
+    // without the annotation it stays the Perl script
+    expect(pod(makeCluster()).containers.find((c) => c.name === 'backup-files')!.command).toEqual([
+      'perl',
+      '/etc/firebird-operator/segment-server.pl',
+    ]);
   });
 
   it('rolls the instances when it is switched on or off', () => {

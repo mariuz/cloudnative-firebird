@@ -10,7 +10,7 @@ import { signLine } from './helpers/segment-auth';
 
 /**
  * The segment server's front (`fb-agent segment-server`, docs/rust-agent-segment-server.md): it
- * answers PING, LIST, GET, WAIT and the requests about the instance's state itself and forwards
+ * answers PING, LIST, GET, WAIT, the requests about the instance's state and the backup files itself and forwards
  * the other requests to segment-server.pl, which it runs behind it. The same requests go to the Perl server alone and to the front: the
  * replies must be the same, except for WAIT, which only the front knows.
  *
@@ -68,9 +68,12 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     (await ask(port, request, undefined, secret)).toString().split('\n').filter((l) => l !== '');
   /** the same request to the Perl server and to the front: the two replies */
   const both = async (request: string) => [await lines(perl.port, request), await lines(front.port, request)];
-  const startFront = async (replDir: string): Promise<{ child: ChildProcess; port: number; out: () => string }> => {
+  const startFront = async (
+    replDir: string,
+    own: Record<string, string> = { ...env(), REPLICATION_DIR: replDir },
+  ): Promise<{ child: ChildProcess; port: number; out: () => string }> => {
     const child = spawn(agentBin!, ['segment-server', '--', 'perl', join(root, 'segment-server.pl')], {
-      env: { ...process.env, ...env(), REPLICATION_DIR: replDir, SEGMENT_PORT: '0', SEGMENT_LISTEN: '', BACKEND_PORT: '0' },
+      env: { ...process.env, ...own, SEGMENT_PORT: '0', SEGMENT_LISTEN: '', BACKEND_PORT: '0' },
     });
     children.push(child);
     let out = '';
@@ -81,7 +84,7 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
         out += d.toString();
         const m = /\(fb-agent [^)]+\) listening on [^\s:]+:(\d+),/.exec(out);
         // ready once the Perl server behind it listens too
-        if (m && /segment server listening on 127\.0\.0\.1:\d+/.test(out)) {
+        if (m && /(?:segment|backup file) server listening on 127\.0\.0\.1:\d+/.test(out)) {
           clearTimeout(timer);
           resolve({ child, port: Number(m[1]), out: () => out });
         }
@@ -243,8 +246,78 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     }
   });
 
-  it('forwards the other requests to the Perl server: the same replies, downloads and uploads', async () => {
-    for (const request of ['ARCHIVED', 'PRIMARYSEEN', 'FILES', 'EXISTS', 'ISOLATION', 'SYNCTO', 'POINTS 7', 'RETAIN none', 'FOLLOW']) {
+  it('copies, lists and removes the backup files as the Perl server does', async () => {
+    const data = (name: string) => join(root, 'data', name);
+    mkdirSync(data('dir.nbk'));
+    writeFileSync(data('mydb.fdb'), 'x');
+    writeFileSync(data('empty.fbk'), '');
+    writeFileSync(data('replica.nbk.ctl'), 'c');
+    const requests = [
+      'FILES', 'EXISTS mydb.fdb', 'EXISTS none.fdb', 'EXISTS dir.nbk', 'EXISTS', 'EXISTS ../primary', 'EXISTS .hidden',
+      // refused, or not a file: the Perl server's words
+      'FILE', 'FILE none.nbk', 'FILE mydb.fdb', 'FILE ../primary', 'FILE dir.nbk', 'STORE', 'STORE a.nbk', 'STORE a.nbk x',
+      'STORE mydb.fdb 1', 'STORE ../a.nbk 1', 'REMOVE', 'REMOVE mydb.fdb', 'REMOVE ../primary', 'REMOVE none.nbk', 'REMOVE dir.nbk',
+    ];
+    for (const request of requests) {
+      const [a, b] = await both(request);
+      expect(b, request).toEqual(a);
+      expect(a.length, request).toBeGreaterThan(0);
+    }
+    expect(await lines(front.port, 'FILES')).toEqual(['empty.fbk', 'nightly.nbk', 'replica.nbk.ctl', '.']);
+    expect(existsSync(data('mydb.fdb'))).toBe(true);
+    for (const name of ['nightly.nbk', 'empty.fbk']) {
+      const [a, b] = [await ask(perl.port, `FILE ${name}`), await ask(front.port, `FILE ${name}`)];
+      expect(b.equals(a), name).toBe(true);
+    }
+    // uploads: whole, empty, and one whose client stops early (nothing is left behind)
+    const body = Buffer.alloc(300_000, 9);
+    for (const [who, port] of [['perl', perl.port], ['front', front.port]] as const) {
+      expect((await ask(port, `STORE ${who}.nbk ${body.length}`, body)).toString(), who).toBe('OK\n');
+      expect(readFileSync(data(`${who}.nbk`)).equals(body), who).toBe(true);
+      expect((await ask(port, `STORE ${who}-0.fbk 0`)).toString(), who).toBe('OK\n');
+      expect(readFileSync(data(`${who}-0.fbk`)).length, who).toBe(0);
+      // replaces a file of the same name
+      expect((await ask(port, `STORE ${who}.nbk 3`, Buffer.from('abc'))).toString(), who).toBe('OK\n');
+      expect(readFileSync(data(`${who}.nbk`), 'utf8'), who).toBe('abc');
+      const short = await new Promise<string>((resolve, reject) => {
+        const sock = connect(port, '127.0.0.1');
+        let reply = '';
+        sock.once('error', reject);
+        sock.on('data', (d: Buffer) => (reply += d.toString()));
+        sock.once('end', () => resolve(reply));
+        // half-closed after ten of fifty bytes
+        sock.once('connect', () => sock.end(Buffer.concat([Buffer.from(`${signLine(`tok STORE ${who}-short.nbk 50`)}\n`), Buffer.alloc(10, 1)])));
+      });
+      expect(short, who).toBe(`ERR short write for ${who}-short.nbk (10 of 50 bytes)\n`);
+      expect(readdirSync(join(root, 'data')).filter((n) => n.includes('short')), who).toEqual([]);
+      expect((await ask(port, `REMOVE ${who}.nbk`)).toString(), who).toBe('OK\n');
+      expect(existsSync(data(`${who}.nbk`)), who).toBe(false);
+    }
+  });
+
+  it('without replication (FILES_ONLY) serves the backup files and refuses the rest, as the Perl server does', async () => {
+    const own = { DATABASE_PATH: join(root, 'data', 'mydb.fdb'), POD_NAME: 'db-0', ISC_PASSWORD: 'tok', FIREBIRD_PORT: '1', FILES_ONLY: 'true' };
+    const perlFiles = await startSegmentServer(join(root, 'segment-server.pl'), own);
+    children.push(perlFiles.child);
+    const frontFiles = await startFront('', own);
+    expect(frontFiles.out()).toMatch(/backup file server \(fb-agent [^)]+\) listening on /);
+    const requests = ['PING', 'FILES', 'EXISTS nightly.nbk', 'LIST', 'GET mydb.fdb.journal-000000007', 'WAIT 1', 'STATE', 'POSITION', 'HEADER', 'VERSION', 'ARCHIVED', 'SEED', 'NOSUCH'];
+    for (const request of requests) {
+      const [a, b] = [await lines(perlFiles.port, request), await lines(frontFiles.port, request)];
+      expect(b, request).toEqual(a);
+      expect(a.length, request).toBeGreaterThan(0);
+    }
+    expect(await lines(frontFiles.port, 'LIST')).toEqual(['ERR not available without replication']);
+    expect(await lines(frontFiles.port, 'FILES')).toEqual(['nightly.nbk', '.']);
+    const file = Buffer.concat([Buffer.from('OK 70000\n'), Buffer.alloc(70_000, 3)]);
+    expect((await ask(frontFiles.port, 'FILE nightly.nbk')).equals(file)).toBe(true);
+    const body = Buffer.alloc(120_000, 4);
+    expect((await ask(frontFiles.port, `STORE restore-2.nbk ${body.length}`, body)).toString()).toBe('OK\n');
+    expect(readFileSync(join(root, 'data', 'restore-2.nbk')).equals(body)).toBe(true);
+  });
+
+  it('gives the same replies for requests of every kind, through the front or not', async () => {
+    for (const request of ['ARCHIVED', 'PRIMARYSEEN', 'FILES', 'EXISTS', 'ISOLATION', 'SYNCTO', 'POINTS 7', 'RETAIN none', 'FOLLOW', 'NOSUCH 1']) {
       const [a, b] = await both(request);
       expect(b, request).toEqual(a);
       expect(a.length, request).toBeGreaterThan(0);
