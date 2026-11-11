@@ -287,7 +287,7 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     expect(replies['SEED'][0]).toMatch(/^ERR no safe seed source on the primary/);
   });
 
-  it('changes what the instance does (SYNC, STANDBY, FENCE, REJOIN, NBACKUP) as the Perl server does', async () => {
+  it('changes what the instance does (SYNC, STANDBY, FENCE, REJOIN, NBACKUP, PROMOTE) as the Perl server does', async () => {
     const repl = (dir: string, name: string) => join(root, dir, name);
     const dirs = [['repl-perl', () => perl.port], ['repl-front', () => front.port]] as const;
     // refused arguments, and requests that need the local Firebird server, which is not there:
@@ -295,6 +295,8 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     const requests = [
       'SYNC', 'SYNC a,,b', 'SYNC -a', 'SYNC a b', 'STANDBY', 'STANDBY off', 'STANDBY off x', 'STANDBY maybe',
       'STANDBY on', 'REJOIN', 'FENCE lease lost', 'NBACKUP', 'NBACKUP 3 a.nbk', 'NBACKUP 0 a.fbk', 'NBACKUP 0 ../a.nbk', 'NBACKUP 0 a.nbk',
+      // the promotion: refused arguments, and without a local server the replica mode cannot be read
+      'PROMOTE', 'PROMOTE x', 'PROMOTE 7 8', 'PROMOTE 7', 'PROMOTE none',
     ];
     const replies: Record<string, string[]> = {};
     for (const request of requests) {
@@ -306,6 +308,8 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     expect(replies['STANDBY on']).toEqual(['ERR this instance is the primary']);
     expect(replies['FENCE lease lost'][0]).toMatch(/^ERR cannot shut .* down$/);
     expect(replies['NBACKUP 0 a.nbk']).toEqual(['ERR nbackup failed']);
+    expect(replies['PROMOTE 7']).toEqual(['ERR cannot read the replica mode']);
+    for (const [dir] of dirs) expect(existsSync(repl(dir, '.pause-pull')) || existsSync(repl(dir, 'promoted')), dir).toBe(false);
     // nothing is left of a fence or an nbackup that failed
     for (const [dir] of dirs) expect(existsSync(repl(dir, 'self-fenced')), dir).toBe(false);
     expect(readdirSync(join(root, 'data')).filter((n) => n.startsWith('a.nbk'))).toEqual([]);

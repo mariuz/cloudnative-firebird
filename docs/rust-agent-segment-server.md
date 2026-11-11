@@ -3,7 +3,7 @@
 Phase 3 of the [Rust agent roadmap](rust-agent-roadmap.md). The segment server
 (`segment-server.pl`, about 1,150 lines, more than 30 commands) is the centre of an instance: the
 journal archive, seeds, backup files, the promotion, the fences. This note says how it moves,
-in which order, and what the steps done so far contain (v0.155.0 to v0.160.0).
+in which order, and what the steps done so far contain (v0.155.0 to v0.161.0).
 
 ## The approach: a front, with the Perl server behind it
 
@@ -18,7 +18,8 @@ puller / operator / Job ──► [TLS proxy] ──► fb-agent front ──►
                                                        the instance's state,
                                                        the backup files,
                                                        the seeds, the fence,
-                                                       nbackup, sync
+                                                       nbackup, sync,
+                                                       the promotion
 ```
 
 Why a front instead of a second server or a rewrite in one go:
@@ -281,14 +282,62 @@ and level 1 nbackups of a primary and one of a replica with its control file, wi
 call; the same requests to the Perl server need one each. The backups restore with their rows.
 All pass on Firebird 4.0.7, 5.0.4 and the 6 snapshot.
 
+## Step 5, second part (v0.161.0): the in-place promotion
+
+PROMOTE makes a replica the primary without a restart, for a switchover or a failover. It is
+the request with the most to lose, so its sequence is the Perl server's step for step:
+
+1. The lock shared with the seeds and the nbackup. The replica mode is read; a database that
+   is no replica any more was promoted already (a repeated request) and says so.
+2. The puller pauses, and everything received is applied. The promotion point is the control
+   file's segment, the last one a synchronous standby saw, or the old primary's last archived
+   segment when that is further: then the skipped segments are recorded as the lineage.
+3. Full shutdown, tried a few times while the server is busy.
+4. The header's replication sequence is written once the server has closed the file: the
+   agent takes the lock the server holds on a database it has open, and keeps it until the
+   database goes online again (ISSUES.md, issue 10).
+5. The journal floor is recorded, the replica's journal and archive are cleared, and the
+   database file is copied for the bootstrap seed, all while nothing has it open.
+6. Online. The sequence is read back through the server; when the server kept an older one,
+   the round from 3 is repeated, the database still a replica.
+7. Replica mode none, publication, and the sequence checked once more.
+8. Complete: the promoted flag, the lineage, the replica's state removed, the reply
+   `OK <segment> <rounds>`. Then the bootstrap seed copy is prepared.
+
+A failure at any step restores the replica (online, read-only replica again, the puller no
+longer paused), so the operator can still promote it offline with a restart.
+
+- **The agent's own attachments** carry everything that goes through the server: the services
+  for the shutdown, the online and the replica mode (the last one with a hand-built parameter
+  block, as the spike found), SQL for the replica mode's value, the sequence and the
+  publication.
+- **The header page is written by the agent.** `set-repl-seq.pl` is ported with its checks; the
+  unit test writes the same bytes.
+- **Two tools are still run**, as the Perl server runs them: `gfix` and `isql` on the bootstrap
+  seed copy. That file has no server, and only the embedded engine opens such a file; a client
+  of the server cannot. It is after the reply and not part of the promotion's outcome.
+- **When the local server does not answer the agent** before anything was done (the replica
+  mode), the request is passed to the Perl server.
+- `NATIVE_PROMOTE=false` in the container's environment leaves it to the Perl server. The
+  operator does not set it.
+
+`hack/agent/promote.sh` builds a replica with a journal behind it in the official images and
+promotes it twice from the same start, by the front and by the Perl server alone. First a
+promotion made to fail after the full shutdown: both restore the replica. Then the promotion:
+both reply `OK 7 1` and leave the same behind (the sequence, online and no replica, the journal
+continuing at segment 8, the lineage, the bootstrap seed opening with its rows, the replica's
+state gone); a repeated request says it is promoted already. The image's tools are wrapped: the
+front runs no `fbsvcmgr`, and three tool calls in all, on the seed copy; the Perl server runs
+them throughout. All pass on Firebird 4.0.7, 5.0.4 and the 6 snapshot.
+
+**Every request is the front's now.** What the Perl server still does behind it: the isolation
+check and the recovery-point sampler it starts, the pruning of the archive, and the refusals
+(the files-only mode, unknown requests).
+
 ## The next steps
 
-Each is its own release, opt-in through the same annotation, with the comparison test extended
-to its commands.
-
-5. **The promotion.** PROMOTE keeps its exact sequence; `hack/repro/promoted-journal.sh` and
-   `refused-attachment.sh` run against it. Then the isolation check and the recovery-point
-   sampler, which become threads of the agent.
+5. **The background work.** The isolation check, the recovery-point sampler and the pruning
+   become threads of the agent.
 6. **TLS in the agent** (rustls), which retires the `segment-tls` sidecar and its hop.
 7. **Without the Perl server.** The front no longer starts it; the scripts leave the ConfigMap.
 

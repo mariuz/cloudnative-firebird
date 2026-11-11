@@ -66,6 +66,69 @@ pub fn header_sequence(database: &Path) -> Option<u64> {
     Some(0)
 }
 
+/// Sets the replication sequence of a database that no server has open: the HDR_repl_seq clump,
+/// which the journal continues from (its next segment is the sequence + 1). A promoted replica has
+/// no clump, so its journal would restart at segment 1 and the other replicas, which applied the
+/// old primary's segments, would skip the new ones. There is no page checksum.
+pub fn set_header_sequence(database: &Path, sequence: u64) -> Result<(), String> {
+    use std::os::unix::fs::FileExt;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(database)
+        .map_err(|e| format!("open {}: {e}", database.display()))?;
+    let mut head = [0u8; 18];
+    file.read_exact_at(&mut head, 0).map_err(|_| "short read")?;
+    let page_size = u16::from_le_bytes([head[16], head[17]]) as usize;
+    // 65536 does not fit the field: Firebird's largest page is 32768
+    if !(4096..=65535).contains(&page_size) {
+        return Err(format!("unexpected page size {page_size}"));
+    }
+    let mut page = vec![0u8; page_size];
+    file.read_exact_at(&mut page, 0).map_err(|_| "short read of the header page")?;
+    if page[0] != 1 {
+        return Err("not a header page".into());
+    }
+    let ods = u16_at(&page, 18).unwrap_or(0) & 0x7fff;
+    let (end_at, mut at) = match ods {
+        13 => (66, 128),
+        14 => (36, 148),
+        _ => return Err(format!("unsupported on-disk structure {ods} (known: 13, 14)")),
+    };
+    let end = u16_at(&page, end_at).unwrap_or(0);
+    let value = sequence.to_le_bytes();
+    let mut found = false;
+    while at < end && at + 2 <= page_size {
+        let (kind, length) = (page[at], page[at + 1] as usize);
+        if kind == 0 {
+            break;
+        }
+        if kind == 11 {
+            if length != 8 || at + 10 > page_size {
+                return Err(format!("unexpected clump length {length}"));
+            }
+            page[at + 2..at + 10].copy_from_slice(&value);
+            found = true;
+            break;
+        }
+        at += 2 + length;
+    }
+    if !found {
+        if end + 11 > page_size {
+            return Err("no room for the clump on the header page".into());
+        }
+        page[end] = 11;
+        page[end + 1] = 8;
+        page[end + 2..end + 10].copy_from_slice(&value);
+        page[end + 10] = 0;
+        page[end_at..end_at + 2].copy_from_slice(&((end + 10) as u16).to_le_bytes());
+    }
+    file.write_all_at(&page, 0).map_err(|e| format!("write: {e}"))?;
+    file.sync_all().map_err(|e| format!("close: {e}"))?;
+    println!("replication sequence of {} set to {sequence}", database.display());
+    Ok(())
+}
+
 /// The sequence in a segment file's header; None without one.
 pub fn segment_sequence(path: &Path) -> Option<u64> {
     let mut header = [0u8; 48];
@@ -331,6 +394,20 @@ mod tests {
         page[36..38].copy_from_slice(&148u16.to_le_bytes());
         fs::write(&f.database, &page).unwrap();
         assert_eq!(f.header(), "OK 0\n");
+        // written as set-repl-seq.pl does: a new clump at the end, then the same clump again
+        page[16..18].copy_from_slice(&8192u16.to_le_bytes());
+        fs::write(&f.database, &page).unwrap();
+        set_header_sequence(&f.database, 63).unwrap();
+        assert_eq!(f.header(), "OK 63\n");
+        let written = fs::read(&f.database).unwrap();
+        assert_eq!(written.len(), 8192);
+        assert_eq!(&written[148..159], &[11, 8, 63, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(u16::from_le_bytes([written[36], written[37]]), 158);
+        set_header_sequence(&f.database, 64).unwrap();
+        assert_eq!(f.header(), "OK 64\n");
+        assert_eq!(u16::from_le_bytes([fs::read(&f.database).unwrap()[36], 0]), 158);
+        fs::write(&f.database, [0u8; 100]).unwrap();
+        assert!(set_header_sequence(&f.database, 1).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 

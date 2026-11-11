@@ -92,6 +92,9 @@ const SPB_DBNAME: u8 = 106;
 const PRP_FORCE_SHUTDOWN: u8 = 41;
 const PRP_SHUTDOWN_MODE: u8 = 44;
 const PRP_ONLINE_MODE: u8 = 45;
+const PRP_REPLICA_MODE: u8 = 46;
+const PRP_RM_NONE: u8 = 0;
+const PRP_RM_READ_ONLY: u8 = 1;
 const PRP_SM_NORMAL: u8 = 0;
 const PRP_SM_FULL: u8 = 3;
 
@@ -137,6 +140,16 @@ impl Database {
     /// Online (`prp_online_mode prp_sm_normal`).
     pub fn bring_online(&self) -> Result<(), Failed> {
         self.properties(&[PRP_ONLINE_MODE, PRP_SM_NORMAL])
+    }
+
+    /// Not a replica any more (`gfix -replica none`). Only once the database is online.
+    pub fn replica_none(&self) -> Result<(), Failed> {
+        self.properties(&[PRP_REPLICA_MODE, PRP_RM_NONE])
+    }
+
+    /// A read-only replica again (`gfix -replica read_only`).
+    pub fn replica_read_only(&self) -> Result<(), Failed> {
+        self.properties(&[PRP_REPLICA_MODE, PRP_RM_READ_ONLY])
     }
 
     /// An nbackup of the database into `file`, by the server (`action_nbak`). Not bounded.
