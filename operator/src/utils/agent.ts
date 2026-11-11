@@ -7,8 +7,9 @@ import { operatorImage } from './operator-image';
  * annotation below gets the fb-agent binary of the operator image copied into its instance pods,
  * and runs from it what has been ported so far: the replicas' segment puller (Phase 2), and the
  * segment server's front (Phase 3, docs/rust-agent-segment-server.md), which answers PING, LIST,
- * GET, WAIT and STATE and runs the Perl segment server behind it for everything else. Setting or
- * removing the annotation changes the pod template, so the instances restart (primary last).
+ * GET, WAIT and the requests about the instance's state, and runs the Perl segment server behind
+ * it for everything else. Setting or removing the annotation changes the pod template, so the
+ * instances restart (primary last).
  */
 export const AGENT_ANNOTATION = `${API_GROUP}/agent`;
 export const AGENT_VOLUME = 'fb-agent';

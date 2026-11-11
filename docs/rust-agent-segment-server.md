@@ -3,7 +3,7 @@
 Phase 3 of the [Rust agent roadmap](rust-agent-roadmap.md). The segment server
 (`segment-server.pl`, about 1,150 lines, more than 30 commands) is the centre of an instance: the
 journal archive, seeds, backup files, the promotion, the fences. This note says how it moves,
-in which order, and what the steps done so far contain (v0.155.0, v0.156.0).
+in which order, and what the steps done so far contain (v0.155.0 to v0.157.0).
 
 ## The approach: a front, with the Perl server behind it
 
@@ -14,7 +14,8 @@ with the request line as it came, to the Perl server it runs on a local port (30
 ```
 puller / operator / Job ──► [TLS proxy] ──► fb-agent front ──► segment-server.pl (127.0.0.1:3071)
                                               answers: PING, LIST, GET, WAIT,     answers: the rest
-                                                       STATE
+                                                       STATE, VERSION, and
+                                                       the instance's state
 ```
 
 Why a front instead of a second server or a rewrite in one go:
@@ -148,16 +149,44 @@ the second case.
 The binary grows from 0.5 MB to 1.0 MB (amd64; 0.9 MB arm64) and its dependency tree to 56
 crates, all pure Rust.
 
+## Step 2, second part (v0.157.0): the other requests about an instance
+
+Twelve more requests are answered by the front. Eleven of them never asked Firebird: the Perl
+server reads them from files on the instance's volume, and so does the front.
+
+| Request | From |
+|---|---|
+| `HEADER` | the replication sequence in the database file's header page |
+| `POSITION` | the primary's name, the promotion flag, the standby's flag, or the replica's control file and its fetched segments |
+| `ARCHIVED` | the archived segments' headers and ages |
+| `ISOLATION` | the fence's marker |
+| `PRIMARYSEEN`, `FOLLOW`, `SYNCTO`, `LINEAGE`, `POINTS <segment>` | the small files the puller, the archive follower, the operator and the sampler keep |
+| `UPLOADED <segment>`, `RETAIN <segment>\|none` | written: the numbers the Perl server's pruning reads |
+| `VERSION` | the server's version string, over the service attachment |
+
+- **VERSION without a database attachment.** The Perl server runs `isql` and asks
+  `ENGINE_VERSION` (about 90 ms). The front reads the server's version string
+  (`LI-V5.0.4.1812 Firebird 5.0`) over the attachment it already has and takes the same three
+  numbers: 1 ms, the same answer on Firebird 4.0.7, 5.0.4 and the 6 snapshot
+  (`hack/agent/state.sh`). One difference: the front can answer while the database is shut
+  down, where the Perl server says `ERR cannot read the engine version`. Without an
+  attachment the request goes to the Perl server.
+- **No database attachment was needed after all.** The plan for this step expected SQL. Reading
+  the Perl server showed only VERSION asked the database, and the services give that too. So
+  the agent still holds nothing that a full shutdown or a promotion would have to wait for.
+- **An argument the Perl server refuses is passed to it**, so the refusal is in its words.
+- **Writes stay compatible.** UPLOADED and RETAIN write the same files, a temporary name and a
+  rename, which the Perl server's pruning reads on its next round.
+
+`tests/segment-server-front.test.ts` asks the Perl server alone and the front the same requests
+in each state of an instance: an empty primary, a primary with its records, a replica without
+and with a control file, a synchronous standby, promoted in place.
+
 ## The next steps
 
 Each is its own release, opt-in through the same annotation, with the comparison test extended
 to its commands.
 
-2. **The rest of the state commands.** HEADER, POSITION, ARCHIVED, ISOLATION, PRIMARYSEEN,
-   FOLLOW, SYNCTO, VERSION, POINTS, LINEAGE, RETAIN, UPLOADED. Those that ask Firebird need SQL:
-   a persistent database attachment beside the service one, with the same deadline and
-   re-attach. A database attachment must not be held through a full shutdown or a promotion,
-   which is the part to design.
 3. **Backup files.** FILE, STORE, REMOVE, FILES, EXISTS, and with them the `backup-files`
    container of clusters without replication.
 4. **Seeds.** SEED, TXNS, PLAN, with the lock that keeps copies one at a time (v0.154.0).

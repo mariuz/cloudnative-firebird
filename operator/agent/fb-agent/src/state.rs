@@ -8,6 +8,7 @@
 //! state (no attachment, an error it does not know, the limit, a call still in flight), the
 //! caller passes the request to the Perl server, which asks with `fbsvcmgr` as before.
 
+use crate::status::engine_version;
 use firebird_wire::{ConnectConfig, ServiceManager, WireCrypt};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::thread;
@@ -34,8 +35,22 @@ fn state_of(statistics: Result<String, String>) -> Option<State> {
     }
 }
 
+/// What a request wants from the attachment, and what it gets.
+#[derive(Clone, Copy)]
+enum Ask {
+    State,
+    Version,
+}
+
+enum Told {
+    State(State),
+    Version(String),
+}
+
+type Request = (Ask, Sender<Option<Told>>);
+
 pub struct Probe {
-    requests: SyncSender<Sender<Option<State>>>,
+    requests: SyncSender<Request>,
     limit: Duration,
 }
 
@@ -43,22 +58,37 @@ impl Probe {
     /// `database`: the database file; `port`: the local server's; the credentials of the sidecar.
     pub fn start(database: String, port: u16, user: String, password: String, limit: Duration) -> Probe {
         // room for one request: with one waiting already, the attachment is stuck
-        let (requests, queue) = mpsc::sync_channel::<Sender<Option<State>>>(1);
+        let (requests, queue) = mpsc::sync_channel::<Request>(1);
         thread::spawn(move || serve(queue, database, port, user, password));
         Probe { requests, limit }
     }
 
-    /// The state, or None when it cannot be told within the limit.
-    pub fn state(&self) -> Option<State> {
+    fn ask(&self, ask: Ask) -> Option<Told> {
         let (reply, answer) = mpsc::channel();
-        match self.requests.try_send(reply) {
+        match self.requests.try_send((ask, reply)) {
             Ok(()) => answer.recv_timeout(self.limit).ok().flatten(),
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => None,
         }
     }
+
+    /// The state, or None when it cannot be told within the limit.
+    pub fn state(&self) -> Option<State> {
+        match self.ask(Ask::State) {
+            Some(Told::State(state)) => Some(state),
+            _ => None,
+        }
+    }
+
+    /// The engine version ("5.0.4"), or None when it cannot be told within the limit.
+    pub fn version(&self) -> Option<String> {
+        match self.ask(Ask::Version) {
+            Some(Told::Version(version)) => Some(version),
+            _ => None,
+        }
+    }
 }
 
-fn serve(queue: Receiver<Sender<Option<State>>>, database: String, port: u16, user: String, password: String) {
+fn serve(queue: Receiver<Request>, database: String, port: u16, user: String, password: String) {
     let config = ConnectConfig::new()
         .host("127.0.0.1")
         .port(port)
@@ -68,8 +98,8 @@ fn serve(queue: Receiver<Sender<Option<State>>>, database: String, port: u16, us
         .connect_timeout(Duration::from_secs(5));
     let mut service: Option<ServiceManager> = None;
     let mut said = false;
-    for reply in queue {
-        let mut state = None;
+    for (ask, reply) in queue {
+        let mut told = None;
         // a second attempt with a new attachment: the one kept may be from before a server restart
         for _ in 0..2 {
             if service.is_none() {
@@ -91,17 +121,24 @@ fn serve(queue: Receiver<Sender<Option<State>>>, database: String, port: u16, us
                 }
             }
             let Some(attached) = service.as_mut() else { break };
-            let statistics = attached.statistics(&database, HEADER_PAGES).map_err(|error| error.to_string());
+            let answer = match ask {
+                Ask::State => attached.statistics(&database, HEADER_PAGES),
+                Ask::Version => attached.server_version(),
+            }
+            .map_err(|error| error.to_string());
             // the client library closes the attachment after a server error: a new one next time
-            if statistics.is_err() {
+            if answer.is_err() {
                 service = None;
             }
-            state = state_of(statistics);
-            if state.is_some() {
+            told = match ask {
+                Ask::State => state_of(answer).map(Told::State),
+                Ask::Version => answer.ok().and_then(|version| engine_version(&version)).map(Told::Version),
+            };
+            if told.is_some() {
                 break;
             }
         }
-        let _ = reply.send(state);
+        let _ = reply.send(told);
     }
 }
 
@@ -131,7 +168,7 @@ mod tests {
         let probe = Probe::start("/nowhere.fdb".into(), 1, "SYSDBA".into(), "x".into(), Duration::from_secs(10));
         let started = std::time::Instant::now();
         assert_eq!(probe.state(), None);
-        assert_eq!(probe.state(), None);
+        assert_eq!(probe.version(), None);
         assert!(started.elapsed() < Duration::from_secs(8));
     }
 }

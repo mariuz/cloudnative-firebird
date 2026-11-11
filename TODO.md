@@ -60,12 +60,11 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   `contactTimeoutSeconds` fenced the primary) and fixed: GET, SEED, TXNS and PLAN are answered by
   child processes. The measurements are in the proposal.
 
-- [ ] **Rust agent, Phase 3, the rest of step 2** ([docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md)):
-  the state commands that need SQL (HEADER, POSITION, ARCHIVED, ISOLATION, PRIMARYSEEN, FOLLOW,
-  SYNCTO, VERSION, POINTS, LINEAGE, RETAIN, UPLOADED) in the front, over a persistent database
-  attachment. Done so far: the front answers PING, LIST, GET and WAIT (v0.155.0) and STATE from
-  a persistent service attachment (v0.156.0). Later steps: backup files, seeds, the changes of
-  role, TLS in the agent, then no Perl server.
+- [ ] **Rust agent, Phase 3, step 3** ([docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md)):
+  the backup file commands (FILE, STORE, REMOVE, FILES, EXISTS) in the front, and with them the
+  `backup-files` container of clusters without replication. Done so far: the journal's fast
+  path and WAIT (v0.155.0), STATE (v0.156.0), and the other requests about an instance's state
+  (v0.157.0). Later steps: seeds, the changes of role, TLS in the agent, then no Perl server.
 - [ ] **An atomic journal archive command**: copy to a temporary name and rename, so the archive
   never holds a segment that is still being copied. The servers only offer complete segments
   since v0.155.0, which covers the replicas; other readers of the archive (the journal archive

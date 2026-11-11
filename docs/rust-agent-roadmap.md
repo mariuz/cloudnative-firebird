@@ -2,7 +2,7 @@
 
 Status: **Phases 0, 1 and 2 done** (v0.154.0), **Phase 3 started** (v0.155.0: the segment server's
 front, and pullers that wait instead of polling; v0.156.0: the database's state from a
-persistent Firebird attachment). Results below. It answers
+persistent Firebird attachment; v0.157.0: the other requests about an instance's state). Results below. It answers
 the question of whether a Rust core should replace the Perl scripts and the parts critical for
 performance.
 
@@ -237,8 +237,8 @@ it.*
 [rust-agent-segment-server.md](rust-agent-segment-server.md). Step 1 is done in v0.155.0: a
 front that answers PING, LIST, GET and the new WAIT and runs the Perl server behind it for the
 rest. A segment now reaches a replica 0.08 s after it is archived instead of 2.4 s (median).
-Step 2 began in v0.156.0: STATE from a service attachment that stays open, 2 ms instead of
-71 ms. The plan was:*
+Step 2 (v0.156.0, v0.157.0): STATE from a service attachment that stays open, 2 ms instead of
+71 ms, and the other requests about an instance's state. The plan was:*
 - Every command in Rust, async, with a limit per command class.
 - mTLS inside the agent, which replaces the segment-tls sidecar.
 - A header cache, and `sendfile` or `copy_file_range` for GET, SEED and FILE.
@@ -279,6 +279,5 @@ Not planned: rewriting the orchestration shell scripts or the TypeScript operato
 
 ## Next step
 
-Phase 3, the rest of step 2 ([rust-agent-segment-server.md](rust-agent-segment-server.md)): the
-state commands that need SQL, over a persistent database attachment. STATE, the one asked every
-few seconds, is done (v0.156.0).
+Phase 3, step 3 ([rust-agent-segment-server.md](rust-agent-segment-server.md)): the backup
+file commands, and with them the `backup-files` container of clusters without replication.
