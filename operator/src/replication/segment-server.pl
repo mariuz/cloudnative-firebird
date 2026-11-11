@@ -3,7 +3,8 @@
 # replicas and seed copies to new replicas, over a minimal line protocol (each request signed with
 # the token, see below; "<token> <command>" stands for the signed command):
 #
-#   "<token> LIST\n"           -> archived segment names, one per line, then ".\n"
+#   "<token> LIST\n"           -> archived segment names, one per line, then ".\n" (those that are
+#                                 complete: not one still being copied into the archive)
 #   "<token> GET <name>\n"     -> "OK <size>\n" + file bytes, or "ERR <reason>\n"
 #   "<token> SEED\n"           -> "OK <dbsize> <ctlsize> <kind>\n" + database bytes + control bytes
 #   "<token> TXNS <S> <ids>\n" -> "<id> <segment>" for each listed transaction with blocks in
@@ -338,6 +339,21 @@ sub segment_sequence {
   return undef unless $n == 48 && substr($hdr, 0, 11) eq 'FBCHANGELOG';
   my (undef, undef, undef, undef, $seq) = unpack('a12 v v a16 Q<', $hdr);
   return $seq;
+}
+
+# Whether a segment file holds all of its segment: at least the length its header announces.
+# Firebird archives a segment with a plain copy (journal_archive_command), and its replica skips a
+# file shorter than its header says. A segment listed while it is still being copied would be
+# fetched short and recorded as fetched, and the replica would wait for it for ever. A file
+# without a segment header is left to the replica to judge, as before.
+sub segment_complete {
+  my ($path) = @_;
+  open(my $fh, '<:raw', $path) or return 0;
+  my $n = read($fh, my $hdr, 48);
+  my $size = -s $fh;
+  close $fh;
+  return 1 unless defined $n && $n == 48 && substr($hdr, 0, 11) eq 'FBCHANGELOG';
+  return $size >= unpack('Q<', substr($hdr, 40, 8));
 }
 
 sub archived_sequences {
@@ -955,7 +971,7 @@ while (1) {
   } elsif ($files_only && $cmd !~ /^(?:FILE|STORE|REMOVE|FILES|EXISTS)$/) {
     print $client "ERR not available without replication\n";
   } elsif ($cmd eq 'LIST') {
-    print $client "$_\n" for segments();
+    print $client "$_\n" for grep { segment_complete("$dir/$_") } segments();
     print $client ".\n";
   } elsif ($cmd eq 'GET' && defined $arg && $arg =~ $name_re && -f "$dir/$arg") {
     in_child($client, sub {

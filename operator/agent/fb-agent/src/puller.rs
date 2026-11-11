@@ -7,6 +7,7 @@
 //! ISC_PASSWORD, SEGMENT_PORT, SEGMENT_PROXY, POLL_SECONDS (5), FIREBIRD_PORT (3050).
 
 use crate::client::{now, open, var};
+use crate::server::segment_name;
 use std::fs::{self, File};
 use std::io::{self, BufRead, Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -26,17 +27,6 @@ fn slurp(path: &Path) -> String {
 /// Whether `host` names this instance: its pod name, alone or before a dot.
 fn names(host: &str, pod: &str) -> bool {
     host.strip_prefix(pod).is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
-}
-
-/// `^[A-Za-z0-9._-]+\.journal-\d+$`
-fn segment_name(name: &str) -> bool {
-    let Some((base, sequence)) = name.rsplit_once(".journal-") else {
-        return false;
-    };
-    !base.is_empty()
-        && base.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-        && !sequence.is_empty()
-        && sequence.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Writes `content` through a temporary name, so a reader never sees a partial file.
@@ -72,22 +62,24 @@ impl Puller {
         line.strip_prefix("OK ")?.split_whitespace().next().map(str::to_string)
     }
 
-    fn pull_once(&self) -> io::Result<()> {
+    /// Fetches what is new. Some(primary) when it asked that primary, None when it had nothing to ask
+    /// (paused, promoted, the primary itself, a synchronous standby).
+    fn pull_once(&self) -> io::Result<Option<String>> {
         // the local segment server pauses pulling while it takes a seed copy of this replica
         if let (Some(flag), Some(ack)) = (self.flag(".pause-pull"), self.flag(".pull-paused")) {
             if flag.exists() {
                 let _ = File::create(ack);
-                return Ok(());
+                return Ok(None);
             }
             let _ = fs::remove_file(ack);
         }
         // promoted in place (segment-server.pl PROMOTE) before the ConfigMap file names this instance
         if self.flag("promoted").is_some_and(|p| p.exists()) {
-            return Ok(());
+            return Ok(None);
         }
         let primary = slurp(&self.primary_file);
         if primary.is_empty() || names(&primary, &self.pod) {
-            return Ok(()); // this instance is the primary
+            return Ok(None); // this instance is the primary
         }
         let mut last = slurp(&self.state);
         let mut segments = Vec::new();
@@ -135,7 +127,7 @@ impl Puller {
                 }
                 println!("synchronous standby no longer attached and not repositioned: not applying the journal (re-seed this replica)");
             }
-            return Ok(());
+            return Ok(None);
         }
         if let Some(path) = &standby_seen {
             let _ = fs::remove_file(path);
@@ -150,7 +142,22 @@ impl Puller {
             println!("fetched {name} from {primary}");
             last = name;
         }
-        Ok(())
+        Ok(Some(primary))
+    }
+
+    /// Waits on the primary's segment server for a segment after the last one fetched, for at most
+    /// `seconds` (WAIT, answered by the fb-agent segment server only). False when the server does
+    /// not know the request or cannot be asked: the caller then waits out its poll interval.
+    fn wait_for_segment(&self, primary: &str, seconds: u64) -> bool {
+        let last = slurp(&self.state);
+        let request = if last.is_empty() {
+            format!("WAIT {seconds}")
+        } else {
+            format!("WAIT {seconds} {last}")
+        };
+        let mut line = String::new();
+        let asked = open(primary, &request, Some(Duration::from_secs(seconds + 10))).and_then(|mut reply| reply.read_line(&mut line));
+        asked.is_ok() && line.starts_with("OK")
     }
 
     /// GET: the segment into a temporary name, then renamed (an atomic hand-off to the replica).
@@ -211,15 +218,43 @@ pub fn run() -> io::Result<()> {
         puller.source.display(),
         puller.primary_file.display()
     );
+    // the primary that did not answer WAIT (a Perl segment server), and the polls since: it is
+    // asked again now and then, as it may have been restarted with the fb-agent server
+    let mut no_wait: Option<(String, u32)> = None;
     loop {
         if stopped() {
             break;
         }
-        if let Err(err) = puller.pull_once() {
-            println!("pull failed: {err}");
-        }
+        let asked = match puller.pull_once() {
+            Ok(asked) => asked,
+            Err(err) => {
+                println!("pull failed: {err}");
+                None
+            }
+        };
         if stopped() {
             break;
+        }
+        // instead of sleeping: wait on the primary for the next segment, where it can tell
+        if let Some(primary) = asked.filter(|_| !stopping.load(Ordering::Relaxed) && interval > 0) {
+            let skip = match &mut no_wait {
+                Some((host, polls)) if *host == primary => {
+                    *polls += 1;
+                    *polls % 12 != 0
+                }
+                _ => false,
+            };
+            if !skip {
+                if puller.wait_for_segment(&primary, interval.min(60)) {
+                    no_wait = None;
+                    continue;
+                }
+                let polls = match no_wait.take() {
+                    Some((host, polls)) if host == primary => polls,
+                    _ => 0,
+                };
+                no_wait = Some((primary, polls));
+            }
         }
         // in short steps: a signal is noticed at once, then the server is checked every second
         let mut left = Duration::from_secs(interval);
@@ -248,16 +283,5 @@ mod tests {
         assert!(!names("db-0.db-headless", "db-1"));
         // without a pod name, only a host that starts with a dot (as the Perl puller)
         assert!(!names("db-0", ""));
-    }
-
-    #[test]
-    fn recognizes_segment_names() {
-        assert!(segment_name("mydb.fdb.journal-000000007"));
-        assert!(segment_name("a.journal-1"));
-        assert!(!segment_name("mydb.fdb.journal-"));
-        assert!(!segment_name("mydb.fdb.journal-7x"));
-        assert!(!segment_name(".journal-7"));
-        assert!(!segment_name("../x.journal-7"));
-        assert!(!segment_name("mydb.fdb"));
     }
 }

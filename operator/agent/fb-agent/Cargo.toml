@@ -8,4 +8,5 @@ repository.workspace = true
 
 [dependencies]
 sig1 = { path = "../sig1" }
+libc = "0.2"
 signal-hook = { version = "0.3", default-features = false }

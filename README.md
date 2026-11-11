@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.154.0/cloudnative-firebird-0.154.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.155.0/cloudnative-firebird-0.155.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.154.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.155.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.154.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.155.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -714,13 +714,23 @@ other instances are read-only replicas:
   partially.
 - **Rust agent (opt-in).** The annotation `firebird.cloudnative-firebird.io/agent: rust` on a
   cluster has an init container copy the `fb-agent` binary of the operator image into its
-  instance pods (`/opt/fb-agent/fb-agent`, since v0.154.0), and the
-  `segment-puller` sidecar runs from it (`fb-agent puller`) instead of `segment-puller.pl`. It
-  behaves as the Perl puller (the same files, flags and log lines), ships segments as fast (the
-  poll interval decides that) and uses 0.5 MB of memory instead of 8 MB. The segment server and
-  everything else stay in Perl; the planned steps are in
-  [docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md). Setting or removing the annotation
-  restarts the instances, primary last; `perl` (or no annotation) is the default.
+  instance pods (since v0.154.0), which then run from it:
+  - the `segment-puller` sidecar (`fb-agent puller` instead of `segment-puller.pl`): the same
+    files, flags and log lines, 0.6 MB of memory instead of 8 MB;
+  - since v0.155.0, the segment server's front (`fb-agent segment-server`), which answers the
+    journal requests (PING, LIST, GET) itself and passes every other request to
+    `segment-server.pl`, which it runs behind it. Its pullers no longer poll: they wait on the
+    primary for the next segment (WAIT), so an archived segment reaches a replica in about
+    0.1 s instead of 2.5 s on average with the default 5 s poll.
+
+  The plan and the measurements are in [docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md)
+  and [docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md). Setting or
+  removing the annotation restarts the instances, primary last; `perl` (or no annotation) is
+  the default, and both kinds of instance work together during the restart.
+- **Complete segments only** (since v0.155.0, with or without the agent): a journal segment is
+  offered to the replicas once its file in the archive is complete. Firebird archives a segment
+  with a plain copy; one fetched during that copy would have been too short for the replica,
+  which skips such a file, and never fetched again.
 - The seed stays usable: while no replica holds segments back (a single instance), the primary
   keeps the segments after the seed up to `maxSegmentRetentionHours` (7 days by default), so an
   instance added later can be seeded from it. Once they are pruned, the primary's init container
