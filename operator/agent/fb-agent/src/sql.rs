@@ -2,11 +2,14 @@
 //! (docs/rust-agent-firebird-access.md), as the Perl scripts run isql for each. No attachment is
 //! kept: one held through a full shutdown or a promotion would be in their way.
 //!
-//! Every call has a deadline. The client library has no read timeout, so the call runs in its
+//! The service calls (full shutdown, online, nbackup) attach to the server's services the same
+//! way, where the Perl scripts run fbsvcmgr.
+//!
+//! Every call has a deadline, except an nbackup, which takes as long as the database is large. The client library has no read timeout, so the call runs in its
 //! own thread; when the server does not answer in time the caller goes on without it (the thread
 //! ends when the server does answer, or with the process).
 
-use firebird_wire::{ConnectConfig, Connection, Value, WireCrypt};
+use firebird_wire::{ConnectConfig, Connection, ServiceManager, Value, WireCrypt};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -74,6 +77,77 @@ impl Database {
     }
 }
 
+/// Why a call to the local server gave nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Failed {
+    /// The server refused or could not be reached: another client (fbsvcmgr) may still get through
+    Refused(String),
+    /// No answer within the limit: the server is not answering anyone
+    TimedOut,
+}
+
+// isc_action_svc_properties and its parameters (ibase.h)
+const ACTION_PROPERTIES: u8 = 8;
+const SPB_DBNAME: u8 = 106;
+const PRP_FORCE_SHUTDOWN: u8 = 41;
+const PRP_SHUTDOWN_MODE: u8 = 44;
+const PRP_ONLINE_MODE: u8 = 45;
+const PRP_SM_NORMAL: u8 = 0;
+const PRP_SM_FULL: u8 = 3;
+
+impl Database {
+    fn services(&self) -> ConnectConfig {
+        ConnectConfig::new()
+            .host("127.0.0.1")
+            .port(self.port)
+            .user(self.user.clone())
+            .password(self.password.clone())
+            .wire_crypt(WireCrypt::Enabled)
+            .connect_timeout(Duration::from_secs(5))
+    }
+
+    /// `fbsvcmgr action_properties dbname <database> ...`, within the command limit.
+    fn properties(&self, parameters: &[u8]) -> Result<(), Failed> {
+        let mut request = vec![ACTION_PROPERTIES, SPB_DBNAME];
+        request.extend((self.path.len() as u16).to_le_bytes());
+        request.extend(self.path.as_bytes());
+        request.extend(parameters);
+        let config = self.services();
+        let (done, answer) = mpsc::channel();
+        thread::spawn(move || {
+            let run = ServiceManager::attach(&config).and_then(|mut service| {
+                let ran = service.run(&request).map(|_| ());
+                let _ = service.close();
+                ran
+            });
+            let _ = done.send(run.map_err(|e| e.to_string()));
+        });
+        match answer.recv_timeout(self.command_limit) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(reason)) => Err(Failed::Refused(reason)),
+            Err(_) => Err(Failed::TimedOut),
+        }
+    }
+
+    /// Full shutdown, forced at once (`prp_shutdown_mode prp_sm_full prp_force_shutdown 0`).
+    pub fn shut_down(&self) -> Result<(), Failed> {
+        self.properties(&[PRP_SHUTDOWN_MODE, PRP_SM_FULL, PRP_FORCE_SHUTDOWN, 0, 0, 0, 0])
+    }
+
+    /// Online (`prp_online_mode prp_sm_normal`).
+    pub fn bring_online(&self) -> Result<(), Failed> {
+        self.properties(&[PRP_ONLINE_MODE, PRP_SM_NORMAL])
+    }
+
+    /// An nbackup of the database into `file`, by the server (`action_nbak`). Not bounded.
+    pub fn nbackup(&self, file: &str, level: u32) -> Result<(), String> {
+        let mut service = ServiceManager::attach(&self.services()).map_err(|e| e.to_string())?;
+        let done = service.nbackup(&self.path, file, level, 0).map(|_| ()).map_err(|e| e.to_string());
+        let _ = service.close();
+        done
+    }
+}
+
 fn within<T: Send + 'static>(limit: Duration, call: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     let (done, answer) = mpsc::channel();
     thread::spawn(move || {
@@ -100,6 +174,9 @@ mod tests {
         };
         assert!(database.value("1").is_err());
         assert!(database.execute("ALTER DATABASE END BACKUP").is_err());
+        assert!(matches!(database.shut_down(), Err(Failed::Refused(_))));
+        assert!(matches!(database.bring_online(), Err(Failed::Refused(_))));
+        assert!(database.nbackup("/nowhere.nbk", 0).is_err());
         let slow = within(Duration::from_millis(50), || {
             thread::sleep(Duration::from_secs(2));
             Ok(1)

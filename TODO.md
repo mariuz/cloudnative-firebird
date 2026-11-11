@@ -60,13 +60,13 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   `contactTimeoutSeconds` fenced the primary) and fixed: GET, SEED, TXNS and PLAN are answered by
   child processes. The measurements are in the proposal.
 
-- [ ] **Rust agent, Phase 3, step 5** ([docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md)):
-  the changes of role in the front (PROMOTE, STANDBY, SYNC, FENCE, REJOIN, NBACKUP), then the
-  isolation check and the recovery-point sampler as threads of the agent. The promotion keeps
-  its exact sequence; `hack/repro/promoted-journal.sh` and `refused-attachment.sh` run against
-  it. Done so far: the journal's fast path and WAIT (v0.155.0), STATE (v0.156.0), the other
-  requests about an instance's state (v0.157.0), the backup files (v0.158.0), the seeds
-  (v0.159.0). Later steps: TLS in the agent, then no Perl server.
+- [ ] **Rust agent, Phase 3, the rest of step 5** ([docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md)):
+  the in-place promotion (PROMOTE) in the front, with its exact sequence
+  (`hack/repro/promoted-journal.sh` and `refused-attachment.sh` run against it), then the
+  isolation check and the recovery-point sampler as threads of the agent. Done so far: the
+  journal's fast path and WAIT (v0.155.0), STATE (v0.156.0), the other requests about an
+  instance's state (v0.157.0), the backup files (v0.158.0), the seeds (v0.159.0), FENCE, REJOIN,
+  NBACKUP, SYNC and STANDBY (v0.160.0). Later steps: TLS in the agent, then no Perl server.
 - [ ] **An atomic journal archive command**: copy to a temporary name and rename, so the archive
   never holds a segment that is still being copied. The servers only offer complete segments
   since v0.155.0, which covers the replicas; other readers of the archive (the journal archive

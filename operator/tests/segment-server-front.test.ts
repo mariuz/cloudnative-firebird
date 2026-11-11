@@ -287,6 +287,77 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     expect(replies['SEED'][0]).toMatch(/^ERR no safe seed source on the primary/);
   });
 
+  it('changes what the instance does (SYNC, STANDBY, FENCE, REJOIN, NBACKUP) as the Perl server does', async () => {
+    const repl = (dir: string, name: string) => join(root, dir, name);
+    const dirs = [['repl-perl', () => perl.port], ['repl-front', () => front.port]] as const;
+    // refused arguments, and requests that need the local Firebird server, which is not there:
+    // the front passes those on, and the Perl server's fbsvcmgr fails in its words
+    const requests = [
+      'SYNC', 'SYNC a,,b', 'SYNC -a', 'SYNC a b', 'STANDBY', 'STANDBY off', 'STANDBY off x', 'STANDBY maybe',
+      'STANDBY on', 'REJOIN', 'FENCE lease lost', 'NBACKUP', 'NBACKUP 3 a.nbk', 'NBACKUP 0 a.fbk', 'NBACKUP 0 ../a.nbk', 'NBACKUP 0 a.nbk',
+    ];
+    const replies: Record<string, string[]> = {};
+    for (const request of requests) {
+      const [a, b] = await both(request);
+      expect(b, request).toEqual(a);
+      expect(a.length, request).toBeGreaterThan(0);
+      replies[request] = b;
+    }
+    expect(replies['STANDBY on']).toEqual(['ERR this instance is the primary']);
+    expect(replies['FENCE lease lost'][0]).toMatch(/^ERR cannot shut .* down$/);
+    expect(replies['NBACKUP 0 a.nbk']).toEqual(['ERR nbackup failed']);
+    // nothing is left of a fence or an nbackup that failed
+    for (const [dir] of dirs) expect(existsSync(repl(dir, 'self-fenced')), dir).toBe(false);
+    expect(readdirSync(join(root, 'data')).filter((n) => n.startsWith('a.nbk'))).toEqual([]);
+
+    // synchronous replication: the same file from both
+    for (const [dir, port] of dirs) {
+      expect(await lines(port(), 'SYNC db-1.db-headless,db-2.db-headless'), dir).toEqual(['OK']);
+      expect(await lines(port(), 'SYNCTO'), dir).toEqual(['OK db-1.db-headless,db-2.db-headless']);
+    }
+    expect(readFileSync(repl('repl-front', 'sync.conf'), 'utf8')).toBe(readFileSync(repl('repl-perl', 'sync.conf'), 'utf8'));
+    expect(readFileSync(repl('repl-front', 'sync.conf'), 'utf8')).toContain(`sync_replica = db-1.db-headless:${join(root, 'data', 'mydb.fdb')}\n{\n`);
+    for (const [dir, port] of dirs) {
+      expect(await lines(port(), 'SYNC none'), dir).toEqual(['OK']);
+      expect(readFileSync(repl(dir, 'sync.conf'), 'utf8'), dir).toBe('');
+    }
+
+    // a replica becomes the synchronous standby, and an asynchronous replica again after segment 57
+    writeFileSync(join(root, 'primary'), 'db-1.db-headless\n');
+    const controlPath = join(root, 'source', '{6A0B3C1D-0000-4000-8000-000000000001}');
+    const control = () => {
+      const b = Buffer.alloc(72, 7);
+      b.write('FBREPLCTL\0', 0, 'latin1');
+      b.writeUInt16LE(1, 10);
+      b.writeUInt32LE(2, 12);
+      b.writeBigUInt64LE(41n, 16);
+      b.writeUInt32LE(1234, 24);
+      b.writeBigUInt64LE(9n, 32);
+      return b;
+    };
+    const after: Buffer[] = [];
+    for (const [dir, port] of dirs) {
+      expect(await lines(port(), 'STANDBY off 57'), `${dir}: not a standby`).toEqual(['OK']);
+      expect(await lines(port(), 'STANDBY on'), dir).toEqual(['OK']);
+      expect(readFileSync(repl(dir, 'sync-standby'), 'utf8'), dir).toMatch(/^\d+\n$/);
+      expect(await lines(port(), 'STANDBY off 57'), `${dir}: no control file`).toEqual(['ERR no replica control file']);
+      writeFileSync(controlPath, control());
+      writeFileSync(repl(dir, '.last-pulled'), 'mydb.fdb.journal-000000041\n');
+      writeFileSync(repl(dir, 'sync-seen'), '57\n');
+      expect(await lines(port(), 'STANDBY off 57'), dir).toEqual(['OK']);
+      expect(readFileSync(repl(dir, '.last-pulled'), 'utf8'), dir).toBe('mydb.fdb.journal-000000057\n');
+      expect(existsSync(repl(dir, 'sync-standby')) || existsSync(repl(dir, 'sync-seen')), dir).toBe(false);
+      expect(await lines(port(), 'POSITION'), dir).toEqual(['OK 57 0 0']);
+      after.push(readFileSync(controlPath));
+      rmSync(controlPath);
+    }
+    // the control file: at segment 57, no transactions, the database's own sequence kept
+    expect(after[1].equals(after[0])).toBe(true);
+    expect(after[1].length).toBe(40);
+    expect(after[1].readBigUInt64LE(16)).toBe(57n);
+    expect(after[1].readBigUInt64LE(32)).toBe(9n);
+  }, 60_000);
+
   it('copies, lists and removes the backup files as the Perl server does', async () => {
     const data = (name: string) => join(root, 'data', name);
     mkdirSync(data('dir.nbk'));
