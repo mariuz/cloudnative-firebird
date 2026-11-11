@@ -3,7 +3,7 @@
 Phase 3 of the [Rust agent roadmap](rust-agent-roadmap.md). The segment server
 (`segment-server.pl`, about 1,150 lines, more than 30 commands) is the centre of an instance: the
 journal archive, seeds, backup files, the promotion, the fences. This note says how it moves,
-in which order, and what the first step (v0.155.0) contains.
+in which order, and what the steps done so far contain (v0.155.0, v0.156.0).
 
 ## The approach: a front, with the Perl server behind it
 
@@ -13,7 +13,8 @@ with the request line as it came, to the Perl server it runs on a local port (30
 
 ```
 puller / operator / Job ──► [TLS proxy] ──► fb-agent front ──► segment-server.pl (127.0.0.1:3071)
-                                              answers: PING, LIST, GET, WAIT      answers: the rest
+                                              answers: PING, LIST, GET, WAIT,     answers: the rest
+                                                       STATE
 ```
 
 Why a front instead of a second server or a rewrite in one go:
@@ -101,17 +102,62 @@ its header says (checked on Firebird 4, 5 and the 6 snapshot), and `cp` writes t
 A file without a segment header is listed as before. The front does this, and since v0.155.0
 `segment-server.pl` does it for LIST too, so clusters without the agent are covered.
 
+## Step 2, first part (v0.156.0): STATE from an attachment that stays open
+
+STATE says whether the instance's database is online, shut down, or shut down by a fence. The
+Lease holder asks every instance every few seconds, and the Perl server starts `fbsvcmgr` each
+time. The front now keeps one service attachment to the pod's Firebird server and reads the
+header statistics over it: the first use of the access layer chosen in
+[rust-agent-firebird-access.md](rust-agent-firebird-access.md) (`firebird-wire`, pinned to one
+version).
+
+- **The same answers.** `OK online`; in full shutdown `OK shutdown`, or `OK fenced` /
+  `OK fenced lease` when the fence's marker file is there. Firebird 6 refuses the statistics of
+  a database in full shutdown ("database ... shutdown"); that is read as shut down, as the Perl
+  server reads it.
+- **When the front cannot tell, the Perl server is asked.** No attachment, an error it does not
+  know, no answer within `LOCAL_QUERY_TIMEOUT_SECONDS` (10), or a call still in flight: the
+  request is forwarded and answered with `fbsvcmgr` as before. So the front never answers
+  worse than the Perl server, and a wrong guess is not possible: it answers only from statistics
+  it received.
+- **A deadline around every call.** The attachment lives in its own thread; a request waits for
+  it at most the limit. The client library has no read timeout, so a hung server holds that
+  thread, not the requests: they are forwarded while it is stuck.
+- **Re-attaching.** The library closes the attachment after a server error, and a server restart
+  breaks it. The next request attaches again (once per request), so a restart costs one
+  forwarded or slower STATE.
+- `NATIVE_STATE=false` in the container's environment turns it off (the front then forwards
+  STATE). The operator does not set it.
+
+`hack/agent/state.sh` runs the front with the Perl server behind it in the official images and
+asks both, side by side, in every state: online, full shutdown, fenced by the Lease holder,
+fenced by the isolation check, online again, online with a stale marker, the server stopped,
+the server back. They agree on Firebird 4.0.7, 5.0.4 and the 6 snapshot. Time per STATE,
+including the client process (about 2 ms):
+
+| | Firebird 4 | Firebird 5 | Firebird 6 snapshot |
+|---|---|---|---|
+| Perl server (`fbsvcmgr` per request) | 72 ms | 71 ms | 90 ms |
+| Front (persistent service attachment) | 2 ms | 2 ms | 21 ms |
+| Front, after a server restart | 1 ms | 2 ms | 21 ms |
+
+On the 6 snapshot the server opens the database for each statistics call when nothing else has
+it open, which is the 21 ms; with another attachment open it is 5 ms. An instance in use is
+the second case.
+
+The binary grows from 0.5 MB to 1.0 MB (amd64; 0.9 MB arm64) and its dependency tree to 56
+crates, all pure Rust.
+
 ## The next steps
 
 Each is its own release, opt-in through the same annotation, with the comparison test extended
 to its commands.
 
-2. **State, through a persistent Firebird connection.** STATE, HEADER, POSITION, ARCHIVED,
-   ISOLATION, PRIMARYSEEN, FOLLOW, SYNCTO, VERSION, POINTS, LINEAGE, RETAIN, UPLOADED. STATE is
-   the one that matters: 70–90 ms today (one `fbsvcmgr`), asked by the Lease holder every five
-   seconds. It needs the Firebird access layer
-   ([rust-agent-firebird-access.md](rust-agent-firebird-access.md)): `firebird-wire` behind a
-   small interface, with a deadline around every call and a re-attach after an error.
+2. **The rest of the state commands.** HEADER, POSITION, ARCHIVED, ISOLATION, PRIMARYSEEN,
+   FOLLOW, SYNCTO, VERSION, POINTS, LINEAGE, RETAIN, UPLOADED. Those that ask Firebird need SQL:
+   a persistent database attachment beside the service one, with the same deadline and
+   re-attach. A database attachment must not be held through a full shutdown or a promotion,
+   which is the part to design.
 3. **Backup files.** FILE, STORE, REMOVE, FILES, EXISTS, and with them the `backup-files`
    container of clusters without replication.
 4. **Seeds.** SEED, TXNS, PLAN, with the lock that keeps copies one at a time (v0.154.0).

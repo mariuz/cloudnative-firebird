@@ -128,6 +128,13 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     expect((await both('LIST')).map((l) => l[1])).toEqual(['mydb.fdb.journal-000000008', 'mydb.fdb.journal-000000008']);
   });
 
+  it('passes STATE to the Perl server when it cannot reach the Firebird server itself', async () => {
+    // nothing listens on FIREBIRD_PORT: the front has no service attachment, the Perl server's fbsvcmgr answers
+    const [p, f] = await both('STATE');
+    expect(p).toEqual([`ERR cannot read the state of ${join(root, 'data', 'mydb.fdb')}`]);
+    expect(f).toEqual(p);
+  });
+
   it('refuses what the Perl server refuses, in its words', async () => {
     for (const port of [perl.port, front.port]) {
       expect(await lines(port, 'PING', 'wrong')).toEqual(['ERR unauthorized (signature)']);

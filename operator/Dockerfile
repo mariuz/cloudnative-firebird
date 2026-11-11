@@ -13,15 +13,19 @@ COPY src ./src
 RUN npm run build
 
 # The instance pods' agent (docs/rust-agent-roadmap.md): one static binary, compiled on the build
-# platform for the target one (no emulation), linked with the toolchain's own linker
+# platform for the target one (no emulation). A foreign target is linked with the toolchain's
+# own linker; the build platform's own target keeps the image's linker, which the procedural
+# macros of the dependencies need too (they are built for the build platform)
 FROM --platform=$BUILDPLATFORM rust:1.97-alpine AS agent
 ARG TARGETARCH
 WORKDIR /agent
 COPY agent ./
 RUN case "$TARGETARCH" in arm64) target=aarch64-unknown-linux-musl ;; *) target=x86_64-unknown-linux-musl ;; esac && \
     rustup target add "$target" && \
-    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
-      cargo build --release --locked --target "$target" && \
+    if [ "$target" != "$(rustc -vV | sed -n 's/^host: //p')" ]; then \
+      export "CARGO_TARGET_$(echo "$target" | tr 'a-z-' 'A-Z_')_LINKER=rust-lld"; \
+    fi && \
+    cargo build --release --locked --target "$target" && \
     cp "target/$target/release/fb-agent" /fb-agent
 
 # Production stage

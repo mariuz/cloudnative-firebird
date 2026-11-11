@@ -9,16 +9,23 @@
 //!   WAIT <seconds> [<name>] -> "OK new" as soon as a complete segment after <name> (any segment
 //!                              without one) is archived, "OK timeout" after <seconds> (1 to 60).
 //!                              The pullers wait here instead of asking every few seconds.
+//!   STATE                   -> "OK online", "OK shutdown", "OK fenced" (shut down by the isolation
+//!                              check) or "OK fenced lease" (by the Lease holder), from a service
+//!                              attachment that stays open (state.rs). Passed to the Perl server
+//!                              when that cannot tell.
 //!
 //! A segment is complete once its file holds the length its header announces. Firebird archives a
 //! segment with a plain copy, and its replica skips a file shorter than its header says, so a
 //! segment listed while it is still being copied would be fetched short and never applied.
 //!
 //! Environment: ARCHIVE_DIR, REPLICATION_DIR, ISC_PASSWORD, SEGMENT_LISTEN (host:port) or
-//! SEGMENT_PORT, AUTH_WINDOW_SECONDS, BACKEND_PORT (3071; 0: a free port). The backend command
+//! SEGMENT_PORT, AUTH_WINDOW_SECONDS, BACKEND_PORT (3071; 0: a free port); for STATE:
+//! DATABASE_PATH, ISC_USER (SYSDBA), FIREBIRD_PORT (3050), LOCAL_QUERY_TIMEOUT_SECONDS (10),
+//! NATIVE_STATE (false: always the Perl server). The backend command
 //! follows "--" on the command line and gets SEGMENT_LISTEN=127.0.0.1:<BACKEND_PORT>.
 
 use crate::client::{now, var};
+use crate::state::{Probe, State};
 use sig1::Verifier;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -100,6 +107,9 @@ struct Front {
     newest: Mutex<Newest>,
     verifier: Mutex<Verifier>,
     backend: SocketAddr,
+    /// The local server's state, with REPLICATION_DIR/self-fenced: who shut the database down
+    state: Option<Probe>,
+    self_fenced: Option<PathBuf>,
 }
 
 impl Front {
@@ -174,6 +184,24 @@ impl Front {
                 self.contacted();
                 self.wait(&mut client, argument)
             }
+            // the Lease holder's, from this pod: no contact from outside
+            ("STATE", _) if self.state.is_some() => match self.state.as_ref().and_then(Probe::state) {
+                Some(State::Online) => writeln!(client, "OK online"),
+                Some(State::Shutdown) => {
+                    // a fence leaves its marker: the Lease holder's says "lease" (it lifts its own),
+                    // the isolation check's does not (the operator lifts that)
+                    let marker = self.self_fenced.as_ref().filter(|path| path.is_file());
+                    match marker.map(|path| fs::read_to_string(path).unwrap_or_default()) {
+                        Some(text) if text.split(|c: char| !c.is_alphanumeric() && c != '_').any(|word| word == "lease") => {
+                            writeln!(client, "OK fenced lease")
+                        }
+                        Some(_) => writeln!(client, "OK fenced"),
+                        None => writeln!(client, "OK shutdown"),
+                    }
+                }
+                // not told: the Perl server asks with fbsvcmgr
+                None => self.forward(client, reader, &line),
+            },
             // not taken over yet: the Perl server answers, with the request as it came
             _ => self.forward(client, reader, &line),
         }
@@ -276,6 +304,18 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
             var("AUTH_WINDOW_SECONDS").parse().unwrap_or(300),
         )),
         backend,
+        state: (var("NATIVE_STATE") != "false" && !var("DATABASE_PATH").is_empty()).then(|| {
+            Probe::start(
+                var("DATABASE_PATH"),
+                var("FIREBIRD_PORT").parse().unwrap_or(3050),
+                Some(var("ISC_USER"))
+                    .filter(|user| !user.is_empty())
+                    .unwrap_or_else(|| "SYSDBA".into()),
+                var("ISC_PASSWORD"),
+                Duration::from_secs(var("LOCAL_QUERY_TIMEOUT_SECONDS").parse().ok().filter(|s| *s > 0).unwrap_or(10)),
+            )
+        }),
+        self_fenced: (!base.is_empty()).then(|| Path::new(&base).join("self-fenced")),
     });
     println!(
         "segment server (fb-agent {}) listening on {}, serving {}; other requests go to {backend}",
@@ -374,6 +414,8 @@ mod tests {
             }),
             verifier: Mutex::new(Verifier::new(b"", 300)),
             backend: SocketAddr::from(([127, 0, 0, 1], 1)),
+            state: None,
+            self_fenced: None,
         };
         assert_eq!(front.newest().as_deref(), Some("db.fdb.journal-000000004"));
         fs::write(dir.join("db.fdb.journal-000000006"), segment(1000, 400)).unwrap();
