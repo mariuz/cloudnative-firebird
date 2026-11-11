@@ -3,7 +3,7 @@
 Phase 3 of the [Rust agent roadmap](rust-agent-roadmap.md). The segment server
 (`segment-server.pl`, about 1,150 lines, more than 30 commands) is the centre of an instance: the
 journal archive, seeds, backup files, the promotion, the fences. This note says how it moves,
-in which order, and what the steps done so far contain (v0.155.0 to v0.158.0).
+in which order, and what the steps done so far contain (v0.155.0 to v0.159.0).
 
 ## The approach: a front, with the Perl server behind it
 
@@ -16,7 +16,8 @@ puller / operator / Job ──► [TLS proxy] ──► fb-agent front ──►
                                               answers: PING, LIST, GET, WAIT,     answers: the rest
                                                        STATE, VERSION, and
                                                        the instance's state,
-                                                       the backup files
+                                                       the backup files,
+                                                       the seeds
 ```
 
 Why a front instead of a second server or a rewrite in one go:
@@ -208,12 +209,48 @@ through its segment server. The front answers those requests now:
   because the commands have to move before the Perl server can go, and because uploads and
   downloads no longer pass through two processes.
 
+## Step 4 (v0.159.0): the seeds
+
+A new or re-seeded replica starts from a copy of the database, which it asks an instance for
+(SEED), and then asks the primary where the transactions open in that copy begin in the
+archive (TXNS, PLAN). The front answers all three now.
+
+| Seed | From | How |
+|---|---|---|
+| `offline` | the primary | its bootstrap seed file, while every segment after it is still archived |
+| `live` | the primary, when `allowLiveSeedFromPrimary` | a copy of the database file under the backup lock |
+| `replica` | a ready replica | its puller paused, everything received applied, then a copy under the backup lock, sent with the replica's control file |
+
+- **The agent's first SQL.** The backup lock (`ALTER DATABASE BEGIN BACKUP`, `END BACKUP`),
+  the replication sequence and the database's GUID go through `firebird-wire`, where the Perl
+  server runs `isql`. Each statement gets its own short attachment and a deadline
+  (`LOCAL_QUERY_TIMEOUT_SECONDS`, `LOCAL_COMMAND_TIMEOUT_SECONDS`), in a thread of its own since
+  the library has no read timeout. No attachment is kept: nothing of the agent's is in the way
+  of a full shutdown or a promotion.
+- **The same sequence.** The order of the Perl server is kept step for step: the pause flag
+  and its acknowledgement, the wait until everything received is applied, the lock, the copy,
+  the unlock whatever happened, the reply, the cleanup.
+- **One copy at a time, across both servers.** The lock file (`.exclusive.lock`) is the one the
+  Perl server takes for its nbackup and its promotion, which it still answers: a seed in the
+  front and a promotion behind it wait for each other as before.
+- **When the local server does not answer the agent** before anything was done (the sequence,
+  the GUID), the request is passed to the Perl server. After the backup lock is taken the front
+  finishes or reports the failure itself, as the Perl server would.
+- `NATIVE_SEED=false` in the container's environment leaves the seeds to the Perl server. The
+  operator does not set it.
+
+`hack/agent/seed.sh` runs the front with the Perl server behind it in the official images. It
+asks each for a live, an offline and a replica seed with the replication init's own client
+(`fetch-seed.pl`), opens every copy as a database and counts its rows, and checks that the
+database is unlocked and writable afterwards, that the puller is not left paused and that no
+copy is left behind. All pass on Firebird 4.0.7, 5.0.4 and the 6 snapshot, and the log shows
+the front made its copies itself.
+
 ## The next steps
 
 Each is its own release, opt-in through the same annotation, with the comparison test extended
 to its commands.
 
-4. **Seeds.** SEED, TXNS, PLAN, with the lock that keeps copies one at a time (v0.154.0).
 5. **Changes of role.** PROMOTE, STANDBY, SYNC, FENCE, REJOIN, NBACKUP, then the isolation check
    and the recovery-point sampler, which become threads of the agent. The promotion keeps its
    exact sequence; `hack/repro/promoted-journal.sh` and `refused-attachment.sh` run against it.

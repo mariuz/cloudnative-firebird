@@ -20,6 +20,9 @@
 //!                              answers them (status.rs).
 //!   FILE <name>, STORE <name> <size>, REMOVE <name>, FILES, EXISTS <name>
 //!                           -> the backup files in the data directory (backups.rs).
+//!   SEED, TXNS <upto> <ids>, PLAN <upto> <next> <ids>
+//!                           -> a replica's seed copy and where its transactions begin in the
+//!                              archive (seed.rs). NATIVE_SEED=false: the Perl server's.
 //!
 //! With FILES_ONLY=true (instances without replication) only PING and the backup files are its
 //! own; the Perl server refuses the rest, as it does alone.
@@ -36,6 +39,8 @@
 
 use crate::backups;
 use crate::client::{now, var};
+use crate::seed::{self, Seeds};
+use crate::sql::Database;
 use crate::state::{Probe, State};
 use crate::status::Files;
 use sig1::Verifier;
@@ -126,6 +131,8 @@ struct Front {
     files: Option<Files>,
     /// Whether the journal's requests are served (not with FILES_ONLY)
     journal: bool,
+    /// For the seeds: the local server's database and whether a live copy is allowed
+    seeds: Option<Seeds>,
     /// The data directory, where the backup files are
     data: Option<PathBuf>,
 }
@@ -220,6 +227,22 @@ impl Front {
                 // not told: the Perl server asks with fbsvcmgr
                 None => self.forward(client, reader, &line),
             },
+            (command @ ("TXNS" | "PLAN"), Some(argument)) if self.seeds.is_some() => {
+                self.contacted();
+                match seed::transactions(&self.archive, command, argument) {
+                    Some(reply) => client.write_all(reply.as_bytes()),
+                    None => self.forward(client, reader, &line),
+                }
+            }
+            ("SEED", _) if self.seeds.is_some() && self.files.is_some() => {
+                self.contacted();
+                let (seeds, files) = (self.seeds.as_ref().expect("checked"), self.files.as_ref().expect("checked"));
+                match seed::seed(seeds, files, &mut client) {
+                    Some(done) => done,
+                    // the local server gave no answer here: the Perl server asks with isql
+                    None => self.forward(client, reader, &line),
+                }
+            }
             (command @ ("FILE" | "STORE" | "REMOVE" | "FILES" | "EXISTS"), _) if self.data.is_some() => {
                 let data = self.data.as_deref().expect("checked by the guard");
                 self.contacted();
@@ -356,6 +379,11 @@ fn from_files(files: &Files, command: &str, argument: Option<&str>) -> Option<St
     })
 }
 
+/// A positive number of seconds from the environment, or the default.
+fn seconds(name: &str, default: u64) -> Duration {
+    Duration::from_secs(var(name).parse().ok().filter(|s| *s > 0).unwrap_or(default))
+}
+
 fn free_port() -> io::Result<u16> {
     Ok(TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port())
 }
@@ -405,11 +433,24 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
                     .filter(|user| !user.is_empty())
                     .unwrap_or_else(|| "SYSDBA".into()),
                 var("ISC_PASSWORD"),
-                Duration::from_secs(var("LOCAL_QUERY_TIMEOUT_SECONDS").parse().ok().filter(|s| *s > 0).unwrap_or(10)),
+                seconds("LOCAL_QUERY_TIMEOUT_SECONDS", 10),
             )
         }),
         self_fenced: (!base.is_empty()).then(|| Path::new(&base).join("self-fenced")),
         journal: !files_only,
+        seeds: (!files_only && var("NATIVE_SEED") != "false" && !var("DATABASE_PATH").is_empty()).then(|| Seeds {
+            database: Database {
+                path: var("DATABASE_PATH"),
+                port: var("FIREBIRD_PORT").parse().unwrap_or(3050),
+                user: Some(var("ISC_USER"))
+                    .filter(|user| !user.is_empty())
+                    .unwrap_or_else(|| "SYSDBA".into()),
+                password: var("ISC_PASSWORD"),
+                query_limit: seconds("LOCAL_QUERY_TIMEOUT_SECONDS", 10),
+                command_limit: seconds("LOCAL_COMMAND_TIMEOUT_SECONDS", 60),
+            },
+            allow_live: var("ALLOW_LIVE_SEED") == "true",
+        }),
         // the database's directory ("." for a bare file name, as the Perl server's)
         data: Some(var("DATABASE_PATH"))
             .filter(|path| !path.is_empty())
@@ -536,6 +577,7 @@ mod tests {
             self_fenced: None,
             files: None,
             journal: true,
+            seeds: None,
             data: None,
         };
         assert_eq!(front.newest().as_deref(), Some("db.fdb.journal-000000004"));
