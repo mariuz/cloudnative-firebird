@@ -25,7 +25,7 @@ pub struct Seeds {
 }
 
 /// Checks at once, then every second, for at most `seconds`.
-fn wait_for(seconds: u64, mut check: impl FnMut() -> bool) -> bool {
+pub fn wait_for(seconds: u64, mut check: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     loop {
         if check() {
@@ -129,9 +129,9 @@ pub fn transactions(archive: &Path, command: &str, argument: &str) -> Option<Str
 }
 
 /// Held until dropped: the lock the seeds, the nbackup and the promotion share.
-struct Exclusive(#[allow(dead_code)] File);
+pub struct Exclusive(#[allow(dead_code)] File);
 
-fn exclusive(base: &Path) -> Result<Exclusive, String> {
+pub fn exclusive(base: &Path) -> Result<Exclusive, String> {
     let path = base.join(".exclusive.lock");
     let file = OpenOptions::new()
         .append(true)
@@ -178,6 +178,28 @@ fn locked_copy(seeds: &Seeds, files: &Files, copy: &Path, on_locked: impl FnOnce
         flag(unlocked)
     );
     copied && unlocked
+}
+
+/// Pauses the segment puller (its flag, then its acknowledgement) and waits until the replica has
+/// applied everything it received: no segment beyond the control file's position. The caller
+/// removes the flag (`.pause-pull`) when it is done.
+pub fn pause_until_applied(files: &Files, control: &Path) -> Result<(), &'static str> {
+    let (pause, paused) = (files.base.join(".pause-pull"), files.base.join(".pull-paused"));
+    let _ = fs::remove_file(&paused);
+    let _ = File::create(&pause);
+    if !wait_for(60, || paused.exists()) {
+        return Err("segment puller did not pause");
+    }
+    let applied = || {
+        let Some((sequence, offset)) = control_file(control) else {
+            return false;
+        };
+        offset == 0 && !archived(&files.source).iter().any(|(fetched, _)| *fetched > sequence)
+    };
+    if !wait_for(300, applied) {
+        return Err("replica did not finish applying received segments");
+    }
+    Ok(())
 }
 
 /// SEED. None: nothing was done or sent, and the Perl server is to answer (the local server
@@ -235,27 +257,9 @@ fn from_replica(seeds: &Seeds, files: &Files, client: &mut impl Write) -> Option
         Ok(lock) => lock,
         Err(error) => return Some(writeln!(client, "ERR {error}")),
     };
-    let (pause, paused, copy) = (
-        files.base.join(".pause-pull"),
-        files.base.join(".pull-paused"),
-        files.base.join("seed.copy"),
-    );
-    let _ = fs::remove_file(&paused);
-    let _ = File::create(&pause);
+    let (pause, copy) = (files.base.join(".pause-pull"), files.base.join("seed.copy"));
     let copied = (|| {
-        if !wait_for(60, || paused.exists()) {
-            return Err("segment puller did not pause");
-        }
-        // everything received has been applied: no segment beyond the control file's position
-        let applied = || {
-            let Some((sequence, offset)) = control_file(&control) else {
-                return false;
-            };
-            offset == 0 && !archived(&files.source).iter().any(|(fetched, _)| *fetched > sequence)
-        };
-        if !wait_for(300, applied) {
-            return Err("replica did not finish applying received segments");
-        }
+        pause_until_applied(files, &control)?;
         let mut position = None;
         if !locked_copy(seeds, files, &copy, || position = fs::read(&control).ok()) {
             return Err("locked copy failed");

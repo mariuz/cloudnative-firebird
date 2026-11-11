@@ -15,6 +15,7 @@
 mod backups;
 mod client;
 mod puller;
+mod role;
 mod seed;
 mod server;
 mod sql;

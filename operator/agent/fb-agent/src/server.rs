@@ -23,6 +23,9 @@
 //!   SEED, TXNS <upto> <ids>, PLAN <upto> <next> <ids>
 //!                           -> a replica's seed copy and where its transactions begin in the
 //!                              archive (seed.rs). NATIVE_SEED=false: the Perl server's.
+//!   SYNC, STANDBY on|off <segment>, FENCE [<reason>], REJOIN, NBACKUP <level> <file>
+//!                           -> the changes of what the instance does (role.rs). NATIVE_ROLE=false:
+//!                              the Perl server's. PROMOTE is the Perl server's.
 //!
 //! With FILES_ONLY=true (instances without replication) only PING and the backup files are its
 //! own; the Perl server refuses the rest, as it does alone.
@@ -39,6 +42,7 @@
 
 use crate::backups;
 use crate::client::{now, var};
+use crate::role::{self, Answer};
 use crate::seed::{self, Seeds};
 use crate::sql::Database;
 use crate::state::{Probe, State};
@@ -133,6 +137,10 @@ struct Front {
     journal: bool,
     /// For the seeds: the local server's database and whether a live copy is allowed
     seeds: Option<Seeds>,
+    /// Whether the changes of role are answered here (not with NATIVE_ROLE=false)
+    role: bool,
+    /// The puller's position (STATE_FILE, or REPLICATION_DIR/.last-pulled)
+    state_file: PathBuf,
     /// The data directory, where the backup files are
     data: Option<PathBuf>,
 }
@@ -234,6 +242,19 @@ impl Front {
                     None => self.forward(client, reader, &line),
                 }
             }
+            (command @ ("SYNC" | "STANDBY" | "FENCE" | "REJOIN" | "NBACKUP"), _)
+                if self.role && self.seeds.is_some() && self.files.is_some() =>
+            {
+                // the Lease holder's requests come from this pod: no contact from outside
+                if !matches!(command, "FENCE" | "REJOIN") {
+                    self.contacted();
+                }
+                match self.change(command, argument) {
+                    Some(Answer::Reply(reply)) => client.write_all(reply.as_bytes()),
+                    // refused, or undone: the Perl server answers
+                    Some(Answer::Forward) | None => self.forward(client, reader, &line),
+                }
+            }
             ("SEED", _) if self.seeds.is_some() && self.files.is_some() => {
                 self.contacted();
                 let (seeds, files) = (self.seeds.as_ref().expect("checked"), self.files.as_ref().expect("checked"));
@@ -269,6 +290,24 @@ impl Front {
                 None => self.forward(client, reader, &line),
             },
             _ => self.forward(client, reader, &line),
+        }
+    }
+
+    /// SYNC, STANDBY, FENCE, REJOIN and NBACKUP. None: an argument the Perl server refuses.
+    fn change(&self, command: &str, argument: Option<&str>) -> Option<Answer> {
+        let (files, database) = (self.files.as_ref()?, &self.seeds.as_ref()?.database);
+        match (command, argument) {
+            ("SYNC", Some(hosts)) => role::sync(files, database, hosts),
+            ("STANDBY", Some("on")) => Some(role::standby_on(files, now())),
+            ("STANDBY", Some(argument)) => {
+                let segment = argument.strip_prefix("off ")?;
+                let digits = !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit());
+                digits.then(|| role::standby_off(files, &self.state_file, segment))
+            }
+            ("FENCE", reason) => Some(role::fence(files, database, reason, now())),
+            ("REJOIN", _) => Some(role::rejoin(files, database)),
+            ("NBACKUP", Some(argument)) => role::nbackup(files, database, self.data.as_deref()?, argument),
+            _ => None,
         }
     }
 
@@ -438,6 +477,11 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
         }),
         self_fenced: (!base.is_empty()).then(|| Path::new(&base).join("self-fenced")),
         journal: !files_only,
+        role: var("NATIVE_ROLE") != "false",
+        state_file: Some(var("STATE_FILE"))
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(&base).join(".last-pulled")),
         seeds: (!files_only && var("NATIVE_SEED") != "false" && !var("DATABASE_PATH").is_empty()).then(|| Seeds {
             database: Database {
                 path: var("DATABASE_PATH"),
@@ -578,6 +622,8 @@ mod tests {
             files: None,
             journal: true,
             seeds: None,
+            role: false,
+            state_file: PathBuf::new(),
             data: None,
         };
         assert_eq!(front.newest().as_deref(), Some("db.fdb.journal-000000004"));

@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "fb-agent"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "firebird-wire",
  "libc",
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "sig1"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "hmac",
  "sha2",

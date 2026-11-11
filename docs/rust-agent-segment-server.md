@@ -3,7 +3,7 @@
 Phase 3 of the [Rust agent roadmap](rust-agent-roadmap.md). The segment server
 (`segment-server.pl`, about 1,150 lines, more than 30 commands) is the centre of an instance: the
 journal archive, seeds, backup files, the promotion, the fences. This note says how it moves,
-in which order, and what the steps done so far contain (v0.155.0 to v0.159.0).
+in which order, and what the steps done so far contain (v0.155.0 to v0.160.0).
 
 ## The approach: a front, with the Perl server behind it
 
@@ -17,7 +17,8 @@ puller / operator / Job ──► [TLS proxy] ──► fb-agent front ──►
                                                        STATE, VERSION, and
                                                        the instance's state,
                                                        the backup files,
-                                                       the seeds
+                                                       the seeds, the fence,
+                                                       nbackup, sync
 ```
 
 Why a front instead of a second server or a rewrite in one go:
@@ -246,14 +247,48 @@ database is unlocked and writable afterwards, that the puller is not left paused
 copy is left behind. All pass on Firebird 4.0.7, 5.0.4 and the 6 snapshot, and the log shows
 the front made its copies itself.
 
+## Step 5, first part (v0.160.0): the fence, nbackup, synchronous replication
+
+Five of the requests that change what an instance does. The promotion is kept apart: it is the
+next part.
+
+| Request | What it does |
+|---|---|
+| `FENCE [<reason>]` | the Lease holder's fence: the marker, then the full shutdown |
+| `REJOIN` | lifts it: the database online, the marker removed |
+| `NBACKUP <level> <file>` | an nbackup into the data directory; on a replica the puller is paused, everything received applied, and the control file written next to the backup |
+| `SYNC none\|<hosts>` | the primary's synchronous replicas (`sync.conf`) |
+| `STANDBY on`, `STANDBY off <segment>` | a replica becomes the synchronous standby, and an asynchronous replica again after that segment |
+
+- **The services, without fbsvcmgr.** The full shutdown (forced at once), the online and the
+  nbackup go to the local server's services over the agent's own attachments, one per call.
+  The crate's own shutdown call asks for another mode, so the two property calls are built by
+  hand, as the spike found.
+- **A fence never depends on the agent's client alone.** When the server refuses a call at once
+  (or cannot be reached), the front undoes what it did (the marker, the pause, the lock) and
+  passes the request to the Perl server, which runs `fbsvcmgr`. When a call gets no answer
+  within `LOCAL_COMMAND_TIMEOUT_SECONDS`, the server answers nobody: the front reports the
+  failure as the Perl server would, without a second wait.
+- **The same order.** The marker before the shutdown, so that a restarted sidecar never takes a
+  fenced database for an online one; the pause flag before anything else on a replica; the
+  lock shared with the seeds and the promotion.
+- `NATIVE_ROLE=false` in the container's environment leaves these to the Perl server. The
+  operator does not set it.
+
+`hack/agent/role.sh` runs the front with the Perl server behind it in the official images, with
+`fbsvcmgr` wrapped so that every call is recorded. The front fences and rejoins, takes level 0
+and level 1 nbackups of a primary and one of a replica with its control file, without a single
+call; the same requests to the Perl server need one each. The backups restore with their rows.
+All pass on Firebird 4.0.7, 5.0.4 and the 6 snapshot.
+
 ## The next steps
 
 Each is its own release, opt-in through the same annotation, with the comparison test extended
 to its commands.
 
-5. **Changes of role.** PROMOTE, STANDBY, SYNC, FENCE, REJOIN, NBACKUP, then the isolation check
-   and the recovery-point sampler, which become threads of the agent. The promotion keeps its
-   exact sequence; `hack/repro/promoted-journal.sh` and `refused-attachment.sh` run against it.
+5. **The promotion.** PROMOTE keeps its exact sequence; `hack/repro/promoted-journal.sh` and
+   `refused-attachment.sh` run against it. Then the isolation check and the recovery-point
+   sampler, which become threads of the agent.
 6. **TLS in the agent** (rustls), which retires the `segment-tls` sidecar and its hop.
 7. **Without the Perl server.** The front no longer starts it; the scripts leave the ConfigMap.
 

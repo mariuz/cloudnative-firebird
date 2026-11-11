@@ -23,7 +23,7 @@ pub struct Files {
 }
 
 /// A file's content without the white space at its end; empty when it cannot be read.
-fn slurp(path: &Path) -> String {
+pub fn slurp(path: &Path) -> String {
     fs::read_to_string(path).map(|text| text.trim_end().to_string()).unwrap_or_default()
 }
 
@@ -89,6 +89,11 @@ fn segment_files(dir: &Path) -> Vec<PathBuf> {
 /// A replica's control file ({char[10] "FBREPLCTL", u16 version, u32 txn_count, u64 sequence,
 /// u32 offset, ...}): the only {GUID} file in the source directory. (sequence, offset)
 fn control(source: &Path) -> Option<(u64, u32)> {
+    control_file(&control_path(source)?)
+}
+
+/// The replica control file: the only {GUID} file in the source directory.
+pub fn control_path(source: &Path) -> Option<PathBuf> {
     let name = fs::read_dir(source)
         .ok()?
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
@@ -98,7 +103,7 @@ fn control(source: &Path) -> Option<(u64, u32)> {
                 && name.ends_with('}')
                 && name[1..name.len() - 1].bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
         })?;
-    control_file(&source.join(name))
+    Some(source.join(name))
 }
 
 /// A control file's (sequence, offset); None when it is not one.
