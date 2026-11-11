@@ -95,9 +95,9 @@ jobs:
           npm ci
           FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" NO_COLOR=1 \
             npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts 2>&1 | tee /tmp/conformance.txt
-          # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, and 8 for
+          # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, and 10 for
           # the segment server's front (colour codes stripped: the runner's output has them)
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +28 passed \(28\)'
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +30 passed \(30\)'
 
       # STATE from the front's service attachment and from the Perl server's fbsvcmgr, side by
       # side in every state of the database, on real servers (docs/rust-agent-segment-server.md)
@@ -406,7 +406,9 @@ jobs:
         run: |
           # docs/rust-agent-roadmap.md, Phase 1: the annotation has the operator image's fb-agent
           # binary copied into the instance pods (an init container, a rolling restart). Without
-          # replication nothing runs it: here it asks the pod's own segment server, the Perl script.
+          # replication the backup file server is the agent's front in its files-only mode, with
+          # the Perl script behind it (Phase 3, step 3): the backups and restores of the steps
+          # below go through it.
           kubectl annotate firebirdcluster test-cluster firebird.cloudnative-firebird.io/agent=rust
           timeout 240 bash -c 'until kubectl get pod test-cluster-0 -o jsonpath="{.spec.initContainers[*].name}" 2>/dev/null | grep -qw agent-install; do sleep 3; done'
           kubectl wait pod/test-cluster-0 --for=condition=Ready --timeout=300s
@@ -416,9 +418,19 @@ jobs:
           kubectl exec test-cluster-0 -c backup-files -- sh -c \
             'p=${SEGMENT_LISTEN:+${SEGMENT_LISTEN##*:}}; SEGMENT_PROXY= SEGMENT_PORT=${p:-$SEGMENT_PORT} $FB_AGENT request 127.0.0.1 PING' | tee /tmp/agent-ping.txt
           [ "$(cat /tmp/agent-ping.txt)" = "OK" ]
-          # a wrong password is refused by the Perl server
+          # a wrong password is refused
           kubectl exec test-cluster-0 -c backup-files -- sh -c \
             'p=${SEGMENT_LISTEN:+${SEGMENT_LISTEN##*:}}; ISC_PASSWORD=wrong SEGMENT_PROXY= SEGMENT_PORT=${p:-$SEGMENT_PORT} $FB_AGENT request 127.0.0.1 PING' | grep -q 'ERR unauthorized (signature)'
+          [ "$(kubectl get pod test-cluster-0 -o jsonpath='{.spec.containers[?(@.name=="backup-files")].command}')" = '["/opt/fb-agent/fb-agent","segment-server","--","perl","/etc/firebird-operator/segment-server.pl"]' ]
+          kubectl logs test-cluster-0 -c backup-files | grep -q 'backup file server (fb-agent .*) listening on '
+          kubectl logs test-cluster-0 -c backup-files | grep -q 'backup file server listening on 127.0.0.1:3071'
+          # the front answers the backup file requests; the journal's are refused, as by the Perl
+          # server alone (no replication here)
+          ask() { kubectl exec test-cluster-0 -c backup-files -- sh -c "p=\${SEGMENT_LISTEN:+\${SEGMENT_LISTEN##*:}}; SEGMENT_PROXY= SEGMENT_PORT=\${p:-\$SEGMENT_PORT} \$FB_AGENT request 127.0.0.1 $1"; }
+          ask FILES | tail -1 | grep -qx '\.'
+          [ "$(ask 'EXISTS no-such-file')" = "OK no" ]
+          ask LIST | tee /tmp/agent-list.txt || true
+          grep -q '^ERR ' /tmp/agent-list.txt
           timeout 120 bash -c 'until [ "$(kubectl get firebirdcluster test-cluster -o jsonpath={.status.phase}/{.status.readyInstances})" = "Running/1" ]; do sleep 3; done'
 
       - name: Verify spec updates are patched onto the StatefulSet

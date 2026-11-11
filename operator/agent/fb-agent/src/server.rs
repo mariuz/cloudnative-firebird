@@ -18,6 +18,11 @@
 //!   ARCHIVED, UPLOADED <segment>, RETAIN <segment>|none
 //!                           -> from the files on the instance's volume, as the Perl server
 //!                              answers them (status.rs).
+//!   FILE <name>, STORE <name> <size>, REMOVE <name>, FILES, EXISTS <name>
+//!                           -> the backup files in the data directory (backups.rs).
+//!
+//! With FILES_ONLY=true (instances without replication) only PING and the backup files are its
+//! own; the Perl server refuses the rest, as it does alone.
 //!
 //! A segment is complete once its file holds the length its header announces. Firebird archives a
 //! segment with a plain copy, and its replica skips a file shorter than its header says, so a
@@ -29,6 +34,7 @@
 //! NATIVE_STATE (false: always the Perl server). The backend command
 //! follows "--" on the command line and gets SEGMENT_LISTEN=127.0.0.1:<BACKEND_PORT>.
 
+use crate::backups;
 use crate::client::{now, var};
 use crate::state::{Probe, State};
 use crate::status::Files;
@@ -118,6 +124,10 @@ struct Front {
     self_fenced: Option<PathBuf>,
     /// The instance's files, for the requests answered from them
     files: Option<Files>,
+    /// Whether the journal's requests are served (not with FILES_ONLY)
+    journal: bool,
+    /// The data directory, where the backup files are
+    data: Option<PathBuf>,
 }
 
 impl Front {
@@ -170,7 +180,7 @@ impl Front {
                 self.contacted();
                 writeln!(client, "OK")
             }
-            ("LIST", _) => {
+            ("LIST", _) if self.journal => {
                 self.contacted();
                 let mut reply = String::new();
                 for name in segments(&self.archive) {
@@ -180,7 +190,7 @@ impl Front {
                 reply.push_str(".\n");
                 client.write_all(reply.as_bytes())
             }
-            ("GET", Some(name)) if segment_name(name) && self.archive.join(name).is_file() => {
+            ("GET", Some(name)) if self.journal && segment_name(name) && self.archive.join(name).is_file() => {
                 self.contacted();
                 let Ok(mut file) = File::open(self.archive.join(name)) else {
                     return writeln!(client, "ERR cannot read");
@@ -188,7 +198,7 @@ impl Front {
                 writeln!(client, "OK {}", file.metadata()?.len())?;
                 io::copy(&mut file, &mut client).map(|_| ())
             }
-            ("WAIT", Some(argument)) => {
+            ("WAIT", Some(argument)) if self.journal => {
                 self.contacted();
                 self.wait(&mut client, argument)
             }
@@ -210,6 +220,15 @@ impl Front {
                 // not told: the Perl server asks with fbsvcmgr
                 None => self.forward(client, reader, &line),
             },
+            (command @ ("FILE" | "STORE" | "REMOVE" | "FILES" | "EXISTS"), _) if self.data.is_some() => {
+                let data = self.data.as_deref().expect("checked by the guard");
+                self.contacted();
+                match self.backup_files(data, command, argument, &mut client, &mut reader) {
+                    Some(done) => done,
+                    // refused, or an error of the system's: in the Perl server's words
+                    None => self.forward(client, reader, &line),
+                }
+            }
             ("VERSION", _) if self.state.is_some() => {
                 self.contacted();
                 match self.state.as_ref().and_then(Probe::version) {
@@ -228,6 +247,35 @@ impl Front {
             },
             _ => self.forward(client, reader, &line),
         }
+    }
+
+    /// The backup file requests. None: nothing was sent or read, and the Perl server is to answer.
+    fn backup_files(
+        &self,
+        data: &Path,
+        command: &str,
+        argument: Option<&str>,
+        client: &mut TcpStream,
+        reader: &mut BufReader<TcpStream>,
+    ) -> Option<io::Result<()>> {
+        let reply = match (command, argument) {
+            ("FILES", _) => backups::list(data),
+            ("EXISTS", Some(name)) if backups::plain_name(name) => backups::exists(data, name),
+            ("REMOVE", Some(name)) if backups::backup_name(name) => backups::remove(data, name)?,
+            ("FILE", Some(name)) if backups::backup_name(name) && data.join(name).is_file() => {
+                return backups::send(data, name, client);
+            }
+            ("STORE", Some(argument)) => {
+                let (name, size) = argument.split_once(' ')?;
+                let digits = !size.is_empty() && size.bytes().all(|b| b.is_ascii_digit());
+                if !backups::backup_name(name) || !digits {
+                    return None;
+                }
+                backups::store(data, name, size.parse().ok()?, reader)?
+            }
+            _ => return None,
+        };
+        Some(client.write_all(reply.as_bytes()))
     }
 
     fn wait(&self, client: &mut TcpStream, argument: &str) -> io::Result<()> {
@@ -316,8 +364,9 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
     let Some((program, arguments)) = backend_command.split_first() else {
         return Err(io::Error::other("usage: fb-agent segment-server -- <backend command...>"));
     };
+    let files_only = var("FILES_ONLY") == "true";
     let archive = var("ARCHIVE_DIR");
-    if archive.is_empty() {
+    if archive.is_empty() && !files_only {
         return Err(io::Error::other("ARCHIVE_DIR is required"));
     }
     let listen = var("SEGMENT_LISTEN");
@@ -348,7 +397,7 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
             var("AUTH_WINDOW_SECONDS").parse().unwrap_or(300),
         )),
         backend,
-        state: (var("NATIVE_STATE") != "false" && !var("DATABASE_PATH").is_empty()).then(|| {
+        state: (!files_only && var("NATIVE_STATE") != "false" && !var("DATABASE_PATH").is_empty()).then(|| {
             Probe::start(
                 var("DATABASE_PATH"),
                 var("FIREBIRD_PORT").parse().unwrap_or(3050),
@@ -360,23 +409,37 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
             )
         }),
         self_fenced: (!base.is_empty()).then(|| Path::new(&base).join("self-fenced")),
-        files: [var("DATABASE_PATH"), var("SOURCE_DIR"), base.clone(), var("PRIMARY_FILE")]
-            .iter()
-            .all(|value| !value.is_empty())
-            .then(|| Files {
-                database: PathBuf::from(var("DATABASE_PATH")),
-                archive: PathBuf::from(var("ARCHIVE_DIR")),
-                source: PathBuf::from(var("SOURCE_DIR")),
-                base: PathBuf::from(&base),
-                primary_file: PathBuf::from(var("PRIMARY_FILE")),
-                pod: var("POD_NAME"),
+        journal: !files_only,
+        // the database's directory ("." for a bare file name, as the Perl server's)
+        data: Some(var("DATABASE_PATH"))
+            .filter(|path| !path.is_empty())
+            .map(|path| match path.rsplit_once('/') {
+                Some((dir, _)) if !dir.is_empty() => PathBuf::from(dir),
+                _ => PathBuf::from("."),
             }),
+        files: (!files_only
+            && [var("DATABASE_PATH"), var("SOURCE_DIR"), base.clone(), var("PRIMARY_FILE")]
+                .iter()
+                .all(|value| !value.is_empty()))
+        .then(|| Files {
+            database: PathBuf::from(var("DATABASE_PATH")),
+            archive: PathBuf::from(var("ARCHIVE_DIR")),
+            source: PathBuf::from(var("SOURCE_DIR")),
+            base: PathBuf::from(&base),
+            primary_file: PathBuf::from(var("PRIMARY_FILE")),
+            pod: var("POD_NAME"),
+        }),
     });
     println!(
-        "segment server (fb-agent {}) listening on {}, serving {}; other requests go to {backend}",
+        "{} (fb-agent {}) listening on {}, serving {}; other requests go to {backend}",
+        if files_only { "backup file server" } else { "segment server" },
         env!("CARGO_PKG_VERSION"),
         listener.local_addr()?,
-        front.archive.display()
+        if files_only {
+            front.data.as_deref().unwrap_or(Path::new("")).display()
+        } else {
+            front.archive.display()
+        }
     );
     let mut child = Command::new(program)
         .args(arguments)
@@ -472,6 +535,8 @@ mod tests {
             state: None,
             self_fenced: None,
             files: None,
+            journal: true,
+            data: None,
         };
         assert_eq!(front.newest().as_deref(), Some("db.fdb.journal-000000004"));
         fs::write(dir.join("db.fdb.journal-000000006"), segment(1000, 400)).unwrap();
