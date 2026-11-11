@@ -15,6 +15,7 @@
 mod client;
 mod puller;
 mod server;
+mod state;
 
 use client::{now, var};
 use sig1::Verifier;
