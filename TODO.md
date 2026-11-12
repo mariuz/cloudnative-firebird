@@ -61,13 +61,13 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   child processes. The measurements are in the proposal.
 
 - [ ] **Rust agent, Phase 3, the end of step 5** ([docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md)):
-  the isolation check and the recovery-point sampler, which the Perl server still starts, as
-  threads of the agent; and the pruning of the archive, which it still does. Then every request
-  is the front's: FILES_ONLY's refusals and unknown requests are all the Perl server answers.
-  Done so far: the journal's fast path and WAIT (v0.155.0), STATE (v0.156.0), the other requests
-  about an instance's state (v0.157.0), the backup files (v0.158.0), the seeds (v0.159.0),
-  FENCE, REJOIN, NBACKUP, SYNC and STANDBY (v0.160.0), PROMOTE (v0.161.0). Later steps: TLS in
-  the agent, then no Perl server.
+  the isolation check (`isolation-check.pl`), which the Perl server behind the front still
+  starts, as a thread of the agent, with `tests/isolation-check.test.ts` run against both. Then
+  the Perl server answers only refusals. Done so far: the journal's fast path and WAIT
+  (v0.155.0), STATE (v0.156.0), the other requests about an instance's state (v0.157.0), the
+  backup files (v0.158.0), the seeds (v0.159.0), FENCE, REJOIN, NBACKUP, SYNC and STANDBY
+  (v0.160.0), PROMOTE (v0.161.0), the pruning and the recovery-point sampler (v0.162.0). Later
+  steps: TLS in the agent, then no Perl server.
 - [ ] **An atomic journal archive command**: copy to a temporary name and rename, so the archive
   never holds a segment that is still being copied. The servers only offer complete segments
   since v0.155.0, which covers the replicas; other readers of the archive (the journal archive

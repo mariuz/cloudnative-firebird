@@ -12,6 +12,7 @@
 //!   fb-agent segment-server -- <command>   the segment server's front, with the Perl server
 //!                                          behind it (server.rs)
 
+mod background;
 mod backups;
 mod client;
 mod promote;

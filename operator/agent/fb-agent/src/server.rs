@@ -29,6 +29,10 @@
 //!   PROMOTE <archived>|none -> the in-place promotion (promote.rs). NATIVE_PROMOTE=false: the
 //!                              Perl server's.
 //!
+//! Beside the requests (background.rs): the archive is pruned and, with RECOVERY_POINTS, the
+//! journal sampled, by threads of the agent; the Perl server is started with its own switched
+//! off. NATIVE_BACKGROUND=false leaves both to the Perl server.
+//!
 //! With FILES_ONLY=true (instances without replication) only PING and the backup files are its
 //! own; the Perl server refuses the rest, as it does alone.
 //!
@@ -42,6 +46,7 @@
 //! NATIVE_STATE (false: always the Perl server). The backend command
 //! follows "--" on the command line and gets SEGMENT_LISTEN=127.0.0.1:<BACKEND_PORT>.
 
+use crate::background::{self, Retention};
 use crate::backups;
 use crate::client::{now, var};
 use crate::promote::{self, Limits};
@@ -560,10 +565,44 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
             front.archive.display()
         }
     );
-    let mut child = Command::new(program)
-        .args(arguments)
-        .env("SEGMENT_LISTEN", backend.to_string())
-        .spawn()?;
+    // the pruning and the recovery-point sampler: threads here, and the backend's own off
+    let background = !files_only && var("NATIVE_BACKGROUND") != "false" && front.files.is_some();
+    let mut backend_command = Command::new(program);
+    backend_command.args(arguments).env("SEGMENT_LISTEN", backend.to_string());
+    if background {
+        backend_command.envs(background::BACKEND_OFF);
+        let keep = var("SEGMENT_RETENTION_SECONDS").parse().unwrap_or(86_400);
+        let retention = Retention {
+            keep,
+            keep_at_most: var("SEGMENT_MAX_RETENTION_SECONDS").parse().unwrap_or(7 * 86_400).max(keep),
+            applied: var("PRUNE_APPLIED") == "true",
+            upload: var("ARCHIVE_UPLOAD") == "true",
+        };
+        let journal = Some(var("JOURNAL_DIR"))
+            .filter(|dir| var("RECOVERY_POINTS") == "true" && !dir.is_empty())
+            .map(PathBuf::from);
+        println!(
+            "the agent prunes the archive{}; the Perl server's own are off",
+            if journal.is_some() {
+                " and samples the recovery points"
+            } else {
+                ""
+            }
+        );
+        background::start(
+            Files {
+                database: PathBuf::from(var("DATABASE_PATH")),
+                archive: PathBuf::from(var("ARCHIVE_DIR")),
+                source: PathBuf::from(var("SOURCE_DIR")),
+                base: PathBuf::from(&base),
+                primary_file: PathBuf::from(var("PRIMARY_FILE")),
+                pod: var("POD_NAME"),
+            },
+            retention,
+            journal,
+        );
+    }
+    let mut child = backend_command.spawn()?;
 
     // SIGTERM reaches this process only (the container's PID 1): it is passed on to the backend,
     // which stops once the pod's Firebird server has stopped, and this front stops with it
