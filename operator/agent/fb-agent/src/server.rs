@@ -25,7 +25,9 @@
 //!                              archive (seed.rs). NATIVE_SEED=false: the Perl server's.
 //!   SYNC, STANDBY on|off <segment>, FENCE [<reason>], REJOIN, NBACKUP <level> <file>
 //!                           -> the changes of what the instance does (role.rs). NATIVE_ROLE=false:
-//!                              the Perl server's. PROMOTE is the Perl server's.
+//!                              the Perl server's.
+//!   PROMOTE <archived>|none -> the in-place promotion (promote.rs). NATIVE_PROMOTE=false: the
+//!                              Perl server's.
 //!
 //! With FILES_ONLY=true (instances without replication) only PING and the backup files are its
 //! own; the Perl server refuses the rest, as it does alone.
@@ -42,6 +44,7 @@
 
 use crate::backups;
 use crate::client::{now, var};
+use crate::promote::{self, Limits};
 use crate::role::{self, Answer};
 use crate::seed::{self, Seeds};
 use crate::sql::Database;
@@ -139,6 +142,8 @@ struct Front {
     seeds: Option<Seeds>,
     /// Whether the changes of role are answered here (not with NATIVE_ROLE=false)
     role: bool,
+    /// The in-place promotion's limits; None with NATIVE_PROMOTE=false
+    promotion: Option<Limits>,
     /// The puller's position (STATE_FILE, or REPLICATION_DIR/.last-pulled)
     state_file: PathBuf,
     /// The data directory, where the backup files are
@@ -253,6 +258,25 @@ impl Front {
                     Some(Answer::Reply(reply)) => client.write_all(reply.as_bytes()),
                     // refused, or undone: the Perl server answers
                     Some(Answer::Forward) | None => self.forward(client, reader, &line),
+                }
+            }
+            ("PROMOTE", Some(argument))
+                if self.promotion.is_some()
+                    && self.seeds.is_some()
+                    && self.files.is_some()
+                    && (argument == "none" || (!argument.is_empty() && argument.bytes().all(|b| b.is_ascii_digit()))) =>
+            {
+                self.contacted();
+                let (limits, files) = (self.promotion.as_ref().expect("checked"), self.files.as_ref().expect("checked"));
+                let database = &self.seeds.as_ref().expect("checked").database;
+                let state = || self.state.as_ref().and_then(Probe::state);
+                match argument.parse::<u64>().ok().map(Some).or((argument == "none").then_some(None)) {
+                    Some(archived) => match promote::promote(files, database, limits, &state, archived, now(), &mut client) {
+                        Answer::Reply(_) => Ok(()),
+                        // no answer from the local server before anything was done: the Perl server's isql
+                        Answer::Forward => self.forward(client, reader, &line),
+                    },
+                    None => self.forward(client, reader, &line),
                 }
             }
             ("SEED", _) if self.seeds.is_some() && self.files.is_some() => {
@@ -449,6 +473,10 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
     };
     let backend = SocketAddr::from(([127, 0, 0, 1], backend_port));
     let base = var("REPLICATION_DIR");
+    let state_file = Some(var("STATE_FILE"))
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(&base).join(".last-pulled"));
     let front = Arc::new(Front {
         archive: PathBuf::from(archive),
         contact: (!base.is_empty()).then(|| Path::new(&base).join("last-contact")),
@@ -478,10 +506,16 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
         self_fenced: (!base.is_empty()).then(|| Path::new(&base).join("self-fenced")),
         journal: !files_only,
         role: var("NATIVE_ROLE") != "false",
-        state_file: Some(var("STATE_FILE"))
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new(&base).join(".last-pulled")),
+        promotion: (!files_only && var("NATIVE_PROMOTE") != "false").then(|| Limits {
+            shutdown_attempts: var("PROMOTE_SHUTDOWN_ATTEMPTS").parse().ok().filter(|n| *n > 0).unwrap_or(5),
+            shutdown_pause: Duration::from_secs(var("PROMOTE_SHUTDOWN_PAUSE").parse().unwrap_or(3)),
+            header_attempts: var("PROMOTE_HEADER_ATTEMPTS").parse().ok().filter(|n| *n > 0).unwrap_or(3),
+            close_timeout: var("PROMOTE_CLOSE_TIMEOUT_SECONDS").parse().ok().filter(|n| *n > 0).unwrap_or(30),
+            journal: Some(var("JOURNAL_DIR")).filter(|dir| !dir.is_empty()).map(PathBuf::from),
+            publication_script: Path::new(&var("SCRIPT_DIR")).join("enable-publication.sql"),
+            state_file: state_file.clone(),
+        }),
+        state_file: state_file.clone(),
         seeds: (!files_only && var("NATIVE_SEED") != "false" && !var("DATABASE_PATH").is_empty()).then(|| Seeds {
             database: Database {
                 path: var("DATABASE_PATH"),
@@ -623,6 +657,7 @@ mod tests {
             journal: true,
             seeds: None,
             role: false,
+            promotion: None,
             state_file: PathBuf::new(),
             data: None,
         };

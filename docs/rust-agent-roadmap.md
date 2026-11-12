@@ -3,7 +3,7 @@
 Status: **Phases 0, 1 and 2 done** (v0.154.0), **Phase 3 started** (v0.155.0: the segment server's
 front, and pullers that wait instead of polling; v0.156.0: the database's state from a
 persistent Firebird attachment; v0.157.0: the other requests about an instance's state;
-v0.158.0: the backup files, also for instances without replication; v0.159.0: the seeds; v0.160.0: the fence, nbackup and synchronous replication). Results below. It answers
+v0.158.0: the backup files, also for instances without replication; v0.159.0: the seeds; v0.160.0: the fence, nbackup and synchronous replication; v0.161.0: the in-place promotion). Results below. It answers
 the question of whether a Rust core should replace the Perl scripts and the parts critical for
 performance.
 
@@ -240,7 +240,7 @@ front that answers PING, LIST, GET and the new WAIT and runs the Perl server beh
 rest. A segment now reaches a replica 0.08 s after it is archived instead of 2.4 s (median).
 Step 2 (v0.156.0, v0.157.0): STATE from a service attachment that stays open, 2 ms instead of
 71 ms, and the other requests about an instance's state. Step 3 (v0.158.0): the backup files. Step 4 (v0.159.0): the seeds, with the agent's first SQL. Step 5 began in v0.160.0: the fence, nbackup and
-synchronous replication; the promotion is next. The plan was:*
+synchronous replication; v0.161.0: the in-place promotion. Every request is the front's now. The plan was:*
 - Every command in Rust, async, with a limit per command class.
 - mTLS inside the agent, which replaces the segment-tls sidecar.
 - A header cache, and `sendfile` or `copy_file_range` for GET, SEED and FILE.
@@ -281,6 +281,6 @@ Not planned: rewriting the orchestration shell scripts or the TypeScript operato
 
 ## Next step
 
-Phase 3, the rest of step 5 ([rust-agent-segment-server.md](rust-agent-segment-server.md)): the
-in-place promotion (PROMOTE), then the isolation check and the recovery-point sampler as threads
-of the agent.
+Phase 3, the end of step 5 ([rust-agent-segment-server.md](rust-agent-segment-server.md)): the
+isolation check, the recovery-point sampler and the pruning of the archive, which the Perl server
+still runs, as threads of the agent. Then TLS in the agent, and no Perl server.
