@@ -31,7 +31,8 @@
 //!
 //! Beside the requests (background.rs): the archive is pruned and, with RECOVERY_POINTS, the
 //! journal sampled, by threads of the agent; the Perl server is started with its own switched
-//! off. NATIVE_BACKGROUND=false leaves both to the Perl server.
+//! off. So is the isolation check (isolation.rs), with ISOLATION_TIMEOUT_SECONDS.
+//! NATIVE_BACKGROUND=false leaves all three to the Perl server.
 //!
 //! With FILES_ONLY=true (instances without replication) only PING and the backup files are its
 //! own; the Perl server refuses the rest, as it does alone.
@@ -571,6 +572,12 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
     backend_command.args(arguments).env("SEGMENT_LISTEN", backend.to_string());
     if background {
         backend_command.envs(background::BACKEND_OFF);
+        // the isolation check: the agent's, with the Perl server's own off
+        if var("ISOLATION_TIMEOUT_SECONDS").parse::<u64>().is_ok_and(|seconds| seconds > 0) {
+            backend_command.env("ISOLATION_TIMEOUT_SECONDS", "0");
+            println!("the agent runs the isolation check; the Perl server's own is off");
+            crate::isolation::start(Path::new(&base).join("self-fenced"), Path::new(&base).join("last-contact"));
+        }
         let keep = var("SEGMENT_RETENTION_SECONDS").parse().unwrap_or(86_400);
         let retention = Retention {
             keep,

@@ -15,6 +15,7 @@
 mod background;
 mod backups;
 mod client;
+mod isolation;
 mod promote;
 mod puller;
 mod role;
@@ -87,9 +88,10 @@ fn main() -> ExitCode {
         ["request", host, words @ ..] if !words.is_empty() => request(host, &words.join(" ")),
         ["serve"] => serve(),
         ["puller"] => puller::run(),
+        ["isolation-check"] => isolation::command().map_err(io::Error::other),
         ["segment-server", "--", backend @ ..] => server::run(&backend.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
         _ => {
-            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | segment-server -- <backend command...>");
+            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | segment-server -- <backend command...>");
             return ExitCode::from(2);
         }
     };

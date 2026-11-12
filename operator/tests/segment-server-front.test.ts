@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { ChildProcess, spawn, spawnSync } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'fs';
 import { connect } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -438,6 +438,44 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     expect(archived(early.alone)).toEqual([6]);
     expect(archived(early.fronted)).toEqual([6]);
   }, 60_000);
+
+  it('runs the isolation check itself, once: a primary cut off from everything is fenced', async () => {
+    // a fake fbsvcmgr that records its calls and reports the database as shut down afterwards (the
+    // agent's own attachment finds no server here and falls back to it, as the Perl check runs it)
+    mkdirSync(join(root, 'bin'));
+    writeFileSync(
+      join(root, 'bin', 'fbsvcmgr'),
+      `#!/bin/sh\necho "$*" >> "${root}/calls"\ncase "$*" in *sts_hdr_pages*) echo "Attributes force write, full shutdown";; esac\nexit 0\n`,
+    );
+    chmodSync(join(root, 'bin', 'fbsvcmgr'), 0o755);
+    const repl = join(root, 'repl-isolated');
+    mkdirSync(repl);
+    const agent = await startFront('', {
+      ...env(),
+      REPLICATION_DIR: repl,
+      PATH: `${join(root, 'bin')}:${process.env.PATH}`,
+      // neither the API server nor a peer is reachable, for two seconds
+      ISOLATION_TIMEOUT_SECONDS: '2',
+      CHECK_INTERVAL: '1',
+      CONNECT_TIMEOUT: '1',
+      KUBERNETES_SERVICE_HOST: '127.0.0.1',
+      KUBERNETES_SERVICE_PORT: '1',
+    });
+    expect(agent.out()).toContain("the agent runs the isolation check; the Perl server's own is off");
+    const backend = spawnSync('pgrep', ['-P', String(agent.child.pid)]).stdout.toString().trim().split('\n')[0];
+    expect(readFileSync(`/proc/${backend}/environ`, 'utf8').split('\0')).toContain('ISOLATION_TIMEOUT_SECONDS=0');
+    for (let i = 0; i < 100 && !existsSync(join(repl, 'self-fenced')); i++) await new Promise((r) => setTimeout(r, 100));
+    expect(existsSync(join(repl, 'self-fenced'))).toBe(true);
+    expect(agent.out()).toMatch(/isolated: neither the Kubernetes API server nor another instance reachable for \d+s; fencing the primary/);
+    // one full shutdown: the Perl server behind the front ran no check of its own
+    await new Promise((r) => setTimeout(r, 2500));
+    const calls = readFileSync(join(root, 'calls'), 'utf8').trim().split('\n');
+    expect(calls.filter((c) => c.includes('prp_shutdown_mode'))).toEqual([
+      `localhost:service_mgr action_properties dbname ${join(root, 'data', 'mydb.fdb')} prp_shutdown_mode prp_sm_full prp_force_shutdown 0`,
+    ]);
+    // the fence shows in the front's own answers
+    expect(await lines(agent.port, 'ISOLATION')).toEqual([expect.stringMatching(/^OK fenced \d+$/)]);
+  }, 30_000);
 
   it('copies, lists and removes the backup files as the Perl server does', async () => {
     const data = (name: string) => join(root, 'data', name);
