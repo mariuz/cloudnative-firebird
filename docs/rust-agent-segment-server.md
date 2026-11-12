@@ -3,7 +3,7 @@
 Phase 3 of the [Rust agent roadmap](rust-agent-roadmap.md). The segment server
 (`segment-server.pl`, about 1,150 lines, more than 30 commands) is the centre of an instance: the
 journal archive, seeds, backup files, the promotion, the fences. This note says how it moves,
-in which order, and what the steps done so far contain (v0.155.0 to v0.161.0).
+in which order, and what the steps done so far contain (v0.155.0 to v0.162.0).
 
 ## The approach: a front, with the Perl server behind it
 
@@ -330,14 +330,41 @@ state gone); a repeated request says it is promoted already. The image's tools a
 front runs no `fbsvcmgr`, and three tool calls in all, on the seed copy; the Perl server runs
 them throughout. All pass on Firebird 4.0.7, 5.0.4 and the 6 snapshot.
 
-**Every request is the front's now.** What the Perl server still does behind it: the isolation
-check and the recovery-point sampler it starts, the pruning of the archive, and the refusals
+**Every request is the front's now.** What the Perl server still did behind it: the pruning
+of the archive, the recovery-point sampler and the isolation check it starts, and the refusals
 (the files-only mode, unknown requests).
+
+## Step 5, the background work (v0.162.0): pruning and recovery points
+
+Two things the segment server does beside answering requests are threads of the agent now.
+
+- **The pruning of the journal archive**, at the start and then every minute, with the Perl
+  server's rules: a segment goes at the retention age unless a replica has not applied it yet
+  (the floor the operator measures), and then at the maximum age whatever the replicas need;
+  with `PRUNE_APPLIED`, what every replica applied goes at once, and with an archive upload
+  only what was uploaded too; without replicas the segments after the offline bootstrap seed
+  are kept; recovery points of segments long gone are removed.
+- **The recovery-point sampler**, every second on the primary, with `RECOVERY_POINTS` and a
+  journal directory: each new length of a segment still being written is appended to
+  `points/<segment>`, which point-in-time recovery cuts a segment at.
+- **Each is done once.** The front starts the Perl server with its own switched off, through
+  the environment that server already reads: retention ages no file reaches, `PRUNE_APPLIED`
+  and `RECOVERY_POINTS` false. No script changed for it, so no instance restarts.
+- `NATIVE_BACKGROUND=false` in the container's environment leaves both to the Perl server. The
+  operator does not set it.
+
+`tests/segment-server-front.test.ts` gives the Perl server alone and the front the same archive
+(segments of ten days, two days and an hour, a floor) and the same journal: the same segments
+are left, in the plain and in the early mode, and the same recovery points written as the
+segment grows. It also reads the environment of the Perl server behind the front.
+
+The isolation check is still the Perl server's: `isolation-check.pl`, which it starts and
+restarts. It reads the same files the front writes (the last contact, the fence's marker).
 
 ## The next steps
 
-5. **The background work.** The isolation check, the recovery-point sampler and the pruning
-   become threads of the agent.
+5. **The isolation check** as a thread of the agent, with `tests/isolation-check.test.ts` run
+   against both. Then the Perl server answers only refusals.
 6. **TLS in the agent** (rustls), which retires the `segment-tls` sidecar and its hop.
 7. **Without the Perl server.** The front no longer starts it; the scripts leave the ConfigMap.
 

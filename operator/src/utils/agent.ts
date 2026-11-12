@@ -8,7 +8,7 @@ import { operatorImage } from './operator-image';
  * and runs from it what has been ported so far: the replicas' segment puller (Phase 2), and the
  * segment server's front (Phase 3, docs/rust-agent-segment-server.md), which answers PING, LIST,
  * GET, WAIT, the requests about the instance's state, the backup files, the seeds and the
- * changes of role, and runs the Perl
+ * changes of role, prunes the archive and samples the recovery points, and runs the Perl
  * segment server behind it for everything else (also as the backup file server of instances
  * without replication). Setting or removing the annotation changes the pod template, so the
  * instances restart (primary last).

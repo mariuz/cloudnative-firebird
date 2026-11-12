@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { ChildProcess, spawn, spawnSync } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'fs';
 import { connect } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -360,6 +360,83 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     expect(after[1].length).toBe(40);
     expect(after[1].readBigUInt64LE(16)).toBe(57n);
     expect(after[1].readBigUInt64LE(32)).toBe(9n);
+  }, 60_000);
+
+  it('prunes the archive and samples the recovery points itself, as the Perl server alone does', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    /** an instance's directories: segments 1 to 6 aged 10 days, 10 days, 2 days, 2 days, an hour, an hour */
+    const instance = (name: string, floor: string) => {
+      const base = join(root, name);
+      for (const d of ['archive', 'source', 'data', 'repl', 'journal']) mkdirSync(join(base, d), { recursive: true });
+      [864_000, 864_000, 172_800, 172_800, 3600, 3600].forEach((age, i) => {
+        const file = join(base, 'archive', `mydb.fdb.journal-00000000${i + 1}`);
+        writeFileSync(file, segment(i + 1, 48));
+        utimesSync(file, now - age, now - age);
+      });
+      writeFileSync(join(base, 'repl', 'retain-floor'), `${floor}\n`);
+      // a segment being written in the journal
+      writeFileSync(join(base, 'journal', 'mydb.fdb.journal-000000009'), segment(9, 100));
+      return {
+        base,
+        env: {
+          ARCHIVE_DIR: join(base, 'archive'),
+          DATABASE_PATH: join(base, 'data', 'mydb.fdb'),
+          SOURCE_DIR: join(base, 'source'),
+          REPLICATION_DIR: join(base, 'repl'),
+          JOURNAL_DIR: join(base, 'journal'),
+          PRIMARY_FILE: join(root, 'primary'),
+          POD_NAME: 'db-0',
+          ISC_PASSWORD: 'tok',
+          FIREBIRD_PORT: '1',
+          RECOVERY_POINTS: 'true',
+        },
+      };
+    };
+    const archived = (base: string) => readdirSync(join(base, 'archive')).sort().map((n) => Number(n.slice(-1)));
+    const points = (base: string) => {
+      try {
+        return readFileSync(join(base, 'repl', 'points', '9'), 'utf8').split('\n').filter(Boolean).map((l) => l.split(' ')[1]);
+      } catch {
+        return [];
+      }
+    };
+    const until = async (what: () => boolean) => {
+      for (let i = 0; i < 80 && !what(); i++) await new Promise((r) => setTimeout(r, 100));
+    };
+    const run = async (floor: string, extra: Record<string, string>) => {
+      const alone = instance(`perl-${floor}`, floor);
+      const fronted = instance(`front-${floor}`, floor);
+      const server = await startSegmentServer(join(root, 'segment-server.pl'), { ...alone.env, ...extra });
+      children.push(server.child);
+      const agent = await startFront('', { ...fronted.env, ...extra });
+      return { alone: alone.base, fronted: fronted.base, agent };
+    };
+
+    // a replica still needs segment 4 on: kept past the retention age, 3 is not, and none past the maximum
+    const kept = await run('3', {});
+    await until(() => archived(kept.alone).length === 3 && archived(kept.fronted).length === 3);
+    expect(archived(kept.alone)).toEqual([4, 5, 6]);
+    expect(archived(kept.fronted)).toEqual([4, 5, 6]);
+    expect(kept.agent.out()).toContain("the agent prunes the archive and samples the recovery points; the Perl server's own are off");
+    // the Perl server behind the front was started with its pruning and its sampler off
+    const backend = spawnSync('pgrep', ['-P', String(kept.agent.child.pid)]).stdout.toString().trim().split('\n')[0];
+    const environment = readFileSync(`/proc/${backend}/environ`, 'utf8').split('\0');
+    for (const off of ['SEGMENT_RETENTION_SECONDS=4000000000', 'SEGMENT_MAX_RETENTION_SECONDS=4000000000', 'PRUNE_APPLIED=false', 'RECOVERY_POINTS=false']) {
+      expect(environment, off).toContain(off);
+    }
+    // each new length of the segment being written is a recovery point, once
+    await until(() => points(kept.alone).length === 1 && points(kept.fronted).length === 1);
+    for (const base of [kept.alone, kept.fronted]) writeFileSync(join(base, 'journal', 'mydb.fdb.journal-000000009'), segment(9, 260));
+    await until(() => points(kept.alone).length === 2 && points(kept.fronted).length === 2);
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(points(kept.alone)).toEqual(['100', '260']);
+    expect(points(kept.fronted)).toEqual(['100', '260']);
+
+    // early pruning: what every replica applied goes at once, whatever its age
+    const early = await run('6', { PRUNE_APPLIED: 'true' });
+    await until(() => archived(early.alone).length === 1 && archived(early.fronted).length === 1);
+    expect(archived(early.alone)).toEqual([6]);
+    expect(archived(early.fronted)).toEqual([6]);
   }, 60_000);
 
   it('copies, lists and removes the backup files as the Perl server does', async () => {
