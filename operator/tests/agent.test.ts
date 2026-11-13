@@ -102,8 +102,42 @@ describe('the Rust agent in the instance pods', () => {
     expect(agent.command).toEqual(['/app/fb-agent', 'segment-tls']);
     expect(agent.startupProbe!.exec!.command).toEqual(['/app/fb-agent', 'tcp', '127.0.0.1', '3052']);
     expect(agent.resources).toEqual({ requests: { cpu: '10m', memory: '8Mi' } });
-    expect(agent.env).toEqual(proxy(pod(cluster)).env);
     expect(agent.image).toBe(proxy(pod(cluster)).image);
+    // the agent's own processes do their TLS themselves: the front on the segment port, the puller
+    // to the primary; the proxy keeps its client side for the pod's Perl clients
+    const spec = pod(withAgent(cluster));
+    const env = (name: string) => Object.fromEntries((spec.containers.find((c) => c.name === name)!.env ?? []).map((e) => [e.name, e.value]));
+    expect(agent.env!.map((e) => e.name)).toEqual(['SEGMENT_TLS_DIR', 'SEGMENT_TLS_PEERS_DIR', 'CLIENT_LISTEN']);
+    expect(agent.ports).toBeUndefined();
+    const server = spec.containers.find((c) => c.name === 'segment-server')!;
+    expect(server.ports).toContainEqual(expect.objectContaining({ containerPort: 3051 }));
+    expect(env('segment-server')).toMatchObject({
+      SEGMENT_TLS_LISTEN: '0.0.0.0:3051',
+      SEGMENT_LISTEN: '127.0.0.1:3061',
+      SEGMENT_TLS_DIR: '/etc/segment-tls',
+      SEGMENT_TLS_PEERS_DIR: '/etc/segment-tls-peers',
+      SEGMENT_PROXY: '127.0.0.1:3052',
+    });
+    expect(env('segment-puller')).toMatchObject({ SEGMENT_TLS_DIR: '/etc/segment-tls', SEGMENT_PROXY: '127.0.0.1:3052' });
+    for (const name of ['segment-server', 'segment-puller']) {
+      expect(spec.containers.find((c) => c.name === name)!.volumeMounts).toEqual(
+        expect.arrayContaining([
+          { name: 'segment-tls', mountPath: '/etc/segment-tls', readOnly: true },
+          { name: 'segment-tls-peers', mountPath: '/etc/segment-tls-peers', readOnly: true },
+        ]),
+      );
+    }
+    // the database container and the Perl clients are as before: through the proxy
+    expect(env('firebird').SEGMENT_TLS_DIR).toBeUndefined();
+    expect(spec.initContainers!.find((c) => c.name === 'replication-init')!.env).toContainEqual({ name: 'SEGMENT_PROXY', value: '127.0.0.1:3052' });
+    // without replication: the backup file server's front, the same way
+    const single = pod(withAgent(makeCluster({ segmentTLS: { enabled: true } })));
+    const files = single.containers.find((c) => c.name === 'backup-files')!;
+    expect(files.env).toContainEqual({ name: 'SEGMENT_TLS_LISTEN', value: '0.0.0.0:3051' });
+    expect(proxy(single).env!.map((e) => e.name)).not.toContain('SERVER_LISTEN');
+    // without the annotation the proxy has both sides and the segment server no certificates
+    expect(proxy(pod(cluster)).env!.map((e) => e.name)).toContain('SERVER_LISTEN');
+    expect(pod(cluster).containers.find((c) => c.name === 'segment-server')!.env!.map((e) => e.name)).not.toContain('SEGMENT_TLS_DIR');
     const job = (c: FirebirdCluster) => proxy(buildFailoverJob(c, ['test-cluster-1']).spec!.template.spec!);
     expect(job(cluster).command).toEqual(['node', 'dist/segment-tls.js']);
     expect(job(withAgent(cluster)).command).toEqual(['/app/fb-agent', 'segment-tls']);
