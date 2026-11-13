@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { AGENT_ANNOTATION, agentErrors, agentMode } from '../src/utils/agent';
+import { V1PodSpec } from '@kubernetes/client-node';
 import { buildStatefulSet, statefulSetNeedsUpdate } from '../src/utils/resources';
+import { buildFailoverJob } from '../src/utils/switchover';
 import { validateClusterSpec } from '../src/utils/validation';
 import { FirebirdCluster } from '../src/types';
 import { makeCluster } from './helpers/factories';
@@ -87,6 +89,24 @@ describe('the Rust agent in the instance pods', () => {
       'perl',
       '/etc/firebird-operator/segment-server.pl',
     ]);
+  });
+
+  it('runs the segment TLS proxy from the agent too, in the instance pods and in the Jobs', () => {
+    const cluster = makeCluster({ instances: 3, replication: { enabled: true }, segmentTLS: { enabled: true } });
+    const proxy = (spec: V1PodSpec) => spec.initContainers!.find((c) => c.name === 'segment-tls')!;
+    // without the annotation: the Node proxy of the operator image
+    expect(proxy(pod(cluster)).command).toEqual(['node', 'dist/segment-tls.js']);
+    expect(proxy(pod(cluster)).resources).toEqual({ requests: { cpu: '10m', memory: '32Mi' } });
+    // with it: fb-agent from the same image, the same environment, a probe without Node
+    const agent = proxy(pod(withAgent(cluster)));
+    expect(agent.command).toEqual(['/app/fb-agent', 'segment-tls']);
+    expect(agent.startupProbe!.exec!.command).toEqual(['/app/fb-agent', 'tcp', '127.0.0.1', '3052']);
+    expect(agent.resources).toEqual({ requests: { cpu: '10m', memory: '8Mi' } });
+    expect(agent.env).toEqual(proxy(pod(cluster)).env);
+    expect(agent.image).toBe(proxy(pod(cluster)).image);
+    const job = (c: FirebirdCluster) => proxy(buildFailoverJob(c, ['test-cluster-1']).spec!.template.spec!);
+    expect(job(cluster).command).toEqual(['node', 'dist/segment-tls.js']);
+    expect(job(withAgent(cluster)).command).toEqual(['/app/fb-agent', 'segment-tls']);
   });
 
   it('rolls the instances when it is switched on or off', () => {

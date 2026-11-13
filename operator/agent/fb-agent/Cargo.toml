@@ -12,3 +12,6 @@ sig1 = { path = "../sig1" }
 firebird-wire = "=0.1.16"
 libc = "0.2"
 signal-hook = { version = "0.3", default-features = false }
+# TLS for the segment servers: rustls with the ring provider (its C and assembly parts are compiled
+# by clang for the static musl targets, see the Dockerfile and the CI's Rust agent job)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

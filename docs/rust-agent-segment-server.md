@@ -3,7 +3,7 @@
 Phase 3 of the [Rust agent roadmap](rust-agent-roadmap.md). The segment server
 (`segment-server.pl`, about 1,150 lines, more than 30 commands) is the centre of an instance: the
 journal archive, seeds, backup files, the promotion, the fences. This note says how it moves,
-in which order, and what the steps done so far contain (v0.155.0 to v0.163.0).
+in which order, and what the steps done so far contain (v0.155.0 to v0.164.0).
 
 ## The approach: a front, with the Perl server behind it
 
@@ -398,9 +398,47 @@ database is online, and `fbsvcmgr` is not called.
 on: refusals (the files-only mode, unknown requests, arguments it refuses in its own words), and
 the requests for which the local server gave the agent no answer.
 
+## Step 6, first part (v0.164.0): the segment TLS proxy
+
+With `spec.segmentTLS`, a proxy runs beside every instance and in every Job that talks to one:
+it accepts mutual TLS on the segment port for the segment server behind it, and relays the
+pod's clients to the other instances. It was a Node process from the operator image
+(`segment-tls.js`). On clusters with the annotation the same sidecar runs `fb-agent segment-tls`
+from the same image.
+
+- **The same proxy.** The same environment (`SERVER_LISTEN`, `SERVER_TARGET`, `CLIENT_LISTEN`,
+  the certificate and peers directories), the `CONNECT <host> <port>` line of the clients,
+  TLS 1.3 only, a peer authenticated by a valid chain to the cluster's CA and no host name
+  check, plain text only to the instances and only until the time the operator publishes
+  during a switch, never as a fallback from a failed handshake.
+- **rustls, with the ring provider.** ring has C and assembly parts; the image build and the CI
+  compile them with clang for the static musl targets. The alternative, a provider in pure
+  Rust, is not ready for this use.
+- **The segment server is reached after the handshake**, so a peer of another cluster cannot
+  open a connection to it. The first version of this port connected before, and the
+  comparison with the Node proxy found it.
+- **One thread per connection, neither direction waiting for the other**: both sockets are
+  polled, so a large upload goes on while a reply is being sent.
+- **The files are read again**: the peers every five seconds, the certificates when their
+  file changed. On SIGTERM the proxy goes on until the pod's Firebird server has stopped.
+- **Memory**: 2 MB, where the Node proxy uses 64 MB, in every instance pod and Job. The
+  sidecar's request goes from 32Mi to 8Mi, and its startup probe no longer starts Node.
+
+The instances of a cluster restart one by one when it is switched to the agent, so a Rust
+proxy must work with a Node one in both roles. `tests/segment-tls-conformance.test.ts` runs
+its scenarios for each of the four pairs: a request relayed without the CONNECT line, uploads
+and downloads of megabytes, another cluster's client and another cluster's server refused,
+plain text accepted during a switch and refused after, the instances listed as plain, a
+malformed first line. For the Rust proxy alone: renewed certificates and a changed peers file
+taken up without a restart, and stopping with the Firebird server.
+
+What this part does not do: the proxy is still a container of its own and a hop. The Perl
+clients of a pod (the replication init's seeding, the Jobs) need it, so it stays until they
+are ported; the agent's own server and puller can do their TLS themselves before that.
+
 ## The next steps
 
-6. **TLS in the agent** (rustls), which retires the `segment-tls` sidecar and its hop.
+6. **TLS inside the agent's server and puller**, without the hop for them.
 7. **Without the Perl server.** The front no longer starts it; the scripts leave the ConfigMap.
 
 Also open, and independent of the order above:

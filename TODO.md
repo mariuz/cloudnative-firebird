@@ -60,12 +60,12 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   `contactTimeoutSeconds` fenced the primary) and fixed: GET, SEED, TXNS and PLAN are answered by
   child processes. The measurements are in the proposal.
 
-- [ ] **Rust agent, Phase 3, steps 6 and 7** ([docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md)):
-  TLS in the agent (rustls), which retires the `segment-tls` sidecar and its hop; then the
-  front without the Perl server behind it: its own refusals, `fbsvcmgr` and `isql` as the
-  fallbacks where the Perl server is today, and the scripts out of the ConfigMap for clusters
-  that opt in. Steps 1 to 5 are done (v0.155.0 to v0.163.0): every request and all the
-  background work are the agent's.
+- [ ] **Rust agent, Phase 3, the rest of steps 6 and 7** ([docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md)):
+  TLS inside the agent's own segment server and puller, without the proxy's hop (the proxy stays
+  for the Perl clients of a pod: the replication init, the Jobs); then the front without the
+  Perl server behind it: its own refusals, `fbsvcmgr` and `isql` as the fallbacks where the Perl
+  server is today, and the scripts out of the ConfigMap for clusters that opt in. Done: steps 1
+  to 5 (v0.155.0 to v0.163.0), and the segment TLS proxy as `fb-agent segment-tls` (v0.164.0).
 - [ ] **An atomic journal archive command**: copy to a temporary name and rename, so the archive
   never holds a segment that is still being copied. The servers only offer complete segments
   since v0.155.0, which covers the replicas; other readers of the archive (the journal archive
