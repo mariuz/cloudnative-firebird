@@ -61,10 +61,31 @@ exit 0
   return { dir, calls, marker: join(dir, 'self-fenced') };
 }
 
+/**
+ * The isolation check has two implementations, isolation-check.pl and \`fb-agent isolation-check\`
+ * (docs/rust-agent-segment-server.md), which run the same scenarios. The Rust one needs the
+ * fb-agent binary (FB_AGENT_BIN, or a build in agent/target) and is skipped without it; the "Rust
+ * agent" CI job runs this file with it. It asks the local server over its own attachments first
+ * (nothing listens on FIREBIRD_PORT here) and then runs fbsvcmgr, the fake one, as the Perl check.
+ */
+const agentBin = [
+  process.env.FB_AGENT_BIN,
+  ...['x86_64-unknown-linux-musl/release', 'aarch64-unknown-linux-musl/release', 'release', 'debug'].map((d) =>
+    join(__dirname, '..', 'agent', 'target', d, 'fb-agent'),
+  ),
+].find((p) => p && existsSync(p));
+const implementations = [
+  { name: 'Perl (isolation-check.pl)', available: hasPerl, command: (dir: string) => ['perl', join(dir, 'isolation-check.pl')] },
+  { name: 'Rust (fb-agent isolation-check)', available: Boolean(agentBin), command: () => [agentBin!, 'isolation-check'] },
+];
+let implementation = implementations[0];
+
 /** Runs one isolation check */
 function check(ws: ReturnType<typeof workspace>, env: Record<string, string>): string {
-  const r = spawnSync('perl', [join(ws.dir, 'isolation-check.pl')], {
+  const [program, ...args] = implementation.command(ws.dir);
+  const r = spawnSync(program, args, {
     env: {
+      FIREBIRD_PORT: '1',
       PATH: `${join(ws.dir, 'bin')}:${process.env.PATH}`,
       DATABASE_PATH: '/data/db.fdb',
       PRIMARY_FILE: join(ws.dir, 'primary'),
@@ -85,10 +106,12 @@ const longAgo = String(Math.floor(Date.now() / 1000) - 60);
 // a port nothing listens on
 const closedPort = '1';
 
-describe('isolation-check.pl', () => {
+describe.each(implementations)('isolation check: $name', (candidate) => {
+  const hasPerl = candidate.available;
   let listener: Server;
   let port: string;
   beforeAll(async () => {
+    implementation = candidate;
     listener = createServer((s) => s.end());
     await new Promise<void>((resolve) => listener.listen(0, '127.0.0.1', resolve));
     port = String((listener.address() as { port: number }).port);

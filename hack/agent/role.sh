@@ -1,5 +1,5 @@
 #!/bin/bash
-# Checks the agent's FENCE, REJOIN and NBACKUP (docs/rust-agent-segment-server.md, step 5)
+# Checks the agent's FENCE, REJOIN, NBACKUP and isolation check (docs/rust-agent-segment-server.md, step 5)
 # against real Firebird servers. The segment server's front does the full shutdown, the online
 # and the nbackup through its own service attachments, where the Perl server behind it runs
 # fbsvcmgr. Here fbsvcmgr is wrapped so that every call is recorded: the front's requests must
@@ -81,6 +81,21 @@ for image in "${images[@]}"; do
   is "rows after the fence" 'rows localhost:/data/db.fdb' "2"
   is "fbsvcmgr was not needed" 'calls' "0"
   x 'grep -q "lease lost: fencing the primary (database in full shutdown)" /data/front.log' || bad "the front did not log the fence: $(x 'cat /data/front.log')"
+
+  # the isolation check (fb-agent isolation-check, what the front runs as a thread): a primary
+  # that reached nothing for longer than the timeout fences itself, and forgets the fence once
+  # the database is online again; over the agent's own attachments, no fbsvcmgr
+  check='su -s /bin/sh firebird -c ". /w/env.sh; PATH=/w/wrapped:\$PATH ONCE=true ISOLATION_TIMEOUT_SECONDS=20 CONNECT_TIMEOUT=1 KUBERNETES_SERVICE_HOST=127.0.0.1 KUBERNETES_SERVICE_PORT=1 SELF_FENCED_FILE=/data/repl/self-fenced LAST_CONNECTED=$1 /w/fb-agent isolation-check"'
+  is "an isolated primary fences itself" "set -- 1; $check | grep -c 'neither the Kubernetes API server nor another instance reachable for .*; fencing the primary'" "1"
+  is "the database is in full shutdown" 'shut' "1"
+  is "STATE" 'front STATE' "OK fenced"
+  is "the check leaves a fenced database alone" "set -- 1; $check | grep -c 'fencing\|lifted\|failed'" "0"
+  x 'gfix -online localhost:/data/db.fdb'
+  is "once the database is online the fence is forgotten" "set -- 1; $check" "database online again: isolation fence lifted"
+  is "the marker is gone" 'ls /data/repl/self-fenced 2>/dev/null | wc -l' "0"
+  is "a primary that was connected a moment ago only warns" "set -- \$(date +%s); $check | grep -c 'isolated for [0-9]*s (fencing after 20s)'" "1"
+  is "the database is online" 'shut' "0"
+  is "fbsvcmgr was not needed" 'calls' "0"
 
   # the same by the Perl server: fbsvcmgr twice
   is "FENCE by the Perl server" 'perl_server FENCE' "OK"

@@ -3,7 +3,7 @@
 Phase 3 of the [Rust agent roadmap](rust-agent-roadmap.md). The segment server
 (`segment-server.pl`, about 1,150 lines, more than 30 commands) is the centre of an instance: the
 journal archive, seeds, backup files, the promotion, the fences. This note says how it moves,
-in which order, and what the steps done so far contain (v0.155.0 to v0.162.0).
+in which order, and what the steps done so far contain (v0.155.0 to v0.163.0).
 
 ## The approach: a front, with the Perl server behind it
 
@@ -358,13 +358,48 @@ Two things the segment server does beside answering requests are threads of the 
 are left, in the plain and in the early mode, and the same recovery points written as the
 segment grows. It also reads the environment of the Perl server behind the front.
 
-The isolation check is still the Perl server's: `isolation-check.pl`, which it starts and
-restarts. It reads the same files the front writes (the last contact, the fence's marker).
+## Step 5, the isolation check (v0.163.0)
+
+The check that lets a primary fence itself, with automatic failover, is a thread of the agent.
+Its rules are `isolation-check.pl`'s:
+
+- Every few seconds, while the instance is the primary, it looks for the Kubernetes API server
+  or the segment server of another instance. When neither has been reachable for the
+  isolation timeout, it writes the marker and puts the database into full shutdown.
+- A primary that neither the operator nor any replica has reached for the contact timeout,
+  while the headless Service lists other instances, fences itself too: it is on the wrong
+  side of a partition although it reaches the API server.
+- When cluster DNS does not answer within its limit, the check goes by the peers of the last
+  answer, the addresses the operator publishes and the operator's list of ready replicas, and
+  fences a primary nothing reaches only when none of the known peers answers either. "No such
+  name" is an answer: no peers.
+- A fenced database is left alone until it is online again; then the marker is removed.
+
+What is the agent's own:
+
+- **The local server** is asked over the agent's service attachments (the state, the full
+  shutdown). When that is refused at once, `fbsvcmgr` is run under `timeout`, as the Perl check
+  runs it: the fence does not depend on one client.
+- **The lookup** calls the resolver directly, for its error code, in a thread with the time
+  limit.
+- **One check.** The Perl server is started with `ISOLATION_TIMEOUT_SECONDS=0`, its own switch.
+  A check that ends unexpectedly is started again, as the Perl server restarts its own.
+- `fb-agent isolation-check` is the same check as a command, with the environment of
+  `isolation-check.pl`.
+
+`tests/isolation-check.test.ts` runs its eighteen scenarios against both implementations, with
+the same fake `fbsvcmgr`. `tests/segment-server-front.test.ts` has the front fence a primary
+that reaches nothing: one full shutdown, and the fence in the front's own answers.
+`hack/agent/role.sh` runs the check against Firebird 4.0.7, 5.0.4 and the 6 snapshot: an
+isolated primary fences itself, a fenced one is left alone, the fence is forgotten once the
+database is online, and `fbsvcmgr` is not called.
+
+**Steps 1 to 5 are done.** The Perl server behind the front answers only what the front passes
+on: refusals (the files-only mode, unknown requests, arguments it refuses in its own words), and
+the requests for which the local server gave the agent no answer.
 
 ## The next steps
 
-5. **The isolation check** as a thread of the agent, with `tests/isolation-check.test.ts` run
-   against both. Then the Perl server answers only refusals.
 6. **TLS in the agent** (rustls), which retires the `segment-tls` sidecar and its hop.
 7. **Without the Perl server.** The front no longer starts it; the scripts leave the ConfigMap.
 
