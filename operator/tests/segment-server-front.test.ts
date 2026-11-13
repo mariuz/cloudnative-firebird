@@ -1,12 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { ChildProcess, spawn, spawnSync } from 'child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'fs';
-import { connect } from 'net';
+import { connect, Server } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { startSegmentServer } from './helpers/segment-server';
 import { signLine } from './helpers/segment-auth';
+import { createTlsCertificates } from '../src/utils/certificates';
+import { SegmentTlsFiles, startClient, startServer } from '../src/segment-tls';
 
 /**
  * The segment server's front (`fb-agent segment-server`, docs/rust-agent-segment-server.md): it
@@ -155,7 +157,11 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
       const replies: Record<string, string[]> = {};
       for (const request of requests) {
         let [a, b] = await both(request);
-        for (let i = 0; i < 3 && JSON.stringify(a) !== JSON.stringify(b); i++) [a, b] = await both(request);
+        for (let i = 0; i < 3 && JSON.stringify(a) !== JSON.stringify(b); i++) {
+          // (the two servers read the clock in different ways: apart for a few milliseconds around a second's start)
+          await new Promise((r) => setTimeout(r, 30));
+          [a, b] = await both(request);
+        }
         expect(b, `${stage}: ${request}`).toEqual(a);
         expect(a.length, `${stage}: ${request}`).toBeGreaterThan(0);
         replies[request] = b;
@@ -638,6 +644,141 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     }
     expect(out).toContain('fetched mydb.fdb.journal-000000012 from 127.0.0.1\n');
   });
+
+  it('accepts mutual TLS itself, and its puller connects over TLS itself: no proxy between them', async () => {
+    const certs = (caName: string): SegmentTlsFiles => {
+      const c = createTlsCertificates({ caName, dnsNames: ['*.db-headless'], clientAuth: true });
+      return { ca: c.caCert, cert: c.tlsCert, key: c.tlsKey };
+    };
+    const files = certs('cluster db CA');
+    const tlsDir = join(root, 'tls');
+    const peersDir = join(root, 'tls-peers');
+    for (const d of [tlsDir, peersDir, join(root, 'repl-tls')]) mkdirSync(d);
+    writeFileSync(join(tlsDir, 'ca.crt'), files.ca);
+    writeFileSync(join(tlsDir, 'tls.key'), files.key);
+    writeFileSync(join(tlsDir, 'tls.crt'), files.cert);
+    const direct = await startFront('', {
+      ...env(),
+      REPLICATION_DIR: join(root, 'repl-tls'),
+      SEGMENT_TLS_LISTEN: '127.0.0.1:0',
+      SEGMENT_TLS_DIR: tlsDir,
+      SEGMENT_TLS_PEERS_DIR: peersDir,
+    });
+    for (let i = 0; i < 100 && !/accepts mutual TLS itself on/.test(direct.out()); i++) await new Promise((r) => setTimeout(r, 50));
+    const tlsPort = Number(/accepts mutual TLS itself on 127\.0\.0\.1:(\d+)/.exec(direct.out())![1]);
+    const servers: Server[] = [];
+    try {
+      // a client of the cluster: the Node proxy's client side, as the Perl clients and the
+      // instances not switched yet use it
+      const proxy = await startClient(() => files, 0);
+      servers.push(proxy);
+      const proxyPort = (proxy.address() as { port: number }).port;
+      const through = (port: number, request: string, body?: Buffer): Promise<Buffer> =>
+        new Promise((resolve, reject) => {
+          const sock = connect(port, '127.0.0.1');
+          const chunks: Buffer[] = [];
+          sock.once('error', reject);
+          sock.on('data', (d: Buffer) => chunks.push(d));
+          sock.once('close', () => resolve(Buffer.concat(chunks)));
+          sock.once('connect', () => {
+            sock.write(`CONNECT 127.0.0.1 ${tlsPort}\n${signLine(`tok ${request}`)}\n`);
+            if (body) sock.write(body);
+          });
+        });
+      // the same replies as on the plain port, the front's own and the Perl server's behind it
+      for (const request of [
+        'PING', 'LIST', 'GET mydb.fdb.journal-000000007', 'FILES', 'FILE nightly.nbk', 'POSITION', 'ISOLATION',
+        'WAIT 1 mydb.fdb.journal-000000009', 'NOSUCH', 'GET ../primary', 'STORE bad/name 5', 'PROMOTE x',
+      ]) {
+        const [plain, encrypted] = [await ask(direct.port, request), await through(proxyPort, request)];
+        expect(encrypted.equals(plain), `${request}: ${encrypted.subarray(0, 60).toString()} / ${plain.subarray(0, 60).toString()}`).toBe(true);
+        expect(plain.length, request).toBeGreaterThan(0);
+      }
+      // an upload over TLS
+      const body = Buffer.alloc(400_000, 6);
+      expect((await through(proxyPort, `STORE tls-1.nbk ${body.length}`, body)).toString()).toBe('OK\n');
+      expect(readFileSync(join(root, 'data', 'tls-1.nbk')).equals(body)).toBe(true);
+      // a request over TLS counts as contact
+      expect(existsSync(join(root, 'repl-tls', 'last-contact'))).toBe(true);
+
+      // another cluster's client is refused before anything is read; so is plain text
+      const stranger = await startClient(() => certs('cluster other CA'), 0);
+      servers.push(stranger);
+      expect((await through((stranger.address() as { port: number }).port, 'PING').catch(() => Buffer.alloc(0))).toString()).toBe('');
+      const plainly = (request: string) => ask(tlsPort, request).then((b) => b.toString()).catch(() => '');
+      expect(await plainly('PING')).toBe('');
+      // plain text while the operator allows it (the instances not switched yet)
+      writeFileSync(join(peersDir, 'accept-plain-until'), String(Date.now() + 60_000));
+      expect(await plainly('PING')).toBe('OK\n');
+      writeFileSync(join(peersDir, 'accept-plain-until'), '0');
+      expect(await plainly('PING')).toBe('');
+
+      // the agent's puller: TLS itself, to the front (no proxy on either side)
+      const pull = async (name: string, port: number, extra: Record<string, string> = {}) => {
+        const dir = join(root, name);
+        mkdirSync(join(dir, 'source'), { recursive: true });
+        writeFileSync(join(dir, 'primary'), '127.0.0.1\n');
+        let out = '';
+        const puller = spawn(agentBin!, ['puller'], {
+          env: {
+            PATH: process.env.PATH ?? '',
+            SOURCE_DIR: join(dir, 'source'),
+            STATE_FILE: join(dir, '.last-pulled'),
+            PRIMARY_FILE: join(dir, 'primary'),
+            REPLICATION_DIR: dir,
+            POD_NAME: 'db-1',
+            ISC_PASSWORD: 'tok',
+            SEGMENT_PORT: String(port),
+            POLL_SECONDS: '20',
+            FIREBIRD_PORT: '1',
+            // segment TLS is on (a proxy is named), and this process has the certificates
+            SEGMENT_PROXY: '127.0.0.1:1',
+            SEGMENT_TLS_DIR: tlsDir,
+            SEGMENT_TLS_PEERS_DIR: peersDir,
+            ...extra,
+          },
+        });
+        children.push(puller);
+        puller.stdout.on('data', (d) => (out += d.toString()));
+        puller.stderr.on('data', (d) => (out += d.toString()));
+        const got = () => readdirSync(join(dir, 'source')).filter((n) => n.includes('journal')).sort();
+        for (let i = 0; i < 100 && got().length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+        return { got, out: () => out, dir };
+      };
+      const own = await pull('replica-tls', tlsPort);
+      expect(own.got(), own.out()).toEqual(['mydb.fdb.journal-000000007', 'mydb.fdb.journal-000000009']);
+      expect(readFileSync(join(own.dir, 'source', 'mydb.fdb.journal-000000007')).equals(segment(7, 300_000))).toBe(true);
+      // and it waits on the front over TLS: a new segment is fetched at once
+      const at = Date.now();
+      writeFileSync(join(archive(), 'mydb.fdb.journal-000000010'), segment(10, 20_000));
+      for (let i = 0; i < 100 && own.got().length < 3; i++) await new Promise((r) => setTimeout(r, 50));
+      expect(own.got().length, own.out()).toBe(3);
+      expect(Date.now() - at).toBeLessThan(2500);
+
+      // to a primary still behind the Node proxy (the instances restart one by one)
+      const node = await startServer(() => files, 0, { host: '127.0.0.1', port: direct.port }, '127.0.0.1');
+      servers.push(node);
+      const mixed = await pull('replica-mixed', (node.address() as { port: number }).port);
+      expect(mixed.got().length, mixed.out()).toBeGreaterThanOrEqual(2);
+      // an instance the operator lists as plain is reached in plain text ("127" names 127.0.0.1)
+      writeFileSync(join(peersDir, 'plain-peers'), '127\n');
+      const plainPeer = await pull('replica-plain', direct.port);
+      expect(plainPeer.got().length, plainPeer.out()).toBeGreaterThanOrEqual(2);
+      // without the certificates of the cluster nothing is fetched
+      writeFileSync(join(peersDir, 'plain-peers'), '');
+      const otherDir = join(root, 'tls-other');
+      mkdirSync(otherDir);
+      const other = certs('cluster other CA');
+      writeFileSync(join(otherDir, 'ca.crt'), other.ca);
+      writeFileSync(join(otherDir, 'tls.key'), other.key);
+      writeFileSync(join(otherDir, 'tls.crt'), other.cert);
+      const refused = await pull('replica-other', tlsPort, { SEGMENT_TLS_DIR: otherDir });
+      expect(refused.got()).toEqual([]);
+      expect(refused.out()).toMatch(/TLS handshake failed|not an instance of this cluster|connect|refused|alert/i);
+    } finally {
+      servers.forEach((s) => s.close());
+    }
+  }, 60_000);
 
   it('stops with the Perl server behind it, and ends when that server ends', async () => {
     const exited = new Promise<number | null>((resolve) => front.child.once('exit', (code) => resolve(code)));

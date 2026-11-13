@@ -3,7 +3,7 @@
 Phase 3 of the [Rust agent roadmap](rust-agent-roadmap.md). The segment server
 (`segment-server.pl`, about 1,150 lines, more than 30 commands) is the centre of an instance: the
 journal archive, seeds, backup files, the promotion, the fences. This note says how it moves,
-in which order, and what the steps done so far contain (v0.155.0 to v0.164.0).
+in which order, and what the steps done so far contain (v0.155.0 to v0.165.0).
 
 ## The approach: a front, with the Perl server behind it
 
@@ -436,9 +436,47 @@ What this part does not do: the proxy is still a container of its own and a hop.
 clients of a pod (the replication init's seeding, the Jobs) need it, so it stays until they
 are ported; the agent's own server and puller can do their TLS themselves before that.
 
+## Step 6, second part (v0.165.0): TLS end to end, without the hop
+
+With segment TLS a journal segment went through two proxies: the puller's, which encrypted
+it, and the segment server's, which decrypted it. On clusters with the annotation the agent's
+own processes now do that themselves.
+
+```
+before:  puller ─► proxy ═══ TLS ═══► proxy ─► front
+now:     puller ═════════ TLS ═════════════► front
+```
+
+- **The front accepts mutual TLS itself** on the segment port (`SEGMENT_TLS_LISTEN`), with the
+  certificates mounted into its container. A request is read, answered and ended over the TLS
+  session by the same code that serves a plain connection; a request the Perl server answers
+  is relayed between the session and that server.
+- **The puller connects over TLS itself** when its container has the certificates
+  (`SEGMENT_TLS_DIR`) and segment TLS is on. So does `fb-agent request`.
+- **The proxy's rules.** TLS 1.3, a chain to the cluster's CA and no host name check; plain
+  text only to the instances the operator lists and only until the time it publishes, told
+  apart by the first byte on the server side; never a fallback from a failed handshake;
+  renewed certificates taken up when the file changed.
+- **The proxy stays, smaller.** The pod's Perl clients (the replication init's seeding, the
+  Lease holder) and the Jobs still go through it, so the sidecar keeps its client side. It no
+  longer has the segment port.
+- **A plain listener on localhost stays** for the pod's own clients, where the front listened
+  behind the proxy.
+
+Measured on a 1 GB segment fetched over TLS, three times each way: 1.4 s through the two
+proxies and 1.3 s end to end, so the time is the same; the two proxies spent 2.3 s of CPU that
+is no longer spent, and the front's own went from 0.4 s to 0.65 s for the encryption (the
+puller's decryption comes on top, where the proxy's was).
+
+`tests/segment-server-front.test.ts` checks, over TLS: the replies of the plain port (the
+front's own and the Perl server's behind it, downloads, an upload); another cluster's client
+and plain text refused; plain text accepted while the operator allows it. And for the puller:
+it fetches and waits over TLS from the front; from a primary still behind the Node proxy,
+since the instances restart one by one; in plain text from an instance listed as plain; and
+nothing with another cluster's certificates.
+
 ## The next steps
 
-6. **TLS inside the agent's server and puller**, without the hop for them.
 7. **Without the Perl server.** The front no longer starts it; the scripts leave the ConfigMap.
 
 Also open, and independent of the order above:
