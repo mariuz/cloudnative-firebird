@@ -71,6 +71,11 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          # the C and assembly parts of the TLS library (ring), for the static musl targets
+          CC_x86_64_unknown_linux_musl: clang
+          CFLAGS_x86_64_unknown_linux_musl: --target=x86_64-unknown-linux-musl
+          CC_aarch64_unknown_linux_musl: clang
+          CFLAGS_aarch64_unknown_linux_musl: --target=aarch64-unknown-linux-musl
         run: |
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
             cargo build --release --locked --target "$target"
@@ -94,11 +99,12 @@ jobs:
         run: |
           npm ci
           FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" NO_COLOR=1 \
-            npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts tests/isolation-check.test.ts 2>&1 | tee /tmp/conformance.txt
+            npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts tests/isolation-check.test.ts tests/segment-tls-conformance.test.ts 2>&1 | tee /tmp/conformance.txt
           # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, 14 for the
           # segment server's front, and the isolation check's file (18 scenarios for each
-          # implementation, 2 more) (colour codes stripped: the runner's output has them)
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +72 passed \(72\)'
+          # implementation, 2 more), and 26 for the segment TLS proxies together (colour codes
+          # stripped: the runner's output has them)
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +98 passed \(98\)'
 
       # STATE from the front's service attachment and from the Perl server's fbsvcmgr, side by
       # side in every state of the database, on real servers (docs/rust-agent-segment-server.md)
@@ -1983,6 +1989,13 @@ jobs:
           kubectl exec "$replica" -c segment-puller -- /opt/fb-agent/fb-agent request "$primary.repl-headless" STATE | grep -qx 'OK online'
           kubectl logs "$primary" -c segment-server | grep -q 'database state from a service attachment to the local server'
           kubectl exec "$primary" -c segment-server -- sh -c 'SEGMENT_PROXY= SEGMENT_PORT=3071 /opt/fb-agent/fb-agent request 127.0.0.1 STATE' | grep -qx 'OK online'
+          # the segment TLS proxy is the agent's too (v0.164.0), in every instance: the rows above
+          # were shipped through it
+          for pod in repl-0 repl-1 repl-2; do
+            [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.initContainers[?(@.name=="segment-tls")].command}')" = '["/app/fb-agent","segment-tls"]' ]
+            kubectl logs "$pod" -c segment-tls | grep -q 'segment TLS: accepting on 0.0.0.0:3051, forwarding to 127.0.0.1:3061'
+            kubectl logs "$pod" -c segment-tls | grep -q 'segment TLS: client proxy on 127.0.0.1:3052'
+          done
           # the isolation check is the agent's where the cluster has one (v0.163.0)
           if [ "$(kubectl exec "$primary" -c segment-server -- printenv ISOLATION_TIMEOUT_SECONDS || echo 0)" -gt 0 ]; then
             kubectl logs "$primary" -c segment-server | grep -q "the agent runs the isolation check; the Perl server's own is off"

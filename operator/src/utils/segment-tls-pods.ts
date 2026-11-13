@@ -2,6 +2,7 @@ import { V1Container, V1EnvVar, V1PodSpec, V1Volume } from '@kubernetes/client-n
 import { FirebirdCluster } from '../types';
 import { SEGMENT_PORT } from './replication';
 import { operatorImage } from './operator-image';
+import { AGENT_IMAGE_PATH, agentMode } from './agent';
 
 /**
  * Segment TLS (spec.segmentTLS): the segment servers (replication sidecar, or the backup file
@@ -14,6 +15,11 @@ import { operatorImage } from './operator-image';
  * accepts TLS on the segment port and forwards to the segment server, which listens on
  * localhost only, and it relays the Perl clients' connections (SEGMENT_PROXY). Job pods get the
  * client side only.
+ *
+ * On clusters with the Rust agent (utils/agent.ts) the same sidecar runs `fb-agent segment-tls`
+ * from the operator image instead of the Node proxy: the same environment and behaviour
+ * (docs/rust-agent-segment-server.md, step 6), and the two work with each other while the
+ * instances restart one by one.
  */
 
 export const SEGMENT_TLS_CONTAINER = 'segment-tls';
@@ -48,7 +54,7 @@ export function segmentTlsDnsNames(cluster: FirebirdCluster): string[] {
   return [`*.${headless}`, `*.${headless}.${namespace}.svc`, `*.${headless}.${namespace}.svc.cluster.local`];
 }
 
-function sidecar(server: boolean): V1Container {
+function sidecar(server: boolean, rust: boolean): V1Container {
   const env: V1EnvVar[] = [
     { name: 'SEGMENT_TLS_DIR', value: SEGMENT_TLS_DIR },
     { name: 'SEGMENT_TLS_PEERS_DIR', value: SEGMENT_TLS_PEERS_DIR },
@@ -63,7 +69,7 @@ function sidecar(server: boolean): V1Container {
   return {
     name: SEGMENT_TLS_CONTAINER,
     image: operatorImage(),
-    command: ['node', 'dist/segment-tls.js'],
+    command: rust ? [AGENT_IMAGE_PATH, 'segment-tls'] : ['node', 'dist/segment-tls.js'],
     // native sidecar: started before the next init container, stopped after the main containers
     restartPolicy: 'Always',
     ...(server ? { ports: [{ name: 'segments', containerPort: SEGMENT_PORT, protocol: 'TCP' }] } : {}),
@@ -71,16 +77,19 @@ function sidecar(server: boolean): V1Container {
     // the next init container (seeding) starts once the client side accepts connections
     startupProbe: {
       exec: {
-        command: [
-          'node',
-          '-e',
-          `require('net').connect(${SEGMENT_PROXY_PORT},'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))`,
-        ],
+        command: rust
+          ? [AGENT_IMAGE_PATH, 'tcp', '127.0.0.1', String(SEGMENT_PROXY_PORT)]
+          : [
+              'node',
+              '-e',
+              `require('net').connect(${SEGMENT_PROXY_PORT},'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))`,
+            ],
       },
       periodSeconds: 1,
       failureThreshold: 60,
     },
-    resources: { requests: { cpu: '10m', memory: '32Mi' } },
+    // the Node proxy needs its runtime's memory; the agent's is a few megabytes
+    resources: { requests: { cpu: '10m', memory: rust ? '8Mi' : '32Mi' } },
     securityContext: {
       runAsNonRoot: true,
       runAsUser: 65532,
@@ -135,7 +144,7 @@ export function withSegmentTls<T extends V1PodSpec>(cluster: FirebirdCluster, sp
   };
   return {
     ...spec,
-    initContainers: [sidecar(instance), ...(spec.initContainers ?? []).map(container)],
+    initContainers: [sidecar(instance, agentMode(cluster) === 'rust'), ...(spec.initContainers ?? []).map(container)],
     containers: spec.containers.map(container),
     volumes: [...(spec.volumes ?? []), ...volumes(cluster)],
   };

@@ -20,7 +20,7 @@ export const AGENT_DIR = '/opt/fb-agent';
 export const AGENT_PATH = `${AGENT_DIR}/fb-agent`;
 export const AGENT_INSTALL_CONTAINER = 'agent-install';
 /** The binary in the operator image (Dockerfile) */
-const AGENT_IMAGE_PATH = '/app/fb-agent';
+export const AGENT_IMAGE_PATH = '/app/fb-agent';
 /** The containers that get the binary: the segment servers (with and without replication) and the puller */
 const AGENT_CONTAINERS = ['segment-server', 'backup-files', 'segment-puller'];
 /**

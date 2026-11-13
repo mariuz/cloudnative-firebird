@@ -24,6 +24,7 @@ mod server;
 mod sql;
 mod state;
 mod status;
+mod tls;
 
 use client::{now, var};
 use sig1::Verifier;
@@ -89,9 +90,15 @@ fn main() -> ExitCode {
         ["serve"] => serve(),
         ["puller"] => puller::run(),
         ["isolation-check"] => isolation::command().map_err(io::Error::other),
+        ["segment-tls"] => tls::run(),
+        // for probes: whether something listens there
+        ["tcp", host, port] => port
+            .parse::<u16>()
+            .map_err(io::Error::other)
+            .and_then(|port| TcpStream::connect((*host, port)).map(|_| ())),
         ["segment-server", "--", backend @ ..] => server::run(&backend.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
         _ => {
-            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | segment-server -- <backend command...>");
+            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | segment-tls | tcp <host> <port> | segment-server -- <backend command...>");
             return ExitCode::from(2);
         }
     };
