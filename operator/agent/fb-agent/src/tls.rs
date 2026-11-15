@@ -33,6 +33,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::{ParsedCertificate, WebPkiClientVerifier};
 use rustls::{
     ClientConfig, ClientConnection, Connection, DigitallySignedStruct, RootCertStore, ServerConfig, ServerConnection, SignatureScheme,
+    StreamOwned,
 };
 use std::collections::HashSet;
 use std::fs;
@@ -41,15 +42,15 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CONNECT_LINE_MAX: usize = 512;
 /// First byte of a TLS handshake record
-const TLS_HANDSHAKE: u8 = 0x16;
+pub const TLS_HANDSHAKE: u8 = 0x16;
 /// How long the server side waits for a connection's first byte
-const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
 /// What one direction of a relay holds at most before it stops reading the other side
 const RELAY_BUFFER: usize = 256 * 1024;
 
@@ -108,12 +109,12 @@ impl ServerCertVerifier for ChainToCa {
 }
 
 /// Both sides' TLS settings: mutual TLS, TLS 1.3, the cluster's CA only.
-struct Settings {
-    server: Arc<ServerConfig>,
-    client: Arc<ClientConfig>,
+pub struct Settings {
+    pub server: Arc<ServerConfig>,
+    pub client: Arc<ClientConfig>,
 }
 
-fn settings(dir: &Path) -> io::Result<Settings> {
+pub fn settings(dir: &Path) -> io::Result<Settings> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let certificates = |name: &str| -> io::Result<Vec<CertificateDer<'static>>> {
         CertificateDer::pem_file_iter(dir.join(name))
@@ -152,11 +153,11 @@ fn settings(dir: &Path) -> io::Result<Settings> {
 
 /// What the operator allows during a switch of segment TLS.
 #[derive(Default, Debug, PartialEq)]
-struct Peers {
+pub struct Peers {
     /// Instance pod names reached in plain text
-    plain: HashSet<String>,
+    pub plain: HashSet<String>,
     /// Until when (epoch milliseconds) plain connections are accepted
-    accept_plain_until: u128,
+    pub accept_plain_until: u128,
 }
 
 /// `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
@@ -179,18 +180,170 @@ fn parse_peers(plain_peers: Option<&str>, accept_plain_until: Option<&str>) -> P
     }
 }
 
-fn read_peers(dir: &Path) -> Peers {
+pub fn read_peers(dir: &Path) -> Peers {
     let read = |name: &str| fs::read_to_string(dir.join(name)).ok();
     parse_peers(read("plain-peers").as_deref(), read("accept-plain-until").as_deref())
 }
 
 /// The instance a segment server address names: its first label (<pod>.<cluster>-headless...).
-fn peer_name(host: &str) -> &str {
+pub fn peer_name(host: &str) -> &str {
     host.split('.').next().unwrap_or(host)
 }
 
-fn now_ms() -> u128 {
+pub fn now_ms() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
+
+/// The certificates and the operator's peers files of a process that does its own TLS (the
+/// segment server's front, the puller): the settings are built again when the certificate
+/// changed, the peers are read when they are asked for.
+pub struct Material {
+    dir: PathBuf,
+    peers: Option<PathBuf>,
+    built: Mutex<Option<(Option<SystemTime>, Arc<Settings>)>>,
+}
+
+impl Material {
+    /// From SEGMENT_TLS_DIR and SEGMENT_TLS_PEERS_DIR; None without the first.
+    pub fn from_environment() -> Option<Material> {
+        let dir = Some(var("SEGMENT_TLS_DIR")).filter(|dir| !dir.is_empty())?;
+        Some(Material {
+            dir: PathBuf::from(dir),
+            peers: Some(var("SEGMENT_TLS_PEERS_DIR")).filter(|dir| !dir.is_empty()).map(PathBuf::from),
+            built: Mutex::new(None),
+        })
+    }
+
+    pub fn settings(&self) -> io::Result<Arc<Settings>> {
+        let stamp = fs::metadata(self.dir.join("tls.crt")).and_then(|m| m.modified()).ok();
+        let mut built = self.built.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((at, settings)) = built.as_ref() {
+            if *at == stamp {
+                return Ok(Arc::clone(settings));
+            }
+        }
+        match settings(&self.dir) {
+            Ok(fresh) => {
+                let fresh = Arc::new(fresh);
+                *built = Some((stamp, Arc::clone(&fresh)));
+                Ok(fresh)
+            }
+            // being replaced: those in use stay
+            Err(error) => built.as_ref().map(|(_, settings)| Arc::clone(settings)).ok_or(error),
+        }
+    }
+
+    pub fn peers(&self) -> Peers {
+        self.peers.as_deref().map(read_peers).unwrap_or_default()
+    }
+}
+
+/// A connection of the segment protocol: plain, or the TLS side of this process. One request
+/// and its reply go over it in turn, so one owner reads and writes.
+pub enum Stream {
+    Plain(TcpStream),
+    Server(Box<StreamOwned<ServerConnection, TcpStream>>),
+    Client(Box<StreamOwned<ClientConnection, TcpStream>>),
+}
+
+impl Stream {
+    /// The end of what this side sends: TLS says so before the connection closes, so the peer
+    /// can tell a complete reply from a cut one.
+    pub fn finish(&mut self) {
+        match self {
+            Stream::Plain(stream) => {
+                let _ = stream.shutdown(Shutdown::Write);
+            }
+            Stream::Server(tls) => {
+                tls.conn.send_close_notify();
+                let _ = tls.conn.complete_io(&mut tls.sock);
+                let _ = tls.sock.shutdown(Shutdown::Write);
+            }
+            Stream::Client(tls) => {
+                tls.conn.send_close_notify();
+                let _ = tls.conn.complete_io(&mut tls.sock);
+                let _ = tls.sock.shutdown(Shutdown::Write);
+            }
+        }
+    }
+}
+
+/// A peer that closes without TLS's own end (a proxy that was stopped) reads as the end.
+fn or_end(read: io::Result<usize>) -> io::Result<usize> {
+    match read {
+        Err(error) if error.kind() == ErrorKind::UnexpectedEof => Ok(0),
+        other => other,
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Stream::Plain(stream) => stream.read(buffer),
+            Stream::Server(tls) => or_end(tls.read(buffer)),
+            Stream::Client(tls) => or_end(tls.read(buffer)),
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Stream::Plain(stream) => stream.write(buffer),
+            Stream::Server(tls) => tls.write(buffer),
+            Stream::Client(tls) => tls.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Stream::Plain(stream) => stream.flush(),
+            Stream::Server(tls) => tls.flush(),
+            Stream::Client(tls) => tls.flush(),
+        }
+    }
+}
+
+/// The server side of a connection accepted on a TLS port: TLS after the handshake, plain text
+/// while the operator allows it (told apart by the first byte), None for anything else.
+pub fn accepted(material: &Material, connection: TcpStream) -> Option<Stream> {
+    // nothing sent: a bare TCP probe, or a client that gave up
+    let _ = connection.set_read_timeout(Some(FIRST_BYTE_TIMEOUT));
+    let mut first = [0u8; 1];
+    if !matches!(connection.peek(&mut first), Ok(1)) {
+        return None;
+    }
+    if first[0] != TLS_HANDSHAKE {
+        return (now_ms() < material.peers().accept_plain_until).then_some(Stream::Plain(connection));
+    }
+    let session = ServerConnection::new(Arc::clone(&material.settings().ok()?.server)).ok()?;
+    let mut session = Connection::Server(session);
+    if !handshake(&mut session, &connection) {
+        return None;
+    }
+    let Connection::Server(session) = session else { return None };
+    Some(Stream::Server(Box::new(StreamOwned::new(session, connection))))
+}
+
+/// The client side to an instance's segment port: plain text to the instances the operator lists
+/// as plain, mutual TLS to the others.
+pub fn connected(material: &Material, host: &str, connection: TcpStream) -> io::Result<Stream> {
+    if material.peers().plain.contains(peer_name(host)) {
+        return Ok(Stream::Plain(connection));
+    }
+    // the name is not checked (the chain to the cluster's CA authenticates the peer)
+    let name = ServerName::try_from(host.to_string()).unwrap_or_else(|_| ServerName::try_from("segment-server").expect("a valid name"));
+    let session = ClientConnection::new(Arc::clone(&material.settings()?.client), name).map_err(other)?;
+    let mut session = Connection::Client(session);
+    if !handshake(&mut session, &connection) {
+        return Err(other(format!(
+            "{host} is not an instance of this cluster (the TLS handshake failed)"
+        )));
+    }
+    let Connection::Client(session) = session else {
+        return Err(other("not a client connection"));
+    };
+    Ok(Stream::Client(Box::new(StreamOwned::new(session, connection))))
 }
 
 /// What both sides share and what is read again while they run.
@@ -228,7 +381,7 @@ fn poll(descriptors: &mut [libc::pollfd]) -> bool {
 /// A TLS connection and a plain one, both ways, in one thread: neither direction waits for the
 /// other, whatever the two ends do (a large upload while the reply is being sent). `pending`:
 /// what the plain side sent before the relay started.
-fn relay_tls(mut tls: Connection, encrypted: TcpStream, plain: TcpStream, pending: Vec<u8>) {
+pub fn relay_tls(mut tls: Connection, encrypted: TcpStream, plain: TcpStream, pending: Vec<u8>) {
     if encrypted.set_nonblocking(true).is_err() || plain.set_nonblocking(true).is_err() {
         return;
     }
@@ -349,7 +502,7 @@ fn relay_tls(mut tls: Connection, encrypted: TcpStream, plain: TcpStream, pendin
 
 /// The TLS handshake, within the time a first byte gets; false when the peer is not one of this
 /// cluster (the alert, if any, is sent).
-fn handshake(tls: &mut Connection, mut encrypted: &TcpStream) -> bool {
+pub fn handshake(tls: &mut Connection, mut encrypted: &TcpStream) -> bool {
     let _ = encrypted.set_read_timeout(Some(FIRST_BYTE_TIMEOUT));
     let _ = encrypted.set_write_timeout(Some(FIRST_BYTE_TIMEOUT));
     while tls.is_handshaking() {

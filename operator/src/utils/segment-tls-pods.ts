@@ -19,7 +19,11 @@ import { AGENT_IMAGE_PATH, agentMode } from './agent';
  * On clusters with the Rust agent (utils/agent.ts) the same sidecar runs `fb-agent segment-tls`
  * from the operator image instead of the Node proxy: the same environment and behaviour
  * (docs/rust-agent-segment-server.md, step 6), and the two work with each other while the
- * instances restart one by one.
+ * instances restart one by one. There the agent's own processes do their TLS themselves, with
+ * the cluster's certificates mounted into their containers: the segment server (its front)
+ * accepts mutual TLS on the segment port, and the segment puller connects to the primary over
+ * TLS, both without the proxy between. The proxy then runs its client side only, for the pod's
+ * Perl clients (the replication init's seeding, the Lease holder).
  */
 
 export const SEGMENT_TLS_CONTAINER = 'segment-tls';
@@ -33,6 +37,8 @@ export const SEGMENT_SERVER_LOCAL_PORT = 3061;
 export const SEGMENT_PROXY_PORT = 3052;
 /** Containers running a segment server */
 const SEGMENT_SERVERS = ['segment-server', 'backup-files'];
+/** Containers of an instance whose process is the agent with its own TLS, on clusters that run it */
+const AGENT_TLS_CONTAINERS = [...SEGMENT_SERVERS, 'segment-puller'];
 
 export function segmentTlsEnabled(cluster: FirebirdCluster): boolean {
   return cluster.spec.segmentTLS?.enabled === true;
@@ -132,19 +138,37 @@ const withEnv = (c: V1Container, env: V1EnvVar[]): V1Container => ({
 export function withSegmentTls<T extends V1PodSpec>(cluster: FirebirdCluster, spec: T, instance: boolean): T {
   if (!segmentTlsEnabled(cluster)) return spec;
   const proxy: V1EnvVar = { name: 'SEGMENT_PROXY', value: `127.0.0.1:${SEGMENT_PROXY_PORT}` };
+  const rust = agentMode(cluster) === 'rust';
+  // an instance's agent does its own TLS: the certificates and the operator's peers in its containers
+  const ownTls = rust && instance;
+  const certificates = (c: V1Container): V1Container => ({
+    ...withEnv(c, [
+      { name: 'SEGMENT_TLS_DIR', value: SEGMENT_TLS_DIR },
+      { name: 'SEGMENT_TLS_PEERS_DIR', value: SEGMENT_TLS_PEERS_DIR },
+    ]),
+    volumeMounts: [
+      ...(c.volumeMounts ?? []),
+      { name: SEGMENT_TLS_VOLUME, mountPath: SEGMENT_TLS_DIR, readOnly: true },
+      { name: SEGMENT_TLS_PEERS_VOLUME, mountPath: SEGMENT_TLS_PEERS_DIR, readOnly: true },
+    ],
+  });
   const container = (c: V1Container): V1Container => {
-    if (!SEGMENT_SERVERS.includes(c.name)) return withEnv(c, [proxy]);
+    if (!SEGMENT_SERVERS.includes(c.name)) {
+      const client = withEnv(c, [proxy]);
+      return ownTls && AGENT_TLS_CONTAINERS.includes(c.name) ? certificates(client) : client;
+    }
+    const local: V1EnvVar = { name: 'SEGMENT_LISTEN', value: `127.0.0.1:${SEGMENT_SERVER_LOCAL_PORT}` };
+    // the agent's front keeps the segment port and accepts mutual TLS on it itself; the plain
+    // listener is for the pod's own clients, as behind the proxy
+    if (ownTls) return certificates(withEnv(c, [proxy, local, { name: 'SEGMENT_TLS_LISTEN', value: `0.0.0.0:${SEGMENT_PORT}` }]));
     // the proxy owns the segment port
     const { ports, ...rest } = c;
     const others = (ports ?? []).filter((p) => p.containerPort !== SEGMENT_PORT);
-    return withEnv({ ...rest, ...(others.length ? { ports: others } : {}) }, [
-      proxy,
-      { name: 'SEGMENT_LISTEN', value: `127.0.0.1:${SEGMENT_SERVER_LOCAL_PORT}` },
-    ]);
+    return withEnv({ ...rest, ...(others.length ? { ports: others } : {}) }, [proxy, local]);
   };
   return {
     ...spec,
-    initContainers: [sidecar(instance, agentMode(cluster) === 'rust'), ...(spec.initContainers ?? []).map(container)],
+    initContainers: [sidecar(instance && !ownTls, rust), ...(spec.initContainers ?? []).map(container)],
     containers: spec.containers.map(container),
     volumes: [...(spec.volumes ?? []), ...volumes(cluster)],
   };

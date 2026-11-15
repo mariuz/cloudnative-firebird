@@ -1,9 +1,11 @@
 //! The client side of the segment servers' protocol: one signed request per connection.
 
+use crate::tls::{self, Material, Stream};
 use std::env;
 use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -35,25 +37,44 @@ fn connect(host: &str, port: u16) -> io::Result<TcpStream> {
 }
 
 /// Connects to the segment server of `host` (SEGMENT_PORT, 3051 by default) and sends `request`,
-/// signed with ISC_PASSWORD. With SEGMENT_PROXY (segment TLS) the connection goes through the
-/// local proxy, which opens mutual TLS to the host named on the first line. `timeout` bounds each
-/// read of the reply.
-pub fn open(host: &str, request: &str, timeout: Option<Duration>) -> io::Result<BufReader<TcpStream>> {
+/// signed with ISC_PASSWORD. With segment TLS (SEGMENT_PROXY is set) the connection is mutual TLS
+/// to that host: made here when this process has the cluster's certificates (SEGMENT_TLS_DIR),
+/// else through the local proxy named by SEGMENT_PROXY, which is told the host on a first line.
+/// `timeout` bounds each read of the reply.
+pub fn open(host: &str, request: &str, timeout: Option<Duration>) -> io::Result<BufReader<Stream>> {
+    static MATERIAL: OnceLock<Option<Material>> = OnceLock::new();
     let port: u16 = var("SEGMENT_PORT").parse().unwrap_or(3051);
     let failed = |target: String| move |err: io::Error| io::Error::new(err.kind(), format!("connect {target}: {err}"));
-    let mut stream = match var("SEGMENT_PROXY").rsplit_once(':') {
-        Some((proxy_host, proxy_port)) => {
+    let proxy = var("SEGMENT_PROXY");
+    let material = MATERIAL
+        .get_or_init(Material::from_environment)
+        .as_ref()
+        .filter(|_| !proxy.is_empty());
+    let mut stream = match (material, proxy.rsplit_once(':')) {
+        (Some(material), _) => {
+            let connection = connect(host, port).map_err(failed(format!("{host}:{port}")))?;
+            let _ = connection.set_nodelay(true);
+            let stream = tls::connected(material, host, connection)?;
+            if let Stream::Client(tls) = &stream {
+                tls.sock.set_read_timeout(timeout)?;
+            }
+            stream
+        }
+        (None, Some((proxy_host, proxy_port))) => {
             let proxy = format!("to the segment TLS proxy {proxy_host}:{proxy_port}");
             let proxy_port = proxy_port
                 .parse()
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SEGMENT_PROXY: bad port"))?;
             let mut stream = connect(proxy_host, proxy_port).map_err(failed(proxy))?;
             writeln!(stream, "CONNECT {host} {port}")?;
-            stream
+            Stream::Plain(stream)
         }
-        None => connect(host, port).map_err(failed(format!("{host}:{port}")))?,
+        (None, None) => Stream::Plain(connect(host, port).map_err(failed(format!("{host}:{port}")))?),
     };
-    stream.set_read_timeout(timeout)?;
+    if let Stream::Plain(plain) = &stream {
+        plain.set_read_timeout(timeout)?;
+    }
     writeln!(stream, "{}", sig1::sign(var("ISC_PASSWORD").as_bytes(), request, now(), &nonce()?))?;
+    stream.flush()?;
     Ok(BufReader::new(stream))
 }

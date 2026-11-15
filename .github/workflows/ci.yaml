@@ -100,11 +100,11 @@ jobs:
           npm ci
           FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" NO_COLOR=1 \
             npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts tests/isolation-check.test.ts tests/segment-tls-conformance.test.ts 2>&1 | tee /tmp/conformance.txt
-          # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, 14 for the
+          # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, 15 for the
           # segment server's front, and the isolation check's file (18 scenarios for each
           # implementation, 2 more), and 26 for the segment TLS proxies together (colour codes
           # stripped: the runner's output has them)
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +98 passed \(98\)'
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +99 passed \(99\)'
 
       # STATE from the front's service attachment and from the Perl server's fbsvcmgr, side by
       # side in every state of the database, on real servers (docs/rust-agent-segment-server.md)
@@ -1943,7 +1943,7 @@ jobs:
           for i in $(seq 401 405); do sql "$primary" "insert into app values ($i, 'mixed'); commit;" >/dev/null; done
           for pod in $replicas; do wait_count "$pod" $((before + 5)); done
           echo "replicas running the proxy kept replicating from the plain primary"
-          # ... pulled by the Rust puller, through the proxy
+          # ... pulled by the Rust puller, which reaches the plain primary itself (plain-peers)
           for pod in $replicas; do
             [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="segment-puller")].command}')" = '["/opt/fb-agent/fb-agent","puller"]' ]
             kubectl logs "$pod" -c segment-puller | grep -q '^segment puller: source='
@@ -1951,7 +1951,7 @@ jobs:
           done
           [ "$(kubectl get pod "$primary" -o jsonpath='{.spec.containers[?(@.name=="segment-puller")].command}')" = '["perl","/etc/firebird-operator/segment-puller.pl"]' ]
           echo "the replicas' Rust pullers fetched the segments from the primary, which still runs the Perl one"
-          # ... and a plain client (the primary, no proxy yet) still reaches a replica's proxy
+          # ... and a plain client (the primary, no proxy yet) still reaches a replica's segment server
           kubectl exec "$primary" -c segment-server -- perl /etc/firebird-operator/segment-request.pl "$replica.repl-headless" PING | tee /tmp/mixed-ping.txt
           grep -q '^OK' /tmp/mixed-ping.txt
 
@@ -1964,8 +1964,9 @@ jobs:
           primary=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
           replicas=$(for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$primary" ] || echo "$pod"; done)
           replica=$(echo "$replicas" | head -1)
-          kubectl logs "$primary" -c segment-tls | grep -q 'accepting on 0.0.0.0:3051'
-          # the segment server listens on localhost only, behind the proxy
+          # with the agent the segment server accepts mutual TLS on the segment port itself
+          # (v0.165.0); its plain listener is on localhost only, for the pod's own clients
+          kubectl logs "$primary" -c segment-server | grep -q 'accepts mutual TLS itself on 0.0.0.0:3051'
           kubectl logs "$primary" -c segment-server | grep -q 'listening on 127.0.0.1:3061'
           # that is the agent's front, with the Perl server behind it on its own local port
           [ "$(kubectl get pod "$primary" -o jsonpath='{.spec.containers[?(@.name=="segment-server")].command}')" = '["/opt/fb-agent/fb-agent","segment-server","--","perl","/etc/firebird-operator/segment-server.pl"]' ]
@@ -1993,8 +1994,12 @@ jobs:
           # were shipped through it
           for pod in repl-0 repl-1 repl-2; do
             [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.initContainers[?(@.name=="segment-tls")].command}')" = '["/app/fb-agent","segment-tls"]' ]
-            kubectl logs "$pod" -c segment-tls | grep -q 'segment TLS: accepting on 0.0.0.0:3051, forwarding to 127.0.0.1:3061'
             kubectl logs "$pod" -c segment-tls | grep -q 'segment TLS: client proxy on 127.0.0.1:3052'
+            # and the segment server accepts mutual TLS itself (v0.165.0): the proxy has the client
+            # side only, for the pod's Perl clients, and the pullers connect over TLS themselves
+            if kubectl logs "$pod" -c segment-tls | grep -q 'segment TLS: accepting on'; then echo "$pod: the proxy still has the segment port"; exit 1; fi
+            kubectl logs "$pod" -c segment-server | grep -q 'segment TLS: the segment server accepts mutual TLS itself on 0.0.0.0:3051'
+            [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="segment-puller")].env[?(@.name=="SEGMENT_TLS_DIR")].value}')" = /etc/segment-tls ]
           done
           # the isolation check is the agent's where the cluster has one (v0.163.0)
           if [ "$(kubectl exec "$primary" -c segment-server -- printenv ISOLATION_TIMEOUT_SECONDS || echo 0)" -gt 0 ]; then

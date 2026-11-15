@@ -41,6 +41,10 @@
 //! segment with a plain copy, and its replica skips a file shorter than its header says, so a
 //! segment listed while it is still being copied would be fetched short and never applied.
 //!
+//! With SEGMENT_TLS_LISTEN (host:port) and SEGMENT_TLS_DIR the front accepts mutual TLS itself on
+//! that address (tls.rs), instead of behind the segment TLS proxy: the same requests, and plain
+//! text only while the operator allows it (SEGMENT_TLS_PEERS_DIR).
+//!
 //! Environment: ARCHIVE_DIR, REPLICATION_DIR, SOURCE_DIR, PRIMARY_FILE, POD_NAME, ISC_PASSWORD, SEGMENT_LISTEN (host:port) or
 //! SEGMENT_PORT, AUTH_WINDOW_SECONDS, BACKEND_PORT (3071; 0: a free port); for STATE:
 //! DATABASE_PATH, ISC_USER (SYSDBA), FIREBIRD_PORT (3050), LOCAL_QUERY_TIMEOUT_SECONDS (10),
@@ -56,6 +60,7 @@ use crate::seed::{self, Seeds};
 use crate::sql::Database;
 use crate::state::{Probe, State};
 use crate::status::Files;
+use crate::tls::{self, Material, Stream};
 use sig1::Verifier;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -188,23 +193,33 @@ impl Front {
         newest.name.clone()
     }
 
-    fn answer(&self, stream: TcpStream) -> io::Result<()> {
-        stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
-        let mut reader = BufReader::new(stream.try_clone()?);
+    /// One connection: its request, answered here or handed to the Perl server.
+    fn answer(&self, stream: Stream) -> io::Result<()> {
+        let mut reader = BufReader::new(stream);
         let mut line = String::new();
         (&mut reader).take(65536).read_line(&mut line)?;
+        if self.dispatch(&mut reader, &line)? {
+            return self.forward(reader, &line);
+        }
+        // the end of the reply (TLS says so itself)
+        reader.get_mut().finish();
+        Ok(())
+    }
+
+    /// Answers the request of `line` on the connection; true when it is the Perl server's to
+    /// answer (nothing was sent then).
+    fn dispatch(&self, reader: &mut BufReader<Stream>, line: &str) -> io::Result<bool> {
         let request_line = line.trim_end_matches(['\r', '\n']).to_string();
         let verified = self.verifier.lock().unwrap_or_else(|p| p.into_inner()).verify(&request_line, now());
-        let mut client = stream;
         let request = match verified {
             Ok(request) => request,
-            Err(denied) => return writeln!(client, "ERR unauthorized ({denied})"),
+            Err(denied) => return writeln!(reader.get_mut(), "ERR unauthorized ({denied})").map(|()| false),
         };
         let argument = request.argument.as_deref();
         match (request.command.as_str(), argument) {
             ("PING", _) => {
                 self.contacted();
-                writeln!(client, "OK")
+                writeln!(reader.get_mut(), "OK")
             }
             ("LIST", _) if self.journal => {
                 self.contacted();
@@ -214,43 +229,48 @@ impl Front {
                     reply.push('\n');
                 }
                 reply.push_str(".\n");
-                client.write_all(reply.as_bytes())
+                reader.get_mut().write_all(reply.as_bytes())
             }
             ("GET", Some(name)) if self.journal && segment_name(name) && self.archive.join(name).is_file() => {
                 self.contacted();
                 let Ok(mut file) = File::open(self.archive.join(name)) else {
-                    return writeln!(client, "ERR cannot read");
+                    return writeln!(reader.get_mut(), "ERR cannot read").map(|()| false);
                 };
-                writeln!(client, "OK {}", file.metadata()?.len())?;
-                io::copy(&mut file, &mut client).map(|_| ())
+                writeln!(reader.get_mut(), "OK {}", file.metadata()?.len())?;
+                // a plain connection: the kernel copies the file to the socket
+                match reader.get_mut() {
+                    Stream::Plain(socket) => io::copy(&mut file, socket),
+                    encrypted => io::copy(&mut file, encrypted),
+                }
+                .map(|_| ())
             }
             ("WAIT", Some(argument)) if self.journal => {
                 self.contacted();
-                self.wait(&mut client, argument)
+                self.wait(reader.get_mut(), argument)
             }
             // the Lease holder's, from this pod: no contact from outside
             ("STATE", _) if self.state.is_some() => match self.state.as_ref().and_then(Probe::state) {
-                Some(State::Online) => writeln!(client, "OK online"),
+                Some(State::Online) => writeln!(reader.get_mut(), "OK online"),
                 Some(State::Shutdown) => {
                     // a fence leaves its marker: the Lease holder's says "lease" (it lifts its own),
                     // the isolation check's does not (the operator lifts that)
                     let marker = self.self_fenced.as_ref().filter(|path| path.is_file());
                     match marker.map(|path| fs::read_to_string(path).unwrap_or_default()) {
                         Some(text) if text.split(|c: char| !c.is_alphanumeric() && c != '_').any(|word| word == "lease") => {
-                            writeln!(client, "OK fenced lease")
+                            writeln!(reader.get_mut(), "OK fenced lease")
                         }
-                        Some(_) => writeln!(client, "OK fenced"),
-                        None => writeln!(client, "OK shutdown"),
+                        Some(_) => writeln!(reader.get_mut(), "OK fenced"),
+                        None => writeln!(reader.get_mut(), "OK shutdown"),
                     }
                 }
                 // not told: the Perl server asks with fbsvcmgr
-                None => self.forward(client, reader, &line),
+                None => return Ok(true),
             },
             (command @ ("TXNS" | "PLAN"), Some(argument)) if self.seeds.is_some() => {
                 self.contacted();
                 match seed::transactions(&self.archive, command, argument) {
-                    Some(reply) => client.write_all(reply.as_bytes()),
-                    None => self.forward(client, reader, &line),
+                    Some(reply) => reader.get_mut().write_all(reply.as_bytes()),
+                    None => return Ok(true),
                 }
             }
             (command @ ("SYNC" | "STANDBY" | "FENCE" | "REJOIN" | "NBACKUP"), _)
@@ -261,9 +281,9 @@ impl Front {
                     self.contacted();
                 }
                 match self.change(command, argument) {
-                    Some(Answer::Reply(reply)) => client.write_all(reply.as_bytes()),
+                    Some(Answer::Reply(reply)) => reader.get_mut().write_all(reply.as_bytes()),
                     // refused, or undone: the Perl server answers
-                    Some(Answer::Forward) | None => self.forward(client, reader, &line),
+                    Some(Answer::Forward) | None => return Ok(true),
                 }
             }
             ("PROMOTE", Some(argument))
@@ -277,50 +297,51 @@ impl Front {
                 let database = &self.seeds.as_ref().expect("checked").database;
                 let state = || self.state.as_ref().and_then(Probe::state);
                 match argument.parse::<u64>().ok().map(Some).or((argument == "none").then_some(None)) {
-                    Some(archived) => match promote::promote(files, database, limits, &state, archived, now(), &mut client) {
+                    Some(archived) => match promote::promote(files, database, limits, &state, archived, now(), reader.get_mut()) {
                         Answer::Reply(_) => Ok(()),
                         // no answer from the local server before anything was done: the Perl server's isql
-                        Answer::Forward => self.forward(client, reader, &line),
+                        Answer::Forward => return Ok(true),
                     },
-                    None => self.forward(client, reader, &line),
+                    None => return Ok(true),
                 }
             }
             ("SEED", _) if self.seeds.is_some() && self.files.is_some() => {
                 self.contacted();
                 let (seeds, files) = (self.seeds.as_ref().expect("checked"), self.files.as_ref().expect("checked"));
-                match seed::seed(seeds, files, &mut client) {
+                match seed::seed(seeds, files, reader.get_mut()) {
                     Some(done) => done,
                     // the local server gave no answer here: the Perl server asks with isql
-                    None => self.forward(client, reader, &line),
+                    None => return Ok(true),
                 }
             }
             (command @ ("FILE" | "STORE" | "REMOVE" | "FILES" | "EXISTS"), _) if self.data.is_some() => {
                 let data = self.data.as_deref().expect("checked by the guard");
                 self.contacted();
-                match self.backup_files(data, command, argument, &mut client, &mut reader) {
+                match self.backup_files(data, command, argument, reader) {
                     Some(done) => done,
                     // refused, or an error of the system's: in the Perl server's words
-                    None => self.forward(client, reader, &line),
+                    None => return Ok(true),
                 }
             }
             ("VERSION", _) if self.state.is_some() => {
                 self.contacted();
                 match self.state.as_ref().and_then(Probe::version) {
-                    Some(version) => writeln!(client, "OK {version}"),
+                    Some(version) => writeln!(reader.get_mut(), "OK {version}"),
                     // not told: the Perl server asks with isql
-                    None => self.forward(client, reader, &line),
+                    None => return Ok(true),
                 }
             }
             (command, _) if self.files.is_some() => match self.files.as_ref().and_then(|files| from_files(files, command, argument)) {
                 Some(reply) => {
                     self.contacted();
-                    client.write_all(reply.as_bytes())
+                    reader.get_mut().write_all(reply.as_bytes())
                 }
                 // not taken over yet: the Perl server answers, with the request as it came
-                None => self.forward(client, reader, &line),
+                None => return Ok(true),
             },
-            _ => self.forward(client, reader, &line),
+            _ => return Ok(true),
         }
+        .map(|()| false)
     }
 
     /// SYNC, STANDBY, FENCE, REJOIN and NBACKUP. None: an argument the Perl server refuses.
@@ -342,20 +363,16 @@ impl Front {
     }
 
     /// The backup file requests. None: nothing was sent or read, and the Perl server is to answer.
-    fn backup_files(
-        &self,
-        data: &Path,
-        command: &str,
-        argument: Option<&str>,
-        client: &mut TcpStream,
-        reader: &mut BufReader<TcpStream>,
-    ) -> Option<io::Result<()>> {
+    fn backup_files(&self, data: &Path, command: &str, argument: Option<&str>, reader: &mut BufReader<Stream>) -> Option<io::Result<()>> {
         let reply = match (command, argument) {
             ("FILES", _) => backups::list(data),
             ("EXISTS", Some(name)) if backups::plain_name(name) => backups::exists(data, name),
             ("REMOVE", Some(name)) if backups::backup_name(name) => backups::remove(data, name)?,
             ("FILE", Some(name)) if backups::backup_name(name) && data.join(name).is_file() => {
-                return backups::send(data, name, client);
+                return match reader.get_mut() {
+                    Stream::Plain(socket) => backups::send(data, name, socket),
+                    encrypted => backups::send(data, name, encrypted),
+                };
             }
             ("STORE", Some(argument)) => {
                 let (name, size) = argument.split_once(' ')?;
@@ -367,10 +384,10 @@ impl Front {
             }
             _ => return None,
         };
-        Some(client.write_all(reply.as_bytes()))
+        Some(reader.get_mut().write_all(reply.as_bytes()))
     }
 
-    fn wait(&self, client: &mut TcpStream, argument: &str) -> io::Result<()> {
+    fn wait(&self, client: &mut impl Write, argument: &str) -> io::Result<()> {
         let (seconds, after) = match argument.split_once(' ') {
             Some((seconds, after)) => (seconds, Some(after)),
             None => (argument, None),
@@ -396,7 +413,7 @@ impl Front {
 
     /// Hands the connection to the backend: the request line as it came (the backend verifies it
     /// again), what the client sent after it, then both directions until the backend is done.
-    fn forward(&self, mut client: TcpStream, reader: BufReader<TcpStream>, line: &str) -> io::Result<()> {
+    fn forward(&self, mut reader: BufReader<Stream>, line: &str) -> io::Result<()> {
         // the backend may still be starting
         let mut attempts = 0;
         let mut backend = loop {
@@ -406,7 +423,11 @@ impl Front {
                     attempts += 1;
                     thread::sleep(Duration::from_millis(100));
                 }
-                Err(err) => return writeln!(client, "ERR segment server backend: {err}"),
+                Err(err) => {
+                    let said = writeln!(reader.get_mut(), "ERR segment server backend: {err}");
+                    reader.get_mut().finish();
+                    return said;
+                }
             }
         };
         backend.write_all(line.as_bytes())?;
@@ -414,16 +435,27 @@ impl Front {
             backend.write_all(b"\n")?;
         }
         backend.write_all(reader.buffer())?;
-        let mut upload_from = reader.into_inner();
-        let mut upload_to = backend.try_clone()?;
-        // uploads (STORE) for as long as the client sends; ends when either side closes
-        thread::spawn(move || {
-            let _ = io::copy(&mut upload_from, &mut upload_to);
-            let _ = upload_to.shutdown(Shutdown::Write);
-        });
-        let copied = io::copy(&mut backend, &mut client);
-        let _ = client.shutdown(Shutdown::Both);
-        copied.map(|_| ())
+        match reader.into_inner() {
+            Stream::Plain(mut client) => {
+                let mut upload_from = client.try_clone()?;
+                let mut upload_to = backend.try_clone()?;
+                // uploads (STORE) for as long as the client sends; ends when either side closes
+                thread::spawn(move || {
+                    let _ = io::copy(&mut upload_from, &mut upload_to);
+                    let _ = upload_to.shutdown(Shutdown::Write);
+                });
+                let copied = io::copy(&mut backend, &mut client);
+                let _ = client.shutdown(Shutdown::Both);
+                copied.map(|_| ())
+            }
+            // TLS: both directions through the session, as the proxy relays them
+            Stream::Server(session) => {
+                let rustls::StreamOwned { conn, sock } = *session;
+                tls::relay_tls(rustls::Connection::Server(conn), sock, backend, Vec::new());
+                Ok(())
+            }
+            Stream::Client(_) => Ok(()),
+        }
     }
 }
 
@@ -633,11 +665,43 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
         }
     });
 
+    // segment TLS without the proxy's hop: mutual TLS accepted here, on its own port (the plain
+    // listener above is then local to the pod), and plain text while the operator allows it
+    let tls_listen = var("SEGMENT_TLS_LISTEN");
+    if let (false, Some(material)) = (tls_listen.is_empty(), Material::from_environment()) {
+        // the certificates must be readable now: a listener that refuses everybody helps nobody
+        material.settings()?;
+        let encrypted = TcpListener::bind(tls_listen.as_str())?;
+        println!(
+            "segment TLS: the segment server accepts mutual TLS itself on {}",
+            encrypted.local_addr()?
+        );
+        let (front, material) = (Arc::clone(&front), Arc::new(material));
+        thread::spawn(move || {
+            for connection in encrypted.incoming().flatten() {
+                let (front, material) = (Arc::clone(&front), Arc::clone(&material));
+                thread::spawn(move || {
+                    let Some(stream) = tls::accepted(&material, connection) else {
+                        return;
+                    };
+                    let socket = match &stream {
+                        Stream::Plain(socket) => socket,
+                        Stream::Server(session) => &session.sock,
+                        Stream::Client(session) => &session.sock,
+                    };
+                    let _ = socket.set_read_timeout(Some(REQUEST_TIMEOUT));
+                    let _ = front.answer(stream);
+                });
+            }
+        });
+    }
+
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let front = Arc::clone(&front);
         thread::spawn(move || {
-            let _ = front.answer(stream);
+            let _ = stream.set_read_timeout(Some(REQUEST_TIMEOUT));
+            let _ = front.answer(Stream::Plain(stream));
         });
     }
     Ok(())
