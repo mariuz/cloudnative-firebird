@@ -7,6 +7,8 @@ in which order, and what the steps done so far contain (v0.155.0 to v0.165.0).
 
 ## The approach: a front, with the Perl server behind it
 
+*(Since v0.166.0 the Perl server is no longer behind it: see step 7. This is how it got there.)*
+
 `fb-agent segment-server -- perl segment-server.pl` listens where the Perl server did. It reads
 each request, checks its signature, and then either answers it itself or hands the connection,
 with the request line as it came, to the Perl server it runs on a local port (3071).
@@ -475,9 +477,53 @@ it fetches and waits over TLS from the front; from a primary still behind the No
 since the instances restart one by one; in plain text from an instance listed as plain; and
 nothing with another cluster's certificates.
 
-## The next steps
+## Step 7 (v0.166.0): without the Perl server
 
-7. **Without the Perl server.** The front no longer starts it; the scripts leave the ConfigMap.
+`fb-agent segment-server`, without a command after it, starts no Perl server. The operator
+runs it that way in the segment server container and the backup file container of clusters
+with the annotation. With `-- perl segment-server.pl` it is the front of the steps above,
+which the tests still use to compare.
+
+By step 5 every request had its answer in the agent. Three things were still the Perl
+server's, and are now the agent's:
+
+- **The refusals.** A request the agent does not have, or an argument it does not accept, was
+  passed on so that the Perl server would say so. The agent says it: `ERR bad request`,
+  `ERR not available without replication` for the backup file server, and for the backup
+  files the system's words (`ERR remove x.nbk: Is a directory`).
+- **The tools as a second way to the database.** Where the Firebird server refused the agent's
+  own attachment, the request went to the Perl server, which ran `fbsvcmgr`, `isql` or `gfix`.
+  The agent runs them itself, under the same limits: `fbsvcmgr` for the state, the full
+  shutdown, the online and an nbackup; `isql` for a value and for the backup lock; `gfix` for
+  the replica mode. An attachment that timed out is not tried again with a tool: the server is
+  answering nobody. When the tool fails too the reply is the Perl server's
+  (`ERR cannot read the state of <database>`, `ERR cannot shut <database> down`,
+  `ERR cannot bring <database> online`, `ERR nbackup failed`, `ERR cannot read the engine
+  version`, `ERR cannot read the replica mode`).
+- **Stopping.** After SIGTERM the server keeps answering until the pod's Firebird server has
+  stopped, then exits, as the Perl server did and the front did through it.
+
+One reply differs on purpose. For a seed, the Perl server took a replication sequence it
+could not read as 0, and could then serve an offline bootstrap seed that the archive no longer
+continues. The agent refuses the seed when neither it nor `isql` gets an answer:
+`ERR no answer from the local server`.
+
+The Perl process was about 9 MB in each instance pod.
+
+Checked three ways:
+
+- `tests/segment-server-front.test.ts` runs every case twice: the agent with the Perl server
+  behind it, and the agent alone, each against the Perl server alone.
+- `hack/agent/alone.sh` runs three servers on one real database (Firebird 4, 5 and the 6
+  snapshot): one reaches Firebird itself and must run no tool; one is given a port nothing
+  listens on for its own attachments and must get the same answers through the tools, which
+  are recorded; one has neither and must refuse, leaving nothing changed.
+- The kind CI runs the replicated cluster this way, with segment TLS, and checks that no
+  `segment-server.pl` runs in an instance pod.
+
+The scripts stay in the ConfigMap. Removing the annotation takes a cluster back to them, and
+the pod's other Perl programs (the replication init, the Lease holder, the metrics exporter,
+the Jobs) are not ported.
 
 Also open, and independent of the order above:
 

@@ -1,6 +1,14 @@
-//! The segment server's front (docs/rust-agent-segment-server.md). It listens where
-//! segment-server.pl would, answers the commands it has taken over, and forwards every other
-//! request, unchanged, to the Perl server it runs behind it on a local port.
+//! The segment server (docs/rust-agent-segment-server.md). It listens where segment-server.pl
+//! did and answers its requests.
+//!
+//! Alone (`fb-agent segment-server`, step 7) it answers everything: what it does not have or
+//! is asked wrongly it refuses in the Perl server's words, and where the Firebird server
+//! refuses its own attachments it asks the image's isql, fbsvcmgr and gfix (sql.rs), as the
+//! Perl server did. The NATIVE_* switches below mean nothing then.
+//!
+//! As a front (`fb-agent segment-server -- perl segment-server.pl`), how it got there and what
+//! the tests compare with: it runs the Perl server behind it on a local port and forwards,
+//! unchanged, what is described below as the Perl server's.
 //!
 //! Its own commands (each connection carries one signed request, as before):
 //!   PING                    -> "OK"
@@ -48,7 +56,7 @@
 //! Environment: ARCHIVE_DIR, REPLICATION_DIR, SOURCE_DIR, PRIMARY_FILE, POD_NAME, ISC_PASSWORD, SEGMENT_LISTEN (host:port) or
 //! SEGMENT_PORT, AUTH_WINDOW_SECONDS, BACKEND_PORT (3071; 0: a free port); for STATE:
 //! DATABASE_PATH, ISC_USER (SYSDBA), FIREBIRD_PORT (3050), LOCAL_QUERY_TIMEOUT_SECONDS (10),
-//! NATIVE_STATE (false: always the Perl server). The backend command
+//! NATIVE_STATE (false: always the Perl server). The backend command, when there is one,
 //! follows "--" on the command line and gets SEGMENT_LISTEN=127.0.0.1:<BACKEND_PORT>.
 
 use crate::background::{self, Retention};
@@ -141,7 +149,11 @@ struct Front {
     /// directory changes
     newest: Mutex<Newest>,
     verifier: Mutex<Verifier>,
-    backend: SocketAddr,
+    /// The Perl server behind this one; None without it (docs/rust-agent-segment-server.md,
+    /// step 7): every request is then answered here
+    backend: Option<SocketAddr>,
+    /// The backup files only (FILES_ONLY): no instance beside this server
+    files_only: bool,
     /// The local server's state, with REPLICATION_DIR/self-fenced: who shut the database down
     state: Option<Probe>,
     self_fenced: Option<PathBuf>,
@@ -198,24 +210,42 @@ impl Front {
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         (&mut reader).take(65536).read_line(&mut line)?;
-        if self.dispatch(&mut reader, &line)? {
-            return self.forward(reader, &line);
+        if let Some(Left(refusal)) = self.dispatch(&mut reader, &line)? {
+            match self.backend {
+                Some(backend) => return self.forward(backend, reader, &line),
+                None => writeln!(reader.get_mut(), "{refusal}")?,
+            }
         }
         // the end of the reply (TLS says so itself)
         reader.get_mut().finish();
         Ok(())
     }
 
-    /// Answers the request of `line` on the connection; true when it is the Perl server's to
-    /// answer (nothing was sent then).
-    fn dispatch(&self, reader: &mut BufReader<Stream>, line: &str) -> io::Result<bool> {
+    /// Answers the request of `line` on the connection. Left: nothing was sent, and it is the
+    /// Perl server's to answer, or without one the refusal it would give.
+    fn dispatch(&self, reader: &mut BufReader<Stream>, line: &str) -> io::Result<Option<Left>> {
         let request_line = line.trim_end_matches(['\r', '\n']).to_string();
         let verified = self.verifier.lock().unwrap_or_else(|p| p.into_inner()).verify(&request_line, now());
         let request = match verified {
             Ok(request) => request,
-            Err(denied) => return writeln!(reader.get_mut(), "ERR unauthorized ({denied})").map(|()| false),
+            Err(denied) => return writeln!(reader.get_mut(), "ERR unauthorized ({denied})").map(|()| None),
         };
         let argument = request.argument.as_deref();
+        let database = self
+            .seeds
+            .as_ref()
+            .map(|seeds| seeds.database.path.as_str())
+            .unwrap_or("the database");
+        // an argument that is refused, or a request this server does not have
+        let refused = || {
+            let files = matches!(request.command.as_str(), "FILE" | "STORE" | "REMOVE" | "FILES" | "EXISTS");
+            Ok(Some(Left(if self.files_only && !files {
+                "ERR not available without replication".into()
+            } else {
+                "ERR bad request".into()
+            })))
+        };
+        let failed = |refusal: String| Ok(Some(Left(refusal)));
         match (request.command.as_str(), argument) {
             ("PING", _) => {
                 self.contacted();
@@ -234,7 +264,7 @@ impl Front {
             ("GET", Some(name)) if self.journal && segment_name(name) && self.archive.join(name).is_file() => {
                 self.contacted();
                 let Ok(mut file) = File::open(self.archive.join(name)) else {
-                    return writeln!(reader.get_mut(), "ERR cannot read").map(|()| false);
+                    return writeln!(reader.get_mut(), "ERR cannot read").map(|()| None);
                 };
                 writeln!(reader.get_mut(), "OK {}", file.metadata()?.len())?;
                 // a plain connection: the kernel copies the file to the socket
@@ -263,14 +293,14 @@ impl Front {
                         None => writeln!(reader.get_mut(), "OK shutdown"),
                     }
                 }
-                // not told: the Perl server asks with fbsvcmgr
-                None => return Ok(true),
+                // not told: the Perl server asks with fbsvcmgr (without it, fbsvcmgr was asked)
+                None => return failed(format!("ERR cannot read the state of {database}")),
             },
             (command @ ("TXNS" | "PLAN"), Some(argument)) if self.seeds.is_some() => {
                 self.contacted();
                 match seed::transactions(&self.archive, command, argument) {
                     Some(reply) => reader.get_mut().write_all(reply.as_bytes()),
-                    None => return Ok(true),
+                    None => return refused(),
                 }
             }
             (command @ ("SYNC" | "STANDBY" | "FENCE" | "REJOIN" | "NBACKUP"), _)
@@ -282,8 +312,23 @@ impl Front {
                 }
                 match self.change(command, argument) {
                     Some(Answer::Reply(reply)) => reader.get_mut().write_all(reply.as_bytes()),
-                    // refused, or undone: the Perl server answers
-                    Some(Answer::Forward) | None => return Ok(true),
+                    // undone: the Perl server answers; without it, what could not be done
+                    Some(Answer::Forward) => {
+                        let base = self
+                            .files
+                            .as_ref()
+                            .map(|files| files.base.display().to_string())
+                            .unwrap_or_default();
+                        return failed(match (command, argument) {
+                            ("SYNC", _) => format!("ERR cannot write {base}/sync.conf"),
+                            ("STANDBY", Some("on")) => format!("ERR cannot write {base}/sync-standby"),
+                            ("STANDBY", _) => "ERR cannot write the replica control file".into(),
+                            ("FENCE", _) => format!("ERR cannot shut {database} down"),
+                            ("REJOIN", _) => format!("ERR cannot bring {database} online"),
+                            _ => "ERR nbackup failed".into(),
+                        });
+                    }
+                    None => return refused(),
                 }
             }
             ("PROMOTE", Some(argument))
@@ -300,9 +345,9 @@ impl Front {
                     Some(archived) => match promote::promote(files, database, limits, &state, archived, now(), reader.get_mut()) {
                         Answer::Reply(_) => Ok(()),
                         // no answer from the local server before anything was done: the Perl server's isql
-                        Answer::Forward => return Ok(true),
+                        Answer::Forward => return failed("ERR cannot read the replica mode".into()),
                     },
-                    None => return Ok(true),
+                    None => return refused(),
                 }
             }
             ("SEED", _) if self.seeds.is_some() && self.files.is_some() => {
@@ -310,8 +355,9 @@ impl Front {
                 let (seeds, files) = (self.seeds.as_ref().expect("checked"), self.files.as_ref().expect("checked"));
                 match seed::seed(seeds, files, reader.get_mut()) {
                     Some(done) => done,
-                    // the local server gave no answer here: the Perl server asks with isql
-                    None => return Ok(true),
+                    // the local server gave no answer here: the Perl server asks with isql. Without
+                    // it isql was asked too, and no seed is served from a database nobody can ask
+                    None => return failed("ERR no answer from the local server".into()),
                 }
             }
             (command @ ("FILE" | "STORE" | "REMOVE" | "FILES" | "EXISTS"), _) if self.data.is_some() => {
@@ -320,15 +366,31 @@ impl Front {
                 match self.backup_files(data, command, argument, reader) {
                     Some(done) => done,
                     // refused, or an error of the system's: in the Perl server's words
-                    None => return Ok(true),
+                    None => {
+                        return match (command, argument.map(|a| a.split(' ').collect::<Vec<_>>()).as_deref()) {
+                            ("REMOVE", Some([name])) if backups::backup_name(name) => {
+                                failed(format!("ERR remove {name}: {}", why(fs::remove_file(data.join(name)).err())))
+                            }
+                            ("FILE", Some([name])) if backups::backup_name(name) && data.join(name).is_file() => {
+                                failed(format!("ERR cannot read {name}: {}", why(File::open(data.join(name)).err())))
+                            }
+                            ("STORE", Some([name, size]))
+                                if backups::backup_name(name) && !size.is_empty() && size.bytes().all(|b| b.is_ascii_digit()) =>
+                            {
+                                let part = data.join(format!(".{name}.part"));
+                                failed(format!("ERR cannot write {name}: {}", why(File::create(part).err())))
+                            }
+                            _ => refused(),
+                        };
+                    }
                 }
             }
             ("VERSION", _) if self.state.is_some() => {
                 self.contacted();
                 match self.state.as_ref().and_then(Probe::version) {
                     Some(version) => writeln!(reader.get_mut(), "OK {version}"),
-                    // not told: the Perl server asks with isql
-                    None => return Ok(true),
+                    // not told: the Perl server asks with isql (without it, isql was asked)
+                    None => return failed("ERR cannot read the engine version".into()),
                 }
             }
             (command, _) if self.files.is_some() => match self.files.as_ref().and_then(|files| from_files(files, command, argument)) {
@@ -336,12 +398,12 @@ impl Front {
                     self.contacted();
                     reader.get_mut().write_all(reply.as_bytes())
                 }
-                // not taken over yet: the Perl server answers, with the request as it came
-                None => return Ok(true),
+                // not one of this server's: the Perl server answers, with the request as it came
+                None => return refused(),
             },
-            _ => return Ok(true),
+            _ => return refused(),
         }
-        .map(|()| false)
+        .map(|()| None)
     }
 
     /// SYNC, STANDBY, FENCE, REJOIN and NBACKUP. None: an argument the Perl server refuses.
@@ -413,11 +475,11 @@ impl Front {
 
     /// Hands the connection to the backend: the request line as it came (the backend verifies it
     /// again), what the client sent after it, then both directions until the backend is done.
-    fn forward(&self, mut reader: BufReader<Stream>, line: &str) -> io::Result<()> {
+    fn forward(&self, backend: SocketAddr, mut reader: BufReader<Stream>, line: &str) -> io::Result<()> {
         // the backend may still be starting
         let mut attempts = 0;
         let mut backend = loop {
-            match TcpStream::connect_timeout(&self.backend, Duration::from_secs(5)) {
+            match TcpStream::connect_timeout(&backend, Duration::from_secs(5)) {
                 Ok(backend) => break backend,
                 Err(_) if attempts < 50 => {
                     attempts += 1;
@@ -459,6 +521,19 @@ impl Front {
     }
 }
 
+/// The system's words for an error, as Perl's `$!` gives them ("Is a directory").
+fn why(error: Option<io::Error>) -> String {
+    let text = error.map(|error| error.to_string()).unwrap_or_else(|| "failed".into());
+    match text.split_once(" (os error") {
+        Some((words, _)) => words.to_string(),
+        None => text,
+    }
+}
+
+/// A request that was not answered: the refusal this server gives when no Perl server is behind
+/// it to answer instead.
+struct Left(String);
+
 /// The reply to a request that is answered from the instance's files; None for any other, and for
 /// an argument the Perl server would refuse (it then says so).
 fn from_files(files: &Files, command: &str, argument: Option<&str>) -> Option<String> {
@@ -490,9 +565,9 @@ fn free_port() -> io::Result<u16> {
 }
 
 pub fn run(backend_command: &[String]) -> io::Result<()> {
-    let Some((program, arguments)) = backend_command.split_first() else {
-        return Err(io::Error::other("usage: fb-agent segment-server -- <backend command...>"));
-    };
+    // without a backend command every request is answered here, whatever the NATIVE_* switches say
+    let standalone = backend_command.is_empty();
+    let native = |switch: &str| standalone || var(switch) != "false";
     let files_only = var("FILES_ONLY") == "true";
     let archive = var("ARCHIVE_DIR");
     if archive.is_empty() && !files_only {
@@ -509,7 +584,18 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
         Ok(port) => port,
         Err(_) => 3071,
     };
-    let backend = SocketAddr::from(([127, 0, 0, 1], backend_port));
+    let backend = (!standalone).then(|| SocketAddr::from(([127, 0, 0, 1], backend_port)));
+    let database = (!var("DATABASE_PATH").is_empty()).then(|| Database {
+        path: var("DATABASE_PATH"),
+        port: var("FIREBIRD_PORT").parse().unwrap_or(3050),
+        user: Some(var("ISC_USER"))
+            .filter(|user| !user.is_empty())
+            .unwrap_or_else(|| "SYSDBA".into()),
+        password: var("ISC_PASSWORD"),
+        query_limit: seconds("LOCAL_QUERY_TIMEOUT_SECONDS", 10),
+        command_limit: seconds("LOCAL_COMMAND_TIMEOUT_SECONDS", 60),
+        tools: standalone,
+    });
     let base = var("REPLICATION_DIR");
     let state_file = Some(var("STATE_FILE"))
         .filter(|path| !path.is_empty())
@@ -530,21 +616,25 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
             var("AUTH_WINDOW_SECONDS").parse().unwrap_or(300),
         )),
         backend,
-        state: (!files_only && var("NATIVE_STATE") != "false" && !var("DATABASE_PATH").is_empty()).then(|| {
-            Probe::start(
-                var("DATABASE_PATH"),
-                var("FIREBIRD_PORT").parse().unwrap_or(3050),
-                Some(var("ISC_USER"))
-                    .filter(|user| !user.is_empty())
-                    .unwrap_or_else(|| "SYSDBA".into()),
-                var("ISC_PASSWORD"),
-                seconds("LOCAL_QUERY_TIMEOUT_SECONDS", 10),
-            )
+        files_only,
+        state: database.clone().filter(|_| !files_only && native("NATIVE_STATE")).map(|database| {
+            let probe = Probe::start(
+                database.path.clone(),
+                database.port,
+                database.user.clone(),
+                database.password.clone(),
+                database.query_limit,
+            );
+            if standalone {
+                probe.with_tools(database)
+            } else {
+                probe
+            }
         }),
         self_fenced: (!base.is_empty()).then(|| Path::new(&base).join("self-fenced")),
         journal: !files_only,
-        role: var("NATIVE_ROLE") != "false",
-        promotion: (!files_only && var("NATIVE_PROMOTE") != "false").then(|| Limits {
+        role: native("NATIVE_ROLE"),
+        promotion: (!files_only && native("NATIVE_PROMOTE")).then(|| Limits {
             shutdown_attempts: var("PROMOTE_SHUTDOWN_ATTEMPTS").parse().ok().filter(|n| *n > 0).unwrap_or(5),
             shutdown_pause: Duration::from_secs(var("PROMOTE_SHUTDOWN_PAUSE").parse().unwrap_or(3)),
             header_attempts: var("PROMOTE_HEADER_ATTEMPTS").parse().ok().filter(|n| *n > 0).unwrap_or(3),
@@ -554,17 +644,8 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
             state_file: state_file.clone(),
         }),
         state_file: state_file.clone(),
-        seeds: (!files_only && var("NATIVE_SEED") != "false" && !var("DATABASE_PATH").is_empty()).then(|| Seeds {
-            database: Database {
-                path: var("DATABASE_PATH"),
-                port: var("FIREBIRD_PORT").parse().unwrap_or(3050),
-                user: Some(var("ISC_USER"))
-                    .filter(|user| !user.is_empty())
-                    .unwrap_or_else(|| "SYSDBA".into()),
-                password: var("ISC_PASSWORD"),
-                query_limit: seconds("LOCAL_QUERY_TIMEOUT_SECONDS", 10),
-                command_limit: seconds("LOCAL_COMMAND_TIMEOUT_SECONDS", 60),
-            },
+        seeds: database.filter(|_| !files_only && native("NATIVE_SEED")).map(|database| Seeds {
+            database,
             allow_live: var("ALLOW_LIVE_SEED") == "true",
         }),
         // the database's directory ("." for a bare file name, as the Perl server's)
@@ -588,7 +669,7 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
         }),
     });
     println!(
-        "{} (fb-agent {}) listening on {}, serving {}; other requests go to {backend}",
+        "{} (fb-agent {}) listening on {}, serving {}; {}",
         if files_only { "backup file server" } else { "segment server" },
         env!("CARGO_PKG_VERSION"),
         listener.local_addr()?,
@@ -596,18 +677,30 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
             front.data.as_deref().unwrap_or(Path::new("")).display()
         } else {
             front.archive.display()
+        },
+        match backend {
+            Some(backend) => format!("other requests go to {backend}"),
+            None => "no Perl server behind it".into(),
         }
     );
     // the pruning and the recovery-point sampler: threads here, and the backend's own off
-    let background = !files_only && var("NATIVE_BACKGROUND") != "false" && front.files.is_some();
-    let mut backend_command = Command::new(program);
-    backend_command.args(arguments).env("SEGMENT_LISTEN", backend.to_string());
+    let background = !files_only && native("NATIVE_BACKGROUND") && front.files.is_some();
+    let mut backend_command = backend_command.split_first().zip(backend).map(|((program, arguments), backend)| {
+        let mut command = Command::new(program);
+        command.args(arguments).env("SEGMENT_LISTEN", backend.to_string());
+        command
+    });
+    let own = if standalone { "" } else { "; the Perl server's own is off" };
     if background {
-        backend_command.envs(background::BACKEND_OFF);
+        if let Some(command) = backend_command.as_mut() {
+            command.envs(background::BACKEND_OFF);
+        }
         // the isolation check: the agent's, with the Perl server's own off
         if var("ISOLATION_TIMEOUT_SECONDS").parse::<u64>().is_ok_and(|seconds| seconds > 0) {
-            backend_command.env("ISOLATION_TIMEOUT_SECONDS", "0");
-            println!("the agent runs the isolation check; the Perl server's own is off");
+            if let Some(command) = backend_command.as_mut() {
+                command.env("ISOLATION_TIMEOUT_SECONDS", "0");
+            }
+            println!("the agent runs the isolation check{own}");
             crate::isolation::start(Path::new(&base).join("self-fenced"), Path::new(&base).join("last-contact"));
         }
         let keep = var("SEGMENT_RETENTION_SECONDS").parse().unwrap_or(86_400);
@@ -621,12 +714,13 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
             .filter(|dir| var("RECOVERY_POINTS") == "true" && !dir.is_empty())
             .map(PathBuf::from);
         println!(
-            "the agent prunes the archive{}; the Perl server's own are off",
+            "the agent prunes the archive{}{}",
             if journal.is_some() {
                 " and samples the recovery points"
             } else {
                 ""
-            }
+            },
+            if standalone { "" } else { "; the Perl server's own are off" }
         );
         background::start(
             Files {
@@ -641,10 +735,12 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
             journal,
         );
     }
-    let mut child = backend_command.spawn()?;
+    let mut child = backend_command.map(|mut command| command.spawn()).transpose()?;
 
     // SIGTERM reaches this process only (the container's PID 1): it is passed on to the backend,
-    // which stops once the pod's Firebird server has stopped, and this front stops with it
+    // which stops once the pod's Firebird server has stopped, and this front stops with it.
+    // Without a backend this server does that itself: it keeps serving until the pod's Firebird
+    // server has stopped (at once where none runs)
     let stopping = Arc::new(AtomicBool::new(false));
     for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         signal_hook::flag::register(signal, Arc::clone(&stopping))?;
@@ -652,16 +748,26 @@ pub fn run(backend_command: &[String]) -> io::Result<()> {
     thread::spawn(move || {
         let mut passed_on = false;
         loop {
-            if let Ok(Some(status)) = child.try_wait() {
-                println!("segment server backend ended ({status})");
-                process::exit(status.code().unwrap_or(1));
+            match child.as_mut() {
+                Some(child) => {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        println!("segment server backend ended ({status})");
+                        process::exit(status.code().unwrap_or(1));
+                    }
+                    if stopping.load(Ordering::Relaxed) && !passed_on {
+                        passed_on = true;
+                        // SAFETY: kill(2) with the id of a child this process has not waited for yet
+                        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+                    }
+                }
+                None => {
+                    if stopping.load(Ordering::Relaxed) && crate::puller::firebird_stopped() {
+                        println!("stopping: the Firebird server has stopped");
+                        process::exit(0);
+                    }
+                }
             }
-            if stopping.load(Ordering::Relaxed) && !passed_on {
-                passed_on = true;
-                // SAFETY: kill(2) with the id of a child this process has not waited for yet
-                unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
-            }
-            thread::sleep(Duration::from_millis(200));
+            thread::sleep(Duration::from_millis(if child.is_some() { 200 } else { 1000 }));
         }
     });
 
@@ -760,7 +866,8 @@ mod tests {
                 name: None,
             }),
             verifier: Mutex::new(Verifier::new(b"", 300)),
-            backend: SocketAddr::from(([127, 0, 0, 1], 1)),
+            backend: Some(SocketAddr::from(([127, 0, 0, 1], 1))),
+            files_only: false,
             state: None,
             self_fenced: None,
             files: None,

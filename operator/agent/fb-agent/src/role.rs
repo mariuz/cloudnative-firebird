@@ -144,11 +144,12 @@ pub fn fence(files: &Files, database: &Database, reason: Option<&str>, now: u64)
         Err(failed) => {
             let _ = fs::remove_file(&marker);
             match failed {
-                Failed::Refused(why) => {
+                Failed::Refused(why) if !database.tools => {
                     println!("full shutdown refused ({why}): passed to fbsvcmgr");
                     Answer::Forward
                 }
-                Failed::TimedOut => {
+                // no answer in time, or fbsvcmgr was refused too
+                Failed::Refused(_) | Failed::TimedOut => {
                     println!("full shutdown failed");
                     reply(format!("ERR cannot shut {} down", database.path))
                 }
@@ -169,11 +170,11 @@ pub fn rejoin(files: &Files, database: &Database) -> Answer {
             println!("isolation fence lifted by the operator: database online");
             reply("OK")
         }
-        Err(Failed::Refused(why)) => {
+        Err(Failed::Refused(why)) if !database.tools => {
             println!("online refused ({why}): passed to fbsvcmgr");
             Answer::Forward
         }
-        Err(Failed::TimedOut) => reply(format!("ERR cannot bring {} online", database.path)),
+        Err(Failed::Refused(_) | Failed::TimedOut) => reply(format!("ERR cannot bring {} online", database.path)),
     }
 }
 
@@ -247,6 +248,11 @@ pub fn nbackup(files: &Files, database: &Database, data: &Path, argument: &str) 
             reply(format!("ERR {reason}"))
         }
         // the lock and the pause are released before the Perl server takes them
+        // fbsvcmgr was asked too
+        Err(Refused::ByTheServer(why)) if database.tools => {
+            println!("nbackup {file} refused: nbackup failed ({why})");
+            reply("ERR nbackup failed")
+        }
         Err(Refused::ByTheServer(why)) => {
             println!("nbackup {file}: {why}: passed to fbsvcmgr");
             drop(lock);
@@ -287,6 +293,7 @@ mod tests {
             password: "x".into(),
             query_limit: Duration::from_secs(5),
             command_limit: Duration::from_secs(5),
+            tools: false,
         };
         (root, files, database)
     }

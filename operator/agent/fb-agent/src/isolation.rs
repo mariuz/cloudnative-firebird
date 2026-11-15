@@ -90,6 +90,8 @@ impl Settings {
                 password: var("ISC_PASSWORD"),
                 query_limit: limit("LOCAL_QUERY_TIMEOUT_SECONDS", 10),
                 command_limit: limit("LOCAL_COMMAND_TIMEOUT_SECONDS", 60),
+                // the check asks fbsvcmgr itself where it needs to
+                tools: false,
             },
             primary_file: path("PRIMARY_FILE").ok_or("PRIMARY_FILE is required")?,
             promoted: path("REPLICATION_DIR").map(|dir| dir.join("promoted")),

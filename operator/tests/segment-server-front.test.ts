@@ -36,7 +36,12 @@ const segment = (sequence: number, length: number, size = length): Buffer => {
   return b.subarray(0, size);
 };
 
-describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and segment-server.pl', () => {
+// twice: as the front of the Perl server, and alone (step 7: no Perl server behind it), where
+// the agent gives the refusals and asks the image's tools itself
+describe.skipIf(!agentBin || !hasPerl).each([
+  { standalone: false, mode: 'with the Perl server behind it' },
+  { standalone: true, mode: 'without the Perl server' },
+])('the segment server front (fb-agent) and segment-server.pl, $mode', ({ standalone }) => {
   let root: string;
   let perl: { child: ChildProcess; port: number };
   let front: { child: ChildProcess; port: number; out: () => string };
@@ -74,7 +79,7 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     replDir: string,
     own: Record<string, string> = { ...env(), REPLICATION_DIR: replDir },
   ): Promise<{ child: ChildProcess; port: number; out: () => string }> => {
-    const child = spawn(agentBin!, ['segment-server', '--', 'perl', join(root, 'segment-server.pl')], {
+    const child = spawn(agentBin!, ['segment-server', ...(standalone ? [] : ['--', 'perl', join(root, 'segment-server.pl')])], {
       env: { ...process.env, ...own, SEGMENT_PORT: '0', SEGMENT_LISTEN: '', BACKEND_PORT: '0' },
     });
     children.push(child);
@@ -86,7 +91,7 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
         out += d.toString();
         const m = /\(fb-agent [^)]+\) listening on [^\s:]+:(\d+),/.exec(out);
         // ready once the Perl server behind it listens too
-        if (m && /(?:segment|backup file) server listening on 127\.0\.0\.1:\d+/.test(out)) {
+        if (m && (standalone || /(?:segment|backup file) server listening on 127\.0\.0\.1:\d+/.test(out))) {
           clearTimeout(timer);
           resolve({ child, port: Number(m[1]), out: () => out });
         }
@@ -423,12 +428,15 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     await until(() => archived(kept.alone).length === 3 && archived(kept.fronted).length === 3);
     expect(archived(kept.alone)).toEqual([4, 5, 6]);
     expect(archived(kept.fronted)).toEqual([4, 5, 6]);
-    expect(kept.agent.out()).toContain("the agent prunes the archive and samples the recovery points; the Perl server's own are off");
+    expect(kept.agent.out()).toContain(
+      `the agent prunes the archive and samples the recovery points${standalone ? '\n' : "; the Perl server's own are off"}`,
+    );
     // the Perl server behind the front was started with its pruning and its sampler off
     const backend = spawnSync('pgrep', ['-P', String(kept.agent.child.pid)]).stdout.toString().trim().split('\n')[0];
-    const environment = readFileSync(`/proc/${backend}/environ`, 'utf8').split('\0');
+    if (standalone) expect(backend).toBe('');
+    const environment = standalone ? [] : readFileSync(`/proc/${backend}/environ`, 'utf8').split('\0');
     for (const off of ['SEGMENT_RETENTION_SECONDS=4000000000', 'SEGMENT_MAX_RETENTION_SECONDS=4000000000', 'PRUNE_APPLIED=false', 'RECOVERY_POINTS=false']) {
-      expect(environment, off).toContain(off);
+      if (!standalone) expect(environment, off).toContain(off);
     }
     // each new length of the segment being written is a recovery point, once
     await until(() => points(kept.alone).length === 1 && points(kept.fronted).length === 1);
@@ -467,9 +475,11 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
       KUBERNETES_SERVICE_HOST: '127.0.0.1',
       KUBERNETES_SERVICE_PORT: '1',
     });
-    expect(agent.out()).toContain("the agent runs the isolation check; the Perl server's own is off");
-    const backend = spawnSync('pgrep', ['-P', String(agent.child.pid)]).stdout.toString().trim().split('\n')[0];
-    expect(readFileSync(`/proc/${backend}/environ`, 'utf8').split('\0')).toContain('ISOLATION_TIMEOUT_SECONDS=0');
+    expect(agent.out()).toContain(`the agent runs the isolation check${standalone ? '\n' : "; the Perl server's own is off"}`);
+    if (!standalone) {
+      const backend = spawnSync('pgrep', ['-P', String(agent.child.pid)]).stdout.toString().trim().split('\n')[0];
+      expect(readFileSync(`/proc/${backend}/environ`, 'utf8').split('\0')).toContain('ISOLATION_TIMEOUT_SECONDS=0');
+    }
     for (let i = 0; i < 100 && !existsSync(join(repl, 'self-fenced')); i++) await new Promise((r) => setTimeout(r, 100));
     expect(existsSync(join(repl, 'self-fenced'))).toBe(true);
     expect(agent.out()).toMatch(/isolated: neither the Kubernetes API server nor another instance reachable for \d+s; fencing the primary/);
@@ -780,12 +790,16 @@ describe.skipIf(!agentBin || !hasPerl)('the segment server front (fb-agent) and 
     }
   }, 60_000);
 
-  it('stops with the Perl server behind it, and ends when that server ends', async () => {
+  it('stops once the Firebird server has stopped, and ends when a Perl server behind it ends', async () => {
     const exited = new Promise<number | null>((resolve) => front.child.once('exit', (code) => resolve(code)));
     front.child.kill('SIGTERM');
     // the Perl server exits once the Firebird server has stopped (nothing listens on FIREBIRD_PORT)
     expect(await exited).toBe(0);
     expect(front.out()).toContain('stopping: the Firebird server has stopped');
+    if (standalone) {
+      expect(front.out()).toContain('no Perl server behind it');
+      return;
+    }
     // a backend that dies takes the front with it (the container restarts)
     const second = await startFront(join(root, 'repl-front'));
     const ended = new Promise<number | null>((resolve) => second.child.once('exit', (code) => resolve(code)));

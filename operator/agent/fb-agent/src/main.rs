@@ -9,8 +9,9 @@
 //!                                          (host:port) or SEGMENT_PORT (0: a free port);
 //!                                          ISC_PASSWORD, AUTH_WINDOW_SECONDS
 //!   fb-agent puller                        the replicas' segment puller (puller.rs)
-//!   fb-agent segment-server -- <command>   the segment server's front, with the Perl server
-//!                                          behind it (server.rs)
+//!   fb-agent segment-server                the segment server (server.rs)
+//!   fb-agent segment-server -- <command>   the same as a front, with the Perl server behind it
+//!                                          for what it does not answer
 
 mod background;
 mod backups;
@@ -96,9 +97,10 @@ fn main() -> ExitCode {
             .parse::<u16>()
             .map_err(io::Error::other)
             .and_then(|port| TcpStream::connect((*host, port)).map(|_| ())),
+        ["segment-server"] => server::run(&[]),
         ["segment-server", "--", backend @ ..] => server::run(&backend.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
         _ => {
-            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | segment-tls | tcp <host> <port> | segment-server -- <backend command...>");
+            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | segment-tls | tcp <host> <port> | segment-server [-- <backend command...>]");
             return ExitCode::from(2);
         }
     };
