@@ -1,6 +1,7 @@
 import { V1Container, V1PodSpec } from '@kubernetes/client-node';
 import { API_GROUP, FirebirdCluster } from '../types';
 import { operatorImage } from './operator-image';
+import { AGENT_INIT_SCRIPT, OPERATOR_CONFIG_DIR } from './replication';
 
 /**
  * The instance pods' Rust agent (docs/rust-agent-roadmap.md). A cluster that opts in with the
@@ -9,7 +10,8 @@ import { operatorImage } from './operator-image';
  * segment server (Phase 3, docs/rust-agent-segment-server.md), which answers every request,
  * prunes the archive, samples the recovery points and runs the isolation check, with no Perl
  * server behind it since v0.166.0 (also as the backup file server of instances without
- * replication). Setting or removing the annotation changes the pod template, so the
+ * replication), and the replication init container's helpers (the seed fetch, the replica
+ * control file, the header's replication sequence) since v0.167.0. Setting or removing the annotation changes the pod template, so the
  * instances restart (primary last).
  */
 export const AGENT_ANNOTATION = `${API_GROUP}/agent`;
@@ -19,8 +21,11 @@ export const AGENT_PATH = `${AGENT_DIR}/fb-agent`;
 export const AGENT_INSTALL_CONTAINER = 'agent-install';
 /** The binary in the operator image (Dockerfile) */
 export const AGENT_IMAGE_PATH = '/app/fb-agent';
-/** The containers that get the binary: the segment servers (with and without replication) and the puller */
-const AGENT_CONTAINERS = ['segment-server', 'backup-files', 'segment-puller'];
+/**
+ * The containers that get the binary: the segment servers (with and without replication), the
+ * puller, and the replication init container
+ */
+const AGENT_CONTAINERS = ['segment-server', 'backup-files', 'segment-puller', 'replication-init'];
 /**
  * What runs from the agent, by container: the fb-agent arguments that replace the container's
  * command.
@@ -30,6 +35,13 @@ const AGENT_COMMANDS: Record<string, string[]> = {
   'segment-server': ['segment-server'],
   // the same server in its files-only mode (FILES_ONLY), for instances without replication
   'backup-files': ['segment-server'],
+};
+/**
+ * The replication init container stays a shell script (it drives gstat, gfix, isql and
+ * nbackup on a database no server has open); its Perl helpers are the agent's commands
+ */
+const AGENT_SCRIPT_COMMANDS: Record<string, string[]> = {
+  'replication-init': ['sh', `${OPERATOR_CONFIG_DIR}/${AGENT_INIT_SCRIPT}`],
 };
 
 /** "rust" (the agent is delivered) or "perl" (the default) */
@@ -72,6 +84,7 @@ export function withAgent<T extends V1PodSpec>(cluster: FirebirdCluster, spec: T
       ? {
           ...c,
           ...(AGENT_COMMANDS[c.name] ? { command: [AGENT_PATH, ...AGENT_COMMANDS[c.name]] } : {}),
+          ...(AGENT_SCRIPT_COMMANDS[c.name] ? { command: AGENT_SCRIPT_COMMANDS[c.name] } : {}),
           env: [...(c.env ?? []), { name: 'FB_AGENT', value: AGENT_PATH }],
           volumeMounts: [...(c.volumeMounts ?? []), { name: AGENT_VOLUME, mountPath: AGENT_DIR, readOnly: true }],
         }
@@ -82,7 +95,7 @@ export function withAgent<T extends V1PodSpec>(cluster: FirebirdCluster, spec: T
   const at = sidecars < 0 ? init.length : sidecars;
   return {
     ...spec,
-    initContainers: [...init.slice(0, at), installer(), ...init.slice(at)],
+    initContainers: [...init.slice(0, at), installer(), ...init.slice(at).map(container)],
     containers: spec.containers.map(container),
     volumes: [...(spec.volumes ?? []), { name: AGENT_VOLUME, emptyDir: {} }],
   };

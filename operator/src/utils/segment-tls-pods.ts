@@ -38,7 +38,7 @@ export const SEGMENT_PROXY_PORT = 3052;
 /** Containers running a segment server */
 const SEGMENT_SERVERS = ['segment-server', 'backup-files'];
 /** Containers of an instance whose process is the agent with its own TLS, on clusters that run it */
-const AGENT_TLS_CONTAINERS = [...SEGMENT_SERVERS, 'segment-puller'];
+const AGENT_TLS_CONTAINERS = [...SEGMENT_SERVERS, 'segment-puller', 'replication-init'];
 
 export function segmentTlsEnabled(cluster: FirebirdCluster): boolean {
   return cluster.spec.segmentTLS?.enabled === true;

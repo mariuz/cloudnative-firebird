@@ -3,7 +3,8 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { AGENT_ANNOTATION, agentErrors, agentMode } from '../src/utils/agent';
 import { V1PodSpec } from '@kubernetes/client-node';
-import { buildStatefulSet, statefulSetNeedsUpdate } from '../src/utils/resources';
+import { buildConfigMap, buildStatefulSet, statefulSetNeedsUpdate } from '../src/utils/resources';
+import { AGENT_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { buildFailoverJob } from '../src/utils/switchover';
 import { validateClusterSpec } from '../src/utils/validation';
 import { FirebirdCluster } from '../src/types';
@@ -74,6 +75,49 @@ describe('the Rust agent in the instance pods', () => {
     expect(server.env).toContainEqual({ name: 'SEGMENT_LISTEN', value: '127.0.0.1:3061' });
     // through the TLS proxy's client side, as the Perl puller
     expect(puller.env).toContainEqual({ name: 'SEGMENT_PROXY', value: '127.0.0.1:3052' });
+  });
+
+  it('runs the replication init with the agent\'s helpers, from a script derived from init-instance.sh', () => {
+    const plain = pod(makeCluster({ replication: { enabled: true } })).initContainers!.find((c) => c.name === 'replication-init')!;
+    expect(plain.command).toEqual(['sh', '/etc/firebird-operator/init-instance.sh']);
+    const init = pod(withAgent(makeCluster({ replication: { enabled: true } }))).initContainers!.find((c) => c.name === 'replication-init')!;
+    expect(init.command).toEqual(['sh', '/etc/firebird-operator/init-instance-agent.sh']);
+    expect(init.env).toEqual([...plain.env!, { name: 'FB_AGENT', value: '/opt/fb-agent/fb-agent' }]);
+    expect(init.volumeMounts).toEqual([...plain.volumeMounts!, { name: 'fb-agent', mountPath: '/opt/fb-agent', readOnly: true }]);
+    // the binary is installed before it runs
+    const order = pod(withAgent(makeCluster({ replication: { enabled: true } }))).initContainers!.map((c) => c.name);
+    expect(order.indexOf('agent-install')).toBeLessThan(order.indexOf('replication-init'));
+    // the script: init-instance.sh, with the agent's command where it ran a Perl helper
+    const [original, derived] = [REPLICATION_SCRIPTS['init-instance.sh'], AGENT_SCRIPTS['init-instance-agent.sh']];
+    const back = derived
+      .replace('echo "replication init with the helpers of $("$FB_AGENT" version)"\n', '')
+      .split('"$FB_AGENT" reposition').join('perl "$SCRIPT_DIR/pitr-plan.pl" --reposition')
+      .split('"$FB_AGENT" set-repl-seq').join('perl "$SCRIPT_DIR/set-repl-seq.pl"')
+      .split('"$FB_AGENT" replica-control').join('perl "$SCRIPT_DIR/replica-control.pl"')
+      .split('"$FB_AGENT" request').join('perl "$SCRIPT_DIR/segment-request.pl"')
+      .split('"$FB_AGENT" fetch-seed').join('perl "$SCRIPT_DIR/fetch-seed.pl"');
+    expect(back).toBe(original);
+    expect(derived.split('\n').filter((line) => /^[^#]*\bperl\b/.test(line))).toEqual([]);
+    expect(derived.match(/"\$FB_AGENT" [a-z-]+/g)!.sort()).toEqual([
+      '"$FB_AGENT" fetch-seed',
+      '"$FB_AGENT" replica-control',
+      '"$FB_AGENT" replica-control',
+      '"$FB_AGENT" replica-control',
+      '"$FB_AGENT" reposition',
+      '"$FB_AGENT" request',
+      '"$FB_AGENT" set-repl-seq',
+      '"$FB_AGENT" set-repl-seq',
+      '"$FB_AGENT" version',
+    ]);
+    // the ConfigMap has both, and the script is not in the hash that restarts every cluster
+    expect(buildConfigMap(makeCluster({ replication: { enabled: true } }))!.data!['init-instance-agent.sh']).toBe(derived);
+    const hash = (cluster: FirebirdCluster) => buildStatefulSet(cluster).spec!.template.metadata!.annotations!['firebird.cloudnative-firebird.io/replication-config-hash'];
+    expect(hash(withAgent(makeCluster({ replication: { enabled: true } })))).toBe(hash(makeCluster({ replication: { enabled: true } })));
+    // with segment TLS the init has the certificates: its seed is fetched over TLS made by the agent
+    const tls = pod(withAgent(makeCluster({ replication: { enabled: true }, segmentTLS: { enabled: true } }))).initContainers!.find((c) => c.name === 'replication-init')!;
+    expect(tls.env).toContainEqual({ name: 'SEGMENT_TLS_DIR', value: '/etc/segment-tls' });
+    expect(tls.env).toContainEqual({ name: 'SEGMENT_PROXY', value: '127.0.0.1:3052' });
+    expect(tls.volumeMounts).toContainEqual({ name: 'segment-tls', mountPath: '/etc/segment-tls', readOnly: true });
   });
 
   it('reaches the backup file server of a cluster without replication', () => {

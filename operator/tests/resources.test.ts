@@ -996,6 +996,7 @@ describe('buildConfigMap (replication)', () => {
       'failover.pl',
       'fetch-seed.pl',
       'fetch-segments.pl',
+      'init-instance-agent.sh',
       'init-instance.sh',
       'isolation-check.pl',
       'peer-addresses',

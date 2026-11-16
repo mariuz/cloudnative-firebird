@@ -85,6 +85,42 @@ export const JOB_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
   ]),
 );
 
+/** The replication init container's script on clusters that run the Rust agent (utils/agent.ts) */
+export const AGENT_INIT_SCRIPT = 'init-instance-agent.sh';
+
+/**
+ * init-instance.sh with each Perl helper replaced by the agent's command of the same arguments,
+ * files and output (operator/agent/fb-agent/src/init.rs). Derived, so the two cannot drift, and
+ * a key of its own, so init-instance.sh stays as it is: a change to that script would restart
+ * the instances of every cluster with replication (the pod template's hash covers it).
+ */
+function agentInitScript(): string {
+  const helpers: [string, string][] = [
+    ['perl "$SCRIPT_DIR/pitr-plan.pl" --reposition', '"$FB_AGENT" reposition'],
+    ['perl "$SCRIPT_DIR/set-repl-seq.pl"', '"$FB_AGENT" set-repl-seq'],
+    ['perl "$SCRIPT_DIR/replica-control.pl"', '"$FB_AGENT" replica-control'],
+    ['perl "$SCRIPT_DIR/segment-request.pl"', '"$FB_AGENT" request'],
+    ['perl "$SCRIPT_DIR/fetch-seed.pl"', '"$FB_AGENT" fetch-seed'],
+    ['set -eu\n', 'set -eu\necho "replication init with the helpers of $("$FB_AGENT" version)"\n'],
+  ];
+  let script = readScript('init-instance.sh');
+  for (const [perl, agent] of helpers) {
+    if (!script.includes(perl)) throw new Error(`init-instance.sh no longer has: ${perl}`);
+    script = script.split(perl).join(agent);
+  }
+  // a helper added to init-instance.sh needs its command in the agent first
+  const left = script.split('\n').filter((line) => /^[^#]*\bperl\b/.test(line));
+  if (left.length) throw new Error(`init-instance.sh runs Perl the agent has no command for: ${left.join(' | ')}`);
+  return script;
+}
+
+/**
+ * Scripts of the clusters that run the Rust agent, shipped in the ConfigMap of every cluster
+ * with replication. Not part of the pod template hash: the annotation changes the pod template
+ * itself.
+ */
+export const AGENT_SCRIPTS: Readonly<Record<string, string>> = { [AGENT_INIT_SCRIPT]: agentInitScript() };
+
 /** Returns true when journal replication is configured for the cluster */
 export function replicationEnabled(cluster: FirebirdCluster): boolean {
   return Boolean(cluster.spec.replication?.enabled);
