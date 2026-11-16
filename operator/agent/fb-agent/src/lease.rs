@@ -338,6 +338,19 @@ fn response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
     }
 }
 
+/// A connection to the first address that accepts one, each in turn: a name with an IPv6 and
+/// an IPv4 address ("localhost", a dual-stack Service) may be served on one of them only.
+fn connect_any(host: &str, addresses: impl Iterator<Item = std::net::SocketAddr>) -> Result<TcpStream, String> {
+    let mut refused = format!("{host}: no address");
+    for address in addresses {
+        match TcpStream::connect_timeout(&address, API_TIMEOUT) {
+            Ok(socket) => return Ok(socket),
+            Err(e) => refused = format!("connect {address}: {e}"),
+        }
+    }
+    Err(refused)
+}
+
 impl Api {
     /// One request on its own connection, verified against the API server's CA.
     fn request(&self, method: &str, body: Option<&str>) -> Result<(u16, Vec<u8>), String> {
@@ -357,12 +370,10 @@ impl Api {
             .with_no_client_auth();
         let name = ServerName::try_from(self.host.clone()).map_err(|e| format!("{}: {e}", self.host))?;
         let session = ClientConnection::new(Arc::new(config), name).map_err(|e| e.to_string())?;
-        let address = (self.host.as_str(), self.port)
+        let addresses = (self.host.as_str(), self.port)
             .to_socket_addrs()
-            .map_err(|e| format!("{}: {e}", self.host))?
-            .next()
-            .ok_or_else(|| format!("{}: no address", self.host))?;
-        let socket = TcpStream::connect_timeout(&address, API_TIMEOUT).map_err(|e| format!("connect {address}: {e}"))?;
+            .map_err(|e| format!("{}: {e}", self.host))?;
+        let socket = connect_any(&self.host, addresses)?;
         let _ = socket.set_nodelay(true);
         socket.set_read_timeout(Some(API_TIMEOUT)).map_err(|e| e.to_string())?;
         socket.set_write_timeout(Some(API_TIMEOUT)).map_err(|e| e.to_string())?;
@@ -997,6 +1008,25 @@ mod tests {
         assert_eq!(micro_time(Duration::ZERO), "1970-01-01T00:00:00.000000Z");
         assert_eq!(micro_time(Duration::from_secs(1_709_164_800)), "2024-02-29T00:00:00.000000Z");
         assert_eq!(micro_time(Duration::from_secs(1_767_225_599)), "2025-12-31T23:59:59.000000Z");
+    }
+
+    #[test]
+    fn connects_to_the_address_that_answers() {
+        use std::net::{SocketAddr, TcpListener};
+        // a server on the IPv4 loopback only, under a name that also has the IPv6 one, first
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let both = [
+            SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)),
+            SocketAddr::from(([127, 0, 0, 1], port)),
+        ];
+        let socket = connect_any("localhost", both.into_iter()).unwrap();
+        assert_eq!(socket.peer_addr().unwrap(), both[1]);
+        // nobody anywhere: the last refusal, with its address
+        drop(listener);
+        let refused = connect_any("localhost", both.into_iter()).unwrap_err();
+        assert!(refused.starts_with(&format!("connect 127.0.0.1:{port}: ")), "{refused}");
+        assert_eq!(connect_any("nowhere", std::iter::empty()).unwrap_err(), "nowhere: no address");
     }
 
     #[test]
