@@ -245,7 +245,8 @@ describe.each(implementations)('segment puller: $name', ({ available, command })
     start({ FIREBIRD_PORT: String((firebird.address() as { port: number }).port) });
     await waitFor(() => read('.last-pulled') === 'mydb.fdb.journal-000000008\n', 'both segments');
     let code: number | null | undefined;
-    puller!.once('exit', (c) => (code = c));
+    // 'close': the output has been read when it fires, which 'exit' does not wait for
+    puller!.once('close', (c) => (code = c));
     puller!.kill('SIGTERM');
     // still pulling while the server runs
     segments['mydb.fdb.journal-000000009'] = Buffer.from('nine');

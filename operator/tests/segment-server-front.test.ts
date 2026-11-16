@@ -652,7 +652,8 @@ describe.skipIf(!agentBin || !hasPerl).each([
       await waitFor(() => fetched(name), name, 3000);
       expect(Date.now() - at, name).toBeLessThan(1500);
     }
-    expect(out).toContain('fetched mydb.fdb.journal-000000012 from 127.0.0.1\n');
+    // the file is in place before the line about it reaches this process
+    await waitFor(() => out.includes('fetched mydb.fdb.journal-000000012 from 127.0.0.1\n'), 'the line about the last segment', 3000);
   });
 
   it('accepts mutual TLS itself, and its puller connects over TLS itself: no proxy between them', async () => {
@@ -791,7 +792,8 @@ describe.skipIf(!agentBin || !hasPerl).each([
   }, 60_000);
 
   it('stops once the Firebird server has stopped, and ends when a Perl server behind it ends', async () => {
-    const exited = new Promise<number | null>((resolve) => front.child.once('exit', (code) => resolve(code)));
+    // 'close': the output has been read when it fires, which 'exit' does not wait for
+    const exited = new Promise<number | null>((resolve) => front.child.once('close', (code) => resolve(code)));
     front.child.kill('SIGTERM');
     // the Perl server exits once the Firebird server has stopped (nothing listens on FIREBIRD_PORT)
     expect(await exited).toBe(0);
