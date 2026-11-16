@@ -7,6 +7,7 @@ import { AddressInfo, createServer, Server, Socket } from 'net';
 import { createHmac, randomBytes } from 'crypto';
 import { JOB_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { fakeSegmentServer, signLine } from './helpers/segment-auth';
+import { implementations } from './helpers/implementations';
 
 const hasPerl = spawnSync('perl', ['-v']).status === 0;
 
@@ -526,7 +527,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
   });
 });
 
-describe('sync-standby.pl', () => {
+describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl) => {
   /**
    * Runs the Job script against fake segment servers for the primary (127.0.0.1) and the standby
    * (127.0.0.2, same port; none with __down): answers per command prefix, requests logged
@@ -569,7 +570,7 @@ describe('sync-standby.pl', () => {
         if (attempt >= 10) throw err;
       }
     }
-    const child = spawn('perl', [join(ws.dir, 'sync-standby.pl')], {
+    const child = spawn(...impl.command(join(ws.dir, 'sync-standby.pl')), {
       env: {
         PATH: `${join(ws.dir, 'bin')}:${process.env.PATH}`,
         ACTION: action,
@@ -595,7 +596,7 @@ describe('sync-standby.pl', () => {
   }
 
   it('attaches: primary shut down, standby caught up, SYNC before STANDBY on, primary back online', async () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     const r = await run('attach', {
       primary: { HEADER: 'OK 9', LIST: 'mydb.fdb.journal-0000000009\n.', SYNC: 'OK' },
       standby: { POSITION: 'OK 9 0 0', 'STANDBY on': 'OK' },
@@ -610,7 +611,7 @@ describe('sync-standby.pl', () => {
   });
 
   it('attaches to a primary just promoted and not written to (no segment at its sequence)', async () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     // its journal starts after S: nothing archived; the standby, seeded at S, has applied S
     const r = await run('attach', {
       primary: { HEADER: 'OK 12', LIST: '.', SYNC: 'OK' },
@@ -621,7 +622,7 @@ describe('sync-standby.pl', () => {
   });
 
   it('keeps the other standbys in every SYNC (OTHERS)', async () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     const attach = await run(
       'attach',
       { primary: { HEADER: 'OK 9', SYNC: 'OK' }, standby: { POSITION: 'OK 9 0 0', 'STANDBY on': 'OK' } },
@@ -635,7 +636,7 @@ describe('sync-standby.pl', () => {
   });
 
   it('undoes a half-done attach and brings the primary back online', async () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     const r = await run('attach', {
       primary: { HEADER: 'OK 9', LIST: 'mydb.fdb.journal-0000000009\n.', SYNC: 'OK' },
       standby: { POSITION: 'OK 9 0 0', 'STANDBY on': 'ERR no', 'STANDBY off': 'OK' },
@@ -648,7 +649,7 @@ describe('sync-standby.pl', () => {
   });
 
   it('reports a standby it could not reposition, for the operator to re-seed it', async () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     const r = await run('attach', {
       primary: { HEADER: 'OK 9', LIST: 'mydb.fdb.journal-0000000009\n.', SYNC: 'OK' },
       standby: { POSITION: 'OK 9 0 0', 'STANDBY on': 'ERR no', 'STANDBY off': 'ERR no' },
@@ -658,7 +659,7 @@ describe('sync-standby.pl', () => {
   });
 
   it('gives up on a standby that does not catch up, and leaves synchronous replication off', async () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     const r = await run('attach', {
       primary: { HEADER: 'OK 9', LIST: 'mydb.fdb.journal-0000000009\n.', SYNC: 'OK' },
       standby: { POSITION: 'OK 8 0 1' },
@@ -671,7 +672,7 @@ describe('sync-standby.pl', () => {
   }, 20_000); // waits TIMEOUT_SECONDS (4) for the standby
 
   it('detaches: standby repositioned first, then synchronous replication off', async () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     const r = await run('detach', {
       primary: { HEADER: 'OK 31', SYNC: 'OK' },
       standby: { 'STANDBY off': 'OK' },
@@ -683,7 +684,7 @@ describe('sync-standby.pl', () => {
   });
 
   it('keeps the standby attached when synchronous replication cannot be turned off', async () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     const r = await run('detach', {
       primary: { HEADER: 'OK 31', SYNC: 'ERR disk full' },
       standby: { 'STANDBY off': 'OK', 'STANDBY on': 'OK' },
@@ -694,7 +695,7 @@ describe('sync-standby.pl', () => {
   });
 
   it('detaches a standby that cannot be reached, for the operator to re-seed it', async () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     const r = await run('detach', { primary: { HEADER: 'OK 31', SYNC: 'OK' }, standby: { __down: null } });
     expect(r.code).toBe(0);
     expect(r.result).toBe('detached unreachable');

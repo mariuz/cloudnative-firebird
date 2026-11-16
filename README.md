@@ -754,8 +754,9 @@ other instances are read-only replicas:
     sequence. The init container itself stays a shell script around Firebird's own tools;
   - since v0.168.0, the primary Lease holder sidecar (`fb-agent lease-holder` instead of a
     Node process: about 2 MB of memory instead of about 100 MB in every instance pod);
-  - since v0.169.0, the custom metrics exporter (`monitoring.customQueriesConfigMap`). With
-    it no Perl runs in an instance pod.
+  - since v0.169.0, the custom metrics exporter (`monitoring.customQueriesConfigMap`) and the
+    Jobs' programs (switchover, failover, synchronous standby, backup files, the journal archive,
+    point-in-time recovery). With them nothing runs Perl on a cluster with the annotation.
 
   The plan and the measurements are in [docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md)
   and [docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md). Setting or

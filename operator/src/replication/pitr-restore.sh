@@ -56,6 +56,14 @@ fi
 heartbeat=$!
 
 fail() { echo "point-in-time recovery failed: $*" >&2; exit 1; }
+# the backup files, the replay's plan and the cut of a segment: the Rust agent's commands where
+# the Job has it (FB_AGENT), the Perl scripts otherwise (the same arguments and output)
+backup_file() { if [ -n "${FB_AGENT:-}" ]; then "$FB_AGENT" backup-file "$@"; else perl "$SCRIPT_DIR/backup-file.pl" "$@"; fi; }
+pitr_plan() { if [ -n "${FB_AGENT:-}" ]; then "$FB_AGENT" pitr-plan "$@"; else perl "$SCRIPT_DIR/pitr-plan.pl" "$@"; fi; }
+cut_segment() { # <file> <length>: the segment's header says <length>, and the file ends there
+  if [ -n "${FB_AGENT:-}" ]; then "$FB_AGENT" cut-segment "$1" "$2"; return; fi
+  perl -e 'open(my $f, "+<:raw", $ARGV[0]) or die "$ARGV[0]: $!\n"; seek($f, 40, 0); print $f pack("Q<", $ARGV[1]); close $f or die; truncate($ARGV[0], $ARGV[1]) or die "$ARGV[0]: $!\n"' "$1" "$2"
+}
 wait_for() { # <file>: wait until the S3 client container wrote it
   while [ ! -f "$1" ]; do
     [ -f "$W/fetcher.failed" ] && fail "the S3 client container failed: $(cat "$W/fetcher.failed")"
@@ -85,7 +93,7 @@ if [ -n "${SERVER_CHAIN:-}" ]; then
   mkdir -p "$W/chain"
   i=0
   for f in $SERVER_CHAIN; do
-    perl "$SCRIPT_DIR/backup-file.pl" get "$f" "$W/chain/$i.nbk"
+    backup_file get "$f" "$W/chain/$i.nbk"
     i=$((i + 1))
   done
 fi
@@ -105,7 +113,7 @@ if echo "$header" | grep -q '^[[:space:]]*Attributes.*replica'; then
   [ -f "$W/chain/position.ctl" ] ||
     fail "the backup was taken on a replica without its position (a backup from an older operator version, or of the synchronous standby); point-in-time recovery needs a backup taken on the primary or on an asynchronous replica"
   # shellcheck disable=SC2046 # three numbers
-  set -- $(perl "$SCRIPT_DIR/pitr-plan.pl" --describe "$W/chain/position.ctl")
+  set -- $(pitr_plan --describe "$W/chain/position.ctl")
   [ "$#" -eq 3 ] && [ "$2" = 0 ] || fail "unusable replica position in the backup"
   S=$1
   adopt=$3
@@ -194,7 +202,7 @@ apply_cut() { # the segment after the target, cut at the recovery point, whereve
   [ -n "$cut_name" ] || return 0
   for f in "$SRC/$cut_name" "$W"/later/*/"$cut_name"; do
     [ -f "$f" ] || continue
-    perl -e 'open(my $f, "+<:raw", $ARGV[0]) or die "$ARGV[0]: $!\n"; seek($f, 40, 0); print $f pack("Q<", $ARGV[1]); close $f or die; truncate($ARGV[0], $ARGV[1]) or die "$ARGV[0]: $!\n"' "$f" "$cut_length"
+    cut_segment "$f" "$cut_length"
   done
 }
 
@@ -232,7 +240,7 @@ if [ "$L1" -ge "$first" ]; then
 fi
 while [ -z "$adopt" ]; do
   rc=0
-  out=$(perl "$SCRIPT_DIR/pitr-plan.pl" "$SRC" "$S" "$oat" "$next" "$W/candidates.ids" "$L1" "$SRC/$guid") || rc=$?
+  out=$(pitr_plan "$SRC" "$S" "$oat" "$next" "$W/candidates.ids" "$L1" "$SRC/$guid") || rc=$?
   echo "$out"
   [ "$rc" -eq 3 ] || break
   need=$(echo "$out" | sed -n 's/^need //p')
@@ -296,7 +304,7 @@ if [ "$L1" -gt "$S" ]; then replay "$L1"; fi
 while read -r p u end; do
   echo "lineage switch: the replay continues after segment $u"
   rm -f "$SRC"/*.journal-*
-  perl "$SCRIPT_DIR/pitr-plan.pl" --reposition "$u" "$SRC/$guid"
+  pitr_plan --reposition "$u" "$SRC/$guid"
   for f in "$W/later/$u"/*.journal-*; do [ -f "$f" ] && mv "$f" "$SRC/"; done
   : > "$W/fb/replication.log"
   replay "$end"
@@ -332,7 +340,7 @@ fi
 nbk="restore-$RESTORE_NAME-pitr.nbk"
 "$FB/nbackup" -user SYSDBA -B 0 "$DB" "$W/$nbk"
 rm -f "$DB"
-trap 'perl "$SCRIPT_DIR/backup-file.pl" remove "$nbk" || true' EXIT
-perl "$SCRIPT_DIR/backup-file.pl" put "$W/$nbk" "$nbk"
+trap 'backup_file remove "$nbk" || true' EXIT
+backup_file put "$W/$nbk" "$nbk"
 rm -f "$W/$nbk"
 # sourced by the Job, which then restores "$nbk" (in the primary's data directory) into TARGET_PATH

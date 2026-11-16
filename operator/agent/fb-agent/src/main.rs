@@ -13,6 +13,8 @@
 //!                                          the replication init container's helpers (init.rs)
 //!   fb-agent lease-holder                  the primary Lease holder sidecar (lease.rs)
 //!   fb-agent metrics-exporter              the custom metrics exporter sidecar (metrics.rs)
+//!   fb-agent backup-file | fetch-segments | pitr-plan | cut-segment | switchover | failover |
+//!            sync-standby                  the Jobs' programs (jobs.rs)
 //!   fb-agent segment-server                the segment server (server.rs)
 //!   fb-agent segment-server -- <command>   the same as a front, with the Perl server behind it
 //!                                          for what it does not answer
@@ -22,6 +24,7 @@ mod backups;
 mod client;
 mod init;
 mod isolation;
+mod jobs;
 mod lease;
 mod metrics;
 mod promote;
@@ -87,6 +90,18 @@ fn serve() -> io::Result<()> {
     Ok(())
 }
 
+/// How a Job's program ends: its message as the Perl script's `die` printed it, and its status.
+fn job(done: Result<(), jobs::Exit>) -> ExitCode {
+    let _ = io::stdout().flush();
+    match done {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(exit) => {
+            eprint!("{}", exit.message);
+            ExitCode::from(exit.code)
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
@@ -101,6 +116,14 @@ fn main() -> ExitCode {
         ["segment-tls"] => tls::run(),
         ["lease-holder"] => lease::run(),
         ["metrics-exporter"] => metrics::run(),
+        // the Jobs' programs: their own messages and exit status (jobs.rs)
+        ["backup-file", rest @ ..] => return job(jobs::backup_file(rest)),
+        ["fetch-segments"] => return job(jobs::fetch_segments()),
+        ["pitr-plan", rest @ ..] => return job(jobs::pitr_plan(rest)),
+        ["cut-segment", rest @ ..] => return job(jobs::cut_segment(rest)),
+        ["switchover"] => return job(jobs::switchover()),
+        ["failover"] => return job(jobs::failover()),
+        ["sync-standby"] => return job(jobs::sync_standby()),
         // for probes: whether something listens there
         ["tcp", host, port] => port
             .parse::<u16>()
@@ -113,7 +136,7 @@ fn main() -> ExitCode {
         ["segment-server"] => server::run(&[]),
         ["segment-server", "--", backend @ ..] => server::run(&backend.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
         _ => {
-            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | segment-tls | lease-holder | metrics-exporter | tcp <host> <port> | segment-server [-- <backend command...>]");
+            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | segment-tls | lease-holder | metrics-exporter | backup-file ... | fetch-segments | pitr-plan ... | cut-segment <file> <length> | switchover | failover | sync-standby | tcp <host> <port> | segment-server [-- <backend command...>]");
             return ExitCode::from(2);
         }
     };

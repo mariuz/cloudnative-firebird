@@ -33,7 +33,7 @@ import {
 } from '../types';
 import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
 import { bootstrapVolumes, buildBootstrapInitContainers, s3ClientVolumes } from './backup';
-import { withAgent } from './agent';
+import { withAgent, withAgentInJob } from './agent';
 import { databaseOnlineCheck } from './fencing';
 import { PENDING_DROPS_DIR, pendingDropsConfigMapName, pendingDropsInitScript } from './pending-drops';
 import {
@@ -906,9 +906,10 @@ export function jobPodSpec<T extends V1PodSpec>(cluster: FirebirdCluster, podSpe
     ...c,
     securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] }, ...(c.securityContext ?? {}) },
   });
-  // segment TLS: Jobs reach the segment servers through the proxy's client side (the pull policy
-  // last, for the proxy too)
-  return withPodPullPolicy(cluster, withSegmentTls(cluster, {
+  // segment TLS: Jobs reach the segment servers through the proxy's client side; the agent's
+  // programs instead of the Perl scripts, for clusters that run it (the pull policy last, for the
+  // proxy and the agent's installer too)
+  return withPodPullPolicy(cluster, withAgentInJob(cluster, withSegmentTls(cluster, {
     ...podSpec,
     ...clusterPodSettings(cluster),
     securityContext: {
@@ -920,7 +921,7 @@ export function jobPodSpec<T extends V1PodSpec>(cluster: FirebirdCluster, podSpe
     },
     containers: podSpec.containers.map(container),
     ...(podSpec.initContainers ? { initContainers: podSpec.initContainers.map(container) } : {}),
-  }, false));
+  }, false)));
 }
 
 /** Annotation carrying the hash of an operator-managed CronJob's job template */

@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { fakeSegmentServer } from './helpers/segment-auth';
+import { implementations } from './helpers/implementations';
 import { JOB_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
 
 const SCRIPTS: Record<string, string> = { ...REPLICATION_SCRIPTS, ...JOB_SCRIPTS };
@@ -174,8 +175,8 @@ describe('replication scripts shipped to instance pods', () => {
     });
   });
 
-  it('fetch-segments.pl fetches archived segments that are not uploaded yet', async () => {
-    if (!hasPerl) return;
+  it.each(implementations('fetch-segments.pl'))('fetch-segments fetches archived segments that are not uploaded yet ($name)', async (impl) => {
+    if (!impl.available) return;
     const segments: Record<string, string> = {
       'mydb.fdb.journal-0000000001': 'one',
       'mydb.fdb.journal-0000000002': 'two',
@@ -201,7 +202,7 @@ describe('replication scripts shipped to instance pods', () => {
     writeFileSync(skip, 'mydb.fdb.journal-0000000001\nmydb.fdb.lineage-0-1\n');
     const segDir = join(out, 'segments');
     await new Promise<void>((resolve, reject) => {
-      const child = spawn('perl', [script], {
+      const child = spawn(...impl.command(script), {
         env: { ...process.env, FIREBIRD_HOST: '127.0.0.1', SEGMENT_PORT: String(port), ISC_PASSWORD: 'tok', OUT_DIR: segDir, SKIP_FILE: skip, RESULT_FILE: join(out, 'result') },
       });
       child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`exit ${code}`))));
@@ -246,9 +247,9 @@ describe('replication scripts shipped to instance pods', () => {
   });
 });
 
-describe('pitr-plan.pl --describe', () => {
+describe.each(implementations('pitr-plan.pl'))('pitr-plan --describe ($name)', (impl) => {
   it('reads a replica\'s position and the first segment its transactions in progress need', () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     const ctlDir = mkdtempSync(join(tmpdir(), 'fb-ctl-'));
     const control = join(ctlDir, 'position.ctl');
     const b = Buffer.alloc(40 + 32);
@@ -264,21 +265,21 @@ describe('pitr-plan.pl --describe', () => {
     writeFileSync(control, b);
     const script = join(dir, 'pitr-plan.pl');
     writeFileSync(script, JOB_SCRIPTS['pitr-plan.pl']);
-    expect(spawnSync('perl', [script, '--describe', control], { encoding: 'utf8' }).stdout).toBe('21 0 17\n');
+    expect(spawnSync(...impl.command(script, ['--describe', control]), { encoding: 'utf8' }).stdout).toBe('21 0 17\n');
     writeFileSync(control, b.subarray(0, 40));
     // no transaction in progress: the position itself (a truncated list is refused)
     b.writeUInt32LE(0, 12);
     writeFileSync(control, b.subarray(0, 40));
-    expect(spawnSync('perl', [script, '--describe', control], { encoding: 'utf8' }).stdout).toBe('21 0 21\n');
+    expect(spawnSync(...impl.command(script, ['--describe', control]), { encoding: 'utf8' }).stdout).toBe('21 0 21\n');
     b.writeUInt32LE(3, 12);
     writeFileSync(control, b);
-    expect(spawnSync('perl', [script, '--describe', control]).status).not.toBe(0);
+    expect(spawnSync(...impl.command(script, ['--describe', control])).status).not.toBe(0);
   });
 });
 
-describe('pitr-plan.pl --reposition', () => {
+describe.each(implementations('pitr-plan.pl'))('pitr-plan --reposition ($name)', (impl) => {
   it('continues after the given segment with no active transaction, keeping db_sequence', () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     const ctlDir = mkdtempSync(join(tmpdir(), 'fb-ctl-'));
     const control = join(ctlDir, '{GUID}');
     const b = Buffer.alloc(40 + 32);
@@ -291,7 +292,7 @@ describe('pitr-plan.pl --reposition', () => {
     writeFileSync(control, b);
     const script = join(dir, 'pitr-plan.pl');
     writeFileSync(script, JOB_SCRIPTS['pitr-plan.pl']);
-    const r = spawnSync('perl', [script, '--reposition', '41', control], { encoding: 'utf8' });
+    const r = spawnSync(...impl.command(script, ['--reposition', '41', control]), { encoding: 'utf8' });
     expect(r.status).toBe(0);
     const ctl = readFileSync(control);
     expect(ctl.length).toBe(40);
@@ -301,11 +302,11 @@ describe('pitr-plan.pl --reposition', () => {
     expect(Number(ctl.readBigUInt64LE(16))).toBe(41);
     expect(ctl.readUInt32LE(24)).toBe(0);
     expect(Number(ctl.readBigUInt64LE(32))).toBe(5);
-    expect(spawnSync('perl', [script, '--reposition', 'x', control]).status).not.toBe(0);
+    expect(spawnSync(...impl.command(script, ['--reposition', 'x', control])).status).not.toBe(0);
   });
 });
 
-describe('pitr-plan.pl', () => {
+describe.each(implementations('pitr-plan.pl'))('pitr-plan ($name)', (impl) => {
   const BEGIN = 1;
   const END = 2;
   /** A journal segment: [transaction, flags] blocks with a few payload bytes each */
@@ -344,12 +345,12 @@ describe('pitr-plan.pl', () => {
     const control = join(segDir, '{GUID}');
     const script = join(dir, 'pitr-plan.pl');
     writeFileSync(script, JOB_SCRIPTS['pitr-plan.pl']);
-    const r = spawnSync('perl', [script, segDir, '5', '100', '110', candidates, '6', control], { encoding: 'utf8' });
+    const r = spawnSync(...impl.command(script, [segDir, '5', '100', '110', candidates, '6', control]), { encoding: 'utf8' });
     return { status: r.status, out: r.stdout + r.stderr, control };
   };
 
   it('asks for earlier segments until every open transaction starts in the directory', () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     const r = plan([5, 6]);
     expect(r.status).toBe(3);
     expect(r.out).toContain('need 4');
@@ -357,7 +358,7 @@ describe('pitr-plan.pl', () => {
   });
 
   it('records the transactions open in the backup from their first segment', () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     const r = plan([4, 5, 6]);
     expect(r.status).toBe(0);
     expect(r.out).toContain('replay: segments 6 to 6, and 2 transaction(s) open in the backup (100 from segment 4, 105 from segment 5)');
@@ -371,7 +372,7 @@ describe('pitr-plan.pl', () => {
   });
 
   it('refuses a gap, and changes after the backup of a transaction complete in it', () => {
-    if (!hasPerl) return;
+    if (!impl.available) return;
     expect(plan([4, 6]).out).toContain('segment 5 is missing');
     const late = plan([4, 5, 6], { 6: [[101, END]] });
     expect(late.status).toBe(1);

@@ -48,6 +48,55 @@ const AGENT_SCRIPT_COMMANDS: Record<string, string[]> = {
   'replication-init': ['sh', `${OPERATOR_CONFIG_DIR}/${AGENT_INIT_SCRIPT}`],
 };
 
+/**
+ * The Jobs' programs (agent/fb-agent/src/jobs.rs): a Perl script as the Job runs it, and the
+ * agent's command that replaces it, with the same arguments, output and exit status
+ */
+const JOB_COMMANDS: Record<string, string[]> = {
+  [`${OPERATOR_CONFIG_DIR}/switchover.pl`]: ['switchover'],
+  [`${OPERATOR_CONFIG_DIR}/failover.pl`]: ['failover'],
+  [`${OPERATOR_CONFIG_DIR}/sync-standby.pl`]: ['sync-standby'],
+  [`${OPERATOR_CONFIG_DIR}/fetch-segments.pl`]: ['fetch-segments'],
+};
+/** The same in the Jobs' shell commands (pitr-restore.sh asks FB_AGENT itself) */
+const JOB_SHELL_COMMANDS: Array<[string, string]> = [
+  [`perl ${OPERATOR_CONFIG_DIR}/backup-file.pl`, `${AGENT_PATH} backup-file`],
+  [`perl ${OPERATOR_CONFIG_DIR}/segment-request.pl`, `${AGENT_PATH} request`],
+  // major-upgrade.sh
+  ['perl "$SCRIPT_DIR/set-repl-seq.pl"', '"$FB_AGENT" set-repl-seq'],
+];
+
+/**
+ * A Job's pod spec with the agent, for clusters that opted in: the binary installed first, and
+ * every Perl program the Job runs replaced by the agent's command. Called by jobPodSpec, after
+ * the segment TLS proxy is added.
+ */
+export function withAgentInJob<T extends V1PodSpec>(cluster: FirebirdCluster, spec: T): T {
+  if (agentMode(cluster) !== 'rust') return spec;
+  const translate = (text: string) => JOB_SHELL_COMMANDS.reduce((t, [perl, agent]) => t.split(perl).join(agent), text);
+  const container = (c: V1Container): V1Container => {
+    if (c.restartPolicy === 'Always') return c;
+    const script = c.command?.[0] === 'perl' && c.command.length === 2 ? JOB_COMMANDS[c.command[1]] : undefined;
+    const command = script ? [AGENT_PATH, ...script] : c.command?.map(translate);
+    return {
+      ...c,
+      ...(command ? { command } : {}),
+      ...(c.args ? { args: c.args.map(translate) } : {}),
+      env: [...(c.env ?? []), { name: 'FB_AGENT', value: AGENT_PATH }],
+      volumeMounts: [...(c.volumeMounts ?? []), { name: AGENT_VOLUME, mountPath: AGENT_DIR, readOnly: true }],
+    };
+  };
+  const init = spec.initContainers ?? [];
+  const sidecars = init.findIndex((c) => c.restartPolicy !== 'Always');
+  const at = sidecars < 0 ? init.length : sidecars;
+  return {
+    ...spec,
+    initContainers: [...init.slice(0, at), installer(), ...init.slice(at).map(container)],
+    containers: spec.containers.map(container),
+    volumes: [...(spec.volumes ?? []), { name: AGENT_VOLUME, emptyDir: {} }],
+  };
+}
+
 /** "rust" (the agent is delivered) or "perl" (the default) */
 export function agentMode(cluster: FirebirdCluster): 'rust' | 'perl' {
   return cluster.metadata.annotations?.[AGENT_ANNOTATION] === 'rust' ? 'rust' : 'perl';
