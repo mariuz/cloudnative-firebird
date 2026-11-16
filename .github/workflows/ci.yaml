@@ -2033,22 +2033,6 @@ jobs:
             kubectl logs "$pod" -c segment-server | grep -q 'segment TLS: the segment server accepts mutual TLS itself on 0.0.0.0:3051'
             [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="segment-puller")].env[?(@.name=="SEGMENT_TLS_DIR")].value}')" = /etc/segment-tls ]
           done
-          # the primary Lease holder is the agent's too (v0.168.0): the primary renews the
-          # cluster's Lease through the API server, the replicas hold nothing
-          if kubectl get pod "$primary" -o jsonpath='{.spec.initContainers[*].name}' | grep -q lease-holder; then
-            for pod in repl-0 repl-1 repl-2; do
-              [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.initContainers[?(@.name=="lease-holder")].command}')" = '["/app/fb-agent","lease-holder"]' ]
-            done
-            timeout 120 bash -c "until kubectl logs $primary -c lease-holder | grep -q '^lease holder: holding the Lease .*as the primary'; do sleep 5; done"
-            kubectl logs "$primary" -c lease-holder | grep -q "^lease holder: $primary watching Lease "
-            [ "$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})" = "$primary" ]
-            t1=$(kubectl get lease repl-lease -o jsonpath={.spec.renewTime})
-            timeout 60 bash -c "until [ \"\$(kubectl get lease repl-lease -o jsonpath={.spec.renewTime})\" != '$t1' ]; do sleep 2; done"
-            echo "the agent's holder renewed the Lease: $t1 -> $(kubectl get lease repl-lease -o jsonpath={.spec.renewTime})"
-            kubectl logs "$replica" -c lease-holder | grep -q '^lease holder: not the primary: not holding the Lease'
-          else
-            echo "this cluster does not hold a primary Lease"; exit 1
-          fi
           # the isolation check is the agent's where the cluster has one (v0.163.0)
           if [ "$(kubectl exec "$primary" -c segment-server -- printenv ISOLATION_TIMEOUT_SECONDS || echo 0)" -gt 0 ]; then
             kubectl logs "$primary" -c segment-server | grep -q "the agent runs the isolation check"
@@ -2229,6 +2213,30 @@ jobs:
           reasons=$(kubectl get events --field-selector involvedObject.name=lmig -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}')
           echo "$reasons" | grep -qx PrimaryLeaseMigrationStarted
           echo "$reasons" | grep -qx PrimaryLeaseMigrated
+          # with the Rust agent the holder is the agent's (v0.168.0), from the same image: after the
+          # instances restarted with it, the primary renews the Lease through the API server
+          # and the replica holds nothing
+          kubectl annotate firebirdcluster lmig firebird.cloudnative-firebird.io/agent=rust
+          agent_holders() {
+            for pod in lmig-0 lmig-1; do
+              kubectl get pod $pod -o jsonpath='{.spec.initContainers[?(@.name=="lease-holder")].command}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}' 2>/dev/null
+            done | grep -c '^\["/app/fb-agent","lease-holder"\] True$'
+          }
+          for n in $(seq 1 120); do
+            [ "$(agent_holders)" = 2 ] && [ -z "$(kubectl get firebirdcluster lmig -o jsonpath={.status.rollingUpdate})" ] && break
+            sleep 5
+          done
+          [ "$(agent_holders)" = 2 ] || { kubectl get pods -l firebird.cloudnative-firebird.io/cluster=lmig; kubectl get firebirdcluster lmig -o jsonpath='{.status}'; echo; exit 1; }
+          timeout 180 bash -c 'until p=$(kubectl get lease lmig-lease -o jsonpath={.spec.holderIdentity}) && [ -n "$p" ] && kubectl logs "$p" -c lease-holder 2>/dev/null | grep -q "^lease holder: holding the Lease .*as the primary"; do sleep 5; done' \
+            || { for pod in lmig-0 lmig-1; do echo "--- $pod"; kubectl logs $pod -c lease-holder; done; kubectl get lease lmig-lease -o yaml; exit 1; }
+          primary=$(kubectl get lease lmig-lease -o jsonpath={.spec.holderIdentity})
+          kubectl logs "$primary" -c lease-holder | grep -q "^lease holder: $primary watching Lease default/lmig-lease "
+          t1=$(kubectl get lease lmig-lease -o jsonpath={.spec.renewTime})
+          timeout 60 bash -c "until [ \"\$(kubectl get lease lmig-lease -o jsonpath={.spec.renewTime})\" != '$t1' ]; do sleep 2; done" \
+            || { echo "the agent's holder did not renew the Lease ($t1)"; kubectl logs "$primary" -c lease-holder; exit 1; }
+          echo "the agent's holder renewed the Lease: $t1 -> $(kubectl get lease lmig-lease -o jsonpath={.spec.renewTime})"
+          replica=$(for pod in lmig-0 lmig-1; do [ "$pod" = "$primary" ] || echo "$pod"; done)
+          timeout 60 bash -c "until kubectl logs $replica -c lease-holder | grep -q '^lease holder: not the primary: not holding the Lease'; do sleep 5; done"
           kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system PRIMARY_LEASE_MIGRATE-
           kubectl rollout status deployment/cloudnative-firebird-operator -n cloudnative-firebird-system --timeout=180s
           kubectl delete firebirdcluster lmig --wait=false
