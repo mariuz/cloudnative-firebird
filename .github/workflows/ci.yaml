@@ -1300,9 +1300,6 @@ jobs:
           [ "$(kubectl get pod repl-0 -o jsonpath='{.metadata.labels.firebird\.cloudnative-firebird\.io/role}')" = "replica" ]
           # promoted in place: the target kept its pod (only the old primary restarted)
           [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.promotedInPlace})" = "true" ]
-          kill "$watcher" 2>/dev/null || true
-          # the in-place outcome above is the termination message this Job wrote
-          [ "$(cat /tmp/switchover-command)" = '["/opt/fb-agent/fb-agent","switchover"]' ] || { cat /tmp/switchover-command; exit 1; }
           [ "$(kubectl get pod repl-1 -o jsonpath={.metadata.uid})" = "$target_uid" ]
           kubectl logs repl-1 -c segment-server | grep 'promoted in place'
           kubectl logs repl-0 -c replication-init | grep 'demoted to replica'
@@ -2146,6 +2143,9 @@ jobs:
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo; kubectl logs job/repl-switchover || true; kubectl logs "$replica" -c segment-server | tail -40; exit 1; }
           kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo
           [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.promotedInPlace})" = "true" ]
+          kill "$watcher" 2>/dev/null || true
+          # the in-place outcome above is the termination message this Job wrote
+          [ "$(cat /tmp/switchover-command)" = '["/opt/fb-agent/fb-agent","switchover"]' ] || { cat /tmp/switchover-command; exit 1; }
           [ "$(kubectl get pod "$replica" -o jsonpath={.metadata.uid})" = "$target_uid" ]
           kubectl logs "$replica" -c segment-server | grep -E "promotion in place by the agent|promoted in place|bootstrap seed"
           kubectl logs "$replica" -c segment-server | grep -q 'promotion in place by the agent'
