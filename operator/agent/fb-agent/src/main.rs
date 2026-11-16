@@ -12,6 +12,7 @@
 //!   fb-agent fetch-seed | replica-control | set-repl-seq | reposition
 //!                                          the replication init container's helpers (init.rs)
 //!   fb-agent lease-holder                  the primary Lease holder sidecar (lease.rs)
+//!   fb-agent metrics-exporter              the custom metrics exporter sidecar (metrics.rs)
 //!   fb-agent segment-server                the segment server (server.rs)
 //!   fb-agent segment-server -- <command>   the same as a front, with the Perl server behind it
 //!                                          for what it does not answer
@@ -22,6 +23,7 @@ mod client;
 mod init;
 mod isolation;
 mod lease;
+mod metrics;
 mod promote;
 mod puller;
 mod role;
@@ -98,6 +100,7 @@ fn main() -> ExitCode {
         ["isolation-check"] => isolation::command().map_err(io::Error::other),
         ["segment-tls"] => tls::run(),
         ["lease-holder"] => lease::run(),
+        ["metrics-exporter"] => metrics::run(),
         // for probes: whether something listens there
         ["tcp", host, port] => port
             .parse::<u16>()
@@ -110,7 +113,7 @@ fn main() -> ExitCode {
         ["segment-server"] => server::run(&[]),
         ["segment-server", "--", backend @ ..] => server::run(&backend.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
         _ => {
-            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | segment-tls | lease-holder | tcp <host> <port> | segment-server [-- <backend command...>]");
+            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | segment-tls | lease-holder | metrics-exporter | tcp <host> <port> | segment-server [-- <backend command...>]");
             return ExitCode::from(2);
         }
     };

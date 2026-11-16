@@ -134,6 +134,35 @@ describe('the Rust agent in the instance pods', () => {
     expect({ ...holder, command: [], resources: {} }).toEqual({ ...node, command: [], resources: {} });
   });
 
+  it('runs the custom metrics exporter from the agent: no Perl is left in an instance pod', () => {
+    const spec = {
+      replication: { enabled: true, failover: { enabled: true, primaryLease: { enabled: true } } },
+      segmentTLS: { enabled: true },
+      monitoring: { customQueriesConfigMap: [{ name: 'fb-queries', key: 'queries.yaml' }] },
+    };
+    const perl = pod(makeCluster(spec)).containers.find((c) => c.name === 'metrics-exporter')!;
+    expect(perl.command!.slice(0, 2)).toEqual(['perl', '-e']);
+    const rust = pod(withAgent(makeCluster(spec)));
+    const exporter = rust.containers.find((c) => c.name === 'metrics-exporter')!;
+    expect(exporter.command).toEqual(['/opt/fb-agent/fb-agent', 'metrics-exporter']);
+    expect(exporter.volumeMounts).toContainEqual({ name: 'fb-agent', mountPath: '/opt/fb-agent', readOnly: true });
+    // its environment, ports and queries volume as the Perl exporter's
+    expect(exporter.ports).toEqual(perl.ports);
+    expect(exporter.env).toEqual(expect.arrayContaining(perl.env!));
+    expect(exporter.volumeMounts).toEqual(expect.arrayContaining(perl.volumeMounts!));
+    // every container of the pod, init containers and sidecars included: none runs Perl
+    for (const c of [...rust.initContainers!, ...rust.containers]) {
+      expect(c.command?.join(' ') ?? '', c.name).not.toMatch(/\bperl\b|\.pl\b/);
+    }
+    // (without the annotation they do)
+    const plain = pod(makeCluster(spec));
+    expect([...plain.initContainers!, ...plain.containers].filter((c) => /\bperl\b/.test(c.command?.join(' ') ?? '')).map((c) => c.name).sort()).toEqual([
+      'metrics-exporter',
+      'segment-puller',
+      'segment-server',
+    ]);
+  });
+
   it('reaches the backup file server of a cluster without replication', () => {
     const spec = pod(withAgent(makeCluster()));
     expect(spec.initContainers!.map((c) => c.name)).toContain('agent-install');
