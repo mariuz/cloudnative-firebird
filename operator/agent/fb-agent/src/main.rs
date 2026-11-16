@@ -9,6 +9,8 @@
 //!                                          (host:port) or SEGMENT_PORT (0: a free port);
 //!                                          ISC_PASSWORD, AUTH_WINDOW_SECONDS
 //!   fb-agent puller                        the replicas' segment puller (puller.rs)
+//!   fb-agent fetch-seed | replica-control | set-repl-seq | reposition
+//!                                          the replication init container's helpers (init.rs)
 //!   fb-agent segment-server                the segment server (server.rs)
 //!   fb-agent segment-server -- <command>   the same as a front, with the Perl server behind it
 //!                                          for what it does not answer
@@ -16,6 +18,7 @@
 mod background;
 mod backups;
 mod client;
+mod init;
 mod isolation;
 mod promote;
 mod puller;
@@ -97,10 +100,14 @@ fn main() -> ExitCode {
             .parse::<u16>()
             .map_err(io::Error::other)
             .and_then(|port| TcpStream::connect((*host, port)).map(|_| ())),
+        ["fetch-seed", host, target] => init::fetch_seed(host, target),
+        ["replica-control", arguments @ ..] => init::replica_control(arguments),
+        ["set-repl-seq", database, sequence] => init::set_sequence(database, sequence),
+        ["reposition", sequence, control] => init::reposition(sequence, control),
         ["segment-server"] => server::run(&[]),
         ["segment-server", "--", backend @ ..] => server::run(&backend.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
         _ => {
-            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | segment-tls | tcp <host> <port> | segment-server [-- <backend command...>]");
+            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | segment-tls | tcp <host> <port> | segment-server [-- <backend command...>]");
             return ExitCode::from(2);
         }
     };

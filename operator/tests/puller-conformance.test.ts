@@ -120,6 +120,8 @@ describe.each(implementations)('segment puller: $name', ({ available, command })
     expect(readFileSync(join(source(), 'mydb.fdb.journal-000000008')).equals(segments['mydb.fdb.journal-000000008'])).toBe(true);
     expect(requests.slice(0, 4)).toEqual(['LIST', 'SYNCTO', 'GET mydb.fdb.journal-000000007', 'GET mydb.fdb.journal-000000008']);
     expect(out).toContain(`segment puller: source=${source()} primary-file=${join(dir, 'primary')}\n`);
+    // the position file is written before the line about the segment reaches this process
+    await waitFor(() => out.includes('fetched mydb.fdb.journal-000000008 from 127.0.0.1\n'), 'the line about the second segment');
     expect(out).toContain('fetched mydb.fdb.journal-000000007 from 127.0.0.1\nfetched mydb.fdb.journal-000000008 from 127.0.0.1\n');
     const [at, host] = read('primary-seen')!.trim().split(' ');
     expect(Math.abs(Number(at) - Date.now() / 1000)).toBeLessThan(10);
