@@ -3,7 +3,7 @@
 Status: **Phases 0, 1 and 2 done** (v0.154.0), **Phase 3 started** (v0.155.0: the segment server's
 front, and pullers that wait instead of polling; v0.156.0: the database's state from a
 persistent Firebird attachment; v0.157.0: the other requests about an instance's state;
-v0.158.0: the backup files, also for instances without replication; v0.159.0: the seeds; v0.160.0: the fence, nbackup and synchronous replication; v0.161.0: the in-place promotion; v0.162.0: the pruning and the recovery-point sampler; v0.163.0: the isolation check; v0.164.0: the segment TLS proxy; v0.165.0: TLS end to end in the agent's server and puller; v0.166.0: no Perl server behind the agent's; v0.167.0: the replication init container's helpers). Results below. It answers
+v0.158.0: the backup files, also for instances without replication; v0.159.0: the seeds; v0.160.0: the fence, nbackup and synchronous replication; v0.161.0: the in-place promotion; v0.162.0: the pruning and the recovery-point sampler; v0.163.0: the isolation check; v0.164.0: the segment TLS proxy; v0.165.0: TLS end to end in the agent's server and puller; v0.166.0: no Perl server behind the agent's; v0.167.0: the replication init container's helpers; v0.168.0: the primary Lease holder). Results below. It answers
 the question of whether a Rust core should replace the Perl scripts and the parts critical for
 performance.
 
@@ -292,6 +292,13 @@ script is not edited, because the pod template's hash covers it and a change wou
 every cluster with replication: clusters with the annotation run `init-instance-agent.sh`,
 derived from it by the operator.
 
-What is left in Perl in an instance pod is the Lease holder and the metrics exporter, and
-in the Jobs their clients (backup files, switchover, failover, the journal archive,
+Since v0.168.0 the primary Lease holder is the agent's (`fb-agent lease-holder`, `lease.rs`).
+It was not Perl but a Node process from the operator image, and the heaviest sidecar of an
+instance pod: about 120 MB idle where the agent's is about 2 MB. It is `lease-holder.ts`
+decision by decision, with its unit tests ported, and an HTTPS client of its own for the two
+requests it makes to the API server (read the Lease, write it back whole with the version
+that was read). The Node holder stays for clusters without the annotation.
+
+What is left in Perl in an instance pod is the metrics exporter, and in the Jobs their
+clients (backup files, switchover, failover, the journal archive,
 point-in-time recovery).

@@ -99,12 +99,13 @@ jobs:
         run: |
           npm ci
           FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" NO_COLOR=1 \
-            npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts tests/isolation-check.test.ts tests/segment-tls-conformance.test.ts tests/init-helpers-conformance.test.ts 2>&1 | tee /tmp/conformance.txt
+            npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts tests/isolation-check.test.ts tests/segment-tls-conformance.test.ts tests/init-helpers-conformance.test.ts tests/lease-holder-conformance.test.ts 2>&1 | tee /tmp/conformance.txt
           # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, 15 for the
           # segment server with the Perl server behind it and 15 without, and the isolation
-          # check's file (18 scenarios for each implementation, 2 more), 26 for the segment TLS proxies together, and 3 for the replication
-          # init's helpers (colour codes stripped: the runner's output has them)
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +117 passed \(117\)'
+          # check's file (18 scenarios for each implementation, 2 more), 26 for the segment TLS proxies together, 3 for the replication
+          # init's helpers, and 7 for the lease holder (colour codes stripped: the runner's
+          # output has them)
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +124 passed \(124\)'
 
       # STATE from the front's service attachment and from the Perl server's fbsvcmgr, side by
       # side in every state of the database, on real servers (docs/rust-agent-segment-server.md)
@@ -2032,6 +2033,22 @@ jobs:
             kubectl logs "$pod" -c segment-server | grep -q 'segment TLS: the segment server accepts mutual TLS itself on 0.0.0.0:3051'
             [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="segment-puller")].env[?(@.name=="SEGMENT_TLS_DIR")].value}')" = /etc/segment-tls ]
           done
+          # the primary Lease holder is the agent's too (v0.168.0): the primary renews the
+          # cluster's Lease through the API server, the replicas hold nothing
+          if kubectl get pod "$primary" -o jsonpath='{.spec.initContainers[*].name}' | grep -q lease-holder; then
+            for pod in repl-0 repl-1 repl-2; do
+              [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.initContainers[?(@.name=="lease-holder")].command}')" = '["/app/fb-agent","lease-holder"]' ]
+            done
+            timeout 120 bash -c "until kubectl logs $primary -c lease-holder | grep -q '^lease holder: holding the Lease .*as the primary'; do sleep 5; done"
+            kubectl logs "$primary" -c lease-holder | grep -q "^lease holder: $primary watching Lease "
+            [ "$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})" = "$primary" ]
+            t1=$(kubectl get lease repl-lease -o jsonpath={.spec.renewTime})
+            timeout 60 bash -c "until [ \"\$(kubectl get lease repl-lease -o jsonpath={.spec.renewTime})\" != '$t1' ]; do sleep 2; done"
+            echo "the agent's holder renewed the Lease: $t1 -> $(kubectl get lease repl-lease -o jsonpath={.spec.renewTime})"
+            kubectl logs "$replica" -c lease-holder | grep -q '^lease holder: not the primary: not holding the Lease'
+          else
+            echo "this cluster does not hold a primary Lease"; exit 1
+          fi
           # the isolation check is the agent's where the cluster has one (v0.163.0)
           if [ "$(kubectl exec "$primary" -c segment-server -- printenv ISOLATION_TIMEOUT_SECONDS || echo 0)" -gt 0 ]; then
             kubectl logs "$primary" -c segment-server | grep -q "the agent runs the isolation check"

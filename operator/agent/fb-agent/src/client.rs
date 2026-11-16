@@ -36,6 +36,16 @@ fn connect(host: &str, port: u16) -> io::Result<TcpStream> {
     Err(last)
 }
 
+/// A plain connection to the segment server at `host`:`port` with `request` signed and sent: the
+/// pod's own server, from its other containers.
+pub fn open_at(host: &str, port: u16, request: &str, timeout: Option<Duration>) -> io::Result<BufReader<Stream>> {
+    let mut stream = connect(host, port).map_err(|err| io::Error::new(err.kind(), format!("connect {host}:{port}: {err}")))?;
+    stream.set_read_timeout(timeout)?;
+    writeln!(stream, "{}", sig1::sign(var("ISC_PASSWORD").as_bytes(), request, now(), &nonce()?))?;
+    stream.flush()?;
+    Ok(BufReader::new(Stream::Plain(stream)))
+}
+
 /// Connects to the segment server of `host` (SEGMENT_PORT, 3051 by default) and sends `request`,
 /// signed with ISC_PASSWORD. With segment TLS (SEGMENT_PROXY is set) the connection is mutual TLS
 /// to that host: made here when this process has the cluster's certificates (SEGMENT_TLS_DIR),
