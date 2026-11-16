@@ -45,8 +45,8 @@ describe('the Rust agent in the instance pods', () => {
     const server = spec.containers.find((c) => c.name === 'segment-server')!;
     expect(server.volumeMounts).toContainEqual({ name: 'fb-agent', mountPath: '/opt/fb-agent', readOnly: true });
     expect(server.env).toContainEqual({ name: 'FB_AGENT', value: '/opt/fb-agent/fb-agent' });
-    // the segment server is the agent's front, with the Perl script behind it
-    expect(server.command).toEqual(['/opt/fb-agent/fb-agent', 'segment-server', '--', 'perl', '/etc/firebird-operator/segment-server.pl']);
+    // the segment server is the agent's, with no Perl script behind it
+    expect(server.command).toEqual(['/opt/fb-agent/fb-agent', 'segment-server']);
     expect(server.ports).toEqual([{ name: 'segments', containerPort: 3051, protocol: 'TCP' }]);
     // and in the puller, which runs from it
     const puller = spec.containers.find((c) => c.name === 'segment-puller')!;
@@ -70,7 +70,7 @@ describe('the Rust agent in the instance pods', () => {
     expect(pod(cluster).initContainers!.map((c) => c.name)).toEqual(['segment-tls', 'lease-holder', 'agent-install', 'security-db-init', 'replication-init']);
     // the front listens where the TLS proxy forwards to, as the Perl server did
     const server = pod(cluster).containers.find((c) => c.name === 'segment-server')!;
-    expect(server.command!.slice(0, 3)).toEqual(['/opt/fb-agent/fb-agent', 'segment-server', '--']);
+    expect(server.command).toEqual(['/opt/fb-agent/fb-agent', 'segment-server']);
     expect(server.env).toContainEqual({ name: 'SEGMENT_LISTEN', value: '127.0.0.1:3061' });
     // through the TLS proxy's client side, as the Perl puller
     expect(puller.env).toContainEqual({ name: 'SEGMENT_PROXY', value: '127.0.0.1:3052' });
@@ -81,8 +81,8 @@ describe('the Rust agent in the instance pods', () => {
     expect(spec.initContainers!.map((c) => c.name)).toContain('agent-install');
     const files = spec.containers.find((c) => c.name === 'backup-files')!;
     expect(files.volumeMounts).toContainEqual({ name: 'fb-agent', mountPath: '/opt/fb-agent', readOnly: true });
-    // the backup file server is the front too, in its files-only mode, with the Perl script behind it
-    expect(files.command).toEqual(['/opt/fb-agent/fb-agent', 'segment-server', '--', 'perl', '/etc/firebird-operator/segment-server.pl']);
+    // the backup file server is the agent's too, in its files-only mode
+    expect(files.command).toEqual(['/opt/fb-agent/fb-agent', 'segment-server']);
     expect(files.env).toContainEqual({ name: 'FILES_ONLY', value: 'true' });
     // without the annotation it stays the Perl script
     expect(pod(makeCluster()).containers.find((c) => c.name === 'backup-files')!.command).toEqual([

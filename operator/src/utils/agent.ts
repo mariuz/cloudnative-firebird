@@ -6,12 +6,10 @@ import { operatorImage } from './operator-image';
  * The instance pods' Rust agent (docs/rust-agent-roadmap.md). A cluster that opts in with the
  * annotation below gets the fb-agent binary of the operator image copied into its instance pods,
  * and runs from it what has been ported so far: the replicas' segment puller (Phase 2), and the
- * segment server's front (Phase 3, docs/rust-agent-segment-server.md), which answers PING, LIST,
- * GET, WAIT, the requests about the instance's state, the backup files, the seeds and the
- * changes of role, prunes the archive, samples the recovery points and runs the isolation
- * check, and runs the Perl
- * segment server behind it for everything else (also as the backup file server of instances
- * without replication). Setting or removing the annotation changes the pod template, so the
+ * segment server (Phase 3, docs/rust-agent-segment-server.md), which answers every request,
+ * prunes the archive, samples the recovery points and runs the isolation check, with no Perl
+ * server behind it since v0.166.0 (also as the backup file server of instances without
+ * replication). Setting or removing the annotation changes the pod template, so the
  * instances restart (primary last).
  */
 export const AGENT_ANNOTATION = `${API_GROUP}/agent`;
@@ -25,13 +23,13 @@ export const AGENT_IMAGE_PATH = '/app/fb-agent';
 const AGENT_CONTAINERS = ['segment-server', 'backup-files', 'segment-puller'];
 /**
  * What runs from the agent, by container: the fb-agent arguments that replace the container's
- * command. The segment server's front gets that command as its backend.
+ * command.
  */
-const AGENT_COMMANDS: Record<string, (command: string[]) => string[]> = {
-  'segment-puller': () => ['puller'],
-  'segment-server': (command) => ['segment-server', '--', ...command],
-  // the same front in its files-only mode (FILES_ONLY), for instances without replication
-  'backup-files': (command) => ['segment-server', '--', ...command],
+const AGENT_COMMANDS: Record<string, string[]> = {
+  'segment-puller': ['puller'],
+  'segment-server': ['segment-server'],
+  // the same server in its files-only mode (FILES_ONLY), for instances without replication
+  'backup-files': ['segment-server'],
 };
 
 /** "rust" (the agent is delivered) or "perl" (the default) */
@@ -73,7 +71,7 @@ export function withAgent<T extends V1PodSpec>(cluster: FirebirdCluster, spec: T
     AGENT_CONTAINERS.includes(c.name)
       ? {
           ...c,
-          ...(AGENT_COMMANDS[c.name] ? { command: [AGENT_PATH, ...AGENT_COMMANDS[c.name](c.command ?? [])] } : {}),
+          ...(AGENT_COMMANDS[c.name] ? { command: [AGENT_PATH, ...AGENT_COMMANDS[c.name]] } : {}),
           env: [...(c.env ?? []), { name: 'FB_AGENT', value: AGENT_PATH }],
           volumeMounts: [...(c.volumeMounts ?? []), { name: AGENT_VOLUME, mountPath: AGENT_DIR, readOnly: true }],
         }

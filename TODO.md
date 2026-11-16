@@ -60,12 +60,12 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   `contactTimeoutSeconds` fenced the primary) and fixed: GET, SEED, TXNS and PLAN are answered by
   child processes. The measurements are in the proposal.
 
-- [ ] **Rust agent, Phase 3, step 7** ([docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md)):
-  the front without the Perl server behind it: its own refusals, `fbsvcmgr` and `isql` as the
-  fallbacks where the Perl server is today, and the scripts out of the ConfigMap for clusters
-  that opt in. Steps 1 to 6 are done (v0.155.0 to v0.165.0). The segment TLS proxy stays as a
-  sidecar for the Perl clients of a pod (the replication init, the Lease holder, the Jobs) until
-  those are ported.
+- [ ] **Rust agent, after Phase 3** ([docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md)):
+  the segment server and the puller are the agent's (Phase 3 is done, v0.155.0 to v0.166.0).
+  What is left in Perl in an instance pod: the replication init (seeding), the Lease holder,
+  the metrics exporter, and the Jobs' clients. Until those are ported the scripts stay in the
+  ConfigMap and the segment TLS proxy stays as a sidecar with its client side. Making the
+  agent the default (no annotation) is a separate decision.
 - [ ] **An atomic journal archive command**: copy to a temporary name and rename, so the archive
   never holds a segment that is still being copied. The servers only offer complete segments
   since v0.155.0, which covers the replicas; other readers of the archive (the journal archive

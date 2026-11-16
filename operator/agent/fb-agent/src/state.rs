@@ -8,6 +8,7 @@
 //! state (no attachment, an error it does not know, the limit, a call still in flight), the
 //! caller passes the request to the Perl server, which asks with `fbsvcmgr` as before.
 
+use crate::sql::Database;
 use crate::status::engine_version;
 use firebird_wire::{ConnectConfig, ServiceManager, WireCrypt};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
@@ -52,6 +53,9 @@ type Request = (Ask, Sender<Option<Told>>);
 pub struct Probe {
     requests: SyncSender<Request>,
     limit: Duration,
+    /// Without the Perl server behind the agent: the tools that are asked when the attachment
+    /// cannot tell
+    tools: Option<Database>,
 }
 
 impl Probe {
@@ -60,7 +64,17 @@ impl Probe {
         // room for one request: with one waiting already, the attachment is stuck
         let (requests, queue) = mpsc::sync_channel::<Request>(1);
         thread::spawn(move || serve(queue, database, port, user, password));
-        Probe { requests, limit }
+        Probe {
+            requests,
+            limit,
+            tools: None,
+        }
+    }
+
+    /// With fbsvcmgr and isql for what the attachment cannot tell, as the Perl server asked them.
+    pub fn with_tools(mut self, database: Database) -> Probe {
+        self.tools = Some(database);
+        self
     }
 
     fn ask(&self, ask: Ask) -> Option<Told> {
@@ -75,7 +89,10 @@ impl Probe {
     pub fn state(&self) -> Option<State> {
         match self.ask(Ask::State) {
             Some(Told::State(state)) => Some(state),
-            _ => None,
+            _ => self.tools.as_ref().and_then(|database| {
+                let (succeeded, text) = database.tool_statistics();
+                state_of(if succeeded { Ok(text) } else { Err(text) })
+            }),
         }
     }
 
@@ -83,7 +100,11 @@ impl Probe {
     pub fn version(&self) -> Option<String> {
         match self.ask(Ask::Version) {
             Some(Told::Version(version)) => Some(version),
-            _ => None,
+            _ => self
+                .tools
+                .as_ref()
+                .and_then(|database| database.value("RDB$GET_CONTEXT('SYSTEM', 'ENGINE_VERSION')").ok())
+                .filter(|version| !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit() || b == b'.')),
         }
     }
 }

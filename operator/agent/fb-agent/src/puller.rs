@@ -183,7 +183,7 @@ impl Puller {
 }
 
 /// The pod's Firebird server no longer accepts connections.
-fn firebird_stopped() -> bool {
+pub fn firebird_stopped() -> bool {
     let port: u16 = var("FIREBIRD_PORT").parse().unwrap_or(3050);
     TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), Duration::from_secs(2)).is_err()
 }

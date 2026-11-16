@@ -3,7 +3,7 @@
 Status: **Phases 0, 1 and 2 done** (v0.154.0), **Phase 3 started** (v0.155.0: the segment server's
 front, and pullers that wait instead of polling; v0.156.0: the database's state from a
 persistent Firebird attachment; v0.157.0: the other requests about an instance's state;
-v0.158.0: the backup files, also for instances without replication; v0.159.0: the seeds; v0.160.0: the fence, nbackup and synchronous replication; v0.161.0: the in-place promotion; v0.162.0: the pruning and the recovery-point sampler; v0.163.0: the isolation check; v0.164.0: the segment TLS proxy; v0.165.0: TLS end to end in the agent's server and puller). Results below. It answers
+v0.158.0: the backup files, also for instances without replication; v0.159.0: the seeds; v0.160.0: the fence, nbackup and synchronous replication; v0.161.0: the in-place promotion; v0.162.0: the pruning and the recovery-point sampler; v0.163.0: the isolation check; v0.164.0: the segment TLS proxy; v0.165.0: TLS end to end in the agent's server and puller; v0.166.0: no Perl server behind the agent's). Results below. It answers
 the question of whether a Rust core should replace the Perl scripts and the parts critical for
 performance.
 
@@ -281,5 +281,7 @@ Not planned: rewriting the orchestration shell scripts or the TypeScript operato
 
 ## Next step
 
-Phase 3, step 7 ([rust-agent-segment-server.md](rust-agent-segment-server.md)): the front
-without the Perl server behind it. Steps 1 to 6 are done.
+Phase 3 is done ([rust-agent-segment-server.md](rust-agent-segment-server.md), steps 1 to 7):
+the segment server and the puller are the agent's, with no Perl server behind it. What is
+left in Perl in an instance pod is the replication init, the Lease holder, the metrics
+exporter and the Jobs' clients.
