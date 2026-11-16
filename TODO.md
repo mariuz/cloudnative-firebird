@@ -63,8 +63,9 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 - [ ] **Rust agent, after Phase 3** ([docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md)):
   the segment server and the puller are the agent's (Phase 3 is done, v0.155.0 to v0.166.0).
   The replication init container's helpers are too (v0.167.0); the init container itself stays
-  a shell script around Firebird's tools. What is left in Perl in an instance pod: the Lease
-  holder and the metrics exporter; and the Jobs' clients (backup files, switchover, failover,
+  a shell script around Firebird's tools. The primary Lease holder, a Node sidecar, is the
+  agent's too (v0.168.0). What is left in Perl in an instance pod: the metrics exporter; and
+  the Jobs' clients (backup files, switchover, failover,
   the journal archive, point-in-time recovery). Until those are ported the scripts stay in the
   ConfigMap and the segment TLS proxy stays as a sidecar with its client side. When a release
   changes `init-instance.sh` anyway, the derived `init-instance-agent.sh` can be folded into

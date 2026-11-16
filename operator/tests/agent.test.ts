@@ -120,6 +120,20 @@ describe('the Rust agent in the instance pods', () => {
     expect(tls.volumeMounts).toContainEqual({ name: 'segment-tls', mountPath: '/etc/segment-tls', readOnly: true });
   });
 
+  it('runs the primary Lease holder from the agent, in the operator image', () => {
+    const spec = { replication: { enabled: true, failover: { enabled: true, primaryLease: { enabled: true } } } };
+    const node = pod(makeCluster(spec)).initContainers!.find((c) => c.name === 'lease-holder')!;
+    expect(node.command).toEqual(['node', 'dist/lease-holder.js']);
+    expect(node.resources).toEqual({ requests: { cpu: '10m', memory: '32Mi' } });
+    const holder = pod(withAgent(makeCluster(spec))).initContainers!.find((c) => c.name === 'lease-holder')!;
+    // the binary of the operator image: the sidecar starts before the pod's agent volume is filled
+    expect(holder.command).toEqual(['/app/fb-agent', 'lease-holder']);
+    expect(holder.image).toBe(node.image);
+    expect(holder.resources).toEqual({ requests: { cpu: '10m', memory: '8Mi' } });
+    // everything else as the Node holder's: its environment, its token, its mounts
+    expect({ ...holder, command: [], resources: {} }).toEqual({ ...node, command: [], resources: {} });
+  });
+
   it('reaches the backup file server of a cluster without replication', () => {
     const spec = pod(withAgent(makeCluster()));
     expect(spec.initContainers!.map((c) => c.name)).toContain('agent-install');

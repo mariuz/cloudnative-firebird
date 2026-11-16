@@ -14,4 +14,7 @@ libc = "0.2"
 signal-hook = { version = "0.3", default-features = false }
 # TLS for the segment servers: rustls with the ring provider (its C and assembly parts are compiled
 # by clang for the static musl targets, see the Dockerfile and the CI's Rust agent job)
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# tls12: for the Kubernetes API server only (the lease holder); the segment servers are TLS 1.3 only
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# the Lease object of the Kubernetes API, read and written back whole by the lease holder
+serde_json = "1"
