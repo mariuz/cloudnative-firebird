@@ -1,3 +1,4 @@
+import { buildFailoverJob } from '../src/utils/switchover';
 import { describe, it, expect, vi, type Mock } from 'vitest';
 import { KubeConfig, V1Container, V1PodSpec, V1StatefulSet } from '@kubernetes/client-node';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
@@ -39,9 +40,9 @@ describe('pod settings', () => {
   });
 
   it('go on the instance pods: priority class, scheduler, pull secrets and the pull policy of every container', () => {
-    // with segment TLS: its proxy sidecar (added after the instance containers) too
+    // with segment TLS and the agent's installer (added after the instance containers) too
     const pod = buildStatefulSet(configured({ replication: { enabled: true }, segmentTLS: { enabled: true } })).spec!.template.spec!;
-    expect(allContainers(pod).map((c) => c.name)).toContain('segment-tls');
+    expect(allContainers(pod).map((c) => c.name)).toContain('agent-install');
     expect(pod.priorityClassName).toBe('database-critical');
     expect(pod.schedulerName).toBe('custom-scheduler');
     expect(pod.imagePullSecrets).toEqual([{ name: 'registry-credentials' }]);
@@ -61,8 +62,9 @@ describe('pod settings', () => {
 
   it('go on the Job pods (jobPodSpec) and the bench Job', () => {
     const tls = configured({ replication: { enabled: true }, segmentTLS: { enabled: true } });
-    expect(allContainers(buildFencingJob(tls, 'test-cluster-0', 'fence').spec!.template.spec!).length).toBeGreaterThan(1);
-    for (const job of [buildFencingJob(tls, 'test-cluster-0', 'fence'), buildFencingJob(configured(), 'test-cluster-0', 'fence'), buildBenchJob(configured(), { transactions: 1, clients: 1, databaseFile: 'db.fdb', jobName: 'b', keep: false })]) {
+    // a Job that runs the agent: its installer gets the settings too
+    expect(allContainers(buildFailoverJob(tls, ['test-cluster-1']).spec!.template.spec!).map((c) => c.name)).toContain('agent-install');
+    for (const job of [buildFailoverJob(tls, ['test-cluster-1']), buildFencingJob(tls, 'test-cluster-0', 'fence'), buildFencingJob(configured(), 'test-cluster-0', 'fence'), buildBenchJob(configured(), { transactions: 1, clients: 1, databaseFile: 'db.fdb', jobName: 'b', keep: false })]) {
       const pod = job.spec!.template.spec!;
       expect(pod.priorityClassName).toBe('database-critical');
       expect(pod.schedulerName).toBe('custom-scheduler');

@@ -48,39 +48,29 @@ pub fn open_at(host: &str, port: u16, request: &str, timeout: Option<Duration>) 
 }
 
 /// Connects to the segment server of `host` (SEGMENT_PORT, 3051 by default) and sends `request`,
-/// signed with ISC_PASSWORD. With segment TLS (SEGMENT_PROXY is set) the connection is mutual TLS
-/// to that host: made here when this process has the cluster's certificates (SEGMENT_TLS_DIR),
-/// else through the local proxy named by SEGMENT_PROXY, which is told the host on a first line.
-/// `timeout` bounds each read of the reply.
+/// signed with ISC_PASSWORD. With segment TLS (SEGMENT_TLS=true) the connection is mutual TLS to
+/// that host with the cluster's certificates (SEGMENT_TLS_DIR), or plain text to an instance the
+/// operator lists as still plain while the cluster switches (tls.rs). `timeout` bounds each read
+/// of the reply.
 pub fn open(host: &str, request: &str, timeout: Option<Duration>) -> io::Result<BufReader<Stream>> {
     static MATERIAL: OnceLock<Option<Material>> = OnceLock::new();
     let port: u16 = var("SEGMENT_PORT").parse().unwrap_or(3051);
     let failed = |target: String| move |err: io::Error| io::Error::new(err.kind(), format!("connect {target}: {err}"));
-    let proxy = var("SEGMENT_PROXY");
-    let material = MATERIAL
-        .get_or_init(Material::from_environment)
-        .as_ref()
-        .filter(|_| !proxy.is_empty());
-    let mut stream = match (material, proxy.rsplit_once(':')) {
-        (Some(material), _) => {
-            let connection = connect(host, port).map_err(failed(format!("{host}:{port}")))?;
-            let _ = connection.set_nodelay(true);
-            let stream = tls::connected(material, host, connection)?;
-            if let Stream::Client(tls) = &stream {
-                tls.sock.set_read_timeout(timeout)?;
-            }
-            stream
+    let mut stream = if var("SEGMENT_TLS") == "true" {
+        // never plain text instead: without the certificates the request is not sent
+        let material = MATERIAL
+            .get_or_init(Material::from_environment)
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "segment TLS: no certificates in SEGMENT_TLS_DIR"))?;
+        let connection = connect(host, port).map_err(failed(format!("{host}:{port}")))?;
+        let _ = connection.set_nodelay(true);
+        let stream = tls::connected(material, host, connection)?;
+        if let Stream::Client(tls) = &stream {
+            tls.sock.set_read_timeout(timeout)?;
         }
-        (None, Some((proxy_host, proxy_port))) => {
-            let proxy = format!("to the segment TLS proxy {proxy_host}:{proxy_port}");
-            let proxy_port = proxy_port
-                .parse()
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SEGMENT_PROXY: bad port"))?;
-            let mut stream = connect(proxy_host, proxy_port).map_err(failed(proxy))?;
-            stream.write_all(format!("CONNECT {host} {port}\n").as_bytes())?;
-            Stream::Plain(stream)
-        }
-        (None, None) => Stream::Plain(connect(host, port).map_err(failed(format!("{host}:{port}")))?),
+        stream
+    } else {
+        Stream::Plain(connect(host, port).map_err(failed(format!("{host}:{port}")))?)
     };
     if let Stream::Plain(plain) = &stream {
         plain.set_read_timeout(timeout)?;

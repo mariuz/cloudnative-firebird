@@ -405,6 +405,8 @@ the requests for which the local server gave the agent no answer.
 
 ## Step 6, first part (v0.164.0): the segment TLS proxy
 
+*(Removed in v0.171.0: every client does its TLS itself, see step 6's second part.)*
+
 With `spec.segmentTLS`, a proxy runs beside every instance and in every Job that talks to one:
 it accepts mutual TLS on the segment port for the segment server behind it, and relays the
 pod's clients to the other instances. It was a Node process from the operator image

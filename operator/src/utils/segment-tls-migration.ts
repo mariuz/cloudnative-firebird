@@ -1,7 +1,7 @@
 import { V1Pod } from '@kubernetes/client-node';
 import { API_GROUP, FirebirdCluster } from '../types';
 import { isPodReady } from './routing';
-import { SEGMENT_TLS_CONTAINER } from './segment-tls-pods';
+import { podHasSegmentTls } from './segment-tls-pods';
 import { reconciliationPaused } from './suspension';
 
 /**
@@ -82,7 +82,7 @@ export function migrationStep(
     const switched =
       !cluster.status?.rollingUpdate &&
       pods.length >= cluster.spec.instances &&
-      pods.every((p) => (p.spec?.initContainers ?? []).some((c) => c.name === SEGMENT_TLS_CONTAINER) && isPodReady(p));
+      pods.every((p) => podHasSegmentTls(p.spec) && isPodReady(p));
     return switched ? { action: 'finish' } : { action: 'none', reason: 'instances restarting' };
   }
   const reason = notMigrating(cluster, mode, nativeSidecars);

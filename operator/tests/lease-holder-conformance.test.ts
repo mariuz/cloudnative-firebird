@@ -5,15 +5,14 @@ import { createServer, IncomingMessage, Server as HttpsServer, ServerResponse } 
 import { Server, Socket } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { kubernetesLeaseApi } from '../src/lease-holder';
 import { createTlsCertificates } from '../src/utils/certificates';
 import { fakeSegmentServer } from './helpers/segment-auth';
 
 /**
  * The primary Lease holder of the Rust agent (`fb-agent lease-holder`, agent/fb-agent/src/lease.rs)
  * as a process, against a Lease API and a segment server played here: what it asks them, and
- * that its renewal is the one the operator's lease-holder.ts sends. Its decisions are the unit
- * tests of lease.rs, case by case those of lease-holder.ts (tests/primary-lease.test.ts).
+ * the Lease it writes back. Its decisions are the unit tests of lease.rs (those of the Node
+ * holder it replaced, deleted in v0.171.0).
  *
  * Needs the fb-agent binary (FB_AGENT_BIN, or a build in agent/target); skipped without it. The
  * "Rust agent" CI job runs this file with it.
@@ -168,7 +167,7 @@ describe.skipIf(!agentBin)('the lease holder of the agent (fb-agent lease-holder
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('renews the Lease as the operator\'s holder does, with the token of the moment', async () => {
+  it('renews the Lease with the token of the moment', async () => {
     start();
     await waitFor(() => calls.filter((c) => c.method === 'PUT').length >= 2, 'two renewals');
     expect(out).toContain('lease holder: db-0 watching Lease prod/db-lease (duration 3s, renew deadline 2s)\n');
@@ -191,22 +190,6 @@ describe.skipIf(!agentBin)('the lease holder of the agent (fb-agent lease-holder
     // the state is asked before each read, and nothing else of the segment server
     expect(new Set(asked)).toEqual(new Set(['STATE']));
 
-    // the same renewal from lease-holder.ts, through the same API
-    const before = calls.length;
-    const operators = kubernetesLeaseApi(
-      { TOKEN_DIR: join(dir, 'token'), KUBERNETES_SERVICE_HOST: 'localhost', KUBERNETES_SERVICE_PORT: String((api.address() as { port: number }).port) },
-      'db-lease',
-      'prod',
-    );
-    child!.kill('SIGKILL');
-    const current = await operators.read();
-    await operators.renew(current!, 'db-0', 3);
-    const theirs = calls.slice(before).find((c) => c.method === 'PUT')!;
-    expect(theirs.url).toBe(renewal.url);
-    expect(Object.keys(theirs.body.spec).sort()).toEqual(Object.keys(renewal.body.spec).sort());
-    expect(theirs.body.spec.renewTime).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$/);
-    expect({ ...theirs.body.spec, renewTime: '' }).toEqual({ ...renewal.body.spec, renewTime: '' });
-    expect({ ...theirs.body.metadata, resourceVersion: '' }).toEqual({ ...renewal.body.metadata, resourceVersion: '' });
   });
 
   it('reads the token again for every request, and a chunked answer', async () => {

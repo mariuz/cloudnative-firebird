@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.170.0/cloudnative-firebird-0.170.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.171.0/cloudnative-firebird-0.171.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.170.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.171.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.170.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.171.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -247,8 +247,8 @@ not built again, so a push to `main` without a bump only moves `latest`. Pull re
 image for both platforms without publishing it. Running the workflow on demand (for a tag, or
 `main`) publishes that version's image again, `latest` and the Release's manifest included. The image is pulled with
 `imagePullPolicy: IfNotPresent`; the kind CI builds `cloudnative-firebird:ci` from the checkout and
-substitutes it. The sidecars the operator runs from its own image (segment TLS, the primary Lease)
-use the image of the running operator, whatever tag it was deployed with.
+substitutes it. What the operator runs from its own image (the agent's binary, the primary Lease holder)
+uses the image of the running operator, whatever tag it was deployed with.
 
 ### Read-only Access for Users (v0.135.0)
 
@@ -577,7 +577,7 @@ Full guide with diagrams, the reasons for it, switching an existing cluster and 
 ```yaml
 spec:
   segmentTLS:
-    enabled: true   # Kubernetes 1.29 or later (native sidecar containers)
+    enabled: true   # the default for new clusters on Kubernetes 1.29 or later
 ```
 
 Since v0.77.0 this is the default for **new** clusters on Kubernetes 1.29 or later: the operator
@@ -598,27 +598,27 @@ condition, a `SegmentTLSRequired` event and `firebird_cluster_segment_tls 0` unt
 
 With `segmentTLS.enabled`, every segment server connection (journal segments, seed copies, backup
 files, the operator's lag and health checks) is carried over mutual TLS 1.3. The Firebird images
-have no TLS tooling, so each instance pod runs a small proxy from the operator's own image as a
-native sidecar (`segment-tls`, an init container with `restartPolicy: Always`): it accepts TLS on
-the segment port (3051) and forwards to the segment server, which then listens on localhost only,
-and it relays the pod's own segment clients to the other instances. Backup, restore and failover
-Jobs get the client side of the proxy only. The operator connects over TLS itself.
+have no TLS tooling; the Rust agent (below) does it: the segment server accepts mutual TLS on the
+segment port (3051), and plain text on localhost only for the pod's own clients (the Lease holder);
+the puller, the replication init and the programs of the backup, restore and failover Jobs
+connect over TLS themselves, with the certificates mounted into their containers. The operator
+connects over TLS itself. Until v0.171.0 a proxy sidecar (`segment-tls`) carried the bytes for
+the clients that had no TLS of their own; there is none now.
 
 The operator creates a CA per cluster and one certificate signed by it (client and server use) in
 the `<cluster>-segment-tls` Secret, owned by the cluster. It renews the certificate 30 days before
-it expires and the CA a year before; the proxies load renewed files without a restart. Pods mount
+it expires and the CA a year before; the agent loads renewed files without a restart. Pods mount
 the certificate, its key and the CA certificate, never the CA's key. A peer is authenticated by its
 certificate's chain to the cluster's CA, so only the cluster's own pods and Jobs (and the operator)
 are accepted; signed requests (above) still apply on top.
 
 Switching `segmentTLS` on or off is a template change: the rolling update restarts every instance,
 the primary last. Replication goes on meanwhile: the operator lists the instances still serving in
-plain text in the `<cluster>-segment-tls-peers` ConfigMap, the proxies connect to those in plain
-text, and they accept plain connections until 5 minutes after the last instance switched. Then
+plain text in the `<cluster>-segment-tls-peers` ConfigMap, the clients connect to those in plain
+text, and the servers accept plain connections until 5 minutes after the last instance switched. Then
 only TLS is accepted. The operator reaches each instance in the mode its pod runs.
 Managing the Secret needs `create` and `update` on Secrets in the operator's ClusterRole
-(`config/deploy/rbac.yaml`). The sidecar uses the image of the running operator (`OPERATOR_IMAGE`
-overrides it), so instance and Job pods must be able to pull it.
+(`config/deploy/rbac.yaml`).
 
 ### Status Fields
 
@@ -728,8 +728,9 @@ other instances are read-only replicas:
   - the replication init container's helpers (seed fetch, replica control file, the header's
     replication sequence); the init container itself stays a shell script around Firebird's
     tools;
-  - with `segmentTLS`, TLS end to end between the puller and the segment server, and the TLS
-    proxy sidecar for the pod's other clients and the Jobs (2 MB of memory instead of 64 MB);
+  - with `segmentTLS`, TLS in the agent itself: the segment server, the puller, the replication
+    init and the Jobs' programs (since v0.171.0 without a proxy sidecar, which took 2 MB of
+    memory as the agent's and 64 MB as the Node process before it);
   - the primary Lease holder sidecar (about 2 MB instead of about 100 MB);
   - the custom metrics exporter (`monitoring.customQueriesConfigMap`);
   - the Jobs' programs: switchover, failover, synchronous standby, backup files, the journal
@@ -1119,8 +1120,8 @@ operator's updates never set an owner (since v0.146.0 not even one the object ha
 read), a reconcile of a cluster the watch saw deleted or replaced creates nothing (v0.146.0), and
 the adoption first checks that the cluster still exists under the same uid: a reconcile that started from the deleted
 cluster's copy would give everything back to it, and the garbage collector would then remove the
-StatefulSet (restarting the instances) and the rest. With it a `lease-holder` sidecar (from
-the operator image, like the segment TLS proxy) in every instance pod renews the Lease every
+StatefulSet (restarting the instances) and the rest. With it a `lease-holder` sidecar (`fb-agent
+lease-holder`, from the operator image) in every instance pod renews the Lease every
 third of `durationSeconds` while its pod is the primary and its database is online, through the
 pod's ServiceAccount (a Role on that one Lease and a RoleBinding the operator manages, and a
 token projected into the sidecar alone):
@@ -1660,8 +1661,8 @@ stopping pod is already out of the Services, and the hook waits up to that many 
 remote client attachments to end (the operator's sidecars and probes, attached through localhost,
 do not count) before the server gets its signal. A Firebird database shutdown is not used for this:
 it is recorded in the database header and is how instances are fenced. `smartShutdownTimeout` must be
-below `stopDelay` (30 seconds if unset). The sidecars (segment server and puller, Lease holder,
-segment TLS proxy) keep running until the server has stopped, so replicas keep fetching the
+below `stopDelay` (30 seconds if unset). The sidecars (segment server and puller, Lease holder)
+keep running until the server has stopped, so replicas keep fetching the
 primary's segments meanwhile, and automatic failover waits for a primary being deleted until its
 smart shutdown is over (`smartShutdownTimeout` and 10 seconds after the deletion); the failover delay
 counts from then. Before v0.107.0 the sidecars ignored the stop signal and every instance took its

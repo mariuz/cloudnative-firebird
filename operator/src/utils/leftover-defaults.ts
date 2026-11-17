@@ -1,6 +1,6 @@
 import { V1PodSpec, V1StatefulSet } from '@kubernetes/client-node';
 import { FirebirdCluster } from '../types';
-import { SEGMENT_TLS_CONTAINER } from './segment-tls-pods';
+import { podHasSegmentTls } from './segment-tls-pods';
 import { PRIMARY_LEASE_ANNOTATION, PRIMARY_LEASE_CONTAINER } from './primary-lease';
 import { POD_ANTI_AFFINITY_ANNOTATION } from './scheduling';
 import { buildStatefulSet } from './resources';
@@ -45,7 +45,7 @@ export function leftoverDefaults(statefulSet: V1StatefulSet, cluster: FirebirdCl
       },
     }).spec?.template?.spec;
   const markers: Record<keyof FirstDefaults, (pod: V1PodSpec | undefined) => string> = {
-    segmentTls: (pod) => String(names(pod).includes(SEGMENT_TLS_CONTAINER)),
+    segmentTls: (pod) => String(podHasSegmentTls(pod)),
     primaryLease: (pod) => String(names(pod).includes(PRIMARY_LEASE_CONTAINER)),
     podAntiAffinity: (pod) => canonical(pod?.affinity?.podAntiAffinity ?? null),
   };

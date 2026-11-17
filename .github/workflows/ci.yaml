@@ -99,17 +99,17 @@ jobs:
 
       # the static binary the pods run, through the tests of the agent's programs: the signed
       # request protocol (TypeScript and Rust), the puller, the segment server, the isolation
-      # check, the segment TLS proxy, the replication init's helpers, the Lease holder, the
+      # check, segment TLS, the replication init's helpers, the Lease holder, the
       # metrics exporter and the Jobs' programs
       - name: Conformance (the static binary)
         working-directory: operator
         run: |
           npm ci
           FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" NO_COLOR=1 \
-            npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts tests/isolation-check.test.ts tests/segment-tls-conformance.test.ts tests/init-helpers-conformance.test.ts tests/lease-holder-conformance.test.ts tests/metrics-exporter-conformance.test.ts tests/jobs-conformance.test.ts tests/switchover.test.ts tests/sync-scripts.test.ts tests/replication-scripts.test.ts 2>&1 | tee /tmp/conformance.txt
+            npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts tests/isolation-check.test.ts tests/segment-tls.test.ts tests/init-helpers-conformance.test.ts tests/lease-holder-conformance.test.ts tests/metrics-exporter-conformance.test.ts tests/jobs-conformance.test.ts tests/switchover.test.ts tests/sync-scripts.test.ts tests/replication-scripts.test.ts 2>&1 | tee /tmp/conformance.txt
           # none skipped: every test of these files runs the static binary, or the protocol and
           # files it shares with the operator (colour codes stripped: the runner's output has them)
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +164 passed \(164\)'
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +144 passed \(144\)'
 
       # STATE from the segment server's service attachment in every state of the database, on
       # real servers (docs/rust-agent-segment-server.md)
@@ -370,8 +370,10 @@ jobs:
           kubectl get events --field-selector reason=SegmentTLSDefaulted,involvedObject.name=test-cluster -o name | grep -q .
           kubectl get secret test-cluster-segment-tls >/dev/null
           timeout 120 bash -c 'until kubectl get pod test-cluster-0 >/dev/null 2>&1; do sleep 3; done'
-          [ "$(kubectl get pod test-cluster-0 -o jsonpath='{.spec.initContainers[0].name}')" = segment-tls ]
-          # the backup file server behind it listens on localhost only
+          # the certificates in the pod (the agent does its TLS itself: no proxy sidecar since v0.171.0)
+          [ "$(kubectl get pod test-cluster-0 -o jsonpath='{.spec.volumes[?(@.name=="segment-tls")].name}')" = segment-tls ]
+          if kubectl get pod test-cluster-0 -o jsonpath='{.spec.initContainers[*].name}' | grep -qw segment-tls; then echo "a segment TLS proxy sidecar"; exit 1; fi
+          # the backup file server accepts TLS on the segment port, plain text on localhost only
           kubectl wait pod/test-cluster-0 --for=condition=Ready --timeout=300s
           kubectl logs test-cluster-0 -c backup-files | grep -q 'listening on 127.0.0.1:3061'
           # and records that the primary will hold its Lease once automatic failover is on (v0.87.0)
@@ -480,13 +482,13 @@ jobs:
           kubectl wait pod/test-cluster-0 --for=condition=Ready --timeout=300s
           kubectl exec test-cluster-0 -c backup-files -- sh -c '$FB_AGENT version' | tee /tmp/agent-version.txt
           grep -q '^fb-agent [0-9]' /tmp/agent-version.txt
-          # the segment server listens on localhost behind the TLS proxy when segment TLS is on
+          # with segment TLS the plain listener of the segment server is on localhost only
           kubectl exec test-cluster-0 -c backup-files -- sh -c \
-            'p=${SEGMENT_LISTEN:+${SEGMENT_LISTEN##*:}}; SEGMENT_PROXY= SEGMENT_PORT=${p:-$SEGMENT_PORT} $FB_AGENT request 127.0.0.1 PING' | tee /tmp/agent-ping.txt
+            'p=${SEGMENT_LISTEN:+${SEGMENT_LISTEN##*:}}; SEGMENT_TLS= SEGMENT_PORT=${p:-$SEGMENT_PORT} $FB_AGENT request 127.0.0.1 PING' | tee /tmp/agent-ping.txt
           [ "$(cat /tmp/agent-ping.txt)" = "OK" ]
           # a wrong password is refused
           kubectl exec test-cluster-0 -c backup-files -- sh -c \
-            'p=${SEGMENT_LISTEN:+${SEGMENT_LISTEN##*:}}; ISC_PASSWORD=wrong SEGMENT_PROXY= SEGMENT_PORT=${p:-$SEGMENT_PORT} $FB_AGENT request 127.0.0.1 PING' | grep -q 'ERR unauthorized (signature)'
+            'p=${SEGMENT_LISTEN:+${SEGMENT_LISTEN##*:}}; ISC_PASSWORD=wrong SEGMENT_TLS= SEGMENT_PORT=${p:-$SEGMENT_PORT} $FB_AGENT request 127.0.0.1 PING' | grep -q 'ERR unauthorized (signature)'
           [ "$(kubectl get pod test-cluster-0 -o jsonpath='{.spec.containers[?(@.name=="backup-files")].command}')" = '["/opt/fb-agent/fb-agent","segment-server"]' ]
           kubectl logs test-cluster-0 -c backup-files | grep -q 'backup file server (fb-agent .*) listening on '
           # no Perl runs in the pod's containers (v0.170.0)
@@ -494,7 +496,7 @@ jobs:
             if kubectl exec test-cluster-0 -c "$c" -- sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null' | tr '\0' ' ' | grep -qw perl; then echo "$c runs Perl"; exit 1; fi
           done
           # the server answers the backup file requests; the journal's are refused (no replication here)
-          ask() { kubectl exec test-cluster-0 -c backup-files -- sh -c "p=\${SEGMENT_LISTEN:+\${SEGMENT_LISTEN##*:}}; SEGMENT_PROXY= SEGMENT_PORT=\${p:-\$SEGMENT_PORT} \$FB_AGENT request 127.0.0.1 $1"; }
+          ask() { kubectl exec test-cluster-0 -c backup-files -- sh -c "p=\${SEGMENT_LISTEN:+\${SEGMENT_LISTEN##*:}}; SEGMENT_TLS= SEGMENT_PORT=\${p:-\$SEGMENT_PORT} \$FB_AGENT request 127.0.0.1 $1"; }
           ask FILES | tail -1 | grep -qx '\.'
           [ "$(ask 'EXISTS no-such-file')" = "OK no" ]
           ask LIST | tee /tmp/agent-list.txt || true
@@ -1945,7 +1947,7 @@ jobs:
           primary=$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})
           replicas=$(for pod in repl-0 repl-1 repl-2; do [ "$pod" = "$primary" ] || echo "$pod"; done)
           replica=$(echo "$replicas" | head -1)
-          # supervised: the rolling update restarts the replicas with the proxy and leaves the
+          # supervised: the rolling update restarts the replicas with TLS and leaves the
           # primary plain until it is let go below, so the mixed mode can be checked
           # the agent's segment servers and pullers (docs/rust-agent-roadmap.md) do their TLS
           # themselves: what follows replicates through them
@@ -1956,12 +1958,12 @@ jobs:
           [ -n "$(kubectl get secret repl-segment-tls -o jsonpath='{.data.ca\.key}')" ]
           tls_ready() {
             kubectl get pods -l "$SEL" \
-              -o jsonpath='{range .items[*]}{.spec.initContainers[0].name} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
+              -o jsonpath='{range .items[*]}{.spec.volumes[?(@.name=="segment-tls")].name} {.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' \
               | grep -c '^segment-tls True$'
           }
           for n in $(seq 1 180); do [ "$(tls_ready)" = 2 ] && break; sleep 5; done
           [ "$(tls_ready)" = 2 ] || { kubectl get firebirdcluster repl -o jsonpath='{.status.rollingUpdate}'; echo; kubectl get pods -l "$SEL"; exit 1; }
-          [ "$(kubectl get pod "$primary" -o jsonpath='{.spec.initContainers[0].name}')" != segment-tls ]
+          [ -z "$(kubectl get pod "$primary" -o jsonpath='{.spec.volumes[?(@.name=="segment-tls")].name}')" ]
           # the operator publishes the plain primary for the proxies
           kubectl get configmap repl-segment-tls-peers -o jsonpath='{.data.plain-peers}' | tee /dev/stderr | grep -qx "$primary"
 
@@ -1969,7 +1971,7 @@ jobs:
           before=$(count "$primary")
           for i in $(seq 401 405); do sql "$primary" "insert into app values ($i, 'mixed'); commit;" >/dev/null; done
           for pod in $replicas; do wait_count "$pod" $((before + 5)); done
-          echo "replicas running the proxy kept replicating from the plain primary"
+          echo "replicas running TLS kept replicating from the plain primary"
           # ... pulled by the agent's puller, which reaches the plain primary itself (plain-peers)
           for pod in $replicas; do
             [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="segment-puller")].command}')" = '["/opt/fb-agent/fb-agent","puller"]' ]
@@ -2018,16 +2020,12 @@ jobs:
           kubectl logs "$primary" -c segment-server | grep -q 'database state from a service attachment to the local server'
           # what it does not have, or is asked wrongly, it refuses
           for request in NOSUCH 'GET nothing' 'NBACKUP 7 x.nbk' 'STANDBY maybe'; do
-            kubectl exec "$primary" -c segment-server -- sh -c "SEGMENT_PROXY= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 $request" 2>&1 | grep -qx 'ERR bad request'
+            kubectl exec "$primary" -c segment-server -- sh -c "SEGMENT_TLS= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 $request" 2>&1 | grep -qx 'ERR bad request'
           done
-          # the segment TLS proxy is the agent's too (v0.164.0), in every instance: the rows above
-          # were shipped through it
+          # no segment TLS proxy (v0.171.0): the segment server accepts mutual TLS itself, and the
+          # pullers connect over TLS themselves
           for pod in repl-0 repl-1 repl-2; do
-            [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.initContainers[?(@.name=="segment-tls")].command}')" = '["/app/fb-agent","segment-tls"]' ]
-            kubectl logs "$pod" -c segment-tls | grep -q 'segment TLS: client proxy on 127.0.0.1:3052'
-            # and the segment server accepts mutual TLS itself (v0.165.0): the proxy has the client
-            # side only, for the pod's other clients, and the pullers connect over TLS themselves
-            if kubectl logs "$pod" -c segment-tls | grep -q 'segment TLS: accepting on'; then echo "$pod: the proxy still has the segment port"; exit 1; fi
+            if kubectl get pod "$pod" -o jsonpath='{.spec.initContainers[*].name}' | grep -qw segment-tls; then echo "$pod: a segment TLS proxy sidecar"; exit 1; fi
             kubectl logs "$pod" -c segment-server | grep -q 'segment TLS: the segment server accepts mutual TLS itself on 0.0.0.0:3051'
             [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="segment-puller")].env[?(@.name=="SEGMENT_TLS_DIR")].value}')" = /etc/segment-tls ]
           done
@@ -2042,16 +2040,16 @@ jobs:
           # primary's, the engine version
           for request in POSITION HEADER VERSION ISOLATION SYNCTO; do
             for pod in "$primary" "$replica"; do
-              kubectl exec "$pod" -c segment-server -- sh -c "SEGMENT_PROXY= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 $request" > /tmp/front.txt
+              kubectl exec "$pod" -c segment-server -- sh -c "SEGMENT_TLS= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 $request" > /tmp/front.txt
               echo "$pod $request: $(cat /tmp/front.txt)"
               grep -q '^OK ' /tmp/front.txt
             done
           done
           version=$(kubectl exec "$primary" -c firebird -- bash -c "echo \"set list on; select rdb\\\$get_context('SYSTEM', 'ENGINE_VERSION') as v from rdb\\\$database;\" | isql -q localhost:$DB" | awk '$1 == "V" { print $2 }')
-          kubectl exec "$primary" -c segment-server -- sh -c 'SEGMENT_PROXY= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 VERSION' | grep -qx "OK $version"
-          kubectl exec "$primary" -c segment-server -- sh -c 'SEGMENT_PROXY= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 ISOLATION' | grep -qx 'OK online'
-          kubectl exec "$primary" -c segment-server -- sh -c 'SEGMENT_PROXY= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 SYNCTO' | grep -q '^OK '
-          kubectl exec "$primary" -c segment-server -- sh -c 'SEGMENT_PROXY= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 POSITION' | grep -qx 'OK primary'
+          kubectl exec "$primary" -c segment-server -- sh -c 'SEGMENT_TLS= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 VERSION' | grep -qx "OK $version"
+          kubectl exec "$primary" -c segment-server -- sh -c 'SEGMENT_TLS= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 ISOLATION' | grep -qx 'OK online'
+          kubectl exec "$primary" -c segment-server -- sh -c 'SEGMENT_TLS= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 SYNCTO' | grep -q '^OK '
+          kubectl exec "$primary" -c segment-server -- sh -c 'SEGMENT_TLS= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 POSITION' | grep -qx 'OK primary'
           # a seed is the front's too (v0.159.0): a replica is re-seeded, and the instance it took
           # its copy from made it itself (its own SQL attachments for the backup lock) or sent the
           # primary's offline bootstrap seed
@@ -2077,11 +2075,11 @@ jobs:
           # the operator reaches the segment servers over TLS too: the lag is measured again
           timeout 120 bash -c "until [ \"\$(kubectl get pod $replica -o jsonpath='{.metadata.annotations.firebird\\.cloudnative-firebird\\.io/replication-lag-seconds}')\" = 0 ]; do sleep 5; done" \
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.replicationStatus}'; exit 1; }
-          # a signed request through the proxy is answered
+          # a signed request over TLS is answered
           kubectl exec "$replica" -c segment-server -- sh -c '$FB_AGENT request "$0" PING' "$primary.repl-headless" | tee /tmp/tls-ping.txt
           grep -q '^OK' /tmp/tls-ping.txt
 
-          # Jobs reach the instances through their own proxy, and still meet the restricted Pod Security Standard
+          # Jobs reach the instances over TLS themselves, and still meet the restricted Pod Security Standard
           kubectl apply -f - <<'EOF'
           apiVersion: firebird.cloudnative-firebird.io/v1
           kind: FirebirdBackup
@@ -2098,12 +2096,14 @@ jobs:
             sleep 5
           done
           [ "$phase" = Completed ] || { kubectl get firebirdbackup repl-tls -o yaml; kubectl logs job/backup-repl-tls --all-containers || true; exit 1; }
-          [ "$(kubectl get job backup-repl-tls -o jsonpath='{.spec.template.spec.initContainers[0].name}')" = segment-tls ]
-          # a Job that runs the agent has it (v0.169.0), installed after the proxy; this local
-          # nbackup runs only fbsvcmgr, and gets none
+          # the Job's containers have the certificates and do their TLS themselves (no proxy since v0.171.0)
+          [ "$(kubectl get job backup-repl-tls -o jsonpath='{.spec.template.spec.volumes[?(@.name=="segment-tls")].name}')" = segment-tls ]
+          [ "$(kubectl get job backup-repl-tls -o jsonpath='{.spec.template.spec.initContainers[?(@.name=="firebird-backup")].env[?(@.name=="SEGMENT_TLS")].value}')" = true ]
+          # a Job that runs the agent has it (v0.169.0), installed first; this local nbackup runs
+          # only fbsvcmgr, and gets none
           job_spec() { kubectl get job backup-repl-tls -o json | jq -c '.spec.template.spec'; }
           if job_spec | jq -r '[.initContainers[], .containers[]] | .[] | select(.name != "agent-install" and .restartPolicy != "Always") | ((.command // []) + (.args // [])) | join(" ")' | grep -q 'fb-agent'; then
-            [ "$(job_spec | jq -r '.initContainers[1].name')" = agent-install ]
+            [ "$(job_spec | jq -r '.initContainers[0].name')" = agent-install ]
           else
             if job_spec | jq -e '.initContainers[] | select(.name == "agent-install")' >/dev/null; then echo "the agent is installed into a Job that does not run it"; exit 1; fi
           fi
@@ -2121,7 +2121,7 @@ jobs:
           # once the switch's grace period is over, a request in plain text is refused
           until_ms=$(kubectl get configmap repl-segment-tls-peers -o jsonpath='{.data.accept-plain-until}')
           while [ "$(date +%s%3N)" -lt $((until_ms + 15000)) ]; do sleep 10; done
-          if kubectl exec "$replica" -c segment-server -- sh -c 'env -u SEGMENT_PROXY $FB_AGENT request "$0" PING' "$primary.repl-headless" 2>&1 | grep -q '^OK'; then
+          if kubectl exec "$replica" -c segment-server -- sh -c 'SEGMENT_TLS= $FB_AGENT request "$0" PING' "$primary.repl-headless" 2>&1 | grep -q '^OK'; then
             echo "the segment server answered a plain connection"; exit 1
           fi
           echo "plain connections are refused"
@@ -2177,7 +2177,7 @@ jobs:
           EOF
           timeout 300 bash -c 'until kubectl get pod mig-0 >/dev/null 2>&1; do sleep 3; done'
           kubectl wait pod/mig-0 --for=condition=Ready --timeout=300s
-          [ "$(kubectl get pod mig-0 -o jsonpath='{.spec.initContainers[*].name}')" != segment-tls ]
+          [ -z "$(kubectl get pod mig-0 -o jsonpath='{.spec.volumes[?(@.name=="segment-tls")].name}')" ]
           # the repl cluster (explicitly false before, true now) is never touched: it has no annotation
           kubectl set env deployment/cloudnative-firebird-operator -n cloudnative-firebird-system SEGMENT_TLS_MIGRATE=pinned
           kubectl rollout status deployment/cloudnative-firebird-operator -n cloudnative-firebird-system --timeout=180s
@@ -2185,7 +2185,7 @@ jobs:
           timeout 600 bash -c "until [ \"\$(kubectl get firebirdcluster mig -o jsonpath='{.metadata.annotations.firebird\\.cloudnative-firebird\\.io/segment-tls-migration}')\" = done ]; do sleep 5; done" \
             || { annotation; echo; kubectl get firebirdcluster mig -o jsonpath='{.status}'; echo; kubectl get pods -l firebird.cloudnative-firebird.io/cluster=mig; exit 1; }
           [ "$(kubectl get firebirdcluster mig -o jsonpath={.spec.segmentTLS.enabled})" = true ]
-          [ "$(kubectl get pod mig-0 -o jsonpath='{.spec.initContainers[0].name}')" = segment-tls ]
+          [ "$(kubectl get pod mig-0 -o jsonpath='{.spec.volumes[?(@.name=="segment-tls")].name}')" = segment-tls ]
           kubectl wait pod/mig-0 --for=condition=Ready --timeout=300s
           reasons=$(kubectl get events --field-selector involvedObject.name=mig -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}')
           echo "$reasons" | grep -qx SegmentTLSMigrationStarted
@@ -3315,7 +3315,7 @@ jobs:
           echo "waiting for the SegmentTLSRequired event"
           timeout 120 bash -c 'until kubectl get events --field-selector reason=SegmentTLSRequired,involvedObject.name=plain -o name | grep -q .; do sleep 5; done' \
             || { kubectl get events --field-selector involvedObject.name=plain; exit 1; }
-          [ "$(kubectl get pod plain-0 -o jsonpath='{.spec.initContainers[*].name}')" != segment-tls ]
+          [ -z "$(kubectl get pod plain-0 -o jsonpath='{.spec.volumes[?(@.name=="segment-tls")].name}')" ]
           [ "$(kubectl get firebirdcluster plain -o jsonpath={.spec.segmentTLS.enabled})" = false ]
           # the metric, on the leader once it has reconciled both clusters (the Lease may still name
           # the old leader for a moment after the rollout)

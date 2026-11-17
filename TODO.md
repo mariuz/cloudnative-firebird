@@ -61,13 +61,14 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   child processes. The measurements are in the proposal.
 
 - [ ] **Rust agent, follow-ups** ([docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md)):
-  every cluster runs the agent and the Perl scripts are deleted (v0.170.0). Left: the Lease
-  holder and the Jobs' programs could do their TLS themselves, with the certificates mounted, as
-  the segment server, the puller and the replication init do; the segment TLS proxy sidecar
-  would then go. The operator's Node implementations of the Lease holder and the segment TLS
-  proxy (`lease-holder.ts`, `segment-tls.ts`) run in no pod and can be deleted, and the former
-  name of the init script (`init-instance-agent.sh` in the cluster ConfigMap) once no pod of
-  before v0.170.0 can be left.
+  every cluster runs the agent (v0.170.0), and since v0.171.0 every process of segment TLS does
+  its TLS itself (no proxy sidecar; the Node Lease holder and proxy deleted). Left:
+  - the former name of the init script (`init-instance-agent.sh` in the cluster ConfigMap), once
+    no pod of before v0.170.0 can be left (an upgrade from v0.169.0 or earlier still needs it);
+  - segment TLS no longer needs native sidecars (Kubernetes 1.29): its default for new clusters
+    (`SEGMENT_TLS_DEFAULT=auto`), the migration of pinned clusters (`SEGMENT_TLS_MIGRATE`) and the
+    admission and startup warnings still follow the 1.29 rule. Dropping it is a policy decision
+    (it would turn TLS on for new clusters on older Kubernetes).
 - [ ] **An atomic journal archive command**: copy to a temporary name and rename, so the archive
   never holds a segment that is still being copied. The servers only offer complete segments
   since v0.155.0, which covers the replicas; other readers of the archive (the journal archive

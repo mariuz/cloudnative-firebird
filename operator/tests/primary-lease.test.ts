@@ -10,10 +10,6 @@ import { notFoundError } from './helpers/factories';
 import type { FirebirdCluster } from '../src/types';
 import { afterEach, type Mock } from 'vitest';
 import { validateClusterSpec } from '../src/utils/validation';
-import { LeaseHolder, renewDeadlineSeconds, renewIntervalSeconds, isPrimary, type DatabaseState } from '../src/lease-holder';
-import { mkdtempSync, writeFileSync, mkdirSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
 
 const env = (c: V1Container | undefined) => Object.fromEntries((c?.env ?? []).map((e) => [e.name, e.value ?? JSON.stringify(e.valueFrom)]));
 const podSpec = (cluster = makeCluster()) => buildStatefulSet(cluster).spec!.template.spec as V1PodSpec;
@@ -89,10 +85,11 @@ describe('the primary Lease', () => {
     const token = spec.volumes!.find((v) => v.name === 'primary-lease-token')!;
     expect(token.projected!.sources!.map((s) => Object.keys(s)[0])).toEqual(['serviceAccountToken', 'configMap']);
     expect(token.projected!.sources![0].serviceAccountToken).toMatchObject({ path: 'token', expirationSeconds: 3600 });
-    // the segment server behind the TLS proxy
+    // with segment TLS: the segment server's plain listener on localhost, so no certificates
     const tls = podSpec(withLease({ segmentTLS: { enabled: true } }));
     expect(env(named(tls, 'lease-holder')).SEGMENT_SERVER).toBe('127.0.0.1:3061');
-    expect(tls.initContainers![0].name).toBe('segment-tls');
+    expect(env(named(tls, 'lease-holder')).SEGMENT_TLS_DIR).toBeUndefined();
+    expect(tls.initContainers![0].name).toBe('lease-holder');
     // nothing without it
     const plain = podSpec(makeCluster({ instances: 3, replication: { enabled: true, failover: { enabled: true } } }));
     expect(named(plain, 'lease-holder')).toBeUndefined();
@@ -100,207 +97,8 @@ describe('the primary Lease', () => {
   });
 });
 
-describe('the lease holder', () => {
-  function holder(overrides: { primary?: boolean; state?: DatabaseState; lease?: object | undefined | (() => Promise<object | undefined>) } = {}) {
-    let now = 1_000_000;
-    const log: string[] = [];
-    const fence = vi.fn().mockResolvedValue(undefined);
-    const rejoin = vi.fn().mockResolvedValue(undefined);
-    const renew = vi.fn().mockResolvedValue(undefined);
-    const state = { primary: overrides.primary ?? true, db: (overrides.state ?? 'online') as DatabaseState, lease: overrides.lease ?? { spec: { holderIdentity: 'db-0' } } };
-    const h = new LeaseHolder({
-      self: 'db-0',
-      durationSeconds: 15,
-      isPrimary: () => state.primary,
-      databaseState: async () => state.db,
-      api: { read: async () => (typeof state.lease === 'function' ? state.lease() : state.lease), renew },
-      fence,
-      rejoin,
-      now: () => now,
-      log: (m) => log.push(m),
-    });
-    return { h, state, fence, rejoin, renew, log, advance: (s: number) => (now += s * 1000) };
-  }
-
-  it('renews the Lease while the pod is the primary and its database online, and never otherwise', async () => {
-    const t = holder();
-    expect(await t.h.tick()).toMatch(/^holding the Lease as the primary/);
-    expect(t.renew).toHaveBeenCalledWith({ spec: { holderIdentity: 'db-0' } }, 'db-0', 15);
-    t.state.db = 'shutdown';
-    expect(await t.h.tick()).toBe('database shutdown: not renewing the Lease');
-    t.state.db = undefined;
-    expect(await t.h.tick()).toBe('database not answering: not renewing the Lease');
-    t.state.db = 'online';
-    t.state.primary = false;
-    expect(await t.h.tick()).toBe('not the primary: not holding the Lease');
-    expect(t.renew).toHaveBeenCalledTimes(1);
-    expect(t.fence).not.toHaveBeenCalled();
-    // an empty Lease (nobody holds it) is acquired
-    t.state.primary = true;
-    t.state.lease = { spec: {} };
-    expect(await t.h.tick()).toMatch(/acquired/);
-    expect(t.renew).toHaveBeenCalledTimes(2);
-    expect(renewIntervalSeconds(15)).toBe(5);
-    expect(renewIntervalSeconds(5)).toBe(1);
-  });
-
-  it('fences the database when the Lease names another instance', async () => {
-    const t = holder({ lease: { spec: { holderIdentity: 'db-2', renewTime: new Date().toISOString() } } });
-    expect(await t.h.tick()).toBe('fenced: the Lease is held by db-2');
-    expect(t.fence).toHaveBeenCalledWith('the Lease is held by db-2');
-    expect(t.renew).not.toHaveBeenCalled();
-    // fenced: nothing more while another instance holds the Lease
-    t.state.db = 'fenced';
-    expect(await t.h.tick()).toBe('fenced; the Lease is held by db-2');
-    expect(t.fence).toHaveBeenCalledTimes(1);
-    expect(t.rejoin).not.toHaveBeenCalled();
-  });
-
-  it('re-acquires its Lease and brings a fenced database back online, unless a failover took the Lease over', async () => {
-    const t = holder({ state: 'fenced', lease: { metadata: { resourceVersion: '7' }, spec: { holderIdentity: 'db-0' } } });
-    expect(await t.h.tick()).toBe('re-acquired the Lease: database back online');
-    expect(t.renew).toHaveBeenCalledWith({ metadata: { resourceVersion: '7' }, spec: { holderIdentity: 'db-0' } }, 'db-0', 15);
-    expect(t.rejoin).toHaveBeenCalledTimes(1);
-    t.state.db = 'online';
-    expect(await t.h.tick()).toMatch(/^holding the Lease/);
-    // the API server still unreachable: it stays fenced
-    const cut = holder({ state: 'fenced', lease: async () => { throw new Error('timed out'); } });
-    expect(await cut.h.tick()).toBe('fenced; cannot read the Lease (timed out)');
-    expect(cut.rejoin).not.toHaveBeenCalled();
-    // the operator took the Lease over between the read and the renewal (a conflict): it stays fenced
-    const taken = holder({ state: 'fenced' });
-    taken.renew.mockRejectedValueOnce(new Error('409 conflict'));
-    expect(await taken.h.tick()).toBe('fenced; cannot re-acquire the Lease (409 conflict)');
-    expect(taken.rejoin).not.toHaveBeenCalled();
-    // an expired Lease nobody holds is acquired too; one held by a replica promoted meanwhile is not
-    const free = holder({ state: 'fenced', lease: { spec: {} } });
-    expect(await free.h.tick()).toBe('re-acquired the Lease: database back online');
-    // a database shut down for another reason (a Job) is left alone
-    const job = holder({ state: 'shutdown' });
-    expect(await job.h.tick()).toBe('database shutdown: not renewing the Lease');
-    expect(job.rejoin).not.toHaveBeenCalled();
-    // one the isolation check fenced (nothing reached this primary) is the operator's to lift
-    const isolated = holder({ state: 'isolated' });
-    expect(await isolated.h.tick()).toBe('database isolated: not renewing the Lease');
-    expect(isolated.rejoin).not.toHaveBeenCalled();
-    expect(isolated.renew).not.toHaveBeenCalled();
-    // a failed rejoin is retried on the next tick
-    const r = holder({ state: 'fenced' });
-    r.rejoin.mockRejectedValueOnce(new Error('ERR cannot bring online'));
-    expect(await r.h.tick()).toMatch(/cannot bring the database back online/);
-    expect(await r.h.tick()).toBe('re-acquired the Lease: database back online');
-  });
-
-  it('fences the database once the Lease could not be renewed for the renew deadline, before it expires', async () => {
-    expect(renewDeadlineSeconds(15)).toBe(10);
-    expect(renewDeadlineSeconds(5)).toBe(3);
-    expect(renewDeadlineSeconds(120)).toBe(80);
-    for (const d of [5, 6, 7, 15, 30, 120]) {
-      expect(renewDeadlineSeconds(d)).toBeGreaterThan(renewIntervalSeconds(d));
-      expect(renewDeadlineSeconds(d)).toBeLessThan(d);
-    }
-    const t = holder();
-    await t.h.tick();
-    t.state.lease = async () => {
-      throw new Error('connect ETIMEDOUT');
-    };
-    t.advance(5);
-    expect(await t.h.tick()).toBe('cannot read the Lease (connect ETIMEDOUT): fencing in 5s');
-    expect(t.fence).not.toHaveBeenCalled();
-    t.advance(5);
-    expect(await t.h.tick()).toBe('fenced: the Lease could not be renewed');
-    expect(t.fence).toHaveBeenCalledWith('cannot renew the Lease: the API server has not answered for 10s');
-    // a failing renewal counts the same way
-    const r = holder();
-    r.renew.mockRejectedValue(new Error('403'));
-    expect(await r.h.tick()).toBe('cannot renew the Lease (403): fencing in 10s');
-    r.advance(10);
-    expect(await r.h.tick()).toBe('fenced: the Lease could not be renewed');
-    // a fence that fails is retried on the next tick
-    const f = holder({ lease: { spec: { holderIdentity: 'db-1' } } });
-    f.fence.mockRejectedValueOnce(new Error('no reply'));
-    await f.h.tick();
-    expect(f.log).toContain('cannot fence the database (no reply); retrying');
-    await f.h.tick();
-    expect(f.fence).toHaveBeenCalledTimes(2);
-  });
-
-  it('counts the deadline from when the last successful renewal was sent', async () => {
-    const t = holder();
-    // a renewal that takes 4s to answer: its renewTime is when it was sent
-    t.renew.mockImplementationOnce(async () => {
-      t.advance(4);
-    });
-    await t.h.tick();
-    t.state.lease = async () => {
-      throw new Error('connect ETIMEDOUT');
-    };
-    t.advance(2);
-    expect(await t.h.tick()).toBe('cannot read the Lease (connect ETIMEDOUT): fencing in 4s');
-  });
-
-  it('enforces the deadline every second, whatever a tick is waiting for', async () => {
-    const t = holder();
-    expect(await t.h.checkDeadline()).toBeUndefined();
-    await t.h.tick();
-    t.advance(9);
-    expect(await t.h.checkDeadline()).toBeUndefined();
-    // a tick stuck on a renewal that does not answer
-    let answer: () => void = () => undefined;
-    t.renew.mockImplementationOnce(() => new Promise<void>((resolve) => (answer = resolve)));
-    const stuck = t.h.tick();
-    t.advance(1);
-    expect(await t.h.checkDeadline()).toBe('fenced: the Lease could not be renewed');
-    expect(t.fence).toHaveBeenCalledWith('cannot renew the Lease: no renewal succeeded for 10s (renew deadline)');
-    // nothing more until the Lease is held again
-    t.advance(1);
-    expect(await t.h.checkDeadline()).toBeUndefined();
-    expect(t.fence).toHaveBeenCalledTimes(1);
-    // the renewal answers after the fence: it does not count, the next tick brings the database back
-    answer();
-    expect(await stuck).toBe('fenced: the Lease could not be renewed in time');
-    expect(await t.h.checkDeadline()).toBeUndefined();
-    t.state.db = 'fenced';
-    expect(await t.h.tick()).toBe('re-acquired the Lease: database back online');
-    expect(t.rejoin).toHaveBeenCalledTimes(1);
-    // a fence that fails is retried at the next check
-    const f = holder();
-    await f.h.tick();
-    f.fence.mockRejectedValueOnce(new Error('no reply'));
-    f.advance(10);
-    await f.h.checkDeadline();
-    expect(f.log).toContain('cannot fence the database (no reply); retrying');
-    f.advance(1);
-    expect(await f.h.checkDeadline()).toBe('fenced: the Lease could not be renewed');
-    expect(f.fence).toHaveBeenCalledTimes(2);
-    // never while not holding the Lease: a replica, or a database down
-    const replica = holder({ primary: false });
-    await replica.h.tick();
-    replica.advance(60);
-    expect(await replica.h.checkDeadline()).toBeUndefined();
-    const down = holder({ state: 'shutdown' });
-    await down.h.tick();
-    down.advance(60);
-    expect(await down.h.checkDeadline()).toBeUndefined();
-    expect(replica.fence).not.toHaveBeenCalled();
-    expect(down.fence).not.toHaveBeenCalled();
-  });
-
-  it('reads the pod role from the ConfigMap file or the promoted marker', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'lease-holder-'));
-    const primaryFile = join(dir, 'primary');
-    const e = { POD_NAME: 'db-1', PRIMARY_FILE: primaryFile, REPLICATION_DIR: join(dir, 'repl') };
-    expect(isPrimary(e)).toBe(false);
-    writeFileSync(primaryFile, 'db-0.db-headless\n');
-    expect(isPrimary(e)).toBe(false);
-    writeFileSync(primaryFile, 'db-1.db-headless\n');
-    expect(isPrimary(e)).toBe(true);
-    writeFileSync(primaryFile, 'db-0.db-headless\n');
-    mkdirSync(join(dir, 'repl'));
-    writeFileSync(join(dir, 'repl', 'promoted'), '1\n');
-    expect(isPrimary(e)).toBe(true);
-  });
-});
+// The holder's decisions (renewing, fencing, re-acquiring, the renew deadline, the pod's role)
+// are the unit tests of the agent's lease.rs, and its requests tests/lease-holder-conformance.test.ts.
 
 /** API clients whose calls default to: read/get → 404, list → empty, others → {} */
 function mockApi(overrides: Record<string, Mock> = {}) {
