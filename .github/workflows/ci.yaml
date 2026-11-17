@@ -2099,8 +2099,14 @@ jobs:
           done
           [ "$phase" = Completed ] || { kubectl get firebirdbackup repl-tls -o yaml; kubectl logs job/backup-repl-tls --all-containers || true; exit 1; }
           [ "$(kubectl get job backup-repl-tls -o jsonpath='{.spec.template.spec.initContainers[0].name}')" = segment-tls ]
-          # the Jobs have the agent too (v0.169.0), installed after the proxy
-          [ "$(kubectl get job backup-repl-tls -o jsonpath='{.spec.template.spec.initContainers[1].name}')" = agent-install ]
+          # a Job that runs the agent has it (v0.169.0), installed after the proxy; this local
+          # nbackup runs only fbsvcmgr, and gets none
+          job_spec() { kubectl get job backup-repl-tls -o json | jq -c '.spec.template.spec'; }
+          if job_spec | jq -r '[.initContainers[], .containers[]] | .[] | select(.name != "agent-install" and .restartPolicy != "Always") | ((.command // []) + (.args // [])) | join(" ")' | grep -q 'fb-agent'; then
+            [ "$(job_spec | jq -r '.initContainers[1].name')" = agent-install ]
+          else
+            if job_spec | jq -e '.initContainers[] | select(.name == "agent-install")' >/dev/null; then echo "the agent is installed into a Job that does not run it"; exit 1; fi
+          fi
           if kubectl get job backup-repl-tls -o json | jq -r '.spec.template.spec | [.initContainers[], .containers[]] | .[] | ((.command // []) + (.args // [])) | join(" ")' | grep -qw perl; then
             echo "the backup Job runs Perl"; exit 1
           fi
