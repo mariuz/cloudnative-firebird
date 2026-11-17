@@ -580,6 +580,13 @@ impl World for Pod {
 }
 
 pub fn run() -> io::Result<()> {
+    // SIGTERM reaches this process only (the container's PID 1), and is caught from the start, so
+    // one that comes as it starts is not fatal: the holder keeps working until
+    // the pod's Firebird server has stopped, then exits
+    let stopping = Arc::new(AtomicBool::new(false));
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        signal_hook::flag::register(signal, Arc::clone(&stopping))?;
+    }
     let (pod, lease) = (var("POD_NAME"), var("LEASE_NAME"));
     if pod.is_empty() || lease.is_empty() {
         return Err(io::Error::other("lease holder: POD_NAME and LEASE_NAME are required"));
@@ -610,12 +617,6 @@ pub fn run() -> io::Result<()> {
         renew_deadline(duration)
     );
 
-    // SIGTERM reaches this process only (the container's PID 1): the holder keeps working until
-    // the pod's Firebird server has stopped, then exits
-    let stopping = Arc::new(AtomicBool::new(false));
-    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
-        signal_hook::flag::register(signal, Arc::clone(&stopping))?;
-    }
     let deadline = Arc::clone(&holder);
     thread::spawn(move || {
         let mut said = false;

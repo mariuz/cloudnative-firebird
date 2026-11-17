@@ -490,6 +490,13 @@ fn seconds(name: &str, default: u64) -> Duration {
 }
 
 pub fn run() -> io::Result<()> {
+    // SIGTERM reaches this process only (the container's PID 1), and is caught from the start, so
+    // one that comes as it starts is not fatal: it keeps serving until the pod's
+    // Firebird server has stopped (at once where none runs)
+    let stopping = Arc::new(AtomicBool::new(false));
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        signal_hook::flag::register(signal, Arc::clone(&stopping))?;
+    }
     let files_only = var("FILES_ONLY") == "true";
     let archive = var("ARCHIVE_DIR");
     if archive.is_empty() && !files_only {
@@ -626,12 +633,6 @@ pub fn run() -> io::Result<()> {
             retention,
             journal,
         );
-    }
-    // SIGTERM reaches this process only (the container's PID 1): it keeps serving until the pod's
-    // Firebird server has stopped (at once where none runs)
-    let stopping = Arc::new(AtomicBool::new(false));
-    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
-        signal_hook::flag::register(signal, Arc::clone(&stopping))?;
     }
     thread::spawn(move || loop {
         if stopping.load(Ordering::Relaxed) && crate::puller::firebird_stopped() {

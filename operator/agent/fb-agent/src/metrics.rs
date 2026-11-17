@@ -321,6 +321,13 @@ fn numeric(value: &str) -> bool {
 }
 
 pub fn run() -> io::Result<()> {
+    // SIGTERM reaches this process only (the container's PID 1), and is caught from the start, so
+    // one that comes as it starts is not fatal: the exporter keeps answering
+    // until the pod's Firebird server has stopped, then exits
+    let stopping = Arc::new(AtomicBool::new(false));
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        signal_hook::flag::register(signal, Arc::clone(&stopping))?;
+    }
     let database = var("DATABASE_PATH");
     if database.is_empty() {
         return Err(io::Error::other("DATABASE_PATH is required"));
@@ -339,12 +346,6 @@ pub fn run() -> io::Result<()> {
     let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| io::Error::other(format!("cannot listen on {port}: {e}")))?;
     println!("metrics on :{port}/metrics");
 
-    // SIGTERM reaches this process only (the container's PID 1): the exporter keeps answering
-    // until the pod's Firebird server has stopped, then exits
-    let stopping = Arc::new(AtomicBool::new(false));
-    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
-        signal_hook::flag::register(signal, Arc::clone(&stopping))?;
-    }
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(1));
         if stopping.load(Ordering::Relaxed) && crate::puller::firebird_stopped() {
