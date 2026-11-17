@@ -1,28 +1,20 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { ChildProcess, spawn, spawnSync } from 'child_process';
-import { chmodSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { request } from 'http';
 import { connect, createServer, Server } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { UPGRADE_SCRIPTS } from '../src/utils/replication';
+import { agentBin } from './helpers/implementations';
 
 /**
  * The custom metrics exporter of the Rust agent (`fb-agent metrics-exporter`,
- * agent/fb-agent/src/metrics.rs) and metrics-exporter.pl: the same queries file and the same
- * stand-in isql for both; what they serve and what they log must be the same, the durations
- * aside.
+ * agent/fb-agent/src/metrics.rs), with a stand-in isql: what it serves and what it logs, the
+ * durations aside (as metrics-exporter.pl did, which it replaced; removed in v0.170.0).
  *
  * Needs the fb-agent binary (FB_AGENT_BIN, or a build in agent/target); skipped without it. The
  * "Rust agent" CI job runs this file with it.
  */
-const agentBin = [
-  process.env.FB_AGENT_BIN,
-  ...['x86_64-unknown-linux-musl/release', 'aarch64-unknown-linux-musl/release', 'release', 'debug'].map((d) =>
-    join(__dirname, '..', 'agent', 'target', d, 'fb-agent'),
-  ),
-].find((p) => p && existsSync(p));
-const hasPerl = spawnSync('perl', ['-v']).status === 0;
 
 /** the queries as the operator renders them (utils/custom-queries.ts) */
 const QUERIES = [
@@ -71,7 +63,7 @@ const QUERIES = [
   '',
 ].join('\n');
 
-describe.skipIf(!agentBin || !hasPerl)('the metrics exporter: fb-agent and metrics-exporter.pl', { timeout: 60_000 }, () => {
+describe.skipIf(!agentBin)('the metrics exporter of fb-agent', { timeout: 60_000 }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'metrics-conformance-'));
   const isql = join(dir, 'isql');
   // args: -q -b -i <file> <database>; the database it was asked for is recorded
@@ -116,7 +108,7 @@ esac
       req.on('error', reject);
       req.end();
     });
-  /** both exporters with the same environment, each on its own port */
+  /** the exporter with the environment, on a port of its own */
   const start = async (env: Record<string, string> = {}) => {
     const run = async (command: string, args: string[]) => {
       const port = await freePort();
@@ -131,7 +123,7 @@ esac
       for (let i = 0; i < 100 && !log.includes('metrics on'); i++) await new Promise((r) => setTimeout(r, 50));
       return { port, child, log: () => log };
     };
-    return { perl: await run('perl', ['-e', UPGRADE_SCRIPTS['metrics-exporter.pl']]), agent: await run(agentBin!, ['metrics-exporter']) };
+    return { agent: await run(agentBin!, ['metrics-exporter']) };
   };
   /** the durations aside */
   const steady = (body: string) => body.replace(/(firebird_exporter_query_duration_seconds\{[^}]*\}) \d+\.\d{3}/g, '$1 T');
@@ -145,12 +137,48 @@ esac
     for (const s of servers.splice(0)) s.close();
   });
 
-  it('serve the same metrics for the same queries', async () => {
-    const { perl, agent } = await start();
-    const [theirs, ours] = [await get(perl.port, '/metrics'), await get(agent.port, '/metrics')];
+  it('serve the metrics of the queries', async () => {
+    const { agent } = await start();
+    const ours = await get(agent.port, '/metrics');
     expect(ours.status).toBe(200);
-    expect(ours.type).toBe(theirs.type);
-    expect(steady(ours.body)).toBe(steady(theirs.body));
+    expect(ours.type).toMatchInlineSnapshot(`"text/plain; version=0.0.4"`);
+    expect(steady(ours.body)).toMatchInlineSnapshot(`
+      "# HELP firebird_up Whether the database answers a query
+      # TYPE firebird_up gauge
+      firebird_up 1
+      # HELP firebird_attachments_total Attachments\\\\nper user \\\\\\\\ now
+      # TYPE firebird_attachments_total gauge
+      firebird_attachments_total{username="SYSDBA"} 2
+      firebird_attachments_total{username="APP \\"x\\" \\\\ y"} 5
+      # HELP firebird_odd_values_v2_amount firebird_odd_values_v2_amount
+      # TYPE firebird_odd_values_v2_amount gauge
+      firebird_odd_values_v2_amount{kind="a"} -12.50
+      firebird_odd_values_v2_amount{kind="",note="c"} +.5
+      # HELP firebird_odd_values_v2_ratio A ratio
+      # TYPE firebird_odd_values_v2_ratio gauge
+      firebird_odd_values_v2_ratio{kind="a"} 1.5e-3
+      firebird_odd_values_v2_ratio{kind="",note="c"} 7.
+      # HELP firebird_transactions_next_tx Next transaction
+      # TYPE firebird_transactions_next_tx counter
+      firebird_transactions_next_tx 1234
+      # HELP firebird_exporter_query_error Whether the custom query failed in this scrape
+      # TYPE firebird_exporter_query_error gauge
+      firebird_exporter_query_error{query="attachments"} 0
+      firebird_exporter_query_error{query="transactions"} 0
+      firebird_exporter_query_error{query="Odd-Values.v2"} 0
+      firebird_exporter_query_error{query="broken"} 1
+      firebird_exporter_query_error{query="slow"} 1
+      firebird_exporter_query_error{query="silent"} 1
+      # HELP firebird_exporter_query_duration_seconds How long the custom query took
+      # TYPE firebird_exporter_query_duration_seconds gauge
+      firebird_exporter_query_duration_seconds{query="attachments"} T
+      firebird_exporter_query_duration_seconds{query="transactions"} T
+      firebird_exporter_query_duration_seconds{query="Odd-Values.v2"} T
+      firebird_exporter_query_duration_seconds{query="broken"} T
+      firebird_exporter_query_duration_seconds{query="slow"} T
+      firebird_exporter_query_duration_seconds{query="silent"} T
+      "
+    `);
     const lines = ours.body.split('\n');
     expect(lines).toContain('firebird_up 1');
     // the description as the operator rendered it, its backslashes escaped for the exposition format
@@ -172,10 +200,9 @@ esac
       expect(lines, query).toContain(`firebird_exporter_query_error{query="${query}"} ${failed}`);
     }
     expect(ours.body).toMatch(/firebird_exporter_query_duration_seconds\{query="slow"\} [01]\.\d{3}\n/);
-    // what they say about the queries that failed, in the same words
-    await waitFor(() => agent.log().includes('query silent') && perl.log().includes('query silent'), 'the log lines');
+    // what it says about the queries that failed
+    await waitFor(() => agent.log().includes('query silent'), 'the log lines');
     const said = (log: string) => log.split('\n').filter((l) => l.startsWith('query '));
-    expect(said(agent.log())).toEqual(said(perl.log()));
     expect(said(agent.log())).toEqual([
       'query broken: Statement failed, SQLSTATE = 42S02 Table unknown',
       'query slow: timed out after 1s',
@@ -183,83 +210,190 @@ esac
     ]);
     // the statement files are removed
     expect(readdirSync(dir).filter((f) => f.startsWith('metrics-query-'))).toEqual([]);
-    // the other paths, alike
-    for (const path of ['/healthz', '/other', '/metricsx', '/metrics/more', '/']) {
-      const [a, b] = [await get(perl.port, path), await get(agent.port, path)];
-      expect({ ...b }, path).toEqual({ ...a });
-    }
+    // the other paths
+    const others: Record<string, unknown> = {};
+    for (const path of ['/healthz', '/other', '/metricsx', '/metrics/more', '/']) others[path] = await get(agent.port, path);
+    expect(others).toMatchInlineSnapshot(`
+      {
+        "/": {
+          "body": "not found
+      ",
+          "status": 404,
+          "type": "text/plain",
+        },
+        "/healthz": {
+          "body": "ok
+      ",
+          "status": 200,
+          "type": "text/plain",
+        },
+        "/metrics/more": {
+          "body": "not found
+      ",
+          "status": 404,
+          "type": "text/plain",
+        },
+        "/metricsx": {
+          "body": "not found
+      ",
+          "status": 404,
+          "type": "text/plain",
+        },
+        "/other": {
+          "body": "not found
+      ",
+          "status": 404,
+          "type": "text/plain",
+        },
+      }
+    `);
     expect((await get(agent.port, '/healthz')).body).toBe('ok\n');
     expect((await get(agent.port, '/other')).status).toBe(404);
     // a scrape with a query string, and a second one: nothing kept from the first
     const again = await get(agent.port, '/metrics?name[]=firebird_up');
     expect(again.status).toBe(200);
     expect(steady(again.body)).toBe(steady(ours.body));
-    expect(steady((await get(perl.port, '/metrics?name[]=firebird_up')).body)).toBe(steady(ours.body));
   });
 
   it('skip the primary-only queries on a replica, and every query when the database does not answer', async () => {
     const replica = await start({ REPLICA: '1' });
-    const [theirs, ours] = [await get(replica.perl.port, '/metrics'), await get(replica.agent.port, '/metrics')];
-    expect(steady(ours.body)).toBe(steady(theirs.body));
+    const ours = await get(replica.agent.port, '/metrics');
+    expect(steady(ours.body)).toMatchInlineSnapshot(`
+      "# HELP firebird_up Whether the database answers a query
+      # TYPE firebird_up gauge
+      firebird_up 1
+      # HELP firebird_attachments_total Attachments\\\\nper user \\\\\\\\ now
+      # TYPE firebird_attachments_total gauge
+      firebird_attachments_total{username="SYSDBA"} 2
+      firebird_attachments_total{username="APP \\"x\\" \\\\ y"} 5
+      # HELP firebird_odd_values_v2_amount firebird_odd_values_v2_amount
+      # TYPE firebird_odd_values_v2_amount gauge
+      firebird_odd_values_v2_amount{kind="a"} -12.50
+      firebird_odd_values_v2_amount{kind="",note="c"} +.5
+      # HELP firebird_odd_values_v2_ratio A ratio
+      # TYPE firebird_odd_values_v2_ratio gauge
+      firebird_odd_values_v2_ratio{kind="a"} 1.5e-3
+      firebird_odd_values_v2_ratio{kind="",note="c"} 7.
+      # HELP firebird_exporter_query_error Whether the custom query failed in this scrape
+      # TYPE firebird_exporter_query_error gauge
+      firebird_exporter_query_error{query="attachments"} 0
+      firebird_exporter_query_error{query="Odd-Values.v2"} 0
+      firebird_exporter_query_error{query="broken"} 1
+      firebird_exporter_query_error{query="slow"} 1
+      firebird_exporter_query_error{query="silent"} 1
+      # HELP firebird_exporter_query_duration_seconds How long the custom query took
+      # TYPE firebird_exporter_query_duration_seconds gauge
+      firebird_exporter_query_duration_seconds{query="attachments"} T
+      firebird_exporter_query_duration_seconds{query="Odd-Values.v2"} T
+      firebird_exporter_query_duration_seconds{query="broken"} T
+      firebird_exporter_query_duration_seconds{query="slow"} T
+      firebird_exporter_query_duration_seconds{query="silent"} T
+      "
+    `);
     expect(ours.body).toContain('firebird_attachments_total{username="SYSDBA"} 2');
     expect(ours.body).not.toContain('next_tx');
     expect(ours.body).not.toContain('query="transactions"');
 
     const down = await start({ DOWN: '1' });
-    const [theirDown, ourDown] = [await get(down.perl.port, '/metrics'), await get(down.agent.port, '/metrics')];
-    expect(steady(ourDown.body)).toBe(steady(theirDown.body));
+    const ourDown = await get(down.agent.port, '/metrics');
+    expect(steady(ourDown.body)).toMatchInlineSnapshot(`
+      "# HELP firebird_up Whether the database answers a query
+      # TYPE firebird_up gauge
+      firebird_up 0
+      # HELP firebird_exporter_query_error Whether the custom query failed in this scrape
+      # TYPE firebird_exporter_query_error gauge
+      firebird_exporter_query_error{query="attachments"} 1
+      firebird_exporter_query_error{query="transactions"} 1
+      firebird_exporter_query_error{query="Odd-Values.v2"} 1
+      firebird_exporter_query_error{query="broken"} 1
+      firebird_exporter_query_error{query="slow"} 1
+      firebird_exporter_query_error{query="silent"} 1
+      # HELP firebird_exporter_query_duration_seconds How long the custom query took
+      # TYPE firebird_exporter_query_duration_seconds gauge
+      firebird_exporter_query_duration_seconds{query="attachments"} T
+      firebird_exporter_query_duration_seconds{query="transactions"} T
+      firebird_exporter_query_duration_seconds{query="Odd-Values.v2"} T
+      firebird_exporter_query_duration_seconds{query="broken"} T
+      firebird_exporter_query_duration_seconds{query="slow"} T
+      firebird_exporter_query_duration_seconds{query="silent"} T
+      "
+    `);
     expect(ourDown.body).toContain('firebird_up 0');
     expect(ourDown.body).not.toContain('firebird_attachments_total');
     expect(ourDown.body).toContain('firebird_exporter_query_error{query="attachments"} 1');
-    await waitFor(() => down.agent.log().includes('does not answer') && down.perl.log().includes('does not answer'), 'the log line');
+    await waitFor(() => down.agent.log().includes('does not answer'), 'the log line');
     const said = (log: string) => log.split('\n').filter((l) => l.startsWith('the database') || l.startsWith('query '));
-    expect(said(down.agent.log())).toEqual(said(down.perl.log()));
     expect(said(down.agent.log())).toEqual(['the database does not answer: Unable to complete network request to host "localhost".']);
   });
 
   it('take a changed queries file at the next scrape, and none as no query', async () => {
     const own = join(dir, 'own-queries');
     writeFileSync(own, 'query one\nprimary 0\nsql SELECT 1 AS NEXT_TX FROM MON$NEXT_TRANSACTION\nmetric next_tx GAUGE\nend\n');
-    const { perl, agent } = await start({ QUERIES_FILE: own });
+    const { agent } = await start({ QUERIES_FILE: own });
     const first = await get(agent.port, '/metrics');
-    expect(steady(first.body)).toBe(steady((await get(perl.port, '/metrics')).body));
+    expect(steady(first.body)).toMatchInlineSnapshot(`
+      "# HELP firebird_up Whether the database answers a query
+      # TYPE firebird_up gauge
+      firebird_up 1
+      # HELP firebird_one_next_tx firebird_one_next_tx
+      # TYPE firebird_one_next_tx gauge
+      firebird_one_next_tx 1234
+      # HELP firebird_exporter_query_error Whether the custom query failed in this scrape
+      # TYPE firebird_exporter_query_error gauge
+      firebird_exporter_query_error{query="one"} 0
+      # HELP firebird_exporter_query_duration_seconds How long the custom query took
+      # TYPE firebird_exporter_query_duration_seconds gauge
+      firebird_exporter_query_duration_seconds{query="one"} T
+      "
+    `);
     expect(first.body).toContain('firebird_one_next_tx 1234');
     writeFileSync(own, 'query two\nprimary 0\nsql SELECT 1 AS NEXT_TX FROM MON$NEXT_TRANSACTION\nmetric next_tx COUNTER Renamed\nend\n');
     const second = await get(agent.port, '/metrics');
-    expect(steady(second.body)).toBe(steady((await get(perl.port, '/metrics')).body));
+    expect(steady(second.body)).toMatchInlineSnapshot(`
+      "# HELP firebird_up Whether the database answers a query
+      # TYPE firebird_up gauge
+      firebird_up 1
+      # HELP firebird_two_next_tx Renamed
+      # TYPE firebird_two_next_tx counter
+      firebird_two_next_tx 1234
+      # HELP firebird_exporter_query_error Whether the custom query failed in this scrape
+      # TYPE firebird_exporter_query_error gauge
+      firebird_exporter_query_error{query="two"} 0
+      # HELP firebird_exporter_query_duration_seconds How long the custom query took
+      # TYPE firebird_exporter_query_duration_seconds gauge
+      firebird_exporter_query_duration_seconds{query="two"} T
+      "
+    `);
     expect(second.body).toContain('# TYPE firebird_two_next_tx counter');
     expect(second.body).not.toContain('firebird_one');
     rmSync(own);
     const none = await get(agent.port, '/metrics');
-    expect(none.body).toBe((await get(perl.port, '/metrics')).body);
     expect(none.body).toBe('# HELP firebird_up Whether the database answers a query\n# TYPE firebird_up gauge\nfirebird_up 1\n');
   });
 
   it('ask the local server for the database, and stop once the Firebird server has stopped', async () => {
-    // a "Firebird server" that listens: the exporters keep answering after SIGTERM
+    // a "Firebird server" that listens: the exporter keeps answering after SIGTERM
     const firebird = createServer((socket) => socket.destroy());
     servers.push(firebird);
     await new Promise<void>((r) => firebird.listen(0, '127.0.0.1', r));
-    const { perl, agent } = await start({ FIREBIRD_PORT: String((firebird.address() as { port: number }).port) });
+    const { agent } = await start({ FIREBIRD_PORT: String((firebird.address() as { port: number }).port) });
     writeFileSync(join(dir, 'asked'), '');
     await get(agent.port, '/metrics');
     const asked = spawnSync('sort', ['-u', join(dir, 'asked')]).stdout.toString();
     expect(asked).toBe('localhost:/db/test.fdb\n');
     const codes: Record<string, number | null | undefined> = {};
-    for (const [name, exporter] of Object.entries({ perl, agent })) {
+    for (const [name, exporter] of Object.entries({ agent })) {
       exporter.child.once('close', (code) => (codes[name] = code));
       exporter.child.kill('SIGTERM');
     }
     await new Promise((r) => setTimeout(r, 1500));
     expect(codes).toEqual({});
     expect((await get(agent.port, '/healthz')).body).toBe('ok\n');
-    expect((await get(perl.port, '/healthz')).body).toBe('ok\n');
     await new Promise<void>((r) => firebird.close(() => r()));
-    await waitFor(() => codes.agent !== undefined && codes.perl !== undefined, 'both exits');
-    expect(codes).toEqual({ perl: 0, agent: 0 });
+    await waitFor(() => codes.agent !== undefined, 'the exit');
+    expect(codes).toEqual({ agent: 0 });
     expect(agent.log()).toContain('stopping: the Firebird server has stopped\n');
-    expect(perl.log()).toContain('stopping: the Firebird server has stopped\n');
-    // and a request that is not HTTP at all gets the same answer from both
+    // and a request that is not HTTP at all
     const raw = (port: number) =>
       new Promise<string>((resolve) => {
         const socket = connect(port, '127.0.0.1');
@@ -270,7 +404,15 @@ esac
         socket.write('hello\r\n\r\n');
       });
     const fresh = await start();
-    expect(await raw(fresh.agent.port)).toBe(await raw(fresh.perl.port));
+    expect(await raw(fresh.agent.port)).toMatchInlineSnapshot(`
+      "HTTP/1.1 404 Not Found
+      Content-Type: text/plain
+      Content-Length: 10
+      Connection: close
+
+      not found
+      "
+    `);
     expect(await raw(fresh.agent.port)).toContain('404 Not Found');
   });
 

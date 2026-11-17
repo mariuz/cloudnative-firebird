@@ -1,12 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { spawnSync } from 'child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { startSegmentServer } from './helpers/segment-server';
+import { agentBin } from './helpers/implementations';
 
-const hasPerl = spawnSync('perl', ['-v']).status === 0;
 
 /**
  * Firebird archives a journal segment with a plain copy, and its replica skips a segment file
@@ -15,7 +13,7 @@ const hasPerl = spawnSync('perl', ['-v']).status === 0;
  * segments that hold their whole length (the fb-agent front does the same:
  * segment-server-front.test.ts).
  */
-describe.skipIf(!hasPerl)('segment-server.pl LIST', () => {
+describe.runIf(agentBin)('the segment server: LIST', () => {
   it('leaves out a segment that is still being copied into the archive', async () => {
     const root = mkdtempSync(join(tmpdir(), 'seglist-'));
     for (const d of ['archive', 'source', 'repl']) mkdirSync(join(root, d));
@@ -32,8 +30,7 @@ describe.skipIf(!hasPerl)('segment-server.pl LIST', () => {
     writeFileSync(join(root, 'archive', 'mydb.fdb.journal-000000004'), 'x'); // no segment header: as before
     writeFileSync(join(root, 'archive', 'mydb.fdb.journal-000000005'), Buffer.alloc(20)); // shorter than a header: as before
     writeFileSync(join(root, 'repl', 'primary'), 'db-0\n');
-    writeFileSync(join(root, 'segment-server.pl'), REPLICATION_SCRIPTS['segment-server.pl']);
-    const { child, port } = await startSegmentServer(join(root, 'segment-server.pl'), {
+    const { child, port } = await startSegmentServer({
       ARCHIVE_DIR: join(root, 'archive'),
       DATABASE_PATH: join(root, 'mydb.fdb'),
       SOURCE_DIR: join(root, 'source'),

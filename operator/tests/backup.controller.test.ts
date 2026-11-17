@@ -220,7 +220,8 @@ describe('FirebirdBackupController', () => {
       const s3 = { bucket: 'b', secretRef: { name: 's' } };
       await controller.reconcileBackup(makeBackup({ spec: { clusterName: 'test-cluster', type: 'physical', s3 } }));
       const job = batchApi.createNamespacedJob.mock.calls[0][0].body as V1Job;
-      expect(job.spec?.template.spec?.initContainers?.[0].args?.[0]).toContain('backup-file.pl get');
+      expect(job.spec?.template.spec?.initContainers?.map((c) => c.name)[0]).toBe('agent-install');
+      expect(job.spec?.template.spec?.initContainers?.[1].args?.[0]).toContain('fb-agent backup-file get');
       expect(lastStatus()).toMatchObject({ phase: 'Running', location: 's3://b/nbackup-l0-test-backup.nbk' });
     });
 
@@ -380,7 +381,8 @@ describe('FirebirdBackupController', () => {
       // without replication the files go through the instance's backup file server
       await controller.reconcileRestore(restore);
       const job = batchApi.createNamespacedJob.mock.calls[0][0].body as V1Job;
-      expect(job.spec?.template.spec?.initContainers?.[0].args?.[0]).toContain(`'s3://b/nbackup-l0-base.nbk'`);
+      expect(job.spec?.template.spec?.initContainers?.map((c) => c.name)[0]).toBe('agent-install');
+      expect(job.spec?.template.spec?.initContainers?.[1].args?.[0]).toContain(`'s3://b/nbackup-l0-base.nbk'`);
       expect(job.spec?.template.spec?.containers[0].args?.[0]).toContain('action_nrest');
     });
 

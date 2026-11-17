@@ -11,16 +11,17 @@
 #      ID" (gstat -h, read from the file) before and after;
 #   2. the race: CYCLES full shutdowns, each with RETRIERS clients retrying an attachment in a loop
 #      (as the replica server retries its own) while the HDR_repl_seq clump is written offline
-#      (operator/src/replication/set-repl-seq.pl), then online; the sequence in the header after
+#      (fb-agent set-repl-seq), then online; the sequence in the header after
 #      going online. First without a lock (the in-place promotion before v0.147.0), then holding
 #      the exclusive lock (flock) a SuperServer holds while it has the file open, taken once the
-#      server closed the file (segment-server.pl since v0.147.0).
+#      server closed the file (the segment server since v0.147.0).
 #
 #   hack/repro/refused-attachment.sh                         # firebirdsql/firebird:5
 #   IMAGE=firebirdsql/firebird:6-snapshot CYCLES=20 hack/repro/refused-attachment.sh
 #
 # Prints "attachment id <a> -> <b> after <n> refused attachments", per cycle "set <s>; online <o>",
-# then "unlocked: lost <k> of <n>" and "locked: lost <k> of <n>". Needs Docker only.
+# then "unlocked: lost <k> of <n>" and "locked: lost <k> of <n>". Needs Docker and the fb-agent
+# binary: FB_AGENT_BIN, or a musl build in operator/agent/target.
 set -eu
 IMAGE=${IMAGE:-firebirdsql/firebird:5}
 NAME=${NAME:-fbrefused}
@@ -28,7 +29,8 @@ ATTEMPTS=${ATTEMPTS:-5}
 CYCLES=${CYCLES:-10}
 RETRIERS=${RETRIERS:-4}
 here=$(cd "$(dirname "$0")" && pwd)
-scripts=$(cd "$here/../../operator/src/replication" && pwd)
+agent=${FB_AGENT_BIN:-$here/../../operator/agent/target/x86_64-unknown-linux-musl/release/fb-agent}
+[ -x "$agent" ] || { echo "no fb-agent binary at $agent (set FB_AGENT_BIN)"; exit 1; }
 work=$(mktemp -d)
 cleanup() {
   docker rm -f "$NAME" >/dev/null 2>&1 || true
@@ -36,6 +38,7 @@ cleanup() {
   rm -rf "$work" 2>/dev/null || true
 }
 trap cleanup EXIT
+cp "$agent" "$work/fb-agent"
 
 cat > "$work/env.sh" <<'EOF'
 export ISC_USER=SYSDBA ISC_PASSWORD=masterkey PATH=/opt/firebird/bin:$PATH
@@ -63,7 +66,7 @@ while ($p < $end) {
 }
 print "none";
 EOF
-# write.pl <db> <seq> <locked>: set-repl-seq.pl, with <locked> 1 once the server closed the file
+# write.pl <db> <seq> <locked>: fb-agent set-repl-seq, with <locked> 1 once the server closed the file
 # and holding its lock during the write
 cat > "$work/write.pl" <<'EOF'
 use Fcntl qw(:flock);
@@ -73,10 +76,10 @@ if ($locked) {
   my $start = time;
   until (flock($fh, LOCK_EX | LOCK_NB)) { die "still open after 30 s\n" if time - $start > 30; select(undef, undef, undef, 0.01) }
 }
-exit(system('perl', '/scripts/set-repl-seq.pl', $db, $seq) == 0 ? 0 : 1);
+exit(system('/w/fb-agent', 'set-repl-seq', $db, $seq) == 0 ? 0 : 1);
 EOF
 
-docker run -d --name "$NAME" -v "$work:/w" -v "$scripts:/scripts:ro" --entrypoint bash "$IMAGE" -c '. /w/env.sh
+docker run -d --name "$NAME" -v "$work:/w" --entrypoint bash "$IMAGE" -c '. /w/env.sh
   echo "CREATE DATABASE '\''$DB'\'' USER SYSDBA; CREATE TABLE app (id INT PRIMARY KEY); COMMIT;" | isql -q
   exec /opt/firebird/bin/firebird' >/dev/null
 x() { docker exec "$NAME" bash -c ". /w/env.sh; $1"; }

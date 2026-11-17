@@ -4,31 +4,20 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { fakeSegmentServer } from './helpers/segment-auth';
-import { implementations } from './helpers/implementations';
+import { agent, agentBin } from './helpers/implementations';
 import { JOB_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
 
 const SCRIPTS: Record<string, string> = { ...REPLICATION_SCRIPTS, ...JOB_SCRIPTS };
 
-const hasPerl = spawnSync('perl', ['-v']).status === 0;
-/** Modules of the Firebird images' perl-base that the scripts use (checked in the image) */
-// Fcntl: checked in firebirdsql/firebird:4, 5 and 6-snapshot (perl -e 'use Fcntl qw(:flock)'), v0.147.0
-const PERL_BASE_MODULES = ['Fcntl', 'IO::Select', 'IO::Socket::INET', 'POSIX', 'Socket'];
 const dir = mkdtempSync(join(tmpdir(), 'fb-repl-scripts-'));
 
-describe('replication scripts shipped to instance pods', () => {
-  it.each(Object.keys(SCRIPTS).filter((name) => name.endsWith('.pl')))(
-    '%s compiles with core perl only',
-    (name) => {
-      if (!hasPerl) return;
-      const file = join(dir, name);
-      writeFileSync(file, SCRIPTS[name]);
-      expect(() => execFileSync('perl', ['-c', file], { stdio: 'pipe' })).not.toThrow();
-      // the Firebird image ships perl-base only (no HTTP::Tiny, File::Copy, Digest::*, Time::HiRes):
-      // only modules checked in the image (perl -c in firebirdsql/firebird:5) are allowed
-      const modules = [...SCRIPTS[name].matchAll(/^\s*(?:use|require)\s+([A-Z][\w:]*)/gm)].map((m) => m[1]);
-      expect(modules.filter((m) => !PERL_BASE_MODULES.includes(m))).toEqual([]);
-    },
-  );
+describe.skipIf(!agentBin)('replication scripts shipped to instance pods', () => {
+  it('no script is Perl, and no script runs it', () => {
+    expect(Object.keys(SCRIPTS).filter((name) => name.endsWith('.pl'))).toEqual([]);
+    for (const [name, script] of Object.entries(SCRIPTS)) {
+      expect(script.split('\n').filter((line) => /^[^#]*\bperl\b/.test(line)), name).toEqual([]);
+    }
+  });
 
   it.each(Object.keys(SCRIPTS).filter((name) => name.endsWith('.sh')))('%s is valid POSIX sh', (name) => {
     const file = join(dir, name);
@@ -48,10 +37,7 @@ describe('replication scripts shipped to instance pods', () => {
     expect(REPLICATION_SCRIPTS['init-instance.sh']).toContain('for source in $(cat "$SEED_SOURCES_FILE" 2>/dev/null || true) "$primary"');
   });
 
-  it('replica-control.pl --adopt keeps the source position and rewrites db_sequence', () => {
-    if (!hasPerl) return;
-    const script = join(dir, 'replica-control.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['replica-control.pl']);
+  it('replica-control --adopt keeps the source position and rewrites db_sequence', () => {
     const source = join(dir, 'source.ctl');
     const header = Buffer.alloc(40);
     header.write('FBREPLCTL', 0, 'latin1');
@@ -64,7 +50,7 @@ describe('replication scripts shipped to instance pods', () => {
     txn.writeBigUInt64LE(40n, 8);
     writeFileSync(source, Buffer.concat([header, txn]));
     const target = join(dir, 'adopted.ctl');
-    execFileSync('perl', [script, '--adopt', source, '9', target], { stdio: 'pipe' });
+    execFileSync(agentBin!, ['replica-control', '--adopt', source, '9', target], { stdio: 'pipe' });
     const out = readFileSync(target);
     expect(out.length).toBe(56);
     expect(out.readBigUInt64LE(16)).toBe(42n); // position kept
@@ -72,12 +58,9 @@ describe('replication scripts shipped to instance pods', () => {
     expect(out.readBigUInt64LE(40)).toBe(900n); // active transaction kept
   });
 
-  it('replica-control.pl writes ControlFile::DataV1 with no transactions when there are no candidates', () => {
-    if (!hasPerl) return;
-    const script = join(dir, 'replica-control.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['replica-control.pl']);
+  it('replica-control writes ControlFile::DataV1 with no transactions when there are no candidates', () => {
     const target = join(dir, '{GUID}');
-    execFileSync('perl', [script, 'unused-host', '15', '16', target], { stdio: 'pipe' });
+    execFileSync(agentBin!, ['replica-control', 'unused-host', '15', '16', target], { stdio: 'pipe' });
     const out = readFileSync(target);
     expect(out.length).toBe(40);
     expect(out.subarray(0, 10).toString('latin1')).toBe('FBREPLCTL\0');
@@ -88,8 +71,7 @@ describe('replication scripts shipped to instance pods', () => {
     expect(out.readBigUInt64LE(32)).toBe(16n); // db_sequence: the copy's own header value
   });
 
-  it('replica-control.pl records journaled candidates as sorted active transactions', async () => {
-    if (!hasPerl) return;
+  it('replica-control records journaled candidates as sorted active transactions', async () => {
     const requests: string[] = [];
     // requests are recorded as "tok <request>" once their signature is checked
     const server = fakeSegmentServer((request, sock) => {
@@ -98,12 +80,10 @@ describe('replication scripts shipped to instance pods', () => {
     }, 'tok');
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;
-    const script = join(dir, 'replica-control.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['replica-control.pl']);
     const target = join(dir, '{GUID2}');
     const run = () =>
       new Promise<void>((resolve, reject) => {
-        const child = spawn('perl', [script, '127.0.0.1', '9', '10', target, '30', '12', '99'], {
+        const child = spawn(agentBin!, ['replica-control', '127.0.0.1', '9', '10', target, '30', '12', '99'], {
           env: { ...process.env, SEGMENT_PORT: String(port), ISC_PASSWORD: 'tok' },
         });
         child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`exit ${code}`))));
@@ -121,8 +101,8 @@ describe('replication scripts shipped to instance pods', () => {
     expect(out.readBigUInt64LE(64)).toBe(7n);
   });
 
-  describe('replica-control.pl --next (live seeds)', () => {
-    /** Runs replica-control.pl against a stand-in segment server answering `reply(command)` */
+  describe('replica-control --next (live seeds)', () => {
+    /** Runs `fb-agent replica-control` against a stand-in segment server answering `reply(command)` */
     const plan = async (reply: (cmd: string) => string) => {
       const requests: string[] = [];
       const server = fakeSegmentServer((request, sock) => {
@@ -132,11 +112,9 @@ describe('replication scripts shipped to instance pods', () => {
       }, 'tok');
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
       const port = (server.address() as { port: number }).port;
-      const script = join(dir, 'replica-control.pl');
-      writeFileSync(script, REPLICATION_SCRIPTS['replica-control.pl']);
       const target = join(dir, `{GUID-${requests.length}-${Math.random()}}`);
       const result = await new Promise<{ code: number | null; text: string }>((resolve) => {
-        const child = spawn('perl', [script, '--next', '40', '127.0.0.1', '9', '9', target, '30', '12'], {
+        const child = spawn(agentBin!, ['replica-control', '--next', '40', '127.0.0.1', '9', '9', target, '30', '12'], {
           env: { ...process.env, SEGMENT_PORT: String(port), ISC_PASSWORD: 'tok' },
         });
         let text = '';
@@ -149,8 +127,7 @@ describe('replication scripts shipped to instance pods', () => {
     };
 
     it('records the candidates and the transactions after the copy\'s next one from PLAN', async () => {
-      if (!hasPerl) return;
-      // 12 began in segment 2 (long before the lock), 41 started after the copy's next transaction
+        // 12 began in segment 2 (long before the lock), 41 started after the copy's next transaction
       const r = await plan(() => '12 2 1\n30 9 1\n41 9 1\n.\n');
       expect(r.code).toBe(0);
       expect(r.requests).toEqual(['tok PLAN 9 40 30,12']);
@@ -160,23 +137,20 @@ describe('replication scripts shipped to instance pods', () => {
     });
 
     it('refuses a transaction whose first archived block does not begin it', async () => {
-      if (!hasPerl) return;
-      const r = await plan(() => '12 4 0\n.\n');
+        const r = await plan(() => '12 4 0\n.\n');
       expect(r.code).not.toBe(0);
       expect(r.text).toContain('transaction 12 began before the oldest archived segment');
     });
 
     it('falls back to TXNS on a segment server without PLAN', async () => {
-      if (!hasPerl) return;
-      const r = await plan((cmd) => (cmd === 'PLAN' ? 'ERR bad request\n' : '12 5\n.\n'));
+        const r = await plan((cmd) => (cmd === 'PLAN' ? 'ERR bad request\n' : '12 5\n.\n'));
       expect(r.code).toBe(0);
       expect(r.requests).toEqual(['tok PLAN 9 40 30,12', 'tok TXNS 9 30,12']);
       expect(readFileSync(r.target).readUInt32LE(12)).toBe(1);
     });
   });
 
-  it.each(implementations('fetch-segments.pl'))('fetch-segments fetches archived segments that are not uploaded yet ($name)', async (impl) => {
-    if (!impl.available) return;
+  it('fetch-segments fetches archived segments that are not uploaded yet', async () => {
     const segments: Record<string, string> = {
       'mydb.fdb.journal-0000000001': 'one',
       'mydb.fdb.journal-0000000002': 'two',
@@ -195,14 +169,12 @@ describe('replication scripts shipped to instance pods', () => {
     }, 'tok');
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;
-    const script = join(dir, 'fetch-segments.pl');
-    writeFileSync(script, JOB_SCRIPTS['fetch-segments.pl']);
     const out = mkdtempSync(join(tmpdir(), 'fb-segments-'));
     const skip = join(out, 'uploaded');
     writeFileSync(skip, 'mydb.fdb.journal-0000000001\nmydb.fdb.lineage-0-1\n');
     const segDir = join(out, 'segments');
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(...impl.command(script), {
+      const child = spawn(...agent(['fetch-segments']), {
         env: { ...process.env, FIREBIRD_HOST: '127.0.0.1', SEGMENT_PORT: String(port), ISC_PASSWORD: 'tok', OUT_DIR: segDir, SKIP_FILE: skip, RESULT_FILE: join(out, 'result') },
       });
       child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`exit ${code}`))));
@@ -247,9 +219,8 @@ describe('replication scripts shipped to instance pods', () => {
   });
 });
 
-describe.each(implementations('pitr-plan.pl'))('pitr-plan --describe ($name)', (impl) => {
+describe.skipIf(!agentBin)('pitr-plan --describe', () => {
   it('reads a replica\'s position and the first segment its transactions in progress need', () => {
-    if (!impl.available) return;
     const ctlDir = mkdtempSync(join(tmpdir(), 'fb-ctl-'));
     const control = join(ctlDir, 'position.ctl');
     const b = Buffer.alloc(40 + 32);
@@ -263,23 +234,20 @@ describe.each(implementations('pitr-plan.pl'))('pitr-plan --describe ($name)', (
     b.writeBigUInt64LE(701n, 56);
     b.writeBigUInt64LE(17n, 64);
     writeFileSync(control, b);
-    const script = join(dir, 'pitr-plan.pl');
-    writeFileSync(script, JOB_SCRIPTS['pitr-plan.pl']);
-    expect(spawnSync(...impl.command(script, ['--describe', control]), { encoding: 'utf8' }).stdout).toBe('21 0 17\n');
+    expect(spawnSync(...agent(['pitr-plan'], ['--describe', control]), { encoding: 'utf8' }).stdout).toBe('21 0 17\n');
     writeFileSync(control, b.subarray(0, 40));
     // no transaction in progress: the position itself (a truncated list is refused)
     b.writeUInt32LE(0, 12);
     writeFileSync(control, b.subarray(0, 40));
-    expect(spawnSync(...impl.command(script, ['--describe', control]), { encoding: 'utf8' }).stdout).toBe('21 0 21\n');
+    expect(spawnSync(...agent(['pitr-plan'], ['--describe', control]), { encoding: 'utf8' }).stdout).toBe('21 0 21\n');
     b.writeUInt32LE(3, 12);
     writeFileSync(control, b);
-    expect(spawnSync(...impl.command(script, ['--describe', control])).status).not.toBe(0);
+    expect(spawnSync(...agent(['pitr-plan'], ['--describe', control])).status).not.toBe(0);
   });
 });
 
-describe.each(implementations('pitr-plan.pl'))('pitr-plan --reposition ($name)', (impl) => {
+describe.skipIf(!agentBin)('pitr-plan --reposition', () => {
   it('continues after the given segment with no active transaction, keeping db_sequence', () => {
-    if (!impl.available) return;
     const ctlDir = mkdtempSync(join(tmpdir(), 'fb-ctl-'));
     const control = join(ctlDir, '{GUID}');
     const b = Buffer.alloc(40 + 32);
@@ -290,9 +258,7 @@ describe.each(implementations('pitr-plan.pl'))('pitr-plan --reposition ($name)',
     b.writeUInt32LE(300, 24);
     b.writeBigUInt64LE(5n, 32);
     writeFileSync(control, b);
-    const script = join(dir, 'pitr-plan.pl');
-    writeFileSync(script, JOB_SCRIPTS['pitr-plan.pl']);
-    const r = spawnSync(...impl.command(script, ['--reposition', '41', control]), { encoding: 'utf8' });
+    const r = spawnSync(...agent(['pitr-plan'], ['--reposition', '41', control]), { encoding: 'utf8' });
     expect(r.status).toBe(0);
     const ctl = readFileSync(control);
     expect(ctl.length).toBe(40);
@@ -302,11 +268,11 @@ describe.each(implementations('pitr-plan.pl'))('pitr-plan --reposition ($name)',
     expect(Number(ctl.readBigUInt64LE(16))).toBe(41);
     expect(ctl.readUInt32LE(24)).toBe(0);
     expect(Number(ctl.readBigUInt64LE(32))).toBe(5);
-    expect(spawnSync(...impl.command(script, ['--reposition', 'x', control])).status).not.toBe(0);
+    expect(spawnSync(...agent(['pitr-plan'], ['--reposition', 'x', control])).status).not.toBe(0);
   });
 });
 
-describe.each(implementations('pitr-plan.pl'))('pitr-plan ($name)', (impl) => {
+describe.skipIf(!agentBin)('pitr-plan', () => {
   const BEGIN = 1;
   const END = 2;
   /** A journal segment: [transaction, flags] blocks with a few payload bytes each */
@@ -343,14 +309,11 @@ describe.each(implementations('pitr-plan.pl'))('pitr-plan ($name)', (impl) => {
     const candidates = join(segDir, 'candidates');
     writeFileSync(candidates, '100\n105\n');
     const control = join(segDir, '{GUID}');
-    const script = join(dir, 'pitr-plan.pl');
-    writeFileSync(script, JOB_SCRIPTS['pitr-plan.pl']);
-    const r = spawnSync(...impl.command(script, [segDir, '5', '100', '110', candidates, '6', control]), { encoding: 'utf8' });
+    const r = spawnSync(...agent(['pitr-plan'], [segDir, '5', '100', '110', candidates, '6', control]), { encoding: 'utf8' });
     return { status: r.status, out: r.stdout + r.stderr, control };
   };
 
   it('asks for earlier segments until every open transaction starts in the directory', () => {
-    if (!impl.available) return;
     const r = plan([5, 6]);
     expect(r.status).toBe(3);
     expect(r.out).toContain('need 4');
@@ -358,7 +321,6 @@ describe.each(implementations('pitr-plan.pl'))('pitr-plan ($name)', (impl) => {
   });
 
   it('records the transactions open in the backup from their first segment', () => {
-    if (!impl.available) return;
     const r = plan([4, 5, 6]);
     expect(r.status).toBe(0);
     expect(r.out).toContain('replay: segments 6 to 6, and 2 transaction(s) open in the backup (100 from segment 4, 105 from segment 5)');
@@ -372,7 +334,6 @@ describe.each(implementations('pitr-plan.pl'))('pitr-plan ($name)', (impl) => {
   });
 
   it('refuses a gap, and changes after the backup of a transaction complete in it', () => {
-    if (!impl.available) return;
     expect(plan([4, 6]).out).toContain('segment 5 is missing');
     const late = plan([4, 5, 6], { 6: [[101, END]] });
     expect(late.status).toBe(1);

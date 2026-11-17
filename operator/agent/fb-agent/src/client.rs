@@ -41,7 +41,8 @@ fn connect(host: &str, port: u16) -> io::Result<TcpStream> {
 pub fn open_at(host: &str, port: u16, request: &str, timeout: Option<Duration>) -> io::Result<BufReader<Stream>> {
     let mut stream = connect(host, port).map_err(|err| io::Error::new(err.kind(), format!("connect {host}:{port}: {err}")))?;
     stream.set_read_timeout(timeout)?;
-    writeln!(stream, "{}", sig1::sign(var("ISC_PASSWORD").as_bytes(), request, now(), &nonce()?))?;
+    // one write: the line and its end in one segment
+    stream.write_all(format!("{}\n", sig1::sign(var("ISC_PASSWORD").as_bytes(), request, now(), &nonce()?)).as_bytes())?;
     stream.flush()?;
     Ok(BufReader::new(Stream::Plain(stream)))
 }
@@ -76,7 +77,7 @@ pub fn open(host: &str, request: &str, timeout: Option<Duration>) -> io::Result<
                 .parse()
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "SEGMENT_PROXY: bad port"))?;
             let mut stream = connect(proxy_host, proxy_port).map_err(failed(proxy))?;
-            writeln!(stream, "CONNECT {host} {port}")?;
+            stream.write_all(format!("CONNECT {host} {port}\n").as_bytes())?;
             Stream::Plain(stream)
         }
         (None, None) => Stream::Plain(connect(host, port).map_err(failed(format!("{host}:{port}")))?),
@@ -84,7 +85,8 @@ pub fn open(host: &str, request: &str, timeout: Option<Duration>) -> io::Result<
     if let Stream::Plain(plain) = &stream {
         plain.set_read_timeout(timeout)?;
     }
-    writeln!(stream, "{}", sig1::sign(var("ISC_PASSWORD").as_bytes(), request, now(), &nonce()?))?;
+    // one write: the line and its end in one segment
+    stream.write_all(format!("{}\n", sig1::sign(var("ISC_PASSWORD").as_bytes(), request, now(), &nonce()?)).as_bytes())?;
     stream.flush()?;
     Ok(BufReader::new(stream))
 }

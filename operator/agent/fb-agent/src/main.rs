@@ -16,7 +16,6 @@
 //!   fb-agent backup-file | fetch-segments | pitr-plan | cut-segment | switchover | failover |
 //!            sync-standby                  the Jobs' programs (jobs.rs)
 //!   fb-agent segment-server                the segment server (server.rs)
-//!   fb-agent segment-server -- <command>   the same as a front, with the Perl server behind it
 //!                                          for what it does not answer
 
 mod background;
@@ -133,10 +132,9 @@ fn main() -> ExitCode {
         ["replica-control", arguments @ ..] => init::replica_control(arguments),
         ["set-repl-seq", database, sequence] => init::set_sequence(database, sequence),
         ["reposition", sequence, control] => init::reposition(sequence, control),
-        ["segment-server"] => server::run(&[]),
-        ["segment-server", "--", backend @ ..] => server::run(&backend.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+        ["segment-server"] => server::run(),
         _ => {
-            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | segment-tls | lease-holder | metrics-exporter | backup-file ... | fetch-segments | pitr-plan ... | cut-segment <file> <length> | switchover | failover | sync-standby | tcp <host> <port> | segment-server [-- <backend command...>]");
+            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | segment-tls | lease-holder | metrics-exporter | backup-file ... | fetch-segments | pitr-plan ... | cut-segment <file> <length> | switchover | failover | sync-standby | tcp <host> <port> | segment-server");
             return ExitCode::from(2);
         }
     };

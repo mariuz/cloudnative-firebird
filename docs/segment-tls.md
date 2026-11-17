@@ -21,8 +21,8 @@ and off safely, and what it does and does not protect.
 
 Firebird clients (applications, `isql`, `gbak` over the network) are already encrypted by
 Firebird's own wire protocol (WireCrypt, see *Encryption in Transit* in the README). Replication
-in this operator does not use that protocol. Each instance runs a small **segment server** (Perl,
-port 3051) next to Firebird, and the instances and Jobs exchange files with it:
+in this operator does not use that protocol. Each instance runs a small **segment server** (the Rust
+agent's, port 3051) next to Firebird, and the instances and Jobs exchange files with it:
 
 | Traffic | From → to | Carries |
 |---|---|---|
@@ -95,6 +95,14 @@ only authenticates the request. The data coming back stays readable, and segment
 encrypts it.
 
 ## Why a proxy sidecar
+
+> **Since v0.170.0** the instances run the Rust agent (docs/rust-agent-roadmap.md), which does
+> TLS itself: the segment server accepts mutual TLS on port 3051, and the puller and the
+> replication init connect over TLS, with the cluster's certificates mounted into their
+> containers. The `segment-tls` sidecar (`fb-agent segment-tls`, from the operator image) keeps
+> only its client side (`127.0.0.1:3052`, `SEGMENT_PROXY`), for the Lease holder and the Jobs'
+> programs. The rest of this section and the next describe the original design, with the Perl
+> scripts, which the protocol, the certificates, the switch and the checks below still follow.
 
 The obvious approach, TLS inside the Perl segment server and its clients, is not possible with the
 official `firebirdsql/firebird` images. Alternatives were measured or ruled out:
@@ -239,7 +247,7 @@ flowchart TB
   other keys through `items`. A compromised instance pod can therefore not mint certificates.
 - **The Secret is owned by the cluster** and is deleted with it. Turning segment TLS off keeps the
   Secret, so turning it back on reuses the same CA.
-- **Host names are not checked.** The Perl clients address instances by short names
+- **Host names are not checked.** The clients address instances by short names
   (`repl-0.repl-headless`), and Node rejects wildcard certificates for two-label names. A peer is
   authenticated by its chain to the cluster's CA instead, which only this cluster's pods and the
   operator hold. In this setting that is a stronger check than a name.
@@ -441,14 +449,13 @@ kubectl get secret repl-segment-tls -o jsonpath='{.type}{"\n"}'          # kuber
 kubectl get pods -l firebird.cloudnative-firebird.io/cluster=repl \
   -o jsonpath='{range .items[*]}{.metadata.name} {.spec.initContainers[0].name}{"\n"}{end}'
 
-kubectl logs repl-0 -c segment-tls      # accepting on 0.0.0.0:3051, forwarding to 127.0.0.1:3061
-kubectl logs repl-0 -c segment-server   # listening on 127.0.0.1:3061 (segment TLS on 3051)
+kubectl logs repl-0 -c segment-tls      # client proxy on 127.0.0.1:3052
+kubectl logs repl-0 -c segment-server   # listening on 127.0.0.1:3061; accepts mutual TLS itself on 0.0.0.0:3051
 
 # a signed request through the proxy is answered ...
-kubectl exec repl-1 -c segment-server -- perl /etc/firebird-operator/segment-request.pl repl-0.repl-headless PING
+kubectl exec repl-1 -c segment-server -- sh -c '$FB_AGENT request repl-0.repl-headless PING'
 # ... the same request in plain text is not
-kubectl exec repl-1 -c segment-server -- env -u SEGMENT_PROXY \
-  perl /etc/firebird-operator/segment-request.pl repl-0.repl-headless PING
+kubectl exec repl-1 -c segment-server -- sh -c 'env -u SEGMENT_PROXY $FB_AGENT request repl-0.repl-headless PING'
 
 # replicas keep up (0 = caught up)
 kubectl get firebirdcluster repl -o jsonpath='{.status.replicationStatus.replicas}'
@@ -473,7 +480,8 @@ What segment TLS guarantees:
 
 What it does not cover:
 
-- **Loopback traffic inside a pod** (Perl client ↔ proxy, proxy ↔ segment server) is plain. It
+- **Loopback traffic inside a pod** (a client ↔ the proxy, a local client ↔ the segment server's
+  plain listener) is plain. It
   never leaves the pod's network namespace.
 - **Files at rest** (journal archive, backups on the volume) are not encrypted by this feature. Use
   encrypted storage classes and Firebird database encryption for that.
@@ -513,8 +521,8 @@ several hundred MB/s per core, so the segment stream, not the cipher, sets the p
 | Switch state | ConfigMap `<cluster>-segment-tls-peers` (`plain-peers`, `accept-plain-until`), mounted at `/etc/segment-tls-peers`, written by the operator only while switching |
 | Secret | `<cluster>-segment-tls`, type `kubernetes.io/tls`, keys `ca.crt`, `ca.key`, `tls.crt`, `tls.key` |
 | Mount | `/etc/segment-tls` (`ca.crt`, `tls.crt`, `tls.key`), read-only |
-| Container | `segment-tls`, operator image, `node dist/segment-tls.js`, uid 65532, read-only root, no capabilities |
+| Container | `segment-tls`, operator image, `/app/fb-agent segment-tls` (client side only since v0.170.0), uid 65532, read-only root, no capabilities |
 | Ports | 3051 TLS (pod network), 3052 client side (loopback), 3061 segment server (loopback) |
-| Environment | proxy: `SEGMENT_TLS_DIR`, `SERVER_LISTEN`, `SERVER_TARGET`, `CLIENT_LISTEN`; Perl: `SEGMENT_PROXY`, `SEGMENT_LISTEN` |
+| Environment | proxy: `SEGMENT_TLS_DIR`, `CLIENT_LISTEN`; the agent's processes: `SEGMENT_TLS_DIR`, `SEGMENT_TLS_PEERS_DIR`, `SEGMENT_TLS_LISTEN`, `SEGMENT_PROXY`, `SEGMENT_LISTEN` |
 | Validity | CA 10 years (renewed with 1 year left), certificate 1 year (renewed with 30 days left) |
-| Source | `operator/src/segment-tls.ts` (proxy), `operator/src/utils/segment-tls-pods.ts` (pod wiring), `operator/src/utils/segment-tls-client.ts` (Secret, operator client), `operator/src/replication/segment-auth.pl` (`SEGMENT_PROXY`) |
+| Source | `operator/agent/fb-agent/src/tls.rs` (the agent's TLS and proxy), `operator/src/utils/segment-tls-pods.ts` (pod wiring), `operator/src/utils/segment-tls-client.ts` (Secret, operator client) |

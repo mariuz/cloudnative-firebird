@@ -219,7 +219,7 @@ describe('FirebirdClusterController – replication integration', () => {
       await controller.reconcile(cluster);
 
       const podSpec = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0].body.spec.template.spec;
-      expect(podSpec.initContainers.map((c: { name: string }) => c.name)).toEqual(['security-db-init', 'replication-init']);
+      expect(podSpec.initContainers.map((c: { name: string }) => c.name)).toEqual(['agent-install', 'security-db-init', 'replication-init']);
       expect(podSpec.containers.map((c: { name: string }) => c.name)).toEqual([
         'firebird',
         'segment-server',
@@ -238,7 +238,7 @@ describe('FirebirdClusterController – replication integration', () => {
       expect(configMap.data.primary).toBe('test-cluster-0.test-cluster-headless');
       expect(configMap.data['replication.conf']).toContain('journal_source_directory');
       expect(Object.keys(configMap.data)).toEqual(
-        expect.arrayContaining(['segment-server.pl', 'segment-puller.pl', 'init-instance.sh']),
+        expect.arrayContaining(['init-instance.sh', 'enable-publication.sql', 'pitr-restore.sh']),
       );
     });
 
@@ -336,7 +336,7 @@ describe('FirebirdClusterController – replication integration', () => {
       const createdSts = (mockAppsApi.createNamespacedStatefulSet as Mock).mock.calls[0][0]
         .body;
       const podSpec = createdSts.spec?.template?.spec;
-      expect(podSpec?.initContainers?.map((c: { name: string }) => c.name)).toEqual(['security-db-init']);
+      expect(podSpec?.initContainers?.map((c: { name: string }) => c.name)).toEqual(['agent-install', 'security-db-init']);
       // only the backup file server sidecar
       expect(podSpec?.containers?.map((c: { name: string }) => c.name)).toEqual(['firebird', 'backup-files']);
     });

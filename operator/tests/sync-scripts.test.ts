@@ -5,11 +5,15 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { AddressInfo, createServer, Server, Socket } from 'net';
 import { createHmac, randomBytes } from 'crypto';
-import { JOB_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
+import { REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { fakeSegmentServer, signLine } from './helpers/segment-auth';
-import { implementations } from './helpers/implementations';
+import { agent, agentBin } from './helpers/implementations';
 
-const hasPerl = spawnSync('perl', ['-v']).status === 0;
+/**
+ * The segment server's commands for synchronous replication and the in-place promotion, the
+ * sync-standby Job and the puller's primary contact: the agent's (`fb-agent segment-server`,
+ * `sync-standby`, `puller`), with fake Firebird tools. Skipped without the agent's binary.
+ */
 
 /** A port no other server listens on (random ports collided between the servers these tests start) */
 const freePort = (): Promise<number> =>
@@ -35,11 +39,9 @@ const rawRequest = (port: number, line: string): Promise<string[]> =>
 /** "<token> <request>", signed with the token as the clients send it */
 const request = (port: number, line: string): Promise<string[]> => rawRequest(port, signLine(line));
 
-/** A directory with the scripts and a fake fbsvcmgr logging its arguments ("<dir>/fail" makes it fail) */
+/** A directory with a fake fbsvcmgr logging its arguments ("<dir>/fail" makes it fail) */
 function workspace() {
   const dir = mkdtempSync(join(tmpdir(), 'fb-sync-'));
-  for (const name of ['segment-server.pl']) writeFileSync(join(dir, name), REPLICATION_SCRIPTS[name]);
-  writeFileSync(join(dir, 'sync-standby.pl'), JOB_SCRIPTS['sync-standby.pl']);
   mkdirSync(join(dir, 'bin'));
   writeFileSync(
     join(dir, 'bin', 'fbsvcmgr'),
@@ -50,7 +52,7 @@ function workspace() {
   return { dir, calls };
 }
 
-describe('segment server: synchronous replication commands', () => {
+describe.skipIf(!agentBin)('segment server: synchronous replication commands', () => {
   const servers: ChildProcess[] = [];
   afterAll(() => servers.forEach((s) => s.kill()));
 
@@ -60,7 +62,7 @@ describe('segment server: synchronous replication commands', () => {
     for (const d of ['archive', 'source']) mkdirSync(join(base, d), { recursive: true });
     writeFileSync(join(ws.dir, 'primary'), `${primary}.db-headless\n`);
     const port = await freePort();
-    const server = spawn('perl', [join(ws.dir, 'segment-server.pl')], {
+    const server = spawn(agentBin!, ['segment-server'], {
       env: {
         PATH: `${join(ws.dir, 'bin')}:${process.env.PATH}`,
         ARCHIVE_DIR: join(base, 'archive'),
@@ -93,7 +95,6 @@ describe('segment server: synchronous replication commands', () => {
   }
 
   it('takes an nbackup of a replica at a known position, with its control file (NBACKUP)', async () => {
-    if (!hasPerl) return;
     const data = mkdtempSync(join(tmpdir(), 'fb-data-'));
     const { ws, base, ask } = await start('db-1', 'db-0', join(data, 'mydb.fdb'));
     const guid = '{11111111-2222-3333-4444-555555555555}';
@@ -126,7 +127,6 @@ describe('segment server: synchronous replication commands', () => {
   });
 
   it('tells whether a file exists in the data directory (EXISTS), without replication too', async () => {
-    if (!hasPerl) return;
     const data = mkdtempSync(join(tmpdir(), 'fb-data-'));
     writeFileSync(join(data, 'restored.fdb'), 'x');
     for (const env of [{}, { FILES_ONLY: 'true' }]) {
@@ -154,14 +154,13 @@ describe('segment server: synchronous replication commands', () => {
       writeFileSync(db, Buffer.concat([page, Buffer.alloc(8192)]));
       const r = await start('db-1', 'db-0', db, extraEnv);
       const { ws, base } = r;
-      writeFileSync(join(ws.dir, 'set-repl-seq.pl'), REPLICATION_SCRIPTS['set-repl-seq.pl']);
       writeFileSync(join(ws.dir, 'enable-publication.sql'), REPLICATION_SCRIPTS['enable-publication.sql']);
       const bin = (name: string, body: string) => {
         writeFileSync(join(ws.dir, 'bin', name), `#!/bin/sh\n${body}`);
         chmodSync(join(ws.dir, 'bin', name), 0o755);
       };
       bin('isql', `case "$*" in *" -i "*) in="";; *) in=$(cat);; esac; echo "isql $* $in" | tr '\\n' ' ' >> "${ws.dir}/calls"; echo >> "${ws.dir}/calls"
-case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || echo 1)";; *REPLICATION_SEQUENCE*) echo "V   $(cat "${ws.dir}/live-seq-once" 2>/dev/null && rm -f "${ws.dir}/live-seq-once" || cat "${ws.dir}/live-seq" 2>/dev/null || perl -e 'open(F, "<:raw", $ARGV[0]); read(F, $p, 138); print unpack("Q<", substr($p, 130, 8))' "${db}")";; esac\n`);
+case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || echo 1)";; *REPLICATION_SEQUENCE*) echo "V   $(cat "${ws.dir}/live-seq-once" 2>/dev/null && rm -f "${ws.dir}/live-seq-once" || cat "${ws.dir}/live-seq" 2>/dev/null || od -An -t u8 -j 130 -N 8 "${db}" | tr -d ' ')";; esac\n`);
       bin('gfix', `echo "gfix $*" >> "${ws.dir}/calls"\n${failGfix ? 'case "$*" in *none*) exit 1;; esac\n' : ''}exit 0\n`);
       const ctl = Buffer.alloc(40);
       ctl.write('FBREPLCTL', 0, 'latin1');
@@ -178,8 +177,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
     }
 
     it('after the last applied segment, or the journal archive\'s when higher', async () => {
-      if (!hasPerl) return;
-      const r = await replica();
+        const r = await replica();
       try {
         expect(await r.ask('PROMOTE 12')).toEqual(['OK 12 1']);
       } finally {
@@ -216,8 +214,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
     }, 20_000);
 
     it('continues a synchronous standby after the last segment it saw archived', async () => {
-      if (!hasPerl) return;
-      const r = await replica();
+        const r = await replica();
       writeFileSync(join(r.base, 'sync-standby'), '');
       writeFileSync(join(r.base, 'sync-seen'), '20\n');
       try {
@@ -233,14 +230,13 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
     /** a process holding the exclusive lock a SuperServer holds on a database it has open */
     const holdOpen = (db: string, seconds: number) =>
       new Promise<ChildProcess>((resolve) => {
-        const child = spawn('perl', ['-e', `use Fcntl ':flock'; open(my $f, '<', $ARGV[0]) or die; flock($f, LOCK_EX) or die; print "locked\n"; $| = 1; sleep ${seconds}`, db]);
+        const child = spawn('flock', ['-x', db, 'sh', '-c', `echo locked; exec sleep ${seconds}`]);
         servers.push(child);
         child.stdout?.once('data', () => resolve(child));
       });
 
     it('writes the header only once the server closed the database after the full shutdown', async () => {
-      if (!hasPerl) return;
-      const r = await replica();
+        const r = await replica();
       // the server still has it open for 2 seconds after the shutdown returns
       await holdOpen(r.db, 2);
       const t0 = Date.now();
@@ -254,8 +250,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
     }, 20_000);
 
     it('leaves the replica to the offline promotion when the server keeps the database open', async () => {
-      if (!hasPerl) return;
-      const r = await replica(false, { PROMOTE_CLOSE_TIMEOUT_SECONDS: '1' });
+        const r = await replica(false, { PROMOTE_CLOSE_TIMEOUT_SECONDS: '1' });
       await holdOpen(r.db, 15);
       try {
         expect(await r.ask('PROMOTE 12')).toEqual(['ERR the server still had the database open 1s after the full shutdown']);
@@ -272,8 +267,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
     }, 20_000);
 
     it('fails over to the offline promotion when the server would journal below the promotion point', async () => {
-      if (!hasPerl) return;
-      const r = await replica();
+        const r = await replica();
       // the server keeps a header without the sequence the promotion wrote (journal from segment 1)
       writeFileSync(join(r.ws.dir, 'live-seq'), '0');
       try {
@@ -293,8 +287,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
     }, 20_000);
 
     it('writes the header again when the server went online with its cached header', async () => {
-      if (!hasPerl) return;
-      const r = await replica();
+        const r = await replica();
       // the first online keeps the header the server had cached (no sequence); the second holds it
       writeFileSync(join(r.ws.dir, 'live-seq-once'), '0');
       try {
@@ -310,8 +303,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
     }, 20_000);
 
     it('leaves a replica the offline promotion can take over when it fails', async () => {
-      if (!hasPerl) return;
-      const r = await replica(true);
+        const r = await replica(true);
       try {
         expect((await r.ask('PROMOTE none'))[0]).toBe('ERR cannot set replica mode none');
       } finally {
@@ -329,7 +321,6 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
   });
 
   it('takes a plain nbackup on the primary (NBACKUP)', async () => {
-    if (!hasPerl) return;
     const data = mkdtempSync(join(tmpdir(), 'fb-data-'));
     const { ws, ask } = await start('db-0', 'db-0', join(data, 'mydb.fdb'));
     expect(await ask('NBACKUP 0 nbackup-l0-x.nbk')).toEqual(['OK']);
@@ -338,7 +329,6 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
   });
 
   it('samples the primary\'s journal segments as recovery points (POINTS)', async () => {
-    if (!hasPerl) return;
     const journal = mkdtempSync(join(tmpdir(), 'fb-journal-'));
     const segment = (seq: number, length: number) => {
       const h = Buffer.alloc(length);
@@ -363,7 +353,6 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
   }, 15_000);
 
   it('samples nothing on a replica', async () => {
-    if (!hasPerl) return;
     const journal = mkdtempSync(join(tmpdir(), 'fb-journal-'));
     const h = Buffer.alloc(150);
     h.write('FBCHANGELOG', 0, 'latin1');
@@ -376,7 +365,6 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
   });
 
   it('reports the engine version of the local server (VERSION)', async () => {
-    if (!hasPerl) return;
     const { ws, ask } = await start('db-0', 'db-0');
     expect((await ask('VERSION'))[0]).toMatch(/^ERR/);
     writeFileSync(join(ws.dir, 'bin', 'isql'), '#!/bin/sh\necho "V                               4.0.7"\n');
@@ -385,7 +373,6 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
   });
 
   it('accepts requests signed with the password once, never the plain form', async () => {
-    if (!hasPerl) return;
     const { ws, ask, port } = await start('db-0', 'db-0');
     writeFileSync(join(ws.dir, 'bin', 'isql'), '#!/bin/sh\necho "V                               5.0.4"\n');
     chmodSync(join(ws.dir, 'bin', 'isql'), 0o755);
@@ -405,16 +392,14 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
     expect(await rawRequest(port, 'tok VERSION')).toEqual(['ERR unauthorized (unsigned)']);
     expect(await rawRequest(port, 'wrong VERSION')).toEqual(['ERR unauthorized (unsigned)']);
 
-    // segment-request.pl (shell scripts) signs too: the server answers it
-    writeFileSync(join(ws.dir, 'segment-request.pl'), REPLICATION_SCRIPTS['segment-request.pl']);
-    const out = spawnSync('perl', [join(ws.dir, 'segment-request.pl'), '127.0.0.1', 'VERSION'], {
+    // `fb-agent request` (shell scripts) signs too: the server answers it
+    const out = spawnSync(agentBin!, ['request', '127.0.0.1', 'VERSION'], {
       env: { PATH: process.env.PATH, ISC_PASSWORD: 'tok', SEGMENT_PORT: String(port) },
     });
     expect(out.stdout.toString()).toBe('OK 5.0.4\n');
   });
 
-  it('segment-request.pl sends one signed request, never the password', async () => {
-    if (!hasPerl) return;
+  it('fb-agent request sends one signed request, never the password', async () => {
     const received: string[] = [];
     const old: Server = createServer((sock) =>
       sock.once('data', (d) => {
@@ -423,11 +408,9 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
       }),
     );
     await new Promise<void>((r) => old.listen(0, '127.0.0.1', r));
-    const dir = mkdtempSync(join(tmpdir(), 'fb-req-'));
-    writeFileSync(join(dir, 'segment-request.pl'), REPLICATION_SCRIPTS['segment-request.pl']);
     try {
       // asynchronously: the stand-in server runs in this process
-      const child = spawn('perl', [join(dir, 'segment-request.pl'), '127.0.0.1', 'SYNCTO'], {
+      const child = spawn(agentBin!, ['request', '127.0.0.1', 'SYNCTO'], {
         env: { PATH: process.env.PATH, ISC_PASSWORD: 'tok', SEGMENT_PORT: String((old.address() as { port: number }).port) },
       });
       let stdout = '';
@@ -444,7 +427,6 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
   });
 
   it('reports when the replica last reached the primary (PRIMARYSEEN)', async () => {
-    if (!hasPerl) return;
     const { base, ask } = await start('db-1', 'db-0');
     expect(await ask('PRIMARYSEEN')).toEqual(['OK never']);
     writeFileSync(join(base, 'primary-seen'), `${Math.floor(Date.now() / 1000) - 42} db-0.db-headless\n`);
@@ -456,7 +438,6 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
   });
 
   it('reports the lineage switches recorded at promotion (LINEAGE)', async () => {
-    if (!hasPerl) return;
     const { base, ask } = await start('db-1', 'db-1');
     expect(await ask('LINEAGE')).toEqual(['.']);
     writeFileSync(join(base, 'lineage'), '21 41\n60 75\nbad line\n');
@@ -464,7 +445,6 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
   });
 
   it('writes the sync_replica entry on the primary and reports it', async () => {
-    if (!hasPerl) return;
     const { base, ask } = await start('db-0', 'db-0');
     expect(await ask('SYNCTO')).toEqual(['OK none']);
     expect(await ask('SYNC db-1.db-headless')).toEqual(['OK']);
@@ -488,7 +468,6 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
   });
 
   it('turns a replica into the standby and back, repositioned after the primary\'s last segment', async () => {
-    if (!hasPerl) return;
     const { base, ask } = await start('db-1', 'db-0');
     const guid = '{11111111-2222-3333-4444-555555555555}';
     const control = (seq: number, dbseq: number) => {
@@ -527,7 +506,7 @@ case "$in" in *REPLICA_MODE*) echo "V   $(cat "${ws.dir}/mode" 2>/dev/null || ec
   });
 });
 
-describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl) => {
+describe.skipIf(!agentBin)('sync-standby (fb-agent)', () => {
   /**
    * Runs the Job script against fake segment servers for the primary (127.0.0.1) and the standby
    * (127.0.0.2, same port; none with __down): answers per command prefix, requests logged
@@ -570,7 +549,7 @@ describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl)
         if (attempt >= 10) throw err;
       }
     }
-    const child = spawn(...impl.command(join(ws.dir, 'sync-standby.pl')), {
+    const child = spawn(...agent(['sync-standby']), {
       env: {
         PATH: `${join(ws.dir, 'bin')}:${process.env.PATH}`,
         ACTION: action,
@@ -596,7 +575,6 @@ describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl)
   }
 
   it('attaches: primary shut down, standby caught up, SYNC before STANDBY on, primary back online', async () => {
-    if (!impl.available) return;
     const r = await run('attach', {
       primary: { HEADER: 'OK 9', LIST: 'mydb.fdb.journal-0000000009\n.', SYNC: 'OK' },
       standby: { POSITION: 'OK 9 0 0', 'STANDBY on': 'OK' },
@@ -611,7 +589,6 @@ describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl)
   });
 
   it('attaches to a primary just promoted and not written to (no segment at its sequence)', async () => {
-    if (!impl.available) return;
     // its journal starts after S: nothing archived; the standby, seeded at S, has applied S
     const r = await run('attach', {
       primary: { HEADER: 'OK 12', LIST: '.', SYNC: 'OK' },
@@ -622,7 +599,6 @@ describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl)
   });
 
   it('keeps the other standbys in every SYNC (OTHERS)', async () => {
-    if (!impl.available) return;
     const attach = await run(
       'attach',
       { primary: { HEADER: 'OK 9', SYNC: 'OK' }, standby: { POSITION: 'OK 9 0 0', 'STANDBY on': 'OK' } },
@@ -636,7 +612,6 @@ describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl)
   });
 
   it('undoes a half-done attach and brings the primary back online', async () => {
-    if (!impl.available) return;
     const r = await run('attach', {
       primary: { HEADER: 'OK 9', LIST: 'mydb.fdb.journal-0000000009\n.', SYNC: 'OK' },
       standby: { POSITION: 'OK 9 0 0', 'STANDBY on': 'ERR no', 'STANDBY off': 'OK' },
@@ -649,7 +624,6 @@ describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl)
   });
 
   it('reports a standby it could not reposition, for the operator to re-seed it', async () => {
-    if (!impl.available) return;
     const r = await run('attach', {
       primary: { HEADER: 'OK 9', LIST: 'mydb.fdb.journal-0000000009\n.', SYNC: 'OK' },
       standby: { POSITION: 'OK 9 0 0', 'STANDBY on': 'ERR no', 'STANDBY off': 'ERR no' },
@@ -659,7 +633,6 @@ describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl)
   });
 
   it('gives up on a standby that does not catch up, and leaves synchronous replication off', async () => {
-    if (!impl.available) return;
     const r = await run('attach', {
       primary: { HEADER: 'OK 9', LIST: 'mydb.fdb.journal-0000000009\n.', SYNC: 'OK' },
       standby: { POSITION: 'OK 8 0 1' },
@@ -672,7 +645,6 @@ describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl)
   }, 20_000); // waits TIMEOUT_SECONDS (4) for the standby
 
   it('detaches: standby repositioned first, then synchronous replication off', async () => {
-    if (!impl.available) return;
     const r = await run('detach', {
       primary: { HEADER: 'OK 31', SYNC: 'OK' },
       standby: { 'STANDBY off': 'OK' },
@@ -684,7 +656,6 @@ describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl)
   });
 
   it('keeps the standby attached when synchronous replication cannot be turned off', async () => {
-    if (!impl.available) return;
     const r = await run('detach', {
       primary: { HEADER: 'OK 31', SYNC: 'ERR disk full' },
       standby: { 'STANDBY off': 'OK', 'STANDBY on': 'OK' },
@@ -695,7 +666,6 @@ describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl)
   });
 
   it('detaches a standby that cannot be reached, for the operator to re-seed it', async () => {
-    if (!impl.available) return;
     const r = await run('detach', { primary: { HEADER: 'OK 31', SYNC: 'OK' }, standby: { __down: null } });
     expect(r.code).toBe(0);
     expect(r.result).toBe('detached unreachable');
@@ -703,17 +673,15 @@ describe.each(implementations('sync-standby.pl'))('sync-standby ($name)', (impl)
   });
 });
 
-describe('segment puller: primary contact', () => {
+describe.skipIf(!agentBin)('segment puller: primary contact', () => {
   it('records when it last reached the primary, for PRIMARYSEEN', async () => {
-    if (!hasPerl) return;
     const dir = mkdtempSync(join(tmpdir(), 'fb-pull-'));
-    writeFileSync(join(dir, 'segment-puller.pl'), REPLICATION_SCRIPTS['segment-puller.pl']);
     mkdirSync(join(dir, 'source'));
     writeFileSync(join(dir, 'primary'), '127.0.0.1\n');
     const primary: Server = fakeSegmentServer((request, socket) => socket.end(request === 'LIST' ? '.\n' : 'OK none\n'), 'tok');
     await new Promise<void>((r) => primary.listen(0, '127.0.0.1', r));
     const port = (primary.address() as { port: number }).port;
-    const puller = spawn('perl', [join(dir, 'segment-puller.pl')], {
+    const puller = spawn(agentBin!, ['puller'], {
       env: {
         PATH: process.env.PATH,
         SOURCE_DIR: join(dir, 'source'),

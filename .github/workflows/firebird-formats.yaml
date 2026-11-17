@@ -1,23 +1,20 @@
 name: Firebird formats
 
 # The operator writes two Firebird-internal formats itself: the replica control file
-# (replica-control.pl) and the HDR_repl_seq header clump (set-repl-seq.pl). This checks them
+# (fb-agent replica-control) and the HDR_repl_seq header clump (fb-agent set-repl-seq). This checks them
 # against each image's own engine and replica server (hack/firebird-formats): on changes to them,
 # weekly (a new Firebird 6 snapshot may change a format), and on demand for any image.
 on:
   pull_request:
     branches: ["main"]
     paths:
-      - "operator/src/replication/replica-control.pl"
-      - "operator/src/replication/set-repl-seq.pl"
-      - "operator/src/replication/segment-auth.pl"
+      - "operator/agent/**"
       - "hack/firebird-formats/**"
       - ".github/workflows/firebird-formats.yaml"
   push:
     branches: ["main"]
     paths:
-      - "operator/src/replication/replica-control.pl"
-      - "operator/src/replication/set-repl-seq.pl"
+      - "operator/agent/**"
       - "hack/firebird-formats/**"
   schedule:
     - cron: "17 5 * * 1"
@@ -42,6 +39,21 @@ jobs:
     continue-on-error: ${{ github.event_name == 'pull_request' && contains(matrix.image, 'snapshot') }}
     steps:
       - uses: actions/checkout@v4
+
+      # the agent's static binary, as the operator image carries it (the toolchain of
+      # operator/agent/rust-toolchain.toml, installed by rustup on first use)
+      - name: Build the agent
+        working-directory: operator/agent
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+          # the C and assembly parts of the TLS library (ring), for the static musl target
+          CC_x86_64_unknown_linux_musl: clang
+          CFLAGS_x86_64_unknown_linux_musl: --target=x86_64-unknown-linux-musl
+        run: |
+          rustup show
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+          target/x86_64-unknown-linux-musl/release/fb-agent version
 
       - name: Check the formats against ${{ matrix.image }}
         run: hack/firebird-formats/verify.sh "${{ matrix.image }}"

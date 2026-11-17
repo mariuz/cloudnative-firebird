@@ -1687,7 +1687,7 @@ export class FirebirdClusterController {
         return result;
       }
       if (!targetPromoted && !conditions.some((c) => c.type === 'Complete' && c.status === 'True')) return result;
-      // "inplace <S>": the Job promoted the target without a restart (switchover.pl)
+      // "inplace <S>": the Job promoted the target without a restart (`fb-agent switchover`)
       const jobPods = await this.coreApi.listNamespacedPod({ namespace, labelSelector: `job-name=${jobName}` });
       const outcome = jobPods.items.map((p) => p.status?.containerStatuses?.[0]?.state?.terminated?.message ?? '').find((m) => m !== '');
       const promotedInPlace = targetPromoted || /^inplace \d+/.test(outcome ?? '');

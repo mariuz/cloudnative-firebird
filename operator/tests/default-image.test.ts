@@ -25,8 +25,11 @@ describe('default Firebird image', () => {
       metadata: { name: 'db', namespace: 'default' },
       spec: { instances: 1, storage: { size: '1Gi' } },
     };
+    // the agent's installer runs the operator image
     const images = (s: ReturnType<typeof buildStatefulSet>) =>
-      [...(s.spec!.template.spec!.initContainers ?? []), ...s.spec!.template.spec!.containers].map((c) => c.image);
+      [...(s.spec!.template.spec!.initContainers ?? []), ...s.spec!.template.spec!.containers]
+        .filter((c) => c.name !== 'agent-install')
+        .map((c) => c.image);
     expect(new Set(images(buildStatefulSet(cluster)))).toEqual(new Set(['registry.example.com/firebird:6-snapshot']));
     // spec.imageName still wins
     const pinned = buildStatefulSet({ ...cluster, spec: { ...cluster.spec, imageName: 'firebirdsql/firebird:4' } });

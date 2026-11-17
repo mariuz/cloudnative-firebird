@@ -321,11 +321,11 @@ describe('planSynchronous on Firebird 4', () => {
 });
 
 describe('buildSyncStandbyJob', () => {
-  it('runs sync-standby.pl against the primary and the standby', () => {
+  it('runs the agent\'s sync-standby against the primary and the standby', () => {
     const job = buildSyncStandbyJob(makeCluster(), 'attach', 'db-0', 'db-1');
     expect(job.metadata?.name).toBe('db-sync-standby');
     const c = job.spec!.template.spec!.containers[0];
-    expect(c.command).toEqual(['perl', '/etc/firebird-operator/sync-standby.pl']);
+    expect(c.command).toEqual(['/opt/fb-agent/fb-agent', 'sync-standby']);
     const env = Object.fromEntries(c.env!.map((e) => [e.name, e.value]));
     expect(env).toMatchObject({ ACTION: 'attach', PRIMARY: 'db-0.db-headless', STANDBY: 'db-1.db-headless', DATABASE_PATH: '/var/lib/firebird/data/mydb.fdb' });
   });

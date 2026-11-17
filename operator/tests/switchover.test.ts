@@ -7,8 +7,7 @@ import { KubeConfig, V1Job } from '@kubernetes/client-node';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
 import { TARGET_PRIMARY_ANNOTATION, buildSwitchoverJob, promotionRounds } from '../src/utils/switchover';
 import { metrics } from '../src/utils/metrics';
-import { REPLICATION_SCRIPTS } from '../src/utils/replication';
-import { implementations } from './helpers/implementations';
+import { agent, agentBin } from './helpers/implementations';
 import { fakeSegmentServer } from './helpers/segment-auth';
 import { FirebirdCluster, SwitchoverStatus } from '../src/types';
 
@@ -320,15 +319,19 @@ describe('planned switchover', () => {
     expect(s.created().some((j) => j.metadata?.name === 'db-switchover')).toBe(false);
   });
 
-  it('runs switchover.pl with the cluster scripts', () => {
+  it('runs the agent\'s switchover with the cluster ConfigMap', () => {
     const job = buildSwitchoverJob(makeCluster(), { from: 'db-0', target: 'db-2', replicas: [] });
     expect(job.spec?.backoffLimit).toBe(0);
-    expect(job.spec?.template.spec?.containers[0].command).toEqual(['perl', '/etc/firebird-operator/switchover.pl']);
-    expect(job.spec?.template.spec?.volumes).toEqual([{ name: 'cluster-config', configMap: { name: 'db-config' } }]);
+    expect(job.spec?.template.spec?.containers[0].command).toEqual(['/opt/fb-agent/fb-agent', 'switchover']);
+    expect(job.spec?.template.spec?.initContainers?.map((c) => c.name)).toEqual(['agent-install']);
+    expect(job.spec?.template.spec?.volumes).toEqual([
+      { name: 'cluster-config', configMap: { name: 'db-config' } },
+      { name: 'fb-agent', emptyDir: {} },
+    ]);
   });
 });
 
-describe.each(implementations('set-repl-seq.pl'))('set-repl-seq ($name)', (impl) => {
+describe.runIf(agentBin)('set-repl-seq', () => {
 
   // header page: pag_type 1, page size at 16, ODS version at 18 (Firebird flag 0x8000), then
   // hdr_end and the clumps: at 66 and from 128 in ODS 13, at 36 and from 148 in ODS 14
@@ -346,15 +349,12 @@ describe.each(implementations('set-repl-seq.pl'))('set-repl-seq ($name)', (impl)
   };
 
   it('adds the replication sequence clump after the existing ones', () => {
-    if (!impl.available) return;
     const dir = mkdtempSync(join(tmpdir(), 'fb-seq-'));
-    const script = join(dir, 'set-repl-seq.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['set-repl-seq.pl']);
     const guid = Buffer.concat([Buffer.from([10, 16]), Buffer.alloc(16, 0xab)]);
     const db = join(dir, 'db.fdb');
     writeFileSync(db, Buffer.concat([header(guid), Buffer.alloc(8192)]));
 
-    execFileSync(...impl.command(script, [db, '63']), { stdio: 'pipe' });
+    execFileSync(...agent(['set-repl-seq'], [db, '63']), { stdio: 'pipe' });
     const page = readFileSync(db);
     expect(page.readUInt16LE(66)).toBe(128 + 18 + 10);
     expect(page.subarray(128, 146)).toEqual(guid);
@@ -365,20 +365,17 @@ describe.each(implementations('set-repl-seq.pl'))('set-repl-seq ($name)', (impl)
     expect(page.length).toBe(16384);
 
     // an existing clump is replaced in place
-    execFileSync(...impl.command(script, [db, '64']), { stdio: 'pipe' });
+    execFileSync(...agent(['set-repl-seq'], [db, '64']), { stdio: 'pipe' });
     const again = readFileSync(db);
     expect(again.readUInt16LE(66)).toBe(156);
     expect(again.readBigUInt64LE(148)).toBe(64n);
   });
 
   it('uses the ODS 14 (Firebird 6) header layout', () => {
-    if (!impl.available) return;
     const dir = mkdtempSync(join(tmpdir(), 'fb-seq-'));
-    const script = join(dir, 'set-repl-seq.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['set-repl-seq.pl']);
     const db = join(dir, 'db.fdb');
     writeFileSync(db, header(Buffer.alloc(0), 14));
-    execFileSync(...impl.command(script, [db, '7']), { stdio: 'pipe' });
+    execFileSync(...agent(['set-repl-seq'], [db, '7']), { stdio: 'pipe' });
     const page = readFileSync(db);
     expect(page.readUInt16LE(36)).toBe(148 + 10);
     expect([page[148], page[149]]).toEqual([11, 8]);
@@ -390,33 +387,26 @@ describe.each(implementations('set-repl-seq.pl'))('set-repl-seq ($name)', (impl)
   });
 
   it('refuses an unknown on-disk structure, and files that are not a database header', () => {
-    if (!impl.available) return;
     const dir = mkdtempSync(join(tmpdir(), 'fb-seq-'));
-    const script = join(dir, 'set-repl-seq.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['set-repl-seq.pl']);
     const future = join(dir, 'future.fdb');
     writeFileSync(future, header(Buffer.alloc(0), 15));
-    const r = spawnSync(...impl.command(script, [future, '1']), { encoding: 'utf8' });
+    const r = spawnSync(...agent(['set-repl-seq'], [future, '1']), { encoding: 'utf8' });
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain('unsupported on-disk structure 15');
     expect(readFileSync(future)).toEqual(header(Buffer.alloc(0), 15));
   });
 
   it('refuses files that are not a database header', () => {
-    if (!impl.available) return;
     const dir = mkdtempSync(join(tmpdir(), 'fb-seq-'));
-    const script = join(dir, 'set-repl-seq.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['set-repl-seq.pl']);
     const bogus = join(dir, 'x');
     writeFileSync(bogus, Buffer.alloc(8192));
-    expect(spawnSync(...impl.command(script, [bogus, '1'])).status).not.toBe(0);
+    expect(spawnSync(...agent(['set-repl-seq'], [bogus, '1'])).status).not.toBe(0);
   });
 });
 
-describe.each(implementations('switchover.pl'))('switchover with Firebird 6 ($name)', (impl) => {
+describe.runIf(agentBin)('switchover with Firebird 6', () => {
 
   it('reads the final sequence through the segment server when header statistics are refused', async () => {
-    if (!impl.available) return;
     const dir = mkdtempSync(join(tmpdir(), 'fb-sw6-'));
     // Firebird 6 answers header statistics of a database in full shutdown with an error
     const fbsvcmgr = join(dir, 'fbsvcmgr');
@@ -433,10 +423,8 @@ describe.each(implementations('switchover.pl'))('switchover with Firebird 6 ($na
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     const port = (server.address() as { port: number }).port;
-    const script = join(dir, 'switchover.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['switchover.pl']);
     const out = await new Promise<{ code: number | null; text: string }>((resolve) => {
-      const child = spawn(...impl.command(script), {
+      const child = spawn(...agent(['switchover']), {
         env: {
           ...process.env,
           PATH: `${dir}:${process.env.PATH}`,
@@ -464,7 +452,6 @@ describe.each(implementations('switchover.pl'))('switchover with Firebird 6 ($na
   });
 
   it('waits for the clients of the old primary up to the switchover delay before stopping writes', { timeout: 30000 }, async () => {
-    if (!impl.available) return;
     // the stub isql answers the attachment count query with the counts given, one per call (the
     // last one repeating): [2, 1, 0] clients leaving, [1] a client that stays
     const run = async (delay: string | undefined, counts: number[] = [1]) => {
@@ -482,10 +469,8 @@ describe.each(implementations('switchover.pl'))('switchover with Firebird 6 ($na
       chmodSync(isql, 0o755);
       const server = fakeSegmentServer((request, sock) => sock.end(request === 'POSITION' ? 'OK 53 0 0\n' : 'ERR unknown\n'), 'tok');
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-      const script = join(dir, 'switchover.pl');
-      writeFileSync(script, REPLICATION_SCRIPTS['switchover.pl']);
       const out = await new Promise<{ code: number | null; text: string }>((resolve) => {
-        const child = spawn(...impl.command(script), {
+        const child = spawn(...agent(['switchover']), {
           env: {
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,
@@ -538,7 +523,6 @@ describe.each(implementations('switchover.pl'))('switchover with Firebird 6 ($na
   });
 
   it('promotes the target in place and reports it, or reports why not', async () => {
-    if (!impl.available) return;
     const run = async (promoteReply: string) => {
       const dir = mkdtempSync(join(tmpdir(), 'fb-swp-'));
       const fbsvcmgr = join(dir, 'fbsvcmgr');
@@ -552,10 +536,8 @@ describe.each(implementations('switchover.pl'))('switchover with Firebird 6 ($na
         else sock.end('ERR unknown\n');
       }, 'tok');
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-      const script = join(dir, 'switchover.pl');
-      writeFileSync(script, REPLICATION_SCRIPTS['switchover.pl']);
       const code = await new Promise<number | null>((resolve) => {
-        const child = spawn(...impl.command(script), {
+        const child = spawn(...agent(['switchover']), {
           env: {
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,

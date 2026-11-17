@@ -2,7 +2,7 @@ import { V1Container, V1EnvVar, V1Lease, V1PodSpec, V1Role, V1RoleBinding, V1Vol
 import { API_GROUP, FirebirdCluster, RESOURCE_KIND } from '../types';
 import { clusterLabels, FIREBIRD_DATA_DIR } from './resources';
 import { OPERATOR_CONFIG_DIR, PRIMARY_KEY, SEGMENT_PORT, replicationDirectories } from './replication';
-import { AGENT_IMAGE_PATH, agentMode } from './agent';
+import { AGENT_IMAGE_PATH } from './agent';
 import { operatorImage } from './operator-image';
 import { SEGMENT_SERVER_LOCAL_PORT, segmentTlsEnabled } from './segment-tls-pods';
 import { nativeSidecarsSupported } from './segment-tls-default';
@@ -13,7 +13,7 @@ import { nativeSidecarsSupported } from './segment-tls-default';
  *
  * Without it the cluster Lease (<cluster>-lease) only records which instance is the primary: the
  * operator moves it when it promotes a replica, and nothing renews it. With it the primary holds
- * the Lease itself: a lease-holder sidecar (lease-holder.ts, from the operator image) in every
+ * the Lease itself: a lease-holder sidecar (`fb-agent lease-holder`, from the operator image) in every
  * instance pod renews the Lease while its pod is the primary and its database is online, and
  * fences the database (the isolation check's fence: full shutdown) when the Lease names another
  * instance or cannot be renewed for the renew deadline (two thirds of the Lease's duration, so
@@ -142,16 +142,14 @@ export function buildPrimaryLeaseRoleBinding(cluster: FirebirdCluster): V1RoleBi
   };
 }
 
-/** The lease-holder sidecar (lease-holder.ts), with the SYSDBA credentials it signs FENCE and STATE with */
+/** The lease-holder sidecar (the agent's lease-holder), with the SYSDBA credentials it signs FENCE and STATE with */
 export function buildLeaseHolderContainer(cluster: FirebirdCluster, credentials: V1EnvVar[], dataDir = FIREBIRD_DATA_DIR): V1Container {
   const dirs = replicationDirectories(cluster, dataDir);
-  const rust = agentMode(cluster) === 'rust';
   return {
     name: PRIMARY_LEASE_CONTAINER,
     image: operatorImage(),
-    // the agent's holder on clusters that run the agent (agent/fb-agent/src/lease.rs): the same
-    // decisions, requests and log lines, from the binary in the operator image
-    command: rust ? [AGENT_IMAGE_PATH, 'lease-holder'] : ['node', 'dist/lease-holder.js'],
+    // the agent's holder (agent/fb-agent/src/lease.rs), from the binary in the operator image
+    command: [AGENT_IMAGE_PATH, 'lease-holder'],
     // native sidecar: keeps running beside the instance, stopped after the main containers
     restartPolicy: 'Always',
     env: [
@@ -166,8 +164,7 @@ export function buildLeaseHolderContainer(cluster: FirebirdCluster, credentials:
       // the segment server of this pod: on localhost behind the TLS proxy, else on the segment port
       { name: 'SEGMENT_SERVER', value: `127.0.0.1:${segmentTlsEnabled(cluster) ? SEGMENT_SERVER_LOCAL_PORT : SEGMENT_PORT}` },
     ],
-    // the Node holder needs its runtime's memory; the agent's is a few megabytes
-    resources: { requests: { cpu: '10m', memory: rust ? '8Mi' : '32Mi' } },
+    resources: { requests: { cpu: '10m', memory: '8Mi' } },
     securityContext: {
       runAsNonRoot: true,
       runAsUser: 65532,

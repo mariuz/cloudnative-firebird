@@ -3,6 +3,7 @@ import { V1Job, V1Pod } from '@kubernetes/client-node';
 import { API_GROUP, FirebirdCluster, SynchronousStatus } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, jobPodSpec } from './resources';
 import { OPERATOR_CONFIG_DIR, SEGMENT_PORT, instanceHost } from './replication';
+import { AGENT_PATH } from './agent';
 import { REPLICATION_LAG_ANNOTATION, isPodReady } from './routing';
 
 /**
@@ -18,7 +19,7 @@ import { REPLICATION_LAG_ANNOTATION, isPodReady } from './routing';
  * each commit on every one of them (verified: with one down, commits fail). They are attached and
  * detached one at a time. A standby must not apply the journal as
  * well (it would apply every change twice), so the switch happens with the primary briefly in
- * full shutdown at the end of its last segment (sync-standby.pl): the standby stops applying
+ * full shutdown at the end of its last segment (`fb-agent sync-standby`): the standby stops applying
  * segments, the primary's segment server writes the sync_replica entry to the file
  * replication.conf includes, and Firebird reads it when the database is opened again. Detaching
  * repositions the standby's replica control file at the primary's last segment, so it continues
@@ -92,7 +93,7 @@ export function synchronousMode(cluster: FirebirdCluster): boolean {
   return Boolean(cluster.spec.replication?.enabled && cluster.spec.replication.mode === 'sync');
 }
 
-/** Builds the Job that attaches or detaches the synchronous standby (sync-standby.pl) */
+/** Builds the Job that attaches or detaches the synchronous standby (`fb-agent sync-standby`) */
 export function buildSyncStandbyJob(
   cluster: FirebirdCluster,
   action: SyncAction,
@@ -126,7 +127,7 @@ export function buildSyncStandbyJob(
             {
               name: 'sync-standby',
               image: clusterImage(cluster),
-              command: ['perl', `${OPERATOR_CONFIG_DIR}/sync-standby.pl`],
+              command: [AGENT_PATH, 'sync-standby'],
               env: [
                 ...superuserClientEnv(cluster),
                 { name: 'ACTION', value: action },

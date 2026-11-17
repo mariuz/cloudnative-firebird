@@ -1,10 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { spawn } from 'child_process';
-import { readFileSync, writeFileSync, mkdtempSync } from 'fs';
+import { mkdtempSync } from 'fs';
 import { AddressInfo, createServer, Server } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { serverStopped, stopWithServer } from '../src/stop-with-server';
+import { agentBin } from './helpers/implementations';
 
 const listen = (): Promise<Server> => new Promise((resolve) => { const s = createServer((c) => c.destroy()); s.listen(0, '127.0.0.1', () => resolve(s)); });
 const portOf = (s: Server) => (s.address() as AddressInfo).port;
@@ -41,21 +42,17 @@ describe('sidecars stop with the Firebird server', () => {
     }
   });
 
-  it('Perl sidecars (the segment server and puller include) do the same', async () => {
+  it.runIf(agentBin)('the agent\'s segment server does the same', async () => {
     const server = await listen();
-    const dir = mkdtempSync(join(tmpdir(), 'stop-perl-'));
-    const script = join(dir, 'sidecar.pl');
-    writeFileSync(
-      script,
-      'use strict; use warnings; use IO::Socket::INET; $| = 1;\n' +
-        readFileSync(join(__dirname, '..', 'src', 'replication', 'stop-with-server.pl'), 'utf8') +
-        '\nprint "ready\\n"; while (1) { exit_when_stopped(); sleep 1; }\n',
-    );
-    const child = spawn('perl', [script], { env: { ...process.env, FIREBIRD_PORT: String(portOf(server)) } });
+    const dir = mkdtempSync(join(tmpdir(), 'stop-agent-'));
+    const child = spawn(agentBin!, ['segment-server'], {
+      env: { ...process.env, FIREBIRD_PORT: String(portOf(server)), ARCHIVE_DIR: dir, SEGMENT_PORT: '0', ISC_PASSWORD: 'x' },
+    });
     let out = '';
     child.stdout.on('data', (d) => (out += d));
     const exited = new Promise<number | null>((r) => child.on('exit', (code) => r(code)));
-    for (let i = 0; i < 50 && !out.includes('ready'); i++) await sleep(50);
+    for (let i = 0; i < 50 && !out.includes('listening on'); i++) await sleep(50);
+    expect(out).toContain('listening on');
     child.kill('SIGTERM');
     await sleep(1500);
     expect(child.exitCode).toBeNull(); // still running: the server is up

@@ -23,14 +23,17 @@ export function segmentRequestOf(raw: string, secret?: string): { request: strin
  * other request to the handler (one request per connection, as the real server).
  */
 export function fakeSegmentServer(handler: (request: string, sock: Socket, raw: string) => void, secret?: string): Server {
-  return createServer((sock) =>
+  return createServer((sock) => {
+    // a client killed mid-request (a test's program stopped) resets its connection: not an error
+    // of the test
+    sock.on('error', () => {});
     sock.once('data', (buf) => {
       const raw = buf.toString();
       const { request } = segmentRequestOf(raw.split('\n')[0], secret);
       if (request === 'PING') sock.end('OK\n');
       else handler(request, sock, raw);
-    }),
-  );
+    });
+  });
 }
 
 /**

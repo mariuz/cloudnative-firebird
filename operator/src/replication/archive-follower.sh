@@ -11,7 +11,7 @@
 # - across a failover in the source (lineage marker "<database>.lineage-<P>-<U>": the replica
 #   promoted at segment P continued after the archive's segment U), downloads up to P only. Once P
 #   is applied, it asks for a restart ($REPLICATION_DIR/reposition holds U): the replication init
-#   container moves the position after U (pitr-plan.pl --reposition) when the operator restarts
+#   container moves the position after U (`fb-agent reposition`) when the operator restarts
 #   the instance, the transactions still open at P being rolled back by the restart (they never
 #   committed in the new lineage), and records U in $REPLICATION_DIR/repositioned. A replica that
 #   applied segments of the lost primary after P cannot follow the new lineage: reported, it needs

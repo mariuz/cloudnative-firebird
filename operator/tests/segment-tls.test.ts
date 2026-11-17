@@ -1,12 +1,12 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { spawn, spawnSync, ChildProcess } from 'child_process';
+import { spawn, ChildProcess } from 'child_process';
 import { mkdtempSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { createServer, Server, Socket } from 'net';
 import { createTlsCertificates } from '../src/utils/certificates';
 import { parsePeers, peerName, SegmentTlsFiles, SegmentTlsPeers, startClient, startServer } from '../src/segment-tls';
+import { agentBin } from './helpers/implementations';
 
 const certs = (caName: string): SegmentTlsFiles => {
   const c = createTlsCertificates({ caName, dnsNames: ['*.db-headless'], clientAuth: true });
@@ -16,7 +16,7 @@ const certs = (caName: string): SegmentTlsFiles => {
 const listen = (server: Server): Promise<number> =>
   new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve((server.address() as { port: number }).port)));
 
-/** One exchange as a Perl client does it: lines out, everything until the server closes back */
+/** One exchange as a plain client does it: lines out, everything until the server closes back */
 const exchange = (port: number, text: string): Promise<string> =>
   new Promise((resolve, reject) => {
     const socket = new Socket();
@@ -148,8 +148,6 @@ describe('segment TLS proxy', () => {
   });
 });
 
-const hasPerl = spawnSync('perl', ['-v']).status === 0;
-
 /** A port no other server listens on */
 const freePort = async (): Promise<number> => {
   const probe = createServer();
@@ -158,7 +156,7 @@ const freePort = async (): Promise<number> => {
   return port;
 };
 
-describe('segment TLS with the Perl segment server and clients', () => {
+describe.runIf(agentBin)('segment TLS with the agent\'s segment server and client', () => {
   const children: ChildProcess[] = [];
   const servers: Server[] = [];
   afterEach(() => {
@@ -167,13 +165,10 @@ describe('segment TLS with the Perl segment server and clients', () => {
   });
 
   it('serves signed requests through both proxies, the server on localhost only', { timeout: 20_000 }, async () => {
-    if (!hasPerl) return;
-    const dir = mkdtempSync(join(tmpdir(), 'fb-segment-tls-'));
-    for (const name of ['segment-server.pl', 'segment-request.pl']) writeFileSync(join(dir, name), REPLICATION_SCRIPTS[name]);
     const data = mkdtempSync(join(tmpdir(), 'fb-data-'));
     writeFileSync(join(data, 'old.fdb'), 'x');
     const [inner, outer] = [await freePort(), await freePort()];
-    const server = spawn('perl', [join(dir, 'segment-server.pl')], {
+    const server = spawn(agentBin!, ['segment-server'], {
       env: {
         PATH: process.env.PATH,
         FILES_ONLY: 'true',
@@ -191,7 +186,7 @@ describe('segment TLS with the Perl segment server and clients', () => {
     const proxy = `127.0.0.1:${(client.address() as { port: number }).port}`;
     const request = (...args: string[]) =>
       new Promise<string>((resolve) => {
-        const c = spawn('perl', [join(dir, 'segment-request.pl'), '127.0.0.1', ...args], {
+        const c = spawn(agentBin!, ['request', '127.0.0.1', ...args], {
           env: { PATH: process.env.PATH, ISC_PASSWORD: 'tok', SEGMENT_PORT: String(outer), SEGMENT_PROXY: proxy },
         });
         let out = '';

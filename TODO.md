@@ -32,8 +32,8 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   overwrote the replication sequence written offline. Reproduced on 4.0, 5.0 and the 6.0 snapshot
   (`hack/repro/refused-attachment.sh`). The report is ready in
   [docs/upstream](docs/upstream/03-refused-attachment-writes-header.md). The operator's handling
-  since v0.147.0 (the file's lock held during the write) prevents it, and since v0.153.0
-  `segment-server.pl` explains it with this cause.
+  since v0.147.0 (the file's lock held during the write) prevents it, and since v0.153.0 the
+  segment server explains it with this cause.
 - [ ] **Synchronous replication follow-ups** (one standby since v0.53.0, several since v0.61.0):
   an "any N of M" quorum (Firebird waits for every `sync_replica`). Attaching and detaching
   without the short write pause is not possible with Firebird 5 or 6: `sync_replica` is read
@@ -60,19 +60,14 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   `contactTimeoutSeconds` fenced the primary) and fixed: GET, SEED, TXNS and PLAN are answered by
   child processes. The measurements are in the proposal.
 
-- [ ] **Rust agent, after Phase 3** ([docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md)):
-  the segment server and the puller are the agent's (Phase 3 is done, v0.155.0 to v0.166.0).
-  The replication init container's helpers are too (v0.167.0); the init container itself stays
-  a shell script around Firebird's tools. The primary Lease holder, a Node sidecar, is the
-  agent's too (v0.168.0), and so are the custom metrics exporter and the Jobs' programs
-  (v0.169.0): nothing runs Perl on a cluster with the annotation. Next: the agent as the
-  default for every cluster, and the Perl scripts deleted (decided). That restarts every
-  cluster's instances once, removes `perl` as a value of the annotation, and turns the
-  conformance tests against the Perl into tests of the agent alone. The segment TLS proxy can
-  then lose its client side (only the Perl clients needed it) and the Node lease holder can go. When a release
-  changes `init-instance.sh` anyway, the derived `init-instance-agent.sh` can be folded into
-  it (`FB_AGENT` set: the agent's commands). Making the
-  agent the default (no annotation) is a separate decision.
+- [ ] **Rust agent, follow-ups** ([docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md)):
+  every cluster runs the agent and the Perl scripts are deleted (v0.170.0). Left: the Lease
+  holder and the Jobs' programs could do their TLS themselves, with the certificates mounted, as
+  the segment server, the puller and the replication init do; the segment TLS proxy sidecar
+  would then go. The operator's Node implementations of the Lease holder and the segment TLS
+  proxy (`lease-holder.ts`, `segment-tls.ts`) run in no pod and can be deleted, and the former
+  name of the init script (`init-instance-agent.sh` in the cluster ConfigMap) once no pod of
+  before v0.170.0 can be left.
 - [ ] **An atomic journal archive command**: copy to a temporary name and rename, so the archive
   never holds a segment that is still being copied. The servers only offer complete segments
   since v0.155.0, which covers the replicas; other readers of the archive (the journal archive

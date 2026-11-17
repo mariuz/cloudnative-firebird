@@ -1,32 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { ChildProcess, spawn, spawnSync } from 'child_process';
+import { ChildProcess, spawn } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { createServer, Server, Socket } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { REPLICATION_SCRIPTS } from '../src/utils/replication';
+import { agentBin } from './helpers/implementations';
 import { fakeSegmentServer } from './helpers/segment-auth';
 
 /**
- * The replicas' segment puller has two implementations: segment-puller.pl and `fb-agent puller`
- * (docs/rust-agent-roadmap.md, Phase 2). The same scenarios run against both, with a fake primary:
- * what they fetch, the files and flags they leave, and their log lines must be the same.
+ * The replicas' segment puller, `fb-agent puller` (docs/rust-agent-roadmap.md, Phase 2), with a
+ * fake primary: what it fetches, the files and flags it leaves, and its log lines (those of
+ * segment-puller.pl, which it replaced; removed in v0.170.0).
  *
- * The Rust one needs the fb-agent binary (FB_AGENT_BIN, or a build in agent/target) and is skipped
- * without it; the "Rust agent" CI job runs this file with it.
+ * It needs the fb-agent binary (FB_AGENT_BIN, or a build in agent/target) and is skipped without
+ * it; the "Rust agent" CI job runs this file with it.
  */
-const agentBin = [
-  process.env.FB_AGENT_BIN,
-  ...['x86_64-unknown-linux-musl/release', 'aarch64-unknown-linux-musl/release', 'release', 'debug'].map((d) =>
-    join(__dirname, '..', 'agent', 'target', d, 'fb-agent'),
-  ),
-].find((p) => p && existsSync(p));
-const hasPerl = spawnSync('perl', ['-v']).status === 0;
-
-const implementations = [
-  { name: 'Perl (segment-puller.pl)', available: hasPerl, command: (dir: string) => ['perl', join(dir, 'segment-puller.pl')] },
-  { name: 'Rust (fb-agent puller)', available: Boolean(agentBin), command: () => [agentBin!, 'puller'] },
-];
+const implementations = [{ name: 'Rust (fb-agent puller)', available: Boolean(agentBin), command: () => [agentBin!, 'puller'] }];
 
 describe.each(implementations)('segment puller: $name', ({ available, command }) => {
   let dir: string;
@@ -56,7 +45,7 @@ describe.each(implementations)('segment puller: $name', ({ available, command })
     await waitFor(() => requests.filter((r) => r === 'LIST').length >= from + n, `${n} more polls`);
   };
   const start = (env: Record<string, string> = {}) => {
-    const [cmd, ...args] = command(dir);
+    const [cmd, ...args] = command();
     puller = spawn(cmd, args, {
       env: {
         PATH: process.env.PATH ?? '',
@@ -80,7 +69,6 @@ describe.each(implementations)('segment puller: $name', ({ available, command })
   beforeEach(async () => {
     dir = mkdtempSync(join(tmpdir(), 'fb-puller-'));
     mkdirSync(source());
-    writeFileSync(join(dir, 'segment-puller.pl'), REPLICATION_SCRIPTS['segment-puller.pl']);
     writeFileSync(join(dir, 'primary'), '127.0.0.1\n');
     out = '';
     requests = [];

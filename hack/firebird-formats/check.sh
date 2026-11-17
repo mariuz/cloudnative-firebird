@@ -2,10 +2,10 @@
 # Runs inside a Firebird image (verify.sh): checks the two Firebird internal formats the operator
 # writes itself against that image's own engine and replica server.
 #
-# 1. HDR_repl_seq header clump (set-repl-seq.pl, src/jrd/ods.h): the sequence the script writes
+# 1. HDR_repl_seq header clump (fb-agent set-repl-seq, src/jrd/ods.h): the sequence the agent writes
 #    is the one the engine reports (REPLICATION_SEQUENCE), when the clump is added and replaced.
-# 2. Replica control file (replica-control.pl, ControlFile::DataV1 in ReplServer.cpp): Firebird's
-#    replica server goes by the position the script writes. Without a control file it would start
+# 2. Replica control file (fb-agent replica-control, ControlFile::DataV1 in ReplServer.cpp):
+#    Firebird's replica server goes by the position the agent writes. Without a control file it would start
 #    from the database's own sequence, so the file claims one segment more than the copy has: the
 #    primary's next segment (43) must be skipped and the one after (44) applied, and the server
 #    moves the file's position on in the same format.
@@ -26,9 +26,9 @@ P="$W/primary.fdb"
 sql "" "create database '$P'; create table t (id integer primary key); commit;" >/dev/null
 echo "ODS: $(gstat -h "$P" | sed -n 's/^[[:space:]]*ODS version[[:space:]]*\([0-9.]*\).*/\1/p')"
 [ "$(seq_of "$P")" = 0 ] || fail "a new database reports replication sequence $(seq_of "$P")"
-perl "$S/set-repl-seq.pl" "$P" 41 >/dev/null
+"$S/fb-agent" set-repl-seq "$P" 41 >/dev/null
 [ "$(seq_of "$P")" = 41 ] || fail "header clump added: the engine reports $(seq_of "$P"), expected 41"
-perl "$S/set-repl-seq.pl" "$P" 42 >/dev/null
+"$S/fb-agent" set-repl-seq "$P" 42 >/dev/null
 [ "$(seq_of "$P")" = 42 ] || fail "header clump replaced: the engine reports $(seq_of "$P"), expected 42"
 echo "ok: HDR_repl_seq header clump (added and replaced) is the sequence the engine reports"
 
@@ -40,7 +40,7 @@ gfix -replica read_only "$R"
 guid=$(gstat -h "$R" | sed -n 's/^[[:space:]]*Database GUID:[[:space:]]*\({[0-9A-F-]*}\).*/\1/p')
 [ -n "$guid" ] || fail "no database GUID in gstat -h"
 # applied up to segment 43, while the copy itself is at 42: no candidates, no primary to ask
-perl "$S/replica-control.pl" none 43 42 "$W/source/.control.tmp" >/dev/null
+"$S/fb-agent" replica-control none 43 42 "$W/source/.control.tmp" >/dev/null
 mv "$W/source/.control.tmp" "$W/source/$guid"
 cat > /opt/firebird/replication.conf <<CONF
 database = $P
@@ -77,7 +77,8 @@ if [ "$rows" != 2 ]; then
   diagnose
   fail "the replica should hold the row of segment 44 only (segment 43 is before the control file's position); it holds: ${rows:-none}"
 fi
-position=$(perl -e 'open(my $f, "<:raw", $ARGV[0]) or die; local $/; my $d = <$f>; my (undef, $v, undef, $s) = unpack("a10 v V Q<", $d); print "$v $s"' "$W/source/$guid")
+# the version (u16 after the 10-byte magic) and the sequence (u64 after the u32 transaction count)
+position="$(od -An -tu2 -j10 -N2 "$W/source/$guid" | tr -d ' ') $(od -An -tu8 -j16 -N8 "$W/source/$guid" | tr -d ' ')"
 [ "${position%% *}" = 1 ] || fail "the replica server rewrote the control file with version ${position%% *}"
 [ "${position#* }" -ge 44 ] || fail "the replica server left the control file at segment ${position#* }"
 echo "ok: replica control file: the replica server skipped segment 43 as written, applied 44 and moved the position to ${position#* }"

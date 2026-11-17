@@ -26,6 +26,18 @@ const cluster = (spec: Partial<FirebirdCluster['spec']> = {}): FirebirdCluster =
   },
 });
 const allContainers = (spec: V1PodSpec) => [...(spec.initContainers ?? []), ...spec.containers];
+/** The containers that run the cluster's image; the agent's installer runs the operator image under its own context */
+const ownContainers = (spec: V1PodSpec) => allContainers(spec).filter((c) => c.name !== 'agent-install');
+/** The installer: restricted on its own (non-root, read-only, no capabilities) */
+const expectRestrictedInstaller = (spec: V1PodSpec) =>
+  expect(allContainers(spec).find((c) => c.name === 'agent-install')?.securityContext).toEqual({
+    runAsNonRoot: true,
+    runAsUser: 65532,
+    runAsGroup: 65532,
+    allowPrivilegeEscalation: false,
+    readOnlyRootFilesystem: true,
+    capabilities: { drop: ['ALL'] },
+  });
 
 describe('instance pod security', () => {
   it('drops every capability except CHOWN, DAC_OVERRIDE and FOWNER, and uses RuntimeDefault seccomp', () => {
@@ -35,12 +47,13 @@ describe('instance pod security', () => {
     expect(containers.map((c) => c.name)).toEqual(
       expect.arrayContaining(['security-db-init', 'bootstrap-download', 'replication-init', 'firebird', 'segment-server']),
     );
-    for (const c of containers) {
+    for (const c of ownContainers(pod)) {
       expect(c.securityContext, c.name).toEqual({
         allowPrivilegeEscalation: false,
         capabilities: { drop: ['ALL'], add: INSTANCE_CAPABILITIES },
       });
     }
+    expectRestrictedInstaller(pod);
   });
 
   it('merges spec.podSecurityContext and spec.securityContext over the defaults', () => {
@@ -82,9 +95,10 @@ describe('instance pods as the firebird user (runAsFirebirdUser)', () => {
       fsGroup: FIREBIRD_UID,
       seccompProfile: { type: 'RuntimeDefault' },
     });
-    for (const c of allContainers(pod)) {
+    for (const c of ownContainers(pod)) {
       expect(c.securityContext, c.name).toEqual({ allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'] } });
     }
+    expectRestrictedInstaller(pod);
     // restricted allows these volume types only (no hostPath)
     for (const v of pod.volumes ?? []) {
       expect(Boolean(v.emptyDir || v.configMap || v.secret || v.persistentVolumeClaim || v.projected), v.name).toBe(true);
@@ -92,8 +106,9 @@ describe('instance pods as the firebird user (runAsFirebirdUser)', () => {
   });
 
   it('runs the image entrypoint on a writable copy of /opt/firebird', () => {
-    expect(pod.initContainers![0].name).toBe('firebird-home');
-    expect(pod.initContainers![0].args![0]).toContain('cp -a /opt/firebird/. /firebird-home/');
+    // first, after the agent's installer
+    expect(pod.initContainers!.map((c) => c.name).slice(0, 2)).toEqual(['agent-install', 'firebird-home']);
+    expect(pod.initContainers![1].args![0]).toContain('cp -a /opt/firebird/. /firebird-home/');
     expect(pod.volumes).toContainEqual({ name: 'firebird-home', emptyDir: {} });
     const firebird = pod.containers.find((c) => c.name === 'firebird')!;
     expect(firebird.volumeMounts).toContainEqual({ name: 'firebird-home', mountPath: '/opt/firebird' });
@@ -135,7 +150,8 @@ describe('Job pod security (restricted Pod Security Standard)', () => {
         runAsGroup: FIREBIRD_UID,
         seccompProfile: { type: 'RuntimeDefault' },
       });
-      for (const container of allContainers(spec)) {
+      if (allContainers(spec).some((c) => c.name === 'agent-install')) expectRestrictedInstaller(spec);
+      for (const container of ownContainers(spec)) {
         expect(container.securityContext, container.name).toEqual({
           allowPrivilegeEscalation: false,
           capabilities: { drop: ['ALL'] },

@@ -99,12 +99,16 @@ describe.skipIf(!agentBin)('the lease holder of the agent (fb-agent lease-holder
       metadata: { name: 'db-lease', namespace: 'prod', resourceVersion: '41', labels: { cluster: 'db' }, ownerReferences: [{ uid: 'u-1' }] },
       spec: { holderIdentity: 'db-0', leaseDurationSeconds: 15, leaseTransitions: 2 },
     };
+    // this test's own records: a request of the previous test's holder, still finishing, lands
+    // in that test's arrays
+    const seen = calls;
+    const requests = () => asked;
     api = createServer({ cert: certificates.tlsCert, key: certificates.tlsKey }, (request: IncomingMessage, response: ServerResponse) => {
       const chunks: Buffer[] = [];
       request.on('data', (d: Buffer) => chunks.push(d));
       request.on('end', () => {
         const text = Buffer.concat(chunks).toString();
-        calls.push({
+        seen.push({
           method: request.method ?? '',
           url: request.url ?? '',
           token: request.headers.authorization ?? '',
@@ -136,7 +140,7 @@ describe.skipIf(!agentBin)('the lease holder of the agent (fb-agent lease-holder
     });
     await new Promise<void>((r) => api.listen(0, '127.0.0.1', r));
     segments = fakeSegmentServer((request: string, sock: Socket) => {
-      asked.push(request);
+      requests().push(request);
       if (request === 'STATE') return void sock.end(`${database}\n`);
       if (request.startsWith('FENCE')) {
         database = 'OK fenced lease';
@@ -150,8 +154,13 @@ describe.skipIf(!agentBin)('the lease holder of the agent (fb-agent lease-holder
     }, 'tok');
     await new Promise<void>((r) => segments.listen(0, '127.0.0.1', r));
   });
-  afterEach(() => {
-    child?.kill('SIGKILL');
+  afterEach(async () => {
+    // gone before the next test's servers start
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const gone = new Promise((resolve) => child!.once('close', resolve));
+      child.kill('SIGKILL');
+      await gone;
+    }
     child = undefined;
     api.closeAllConnections();
     api.close();

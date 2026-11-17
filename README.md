@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.169.0/cloudnative-firebird-0.169.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.170.0/cloudnative-firebird-0.170.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.169.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.170.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.169.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.170.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -699,7 +699,7 @@ other instances are read-only replicas:
   server starts). Full journal segments are archived on the primary's volume.
 - Two sidecars ship segments: `segment-server` serves the local archive and seed copies, and
   `segment-puller` fetches new segments from the current primary into the replica's
-  `journal_source_directory`. They use only the Firebird image's perl, sign their requests with
+  `journal_source_directory`. They run the Rust agent (below), sign their requests with
   the SYSDBA password (the password itself is not sent), and never open a live database file directly (all access goes through the
   local server).
 - A new replica is seeded from a **ready replica** (locked through that replica's server), or
@@ -712,56 +712,35 @@ other instances are read-only replicas:
   transaction open in the copy from its first archived segment, so they are replayed, and a
   transaction whose start is no longer archived fails the seed rather than being replayed
   partially.
-- **Rust agent (opt-in).** The annotation `firebird.cloudnative-firebird.io/agent: rust` on a
-  cluster has an init container copy the `fb-agent` binary of the operator image into its
-  instance pods (since v0.154.0), which then run from it:
-  - the `segment-puller` sidecar (`fb-agent puller` instead of `segment-puller.pl`): the same
-    files, flags and log lines, 0.6 MB of memory instead of 8 MB;
-  - since v0.155.0, the segment server's front (`fb-agent segment-server`), which answers the
-    journal requests (PING, LIST, GET) itself and passes every other request to
-    `segment-server.pl`, which it runs behind it. Its pullers no longer poll: they wait on the
-    primary for the next segment (WAIT), so an archived segment reaches a replica in about
-    0.1 s instead of 2.5 s on average with the default 5 s poll;
-  - since v0.156.0, the database's state (STATE, which the Lease holder asks every few seconds)
-    from one attachment to the Firebird server that stays open, instead of an `fbsvcmgr`
-    process per request: 2 ms instead of 70 ms. When the front cannot tell, the Perl server
-    answers as before;
-  - since v0.157.0, the other requests about an instance's state that the operator sends on
-    each reconciliation (the position, the header's sequence, the archive, the fence, the
-    engine version and others), with the Perl server's replies;
-  - since v0.158.0, the backup files that backup and restore Jobs copy to and from the data
-    directory. Instances without replication get the front for this too, in their
-    `backup-files` container;
-  - since v0.159.0, the seed copy a new or re-seeded replica starts from. The agent takes the
-    backup lock itself, over its own short SQL attachments;
-  - since v0.160.0, the Lease holder's fence and its lifting, physical backups (nbackup) and
-    the switches of synchronous replication, through the server's services without
-    `fbsvcmgr`;
-  - since v0.161.0, the in-place promotion of a switchover or a failover, with the same
-    sequence and the same undo on failure. With it every request is answered by the agent;
-  - since v0.162.0, the pruning of the journal archive and the recovery-point sampler;
-  - since v0.163.0, the primary's isolation check. The Perl server behind the agent now only
-    answers what the agent passes on to it;
-  - since v0.164.0, with `segmentTLS`, the TLS proxy sidecar of the instance pods and the Jobs
-    (`fb-agent segment-tls` instead of a Node process: 2 MB of memory instead of 64 MB each);
-  - since v0.165.0, with `segmentTLS`, TLS end to end between the agent's puller and segment
-    server, without a proxy on either side (the proxy stays for the pod's Perl clients);
-  - since v0.166.0, no Perl segment server behind the agent's: it refuses what the Perl server
-    refused, in the same words, and asks `isql`, `fbsvcmgr` and `gfix` where the Firebird
-    server refuses its own attachments;
-  - since v0.167.0, the replication init container's helpers: the seed fetch (over TLS made
-    by the agent, with `segmentTLS`), the replica control file and the header's replication
-    sequence. The init container itself stays a shell script around Firebird's own tools;
-  - since v0.168.0, the primary Lease holder sidecar (`fb-agent lease-holder` instead of a
-    Node process: about 2 MB of memory instead of about 100 MB in every instance pod);
-  - since v0.169.0, the custom metrics exporter (`monitoring.customQueriesConfigMap`) and the
-    Jobs' programs (switchover, failover, synchronous standby, backup files, the journal archive,
-    point-in-time recovery). With them nothing runs Perl on a cluster with the annotation.
+- **The Rust agent.** Every instance pod and every Job that needs it runs `fb-agent`, a static
+  binary of the operator image that an init container copies into the pod (since v0.170.0 on
+  every cluster; it was opt-in, with the annotation `firebird.cloudnative-firebird.io/agent:
+  rust`, from v0.154.0 to v0.169.0, and the annotation is now accepted and ignored). It
+  replaced the Perl scripts and the operator's Node sidecars:
+  - the segment server (`segment-server`, and `backup-files` without replication): the journal
+    requests, the database's state from one attachment that stays open (2 ms instead of 70 ms),
+    the backup files, the seed copies, fences, nbackup, the switches of synchronous replication,
+    the in-place promotion, the pruning of the archive, the recovery-point sampler and the
+    primary's isolation check. Where the Firebird server refuses its own attachments it asks
+    the image's `isql`, `fbsvcmgr` and `gfix`;
+  - the segment puller, which waits on the primary for the next segment (WAIT): an archived
+    segment reaches a replica in about 0.1 s instead of 2.5 s with a 5 s poll;
+  - the replication init container's helpers (seed fetch, replica control file, the header's
+    replication sequence); the init container itself stays a shell script around Firebird's
+    tools;
+  - with `segmentTLS`, TLS end to end between the puller and the segment server, and the TLS
+    proxy sidecar for the pod's other clients and the Jobs (2 MB of memory instead of 64 MB);
+  - the primary Lease holder sidecar (about 2 MB instead of about 100 MB);
+  - the custom metrics exporter (`monitoring.customQueriesConfigMap`);
+  - the Jobs' programs: switchover, failover, synchronous standby, backup files, the journal
+    archive, point-in-time recovery.
 
   The plan and the measurements are in [docs/rust-agent-roadmap.md](docs/rust-agent-roadmap.md)
-  and [docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md). Setting or
-  removing the annotation restarts the instances, primary last; `perl` (or no annotation) is
-  the default, and both kinds of instance work together during the restart.
+  and [docs/rust-agent-segment-server.md](docs/rust-agent-segment-server.md). Upgrading to
+  v0.170.0 restarts the instances of every cluster, primary last. On a cluster that did not run
+  the agent, until an instance has restarted, a container of it that restarts on its own (a
+  crash, an OOM kill) finds no Perl script to run and fails until the rolling update reaches
+  it; clusters that ran it keep the init script under its former name meanwhile.
 - **Complete segments only** (since v0.155.0, with or without the agent): a journal segment is
   offered to the replicas once its file in the archive is complete. Firebird archives a segment
   with a plain copy; one fetched during that copy would have been too short for the replica,
@@ -2429,11 +2408,11 @@ npm test
 ```
 
 The operator writes two Firebird-internal formats itself: the replica control file and the
-`HDR_repl_seq` header clump. `hack/firebird-formats/verify.sh [image ...]` (Docker) checks them
-against each image's own engine and replica server: the sequence the engine reports, and that the
+`HDR_repl_seq` header clump. `hack/firebird-formats/verify.sh [image ...]` (Docker, the agent's
+musl binary) checks the agent's `set-repl-seq` and `replica-control` against each image's own engine and replica server: the sequence the engine reports, and that the
 replica server skips and applies segments exactly at the position the control file records. The
-"Firebird formats" workflow runs it for Firebird 4, 5 and the 6 snapshot when those scripts
-change, every week, and on demand for any image (`workflow_dispatch`).
+"Firebird formats" workflow builds the agent and runs it for Firebird 4, 5 and the 6 snapshot
+when the agent or those scripts change, every week, and on demand for any image (`workflow_dispatch`).
 
 ### Run Locally (against a cluster)
 

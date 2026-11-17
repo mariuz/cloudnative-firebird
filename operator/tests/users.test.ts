@@ -43,7 +43,8 @@ const secret = { metadata: { uid: 's-uid', resourceVersion: '7' }, data: { passw
 describe('persistent security database', () => {
   it('seeds it on the instance volume and points the server and the entrypoint alias at it', () => {
     const pod = buildStatefulSet(makeCluster()).spec!.template.spec!;
-    const init = pod.initContainers![0];
+    expect(pod.initContainers![0].name).toBe('agent-install');
+    const init = pod.initContainers![1];
     expect(init.name).toBe('security-db-init');
     expect(init.args![0]).toContain('cp /opt/firebird/security[0-9]*.fdb "$d/security.fdb.tmp"');
     expect(init.args![0]).toContain(`'security.db = ${SECURITY_DB_PATH}'`);

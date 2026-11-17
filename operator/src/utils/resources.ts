@@ -33,7 +33,7 @@ import {
 } from '../types';
 import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
 import { bootstrapVolumes, buildBootstrapInitContainers, s3ClientVolumes } from './backup';
-import { withAgent, withAgentInJob } from './agent';
+import { AGENT_PATH, withAgent, withAgentInJob } from './agent';
 import { databaseOnlineCheck } from './fencing';
 import { PENDING_DROPS_DIR, pendingDropsConfigMapName, pendingDropsInitScript } from './pending-drops';
 import {
@@ -189,7 +189,7 @@ export function buildBackupFilesContainer(cluster: FirebirdCluster, image: strin
   return {
     name: 'backup-files',
     image,
-    command: ['perl', `${OPERATOR_CONFIG_DIR}/segment-server.pl`],
+    command: [AGENT_PATH, 'segment-server'],
     ports: [{ name: 'segments', containerPort: SEGMENT_PORT, protocol: 'TCP' }],
     env: [
       ...superuserClientEnv(cluster),
@@ -203,23 +203,6 @@ export function buildBackupFilesContainer(cluster: FirebirdCluster, image: strin
       { name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true },
     ],
   };
-}
-
-/** Scripts the backup file server of instances without replication runs */
-const BACKUP_FILE_SCRIPTS = ['segment-server.pl', 'backup-file.pl'];
-
-/** The cluster ConfigMap entries of the backup file server (instances without replication) */
-function backupFilesConfigData(): Record<string, string> {
-  return Object.fromEntries(BACKUP_FILE_SCRIPTS.map((name) => [name, REPLICATION_SCRIPTS[name]]));
-}
-
-/** Pod template annotation carrying the hash of the backup file server's scripts (no replication) */
-export const BACKUP_FILES_HASH_ANNOTATION = `${API_GROUP}/backup-files-hash`;
-
-function backupFilesHash(): string {
-  const data = backupFilesConfigData();
-  const canonical = Object.keys(data).sort().map((key) => `${key}\0${data[key]}`).join('\0');
-  return createHash('sha256').update(canonical).digest('hex').slice(0, 16);
 }
 
 /** Pod template annotation carrying the hash of the replication configuration */
@@ -471,17 +454,15 @@ export function buildStatefulSet(
             ...(secretHash ? { 'firebird.cloudnative-firebird.io/superuser-secret-hash': secretHash } : {}),
             // replication.conf is mounted via subPath, which does not follow ConfigMap
             // updates; hashing it into the template rolls the pods when it changes (the scripts
-            // are read once at start, too)
-            ...(replication
-              ? { [REPLICATION_CONFIG_HASH_ANNOTATION]: replicationConfigHash(cluster) }
-              : { [BACKUP_FILES_HASH_ANNOTATION]: backupFilesHash() }),
+            // are read once at start, too); the agent's binary comes with the operator image
+            ...(replication ? { [REPLICATION_CONFIG_HASH_ANNOTATION]: replicationConfigHash(cluster) } : {}),
           },
         }),
         // segment TLS: the proxy sidecar, the certificates, the segment server on localhost;
         // the primary Lease: its holder sidecar and token
         // the pull policy last, for the sidecars too
         // the Rust agent's binary, for clusters that opted in (utils/agent.ts)
-        spec: withPodPullPolicy(cluster, withAgent(cluster, withSegmentTls(cluster, withPrimaryLease(cluster, {
+        spec: withPodPullPolicy(cluster, withAgent(withSegmentTls(cluster, withPrimaryLease(cluster, {
           ...clusterPodSettings(cluster),
           ...terminationGracePeriod(cluster),
           securityContext: instancePodSecurityContext(cluster),
@@ -909,7 +890,7 @@ export function jobPodSpec<T extends V1PodSpec>(cluster: FirebirdCluster, podSpe
   // segment TLS: Jobs reach the segment servers through the proxy's client side; the agent's
   // programs instead of the Perl scripts, for clusters that run it (the pull policy last, for the
   // proxy and the agent's installer too)
-  return withPodPullPolicy(cluster, withAgentInJob(cluster, withSegmentTls(cluster, {
+  return withPodPullPolicy(cluster, withAgentInJob(withSegmentTls(cluster, {
     ...podSpec,
     ...clusterPodSettings(cluster),
     securityContext: {
@@ -1181,7 +1162,7 @@ export function buildConfigMap(
   options?: {
     primaryPod?: string;
     seedSourcePods?: string[];
-    /** IP addresses of the instance pods (isolation-check.pl, when cluster DNS fails) */
+    /** IP addresses of the instance pods (the isolation check, when cluster DNS fails) */
     peerAddresses?: string[];
     reseed?: Record<string, string>;
     promote?: Record<string, string>;
@@ -1205,7 +1186,7 @@ export function buildConfigMap(
   }
 
   if (replicationEnabled(cluster)) {
-    // with the agent's scripts, outside the pod template's hash (utils/replication.ts)
+    // with the init script under its name of before v0.170.0, outside the pod template's hash
     Object.assign(data, replicationConfigData(cluster), AGENT_SCRIPTS);
     // Read by the replica seeding step and the segment puller on every poll, so it follows
     // the operator's view of the current primary without restarting pods
@@ -1225,8 +1206,6 @@ export function buildConfigMap(
     // planned switchover (always present, like reseed)
     data[PROMOTE_KEY] = directives(options?.promote);
     data[DEMOTE_KEY] = directives(options?.demote);
-  } else {
-    Object.assign(data, backupFilesConfigData());
   }
   Object.assign(data, JOB_SCRIPTS);
 

@@ -188,7 +188,7 @@ describe('automatic failover', () => {
     // the elected replica keeps running: a Job promotes it in place once the primary moved
     expect(s.fn('deleteNamespacedPod').mock.calls.map((c) => c[0].name).sort()).toEqual(['db-0', 'db-1']);
     const promote = s.created().find((j) => j.metadata?.name === 'db-promote')!;
-    expect(promote.spec!.template.spec!.containers[0].command![2]).toContain('segment-request.pl "$TARGET" PROMOTE none');
+    expect(promote.spec!.template.spec!.containers[0].command![2]).toContain('/opt/fb-agent/fb-agent request "$TARGET" PROMOTE none');
     // the targetPrimary annotation follows, so it cannot switch back to the failed primary
     expect(s.fn('patchNamespacedCustomObject').mock.calls[0][0].body).toEqual({
       metadata: { annotations: { [TARGET_PRIMARY_ANNOTATION]: 'db-2' } },
@@ -271,7 +271,7 @@ describe('automatic failover', () => {
     expect(parseElection('garbage')).toBeUndefined();
     expect(() => validateClusterSpec(makeCluster(undefined, { enabled: true, delaySeconds: 0 }))).toThrow(/delaySeconds/);
     const job = buildFailoverJob(makeCluster(), ['db-1']);
-    expect(job.spec?.template.spec?.containers[0].command).toEqual(['perl', '/etc/firebird-operator/failover.pl']);
+    expect(job.spec?.template.spec?.containers[0].command).toEqual(['/opt/fb-agent/fb-agent', 'failover']);
   });
 });
 
