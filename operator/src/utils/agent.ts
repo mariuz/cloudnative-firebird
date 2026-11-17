@@ -11,7 +11,9 @@ import { AGENT_INIT_SCRIPT, OPERATOR_CONFIG_DIR } from './replication';
  * prunes the archive, samples the recovery points and runs the isolation check, with no Perl
  * server behind it since v0.166.0 (also as the backup file server of instances without
  * replication), and the replication init container's helpers (the seed fetch, the replica
- * control file, the header's replication sequence) since v0.167.0. Setting or removing the annotation changes the pod template, so the
+ * control file, the header's replication sequence) since v0.167.0; the primary Lease holder
+ * (utils/primary-lease.ts) since v0.168.0, and the custom metrics exporter since v0.169.0: no
+ * Perl runs in an instance pod then. Setting or removing the annotation changes the pod template, so the
  * instances restart (primary last).
  */
 export const AGENT_ANNOTATION = `${API_GROUP}/agent`;
@@ -23,9 +25,9 @@ export const AGENT_INSTALL_CONTAINER = 'agent-install';
 export const AGENT_IMAGE_PATH = '/app/fb-agent';
 /**
  * The containers that get the binary: the segment servers (with and without replication), the
- * puller, and the replication init container
+ * puller, the replication init container, and the custom metrics exporter
  */
-const AGENT_CONTAINERS = ['segment-server', 'backup-files', 'segment-puller', 'replication-init'];
+const AGENT_CONTAINERS = ['segment-server', 'backup-files', 'segment-puller', 'replication-init', 'metrics-exporter'];
 /**
  * What runs from the agent, by container: the fb-agent arguments that replace the container's
  * command.
@@ -35,6 +37,8 @@ const AGENT_COMMANDS: Record<string, string[]> = {
   'segment-server': ['segment-server'],
   // the same server in its files-only mode (FILES_ONLY), for instances without replication
   'backup-files': ['segment-server'],
+  // the custom metrics exporter (utils/custom-queries.ts): the last Perl of an instance pod
+  'metrics-exporter': ['metrics-exporter'],
 };
 /**
  * The replication init container stays a shell script (it drives gstat, gfix, isql and
@@ -43,6 +47,55 @@ const AGENT_COMMANDS: Record<string, string[]> = {
 const AGENT_SCRIPT_COMMANDS: Record<string, string[]> = {
   'replication-init': ['sh', `${OPERATOR_CONFIG_DIR}/${AGENT_INIT_SCRIPT}`],
 };
+
+/**
+ * The Jobs' programs (agent/fb-agent/src/jobs.rs): a Perl script as the Job runs it, and the
+ * agent's command that replaces it, with the same arguments, output and exit status
+ */
+const JOB_COMMANDS: Record<string, string[]> = {
+  [`${OPERATOR_CONFIG_DIR}/switchover.pl`]: ['switchover'],
+  [`${OPERATOR_CONFIG_DIR}/failover.pl`]: ['failover'],
+  [`${OPERATOR_CONFIG_DIR}/sync-standby.pl`]: ['sync-standby'],
+  [`${OPERATOR_CONFIG_DIR}/fetch-segments.pl`]: ['fetch-segments'],
+};
+/** The same in the Jobs' shell commands (pitr-restore.sh asks FB_AGENT itself) */
+const JOB_SHELL_COMMANDS: Array<[string, string]> = [
+  [`perl ${OPERATOR_CONFIG_DIR}/backup-file.pl`, `${AGENT_PATH} backup-file`],
+  [`perl ${OPERATOR_CONFIG_DIR}/segment-request.pl`, `${AGENT_PATH} request`],
+  // major-upgrade.sh
+  ['perl "$SCRIPT_DIR/set-repl-seq.pl"', '"$FB_AGENT" set-repl-seq'],
+];
+
+/**
+ * A Job's pod spec with the agent, for clusters that opted in: the binary installed first, and
+ * every Perl program the Job runs replaced by the agent's command. Called by jobPodSpec, after
+ * the segment TLS proxy is added.
+ */
+export function withAgentInJob<T extends V1PodSpec>(cluster: FirebirdCluster, spec: T): T {
+  if (agentMode(cluster) !== 'rust') return spec;
+  const translate = (text: string) => JOB_SHELL_COMMANDS.reduce((t, [perl, agent]) => t.split(perl).join(agent), text);
+  const container = (c: V1Container): V1Container => {
+    if (c.restartPolicy === 'Always') return c;
+    const script = c.command?.[0] === 'perl' && c.command.length === 2 ? JOB_COMMANDS[c.command[1]] : undefined;
+    const command = script ? [AGENT_PATH, ...script] : c.command?.map(translate);
+    return {
+      ...c,
+      ...(command ? { command } : {}),
+      ...(c.args ? { args: c.args.map(translate) } : {}),
+      env: [...(c.env ?? []), { name: 'FB_AGENT', value: AGENT_PATH }],
+      volumeMounts: [...(c.volumeMounts ?? []), { name: AGENT_VOLUME, mountPath: AGENT_DIR, readOnly: true }],
+    };
+  };
+  const init = spec.initContainers ?? [];
+  const sidecars = init.findIndex((c) => c.restartPolicy !== 'Always');
+  const at = sidecars < 0 ? init.length : sidecars;
+  return {
+    ...spec,
+    initContainers: [...init.slice(0, at), installer(), ...init.slice(at).map(container)],
+    containers: spec.containers.map(container),
+    volumes: [...(spec.volumes ?? []), { name: AGENT_VOLUME, emptyDir: {} }],
+  };
+}
 
 /** "rust" (the agent is delivered) or "perl" (the default) */
 export function agentMode(cluster: FirebirdCluster): 'rust' | 'perl' {

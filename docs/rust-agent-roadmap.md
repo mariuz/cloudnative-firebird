@@ -3,7 +3,7 @@
 Status: **Phases 0, 1 and 2 done** (v0.154.0), **Phase 3 started** (v0.155.0: the segment server's
 front, and pullers that wait instead of polling; v0.156.0: the database's state from a
 persistent Firebird attachment; v0.157.0: the other requests about an instance's state;
-v0.158.0: the backup files, also for instances without replication; v0.159.0: the seeds; v0.160.0: the fence, nbackup and synchronous replication; v0.161.0: the in-place promotion; v0.162.0: the pruning and the recovery-point sampler; v0.163.0: the isolation check; v0.164.0: the segment TLS proxy; v0.165.0: TLS end to end in the agent's server and puller; v0.166.0: no Perl server behind the agent's; v0.167.0: the replication init container's helpers; v0.168.0: the primary Lease holder). Results below. It answers
+v0.158.0: the backup files, also for instances without replication; v0.159.0: the seeds; v0.160.0: the fence, nbackup and synchronous replication; v0.161.0: the in-place promotion; v0.162.0: the pruning and the recovery-point sampler; v0.163.0: the isolation check; v0.164.0: the segment TLS proxy; v0.165.0: TLS end to end in the agent's server and puller; v0.166.0: no Perl server behind the agent's; v0.167.0: the replication init container's helpers; v0.168.0: the primary Lease holder; v0.169.0: the custom metrics exporter and the Jobs' programs). Results below. It answers
 the question of whether a Rust core should replace the Perl scripts and the parts critical for
 performance.
 
@@ -299,6 +299,13 @@ decision by decision, with its unit tests ported, and an HTTPS client of its own
 requests it makes to the API server (read the Lease, write it back whole with the version
 that was read). The Node holder stays for clusters without the annotation.
 
-What is left in Perl in an instance pod is the metrics exporter, and in the Jobs their
-clients (backup files, switchover, failover, the journal archive,
-point-in-time recovery).
+Since v0.169.0 the custom metrics exporter is the agent's (`fb-agent metrics-exporter`,
+`metrics.rs`), and with it no Perl runs in an instance pod of a cluster with the annotation.
+
+Since v0.169.0 the Jobs' programs are the agent's as well (`jobs.rs`): switchover, failover,
+the synchronous standby, the backup files, the journal archive and point-in-time recovery.
+`jobPodSpec` installs the binary into every Job's pod and replaces each Perl invocation with
+the agent's command; nothing runs Perl on a cluster with the annotation.
+
+Next: the agent as the default, and the Perl scripts deleted.
+

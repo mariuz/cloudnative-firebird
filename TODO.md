@@ -64,10 +64,12 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
   the segment server and the puller are the agent's (Phase 3 is done, v0.155.0 to v0.166.0).
   The replication init container's helpers are too (v0.167.0); the init container itself stays
   a shell script around Firebird's tools. The primary Lease holder, a Node sidecar, is the
-  agent's too (v0.168.0). What is left in Perl in an instance pod: the metrics exporter; and
-  the Jobs' clients (backup files, switchover, failover,
-  the journal archive, point-in-time recovery). Until those are ported the scripts stay in the
-  ConfigMap and the segment TLS proxy stays as a sidecar with its client side. When a release
+  agent's too (v0.168.0), and so are the custom metrics exporter and the Jobs' programs
+  (v0.169.0): nothing runs Perl on a cluster with the annotation. Next: the agent as the
+  default for every cluster, and the Perl scripts deleted (decided). That restarts every
+  cluster's instances once, removes `perl` as a value of the annotation, and turns the
+  conformance tests against the Perl into tests of the agent alone. The segment TLS proxy can
+  then lose its client side (only the Perl clients needed it) and the Node lease holder can go. When a release
   changes `init-instance.sh` anyway, the derived `init-instance-agent.sh` can be folded into
   it (`FB_AGENT` set: the agent's commands). Making the
   agent the default (no annotation) is a separate decision.

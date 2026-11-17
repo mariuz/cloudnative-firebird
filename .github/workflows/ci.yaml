@@ -99,13 +99,15 @@ jobs:
         run: |
           npm ci
           FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" NO_COLOR=1 \
-            npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts tests/isolation-check.test.ts tests/segment-tls-conformance.test.ts tests/init-helpers-conformance.test.ts tests/lease-holder-conformance.test.ts 2>&1 | tee /tmp/conformance.txt
+            npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts tests/isolation-check.test.ts tests/segment-tls-conformance.test.ts tests/init-helpers-conformance.test.ts tests/lease-holder-conformance.test.ts tests/metrics-exporter-conformance.test.ts tests/jobs-conformance.test.ts tests/switchover.test.ts tests/sync-scripts.test.ts tests/replication-scripts.test.ts 2>&1 | tee /tmp/conformance.txt
           # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, 15 for the
           # segment server with the Perl server behind it and 15 without, and the isolation
           # check's file (18 scenarios for each implementation, 2 more), 26 for the segment TLS proxies together, 3 for the replication
-          # init's helpers, and 7 for the lease holder (colour codes stripped: the runner's
-          # output has them)
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +124 passed \(124\)'
+          # init's helpers, 7 for the lease holder, 5 for the metrics exporter, 3 for the Jobs'
+          # programs, and the script tests that run once per implementation (switchover,
+          # sync-standby, fetch-segments, pitr-plan, set-repl-seq) with the files they share
+          # (colour codes stripped: the runner's output has them)
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +239 passed \(239\)'
 
       # STATE from the front's service attachment and from the Perl server's fbsvcmgr, side by
       # side in every state of the database, on real servers (docs/rust-agent-segment-server.md)
@@ -2102,6 +2104,11 @@ jobs:
           done
           [ "$phase" = Completed ] || { kubectl get firebirdbackup repl-tls -o yaml; kubectl logs job/backup-repl-tls --all-containers || true; exit 1; }
           [ "$(kubectl get job backup-repl-tls -o jsonpath='{.spec.template.spec.initContainers[0].name}')" = segment-tls ]
+          # the Jobs of a cluster with the agent have it too (v0.169.0), installed after the proxy
+          [ "$(kubectl get job backup-repl-tls -o jsonpath='{.spec.template.spec.initContainers[1].name}')" = agent-install ]
+          if kubectl get job backup-repl-tls -o json | jq -r '.spec.template.spec | [.initContainers[], .containers[]] | .[] | ((.command // []) + (.args // [])) | join(" ")' | grep -qw perl; then
+            echo "the backup Job runs Perl"; exit 1
+          fi
           kubectl create namespace pss-restricted-tls
           kubectl label namespace pss-restricted-tls pod-security.kubernetes.io/enforce=restricted
           timeout 60 bash -c 'until kubectl get serviceaccount default -n pss-restricted-tls >/dev/null 2>&1; do sleep 2; done'
@@ -2123,12 +2130,22 @@ jobs:
           # keeps its pod and promotes itself over the agent's own attachments
           target_uid=$(kubectl get pod "$replica" -o jsonpath={.metadata.uid})
           before=$(count "$primary")
+          # the switchover Job is the agent's too (v0.169.0): its command, kept while the Job exists
+          rm -f /tmp/switchover-command
+          ( for n in $(seq 1 300); do
+              c=$(kubectl get job repl-switchover -o jsonpath='{.spec.template.spec.containers[0].command}' 2>/dev/null) && [ -n "$c" ] && echo "$c" > /tmp/switchover-command
+              sleep 1
+            done ) &
+          watcher=$!
           kubectl annotate --overwrite firebirdcluster repl firebird.cloudnative-firebird.io/targetPrimary="$replica"
           timeout 600 bash -c "until [ \"\$(kubectl get lease repl-lease -o jsonpath={.spec.holderIdentity})\" = '$replica' ] && [ \"\$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.phase})\" = Completed ]; do
               [ \"\$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.phase})\" = Failed ] && exit 1; sleep 3; done" \
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo; kubectl logs job/repl-switchover || true; kubectl logs "$replica" -c segment-server | tail -40; exit 1; }
           kubectl get firebirdcluster repl -o jsonpath='{.status.switchover}'; echo
           [ "$(kubectl get firebirdcluster repl -o jsonpath={.status.switchover.promotedInPlace})" = "true" ]
+          kill "$watcher" 2>/dev/null || true
+          # the in-place outcome above is the termination message this Job wrote
+          [ "$(cat /tmp/switchover-command)" = '["/opt/fb-agent/fb-agent","switchover"]' ] || { cat /tmp/switchover-command; exit 1; }
           [ "$(kubectl get pod "$replica" -o jsonpath={.metadata.uid})" = "$target_uid" ]
           kubectl logs "$replica" -c segment-server | grep -E "promotion in place by the agent|promoted in place|bootstrap seed"
           kubectl logs "$replica" -c segment-server | grep -q 'promotion in place by the agent'
@@ -3131,6 +3148,26 @@ jobs:
           if scrape | grep -q '^firebird_attachments_total'; then echo 'the removed query still runs'; exit 1; fi
           [ "$(kubectl get pod metrics-0 -o jsonpath={.metadata.uid})" = "$uid" ]
           [ "$(kubectl get pod metrics-0 -o jsonpath='{.status.containerStatuses[?(@.name=="metrics-exporter")].restartCount}')" = 0 ]
+          # with the Rust agent the exporter is the agent's (v0.169.0): the instance restarts with
+          # it and serves the same metrics, from the real isql
+          kubectl annotate firebirdcluster metrics firebird.cloudnative-firebird.io/agent=rust
+          timeout 300 bash -c 'until [ "$(kubectl get pod metrics-0 -o jsonpath="{.spec.containers[?(@.name==\"metrics-exporter\")].command}" 2>/dev/null)" = "[\"/opt/fb-agent/fb-agent\",\"metrics-exporter\"]" ]; do sleep 3; done' \
+            || { kubectl get pod metrics-0 -o jsonpath='{.spec.containers[*].command}'; echo; exit 1; }
+          kubectl wait pod/metrics-0 --for=condition=Ready --timeout=600s
+          timeout 180 bash -c 'until kubectl get --raw /api/v1/namespaces/default/pods/metrics-0:9187/proxy/metrics 2>/dev/null | grep -Eq "^firebird_sweep_every [0-9]+$"; do sleep 5; done' \
+            || { scrape || true; kubectl logs metrics-0 -c metrics-exporter --tail=30; exit 1; }
+          scrape | tee /tmp/metrics-agent.txt | grep -v '^#'
+          grep -qx 'firebird_up 1' /tmp/metrics-agent.txt
+          grep -q '^# HELP firebird_sweep_every Sweep interval$' /tmp/metrics-agent.txt
+          grep -q '^# TYPE firebird_sweep_every gauge$' /tmp/metrics-agent.txt
+          grep -qx 'firebird_exporter_query_error{query="sweep"} 0' /tmp/metrics-agent.txt
+          grep -qx 'firebird_exporter_query_error{query="broken"} 1' /tmp/metrics-agent.txt
+          kubectl logs metrics-0 -c metrics-exporter | grep -q '^metrics on :9187/metrics$'
+          kubectl logs metrics-0 -c metrics-exporter | grep -q '^query broken: '
+          # no Perl runs in the pod
+          for c in $(kubectl get pod metrics-0 -o jsonpath='{.spec.containers[*].name}'); do
+            if kubectl exec metrics-0 -c "$c" -- sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null' | tr '\0' ' ' | grep -qw perl; then echo "$c runs Perl"; exit 1; fi
+          done
           kubectl delete firebirdcluster metrics --wait=true --timeout=300s
           kubectl wait --for=delete pod/metrics-0 --timeout=300s || true
           # the rendered Secret goes with the cluster (owner reference)

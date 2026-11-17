@@ -1,4 +1,5 @@
-import { clusterPodSettings, withPullPolicy } from './pod-settings';
+import { clusterPodSettings, withPodPullPolicy, withPullPolicy } from './pod-settings';
+import { withAgentInJob } from './agent';
 import { createHash } from 'crypto';
 import { V1EnvVar, V1Job, V1Pod } from '@kubernetes/client-node';
 import { API_GROUP, FirebirdCluster, ImageCheckStatus, MajorUpgradeStatus, RESOURCE_KIND } from '../types';
@@ -217,7 +218,9 @@ export function buildMajorUpgradeJob(cluster: FirebirdCluster, upgrade: MajorUpg
       backoffLimit: 1,
       template: {
         metadata: { labels },
-        spec: {
+        // with the agent: its set-repl-seq instead of the Perl script (the installer's pull
+        // policy as the cluster's)
+        spec: withPodPullPolicy(cluster, withAgentInJob(cluster, {
           restartPolicy: 'Never',
           ...clusterPodSettings(cluster),
           securityContext: instancePodSecurityContext(cluster),
@@ -230,7 +233,7 @@ export function buildMajorUpgradeJob(cluster: FirebirdCluster, upgrade: MajorUpg
           ...(cluster.spec.nodeSelector ? { nodeSelector: cluster.spec.nodeSelector } : {}),
           ...(cluster.spec.affinity ? { affinity: cluster.spec.affinity } : {}),
           ...(cluster.spec.tolerations ? { tolerations: cluster.spec.tolerations } : {}),
-        },
+        })),
       },
     },
   };
