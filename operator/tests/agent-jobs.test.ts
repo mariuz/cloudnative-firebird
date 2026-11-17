@@ -10,14 +10,14 @@ import { FirebirdBackup, FirebirdCluster, FirebirdRestore } from '../src/types';
 import { makeCluster } from './helpers/factories';
 
 /**
- * The Jobs of a cluster that runs the Rust agent: the binary is installed into the Job's pod, and
- * every Perl program the Job ran is the agent's command (agent/fb-agent/src/jobs.rs). The
- * conformance of each command with its script is in their tests (tests/helpers/implementations.ts).
+ * The Jobs run the Rust agent (since v0.170.0 on every cluster): the binary is installed into the
+ * Job's pod, and every program the Job runs is the agent's command (agent/fb-agent/src/jobs.rs).
+ * The commands' own tests are in jobs-conformance.test.ts and the tests of their Jobs.
  */
 const s3 = { bucket: 'bkt', prefix: 'fb/', secretRef: { name: 's3-creds' }, endpoint: 'http://minio:9000' };
-const withAgent = (cluster: FirebirdCluster): FirebirdCluster => ({
+const annotated = (cluster: FirebirdCluster, value: string): FirebirdCluster => ({
   ...cluster,
-  metadata: { ...cluster.metadata, annotations: { ...cluster.metadata.annotations, [AGENT_ANNOTATION]: 'rust' } },
+  metadata: { ...cluster.metadata, annotations: { ...cluster.metadata.annotations, [AGENT_ANNOTATION]: value } },
 });
 const backup = (spec: Partial<FirebirdBackup['spec']> = {}): FirebirdBackup => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
@@ -57,7 +57,7 @@ function jobs(cluster: FirebirdCluster): Record<string, V1PodSpec> {
 const containers = (spec: V1PodSpec): V1Container[] => [...(spec.initContainers ?? []), ...spec.containers];
 const commandLine = (c: V1Container) => [...(c.command ?? []), ...(c.args ?? [])].join(' ');
 
-describe('the Jobs of a cluster with the Rust agent', () => {
+describe('the Jobs of a cluster run the Rust agent', () => {
   const spec = {
     instances: 3,
     replication: {
@@ -70,15 +70,15 @@ describe('the Jobs of a cluster with the Rust agent', () => {
     segmentTLS: { enabled: true },
   } as Partial<FirebirdCluster['spec']>;
 
-  it('run the agent\'s commands where they ran the Perl scripts', () => {
-    const perl = jobs(makeCluster(spec));
-    const rust = jobs(withAgent(makeCluster(spec)));
-    // without the annotation the Jobs are as they were: Perl
-    for (const [name, pod] of Object.entries(perl)) {
-      expect(containers(pod).map((c) => c.name), name).not.toContain('agent-install');
+  it('run the agent\'s commands, whatever the annotation of before v0.170.0 says', () => {
+    const rust = jobs(makeCluster(spec));
+    // the Jobs that only run Firebird's tools are left as they are
+    const without = Object.keys(rust).filter((name) => !containers(rust[name]).some((c) => c.name === 'agent-install'));
+    expect(without).toEqual(['logical backup', 'backup to S3 with retention', 'nbackup restore']);
+    for (const name of without) {
+      for (const c of containers(rust[name])) expect(c.env ?? [], `${name}/${c.name}`).not.toContainEqual(expect.objectContaining({ name: 'FB_AGENT' }));
     }
-    expect(Object.values(perl).some((pod) => containers(pod).some((c) => /\bperl\b/.test(commandLine(c))))).toBe(true);
-    for (const [name, pod] of Object.entries(rust)) {
+    for (const [name, pod] of Object.entries(rust).filter(([name]) => !without.includes(name))) {
       const names = containers(pod).map((c) => c.name);
       // installed after the native sidecars (the segment TLS proxy), before the Job's own containers
       expect(names, name).toContain('agent-install');
@@ -101,44 +101,17 @@ describe('the Jobs of a cluster with the Rust agent', () => {
     expect(commandLine(command('promote', 'promote'))).toContain('reply=$(/opt/fb-agent/fb-agent request "$TARGET" PROMOTE 9)');
     expect(commandLine(command('nbackup of a replica to S3', 'firebird-backup'))).toContain('out=$(/opt/fb-agent/fb-agent backup-file nbackup 1 "$f")');
     expect(commandLine(command('major upgrade', 'restore'))).toContain('"$FB_AGENT" set-repl-seq');
-    // everything else in the Jobs as without the annotation
-    const strip = (pod: V1PodSpec) =>
-      JSON.stringify(pod)
-        .split('/opt/fb-agent/fb-agent backup-file')
-        .join('perl /etc/firebird-operator/backup-file.pl')
-        .split('/opt/fb-agent/fb-agent request')
-        .join('perl /etc/firebird-operator/segment-request.pl');
-    const some = <T>(list?: T[]) => (list?.length ? list : undefined);
-    for (const name of Object.keys(perl)) {
-      const pod = JSON.parse(strip(rust[name])) as V1PodSpec;
-      const plain = (c: V1Container) => ({
-        ...c,
-        command: c.command?.[0] === '/opt/fb-agent/fb-agent' && c.command.length === 2 ? undefined : c.command?.map((t) => t.split('"$FB_AGENT" set-repl-seq').join('perl "$SCRIPT_DIR/set-repl-seq.pl"')),
-        env: some(c.env?.filter((e) => e.name !== 'FB_AGENT')),
-        volumeMounts: some(c.volumeMounts?.filter((m) => m.name !== 'fb-agent')),
-      });
-      const without = {
-        ...pod,
-        // the segment TLS proxy is the agent's too since v0.164.0 (tests/agent.test.ts)
-        initContainers: pod.initContainers?.filter((c) => c.name !== 'agent-install' && c.restartPolicy !== 'Always').map(plain),
-        containers: pod.containers.map(plain),
-        volumes: pod.volumes?.filter((v) => v.name !== 'fb-agent'),
-      };
-      const before = {
-        ...perl[name],
-        initContainers: perl[name].initContainers?.filter((c) => c.restartPolicy !== 'Always').map((c) => ({ ...plain(c), command: c.command?.[0] === 'perl' && c.command.length === 2 ? undefined : c.command })),
-        containers: perl[name].containers.map((c) => ({ ...plain(c), command: c.command?.[0] === 'perl' && c.command.length === 2 ? undefined : c.command })),
-      };
-      expect(JSON.parse(JSON.stringify(without)), name).toEqual(JSON.parse(JSON.stringify(before)));
+    // the annotation that made a cluster opt in is accepted and changes nothing
+    for (const value of ['rust', 'perl']) {
+      expect(JSON.parse(JSON.stringify(jobs(annotated(makeCluster(spec), value)))), value).toEqual(JSON.parse(JSON.stringify(rust)));
     }
   });
 
-  it('point-in-time recovery: the script asks for the agent itself', () => {
+  it('point-in-time recovery: the script runs the agent', () => {
     const script = JOB_SCRIPTS['pitr-restore.sh'];
-    expect(script).toContain('backup_file() { if [ -n "${FB_AGENT:-}" ]; then "$FB_AGENT" backup-file "$@"; else perl "$SCRIPT_DIR/backup-file.pl" "$@"; fi; }');
-    // every Perl run goes through those three
-    const runs = script.split('\n').filter((l) => /\bperl\b/.test(l) && !l.trimStart().startsWith('#'));
-    expect(runs).toHaveLength(3);
-    expect(runs.every((l) => /^(backup_file\(\)|pitr_plan\(\)|  perl -e )/.test(l))).toBe(true);
+    expect(script).toContain('backup_file() { "$FB_AGENT" backup-file "$@"; }');
+    expect(script).toContain('pitr_plan() { "$FB_AGENT" pitr-plan "$@"; }');
+    expect(script).toContain('cut_segment() { "$FB_AGENT" cut-segment "$1" "$2"; }');
+    expect(script.split('\n').filter((l) => /\bperl\b/.test(l) && !l.trimStart().startsWith('#'))).toEqual([]);
   });
 });

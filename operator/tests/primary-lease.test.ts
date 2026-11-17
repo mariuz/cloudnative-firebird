@@ -67,7 +67,8 @@ describe('the primary Lease', () => {
   it('runs the lease-holder sidecar with its token, the cluster ConfigMap and the data directory', () => {
     const spec = podSpec(withLease());
     const holder = spec.initContainers!.find((c) => c.name === 'lease-holder')!;
-    expect(holder).toMatchObject({ image: 'registry.example/cloudnative-firebird:1.2.3', restartPolicy: 'Always', command: ['node', 'dist/lease-holder.js'] });
+    expect(holder).toMatchObject({ image: 'registry.example/cloudnative-firebird:1.2.3', restartPolicy: 'Always', command: ['/app/fb-agent', 'lease-holder'] });
+    expect(holder.resources?.requests).toEqual({ cpu: '10m', memory: '8Mi' });
     expect(env(holder)).toMatchObject({
       LEASE_NAME: 'test-cluster-lease',
       LEASE_DURATION_SECONDS: '15',

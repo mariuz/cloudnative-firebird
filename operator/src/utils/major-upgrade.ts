@@ -218,9 +218,8 @@ export function buildMajorUpgradeJob(cluster: FirebirdCluster, upgrade: MajorUpg
       backoffLimit: 1,
       template: {
         metadata: { labels },
-        // with the agent: its set-repl-seq instead of the Perl script (the installer's pull
-        // policy as the cluster's)
-        spec: withPodPullPolicy(cluster, withAgentInJob(cluster, {
+        // with the agent for set-repl-seq (the installer's pull policy as the cluster's)
+        spec: withPodPullPolicy(cluster, withAgentInJob({
           restartPolicy: 'Never',
           ...clusterPodSettings(cluster),
           securityContext: instancePodSecurityContext(cluster),

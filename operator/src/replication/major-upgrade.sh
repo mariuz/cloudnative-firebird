@@ -60,7 +60,7 @@ restore)
     if [ -f "$W/$name.seq" ]; then
       # the journal continues after the old database's segments (Firebird 4 and 5 segment names
       # carry no GUID: a lower sequence would reuse the names of archived segments)
-      perl "$SCRIPT_DIR/set-repl-seq.pl" "$W/$name.fdb.tmp" "$(cat "$W/$name.seq")"
+      "$FB_AGENT" set-repl-seq "$W/$name.fdb.tmp" "$(cat "$W/$name.seq")"
     fi
     own firebird:firebird "$W/$name.fdb.tmp"
     mv "$W/$name.fdb.tmp" "$W/$name.fdb"

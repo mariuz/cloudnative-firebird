@@ -19,7 +19,7 @@
 #    segment ("<segment>.points", segment server POINTS), that one is applied too, cut at its last
 #    length recorded at or before the target (whole commits up to that second).
 # 3. Downloads the segments from S3 (through the S3 client container of the pod, see below) and
-#    plans the replay with pitr-plan.pl: segments after S, plus the transactions open in the
+#    plans the replay with `fb-agent pitr-plan`: segments after S, plus the transactions open in the
 #    backup from their first segment.
 # 4. Makes the scratch database a read-only replica, starts a private Firebird server whose
 #    replication.conf points the replica at the segments, and waits until it applied segment L.
@@ -56,14 +56,10 @@ fi
 heartbeat=$!
 
 fail() { echo "point-in-time recovery failed: $*" >&2; exit 1; }
-# the backup files, the replay's plan and the cut of a segment: the Rust agent's commands where
-# the Job has it (FB_AGENT), the Perl scripts otherwise (the same arguments and output)
-backup_file() { if [ -n "${FB_AGENT:-}" ]; then "$FB_AGENT" backup-file "$@"; else perl "$SCRIPT_DIR/backup-file.pl" "$@"; fi; }
-pitr_plan() { if [ -n "${FB_AGENT:-}" ]; then "$FB_AGENT" pitr-plan "$@"; else perl "$SCRIPT_DIR/pitr-plan.pl" "$@"; fi; }
-cut_segment() { # <file> <length>: the segment's header says <length>, and the file ends there
-  if [ -n "${FB_AGENT:-}" ]; then "$FB_AGENT" cut-segment "$1" "$2"; return; fi
-  perl -e 'open(my $f, "+<:raw", $ARGV[0]) or die "$ARGV[0]: $!\n"; seek($f, 40, 0); print $f pack("Q<", $ARGV[1]); close $f or die; truncate($ARGV[0], $ARGV[1]) or die "$ARGV[0]: $!\n"' "$1" "$2"
-}
+# the backup files, the replay's plan and the cut of a segment: the agent's commands (FB_AGENT)
+backup_file() { "$FB_AGENT" backup-file "$@"; }
+pitr_plan() { "$FB_AGENT" pitr-plan "$@"; }
+cut_segment() { "$FB_AGENT" cut-segment "$1" "$2"; } # <file> <length>: the segment's header says <length>, and the file ends there
 wait_for() { # <file>: wait until the S3 client container wrote it
   while [ ! -f "$1" ]; do
     [ -f "$W/fetcher.failed" ] && fail "the S3 client container failed: $(cat "$W/fetcher.failed")"

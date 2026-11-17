@@ -241,7 +241,7 @@ describe('buildStatefulSet (replication)', () => {
   it('adds no replication containers when replication is disabled or absent', () => {
     for (const cluster of [makeCluster({ replication: { enabled: false } }), makeCluster()]) {
       const podSpec = podSpecOf(cluster);
-      expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['security-db-init']);
+      expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['agent-install', 'security-db-init']);
       expect(podSpec?.containers?.map((c) => c.name)).toEqual(['firebird', 'backup-files']);
     }
   });
@@ -249,21 +249,22 @@ describe('buildStatefulSet (replication)', () => {
   it('runs the segment server in its files-only mode as the backup file server without replication', () => {
     const podSpec = podSpecOf(makeCluster());
     const files = podSpec!.containers!.find((c) => c.name === 'backup-files')!;
-    expect(files.command).toEqual(['perl', '/etc/firebird-operator/segment-server.pl']);
+    expect(files.command).toEqual(['/opt/fb-agent/fb-agent', 'segment-server']);
     const env = Object.fromEntries(files.env!.map((e) => [e.name, e.value]));
     expect(env).toMatchObject({ FILES_ONLY: 'true', DATABASE_PATH: '/var/lib/firebird/data/mydb.fdb', SEGMENT_PORT: '3051' });
     expect(files.env).toContainEqual({ name: 'ISC_USER', value: 'SYSDBA' });
     expect(files.ports).toEqual([{ name: 'segments', containerPort: 3051, protocol: 'TCP' }]);
-    expect(files.volumeMounts?.map((m) => m.name)).toEqual(['firebird-data', 'cluster-config']);
-    // the scripts are read at start: a new version rolls the pods
+    expect(files.volumeMounts?.map((m) => m.name)).toEqual(['firebird-data', 'cluster-config', 'fb-agent']);
+    expect(files.env).toContainEqual({ name: 'FB_AGENT', value: '/opt/fb-agent/fb-agent' });
+    // the binary comes with the operator image (the installer's): no scripts, no hash of them
     const sts = buildStatefulSet(makeCluster());
-    expect(sts.spec!.template.metadata!.annotations!['firebird.cloudnative-firebird.io/backup-files-hash']).toMatch(/^[0-9a-f]{16}$/);
-    expect(Object.keys(buildConfigMap(makeCluster())!.data!).sort()).toEqual(['backup-file.pl', 'fetch-segments.pl', 'pitr-plan.pl', 'pitr-restore.sh', 'segment-server.pl', 'sync-standby.pl']);
+    expect(sts.spec!.template.metadata!.annotations!['firebird.cloudnative-firebird.io/backup-files-hash']).toBeUndefined();
+    expect(Object.keys(buildConfigMap(makeCluster())!.data!).sort()).toEqual(['pitr-restore.sh']);
   });
 
   it('seeds replicas in an init container and ships segments with two sidecars', () => {
     const podSpec = podSpecOf(makeCluster({ replication: { enabled: true } }));
-    expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['security-db-init', 'replication-init']);
+    expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['agent-install', 'security-db-init', 'replication-init']);
     expect(podSpec?.containers?.map((c) => c.name)).toEqual(['firebird', 'segment-server', 'segment-puller']);
     expect(podSpec?.containers?.[1].ports).toEqual([{ name: 'segments', containerPort: 3051, protocol: 'TCP' }]);
   });
@@ -272,7 +273,7 @@ describe('buildStatefulSet (replication)', () => {
     const podSpec = podSpecOf(
       makeCluster({ replication: { enabled: true }, bootstrap: { recovery: { sourcePath: '/backup/db.fbk' } } }),
     );
-    expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['security-db-init', 'bootstrap-restore', 'replication-init']);
+    expect(podSpec?.initContainers?.map((c) => c.name)).toEqual(['agent-install', 'security-db-init', 'bootstrap-restore', 'replication-init']);
   });
 
   it('mounts replication.conf into the Firebird container; the init container creates the database', () => {
@@ -304,7 +305,7 @@ describe('buildStatefulSet (replication)', () => {
   it('gives the sidecars the data volume, the scripts and SYSDBA credentials', () => {
     const cluster = makeCluster({ superuserSecret: { name: 'fb-secret' }, replication: { enabled: true } });
     const puller = podSpecOf(cluster)?.containers?.find((c) => c.name === 'segment-puller');
-    expect(puller?.command).toEqual(['perl', '/etc/firebird-operator/segment-puller.pl']);
+    expect(puller?.command).toEqual(['/opt/fb-agent/fb-agent', 'puller']);
     expect(puller?.volumeMounts).toContainEqual({ name: 'firebird-data', mountPath: '/var/lib/firebird/data' });
     expect(puller?.volumeMounts).toContainEqual({
       name: 'cluster-config',
@@ -573,7 +574,7 @@ describe('podDisruptionBudgetNeedsUpdate', () => {
 describe('buildConfigMap & configMapNeedsUpdate', () => {
   it('only ships the backup file server scripts when neither config nor bootstrap initSql is provided', () => {
     const cluster = makeCluster();
-    expect(Object.keys(buildConfigMap(cluster)!.data!).sort()).toEqual(['backup-file.pl', 'fetch-segments.pl', 'pitr-plan.pl', 'pitr-restore.sh', 'segment-server.pl', 'sync-standby.pl']);
+    expect(Object.keys(buildConfigMap(cluster)!.data!).sort()).toEqual(['pitr-restore.sh']);
   });
 
   it('creates ConfigMap with custom firebird.conf settings', () => {
@@ -682,7 +683,7 @@ describe('buildStatefulSet (config & bootstrap volume mounting)', () => {
     const container = sts.spec?.template?.spec?.containers?.[0];
     expect(container?.env).toContainEqual({ name: 'FIREBIRD_CONF_DefaultCacheMem', value: '128M' });
     expect(container?.volumeMounts?.some((vm) => vm.mountPath.endsWith('firebird.conf'))).toBe(false);
-    expect(sts.spec?.template?.spec?.volumes?.map((v) => v.name)).toEqual(['pending-user-drops', 'cluster-config']);
+    expect(sts.spec?.template?.spec?.volumes?.map((v) => v.name)).toEqual(['pending-user-drops', 'cluster-config', 'fb-agent']);
   });
 
   it('adds WireCrypt=Required to the conf env when TLS is enabled', () => {
@@ -990,31 +991,20 @@ describe('buildConfigMap (replication)', () => {
     const cm = buildConfigMap(makeCluster({ replication: { enabled: true } }), { primaryPod: 'test-cluster-1' });
     expect(cm?.data?.primary).toBe('test-cluster-1.test-cluster-headless');
     expect(Object.keys(cm?.data ?? {}).sort()).toEqual([
-      'backup-file.pl',
       'demote',
       'enable-publication.sql',
-      'failover.pl',
-      'fetch-seed.pl',
-      'fetch-segments.pl',
       'init-instance-agent.sh',
       'init-instance.sh',
-      'isolation-check.pl',
       'peer-addresses',
-      'pitr-plan.pl',
       'pitr-restore.sh',
       'primary',
       'promote',
-      'replica-control.pl',
       'replication.conf',
       'reseed',
       'seed-sources',
-      'segment-puller.pl',
-      'segment-request.pl',
-      'segment-server.pl',
-      'set-repl-seq.pl',
-      'switchover.pl',
-      'sync-standby.pl',
     ]);
+    // the init script under its name of before v0.170.0, for pods that opted into the agent then
+    expect(cm?.data?.['init-instance-agent.sh']).toBe(cm?.data?.['init-instance.sh']);
   });
 
   it('lists ready replicas as seed sources, one host per line', () => {

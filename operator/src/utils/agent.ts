@@ -1,20 +1,16 @@
 import { V1Container, V1PodSpec } from '@kubernetes/client-node';
 import { API_GROUP, FirebirdCluster } from '../types';
 import { operatorImage } from './operator-image';
-import { AGENT_INIT_SCRIPT, OPERATOR_CONFIG_DIR } from './replication';
 
 /**
- * The instance pods' Rust agent (docs/rust-agent-roadmap.md). A cluster that opts in with the
- * annotation below gets the fb-agent binary of the operator image copied into its instance pods,
- * and runs from it what has been ported so far: the replicas' segment puller (Phase 2), and the
- * segment server (Phase 3, docs/rust-agent-segment-server.md), which answers every request,
- * prunes the archive, samples the recovery points and runs the isolation check, with no Perl
- * server behind it since v0.166.0 (also as the backup file server of instances without
- * replication), and the replication init container's helpers (the seed fetch, the replica
- * control file, the header's replication sequence) since v0.167.0; the primary Lease holder
- * (utils/primary-lease.ts) since v0.168.0, and the custom metrics exporter since v0.169.0: no
- * Perl runs in an instance pod then. Setting or removing the annotation changes the pod template, so the
- * instances restart (primary last).
+ * The Rust agent (docs/rust-agent-roadmap.md): the fb-agent binary of the operator image, copied
+ * into every instance pod and every Job's pod. Since v0.170.0 it is what they run, on every
+ * cluster: the segment server and puller, the backup file server, the replication init's
+ * helpers, the primary Lease holder, the segment TLS proxy, the custom metrics exporter, and the
+ * Jobs' programs (switchover, failover, the synchronous standby, the backup files, the journal
+ * archive, point-in-time recovery). The Perl scripts they replaced are gone.
+ *
+ * The annotation that made a cluster opt in (v0.152.0 to v0.169.0) is accepted and ignored.
  */
 export const AGENT_ANNOTATION = `${API_GROUP}/agent`;
 export const AGENT_VOLUME = 'fb-agent';
@@ -24,85 +20,12 @@ export const AGENT_INSTALL_CONTAINER = 'agent-install';
 /** The binary in the operator image (Dockerfile) */
 export const AGENT_IMAGE_PATH = '/app/fb-agent';
 /**
- * The containers that get the binary: the segment servers (with and without replication), the
- * puller, the replication init container, and the custom metrics exporter
+ * The containers of an instance pod that run the agent: the segment servers (with and without
+ * replication), the puller, the replication init container, and the custom metrics exporter
  */
 const AGENT_CONTAINERS = ['segment-server', 'backup-files', 'segment-puller', 'replication-init', 'metrics-exporter'];
-/**
- * What runs from the agent, by container: the fb-agent arguments that replace the container's
- * command.
- */
-const AGENT_COMMANDS: Record<string, string[]> = {
-  'segment-puller': ['puller'],
-  'segment-server': ['segment-server'],
-  // the same server in its files-only mode (FILES_ONLY), for instances without replication
-  'backup-files': ['segment-server'],
-  // the custom metrics exporter (utils/custom-queries.ts): the last Perl of an instance pod
-  'metrics-exporter': ['metrics-exporter'],
-};
-/**
- * The replication init container stays a shell script (it drives gstat, gfix, isql and
- * nbackup on a database no server has open); its Perl helpers are the agent's commands
- */
-const AGENT_SCRIPT_COMMANDS: Record<string, string[]> = {
-  'replication-init': ['sh', `${OPERATOR_CONFIG_DIR}/${AGENT_INIT_SCRIPT}`],
-};
 
-/**
- * The Jobs' programs (agent/fb-agent/src/jobs.rs): a Perl script as the Job runs it, and the
- * agent's command that replaces it, with the same arguments, output and exit status
- */
-const JOB_COMMANDS: Record<string, string[]> = {
-  [`${OPERATOR_CONFIG_DIR}/switchover.pl`]: ['switchover'],
-  [`${OPERATOR_CONFIG_DIR}/failover.pl`]: ['failover'],
-  [`${OPERATOR_CONFIG_DIR}/sync-standby.pl`]: ['sync-standby'],
-  [`${OPERATOR_CONFIG_DIR}/fetch-segments.pl`]: ['fetch-segments'],
-};
-/** The same in the Jobs' shell commands (pitr-restore.sh asks FB_AGENT itself) */
-const JOB_SHELL_COMMANDS: Array<[string, string]> = [
-  [`perl ${OPERATOR_CONFIG_DIR}/backup-file.pl`, `${AGENT_PATH} backup-file`],
-  [`perl ${OPERATOR_CONFIG_DIR}/segment-request.pl`, `${AGENT_PATH} request`],
-  // major-upgrade.sh
-  ['perl "$SCRIPT_DIR/set-repl-seq.pl"', '"$FB_AGENT" set-repl-seq'],
-];
-
-/**
- * A Job's pod spec with the agent, for clusters that opted in: the binary installed first, and
- * every Perl program the Job runs replaced by the agent's command. Called by jobPodSpec, after
- * the segment TLS proxy is added.
- */
-export function withAgentInJob<T extends V1PodSpec>(cluster: FirebirdCluster, spec: T): T {
-  if (agentMode(cluster) !== 'rust') return spec;
-  const translate = (text: string) => JOB_SHELL_COMMANDS.reduce((t, [perl, agent]) => t.split(perl).join(agent), text);
-  const container = (c: V1Container): V1Container => {
-    if (c.restartPolicy === 'Always') return c;
-    const script = c.command?.[0] === 'perl' && c.command.length === 2 ? JOB_COMMANDS[c.command[1]] : undefined;
-    const command = script ? [AGENT_PATH, ...script] : c.command?.map(translate);
-    return {
-      ...c,
-      ...(command ? { command } : {}),
-      ...(c.args ? { args: c.args.map(translate) } : {}),
-      env: [...(c.env ?? []), { name: 'FB_AGENT', value: AGENT_PATH }],
-      volumeMounts: [...(c.volumeMounts ?? []), { name: AGENT_VOLUME, mountPath: AGENT_DIR, readOnly: true }],
-    };
-  };
-  const init = spec.initContainers ?? [];
-  const sidecars = init.findIndex((c) => c.restartPolicy !== 'Always');
-  const at = sidecars < 0 ? init.length : sidecars;
-  return {
-    ...spec,
-    initContainers: [...init.slice(0, at), installer(), ...init.slice(at).map(container)],
-    containers: spec.containers.map(container),
-    volumes: [...(spec.volumes ?? []), { name: AGENT_VOLUME, emptyDir: {} }],
-  };
-}
-
-/** "rust" (the agent is delivered) or "perl" (the default) */
-export function agentMode(cluster: FirebirdCluster): 'rust' | 'perl' {
-  return cluster.metadata.annotations?.[AGENT_ANNOTATION] === 'rust' ? 'rust' : 'perl';
-}
-
-/** Problems with the agent annotation, for validateClusterSpec */
+/** Problems with the agent annotation, for validateClusterSpec: its values of before v0.170.0 are accepted */
 export function agentErrors(cluster: FirebirdCluster): string[] {
   const value = cluster.metadata.annotations?.[AGENT_ANNOTATION];
   return value === undefined || value === 'rust' || value === 'perl'
@@ -129,20 +52,8 @@ function installer(): V1Container {
   };
 }
 
-/** An instance pod spec with the agent binary, for clusters that opted in */
-export function withAgent<T extends V1PodSpec>(cluster: FirebirdCluster, spec: T): T {
-  if (agentMode(cluster) !== 'rust') return spec;
-  const container = (c: V1Container): V1Container =>
-    AGENT_CONTAINERS.includes(c.name)
-      ? {
-          ...c,
-          ...(AGENT_COMMANDS[c.name] ? { command: [AGENT_PATH, ...AGENT_COMMANDS[c.name]] } : {}),
-          ...(AGENT_SCRIPT_COMMANDS[c.name] ? { command: AGENT_SCRIPT_COMMANDS[c.name] } : {}),
-          env: [...(c.env ?? []), { name: 'FB_AGENT', value: AGENT_PATH }],
-          volumeMounts: [...(c.volumeMounts ?? []), { name: AGENT_VOLUME, mountPath: AGENT_DIR, readOnly: true }],
-        }
-      : c;
-  // after the native sidecars (the segment TLS proxy, the Lease holder), before the other init containers
+/** The binary in the pod, where the agent's containers run it (FB_AGENT), installed after the native sidecars */
+function withInstaller<T extends V1PodSpec>(spec: T, container: (c: V1Container) => V1Container): T {
   const init = spec.initContainers ?? [];
   const sidecars = init.findIndex((c) => c.restartPolicy !== 'Always');
   const at = sidecars < 0 ? init.length : sidecars;
@@ -152,4 +63,26 @@ export function withAgent<T extends V1PodSpec>(cluster: FirebirdCluster, spec: T
     containers: spec.containers.map(container),
     volumes: [...(spec.volumes ?? []), { name: AGENT_VOLUME, emptyDir: {} }],
   };
+}
+
+const withBinary = (c: V1Container): V1Container => ({
+  ...c,
+  env: [...(c.env ?? []), { name: 'FB_AGENT', value: AGENT_PATH }],
+  volumeMounts: [...(c.volumeMounts ?? []), { name: AGENT_VOLUME, mountPath: AGENT_DIR, readOnly: true }],
+});
+
+/** An instance pod spec with the agent binary in the containers that run it */
+export function withAgent<T extends V1PodSpec>(spec: T): T {
+  return withInstaller(spec, (c) => (AGENT_CONTAINERS.includes(c.name) ? withBinary(c) : c));
+}
+
+/**
+ * A Job's pod spec with the agent binary in every container (not the segment TLS proxy, a sidecar
+ * from the operator image), when one of them runs it; the Jobs that only run Firebird's tools
+ * (databases, users, roles) are left as they are
+ */
+export function withAgentInJob<T extends V1PodSpec>(spec: T): T {
+  const own = [...(spec.initContainers ?? []), ...spec.containers].filter((c) => c.restartPolicy !== 'Always');
+  const runs = own.some((c) => /fb-agent|\$FB_AGENT|pitr-restore\.sh/.test([...(c.command ?? []), ...(c.args ?? [])].join(' ')));
+  return runs ? withInstaller(spec, (c) => (c.restartPolicy === 'Always' ? c : withBinary(c))) : spec;
 }

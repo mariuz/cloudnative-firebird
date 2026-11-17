@@ -1,7 +1,7 @@
 # How the Rust agent reaches Firebird (spike, 2026-11-10)
 
 Phase 1 of the [Rust agent roadmap](rust-agent-roadmap.md) has to pick how the agent talks to
-the local Firebird server. Today the Perl scripts start `isql`, `fbsvcmgr` or `gfix` for every
+the local Firebird server. At the time (since v0.170.0 they are deleted) the Perl scripts started `isql`, `fbsvcmgr` or `gfix` for every
 query and every service call. This records a spike that tried the options against Firebird
 4.0.7, 5.0.4 and the 6 snapshot (T6.0.0.2455), in the official images.
 

@@ -1,29 +1,22 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { ChildProcess, spawn, spawnSync } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { createServer, Server, Socket } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { startSegmentServer } from './helpers/segment-server';
+import { agentBin } from './helpers/implementations';
 import { signLine } from './helpers/segment-auth';
 
 /**
- * The signed request protocol (SIG1) has three implementations: Perl (segment-auth.pl and
- * segment-server.pl), TypeScript (replication-lag.ts) and Rust (agent/sig1, the fb-agent binary:
- * docs/rust-agent-roadmap.md, Phase 1). Each client is run against each server, and the servers
- * are given the same lines and must give the same replies.
+ * The signed request protocol (SIG1) has two implementations: TypeScript (replication-lag.ts) and
+ * Rust (agent/sig1, the fb-agent binary: docs/rust-agent-roadmap.md). Each client is run against
+ * the agent's servers (the segment server and `serve`), and the servers are given the same lines
+ * and must give the same replies (the Perl implementation's, removed in v0.170.0).
  *
  * Needs the fb-agent binary: FB_AGENT_BIN, or a build in agent/target (`cargo build` in
  * operator/agent). Skipped without one; the "Rust agent" CI job builds it and runs this file.
  */
-const agentBin = [
-  process.env.FB_AGENT_BIN,
-  ...['x86_64-unknown-linux-musl/release', 'aarch64-unknown-linux-musl/release', 'release', 'debug'].map((d) =>
-    join(__dirname, '..', 'agent', 'target', d, 'fb-agent'),
-  ),
-].find((p) => p && existsSync(p));
-const hasPerl = spawnSync('perl', ['-v']).status === 0;
 
 /** The replies of a server to one raw line */
 const raw = (port: number, line: string): Promise<string[]> =>
@@ -36,9 +29,9 @@ const raw = (port: number, line: string): Promise<string[]> =>
     socket.connect(port, '127.0.0.1', () => socket.write(`${line}\n`));
   });
 
-describe.skipIf(!agentBin || !hasPerl)('SIG1 conformance: Perl, TypeScript and Rust', () => {
+describe.skipIf(!agentBin)('SIG1 conformance: TypeScript and Rust', () => {
   let root: string;
-  let perl: { child: ChildProcess; port: number };
+  let server: { child: ChildProcess; port: number };
   let rust: { child: ChildProcess; port: number };
   const servers: Server[] = [];
   /** stdout lines and the exit status of a client program */
@@ -48,8 +41,6 @@ describe.skipIf(!agentBin || !hasPerl)('SIG1 conformance: Perl, TypeScript and R
   };
   const agent = (port: number, secret: string, ...request: string[]) =>
     run(agentBin!, ['request', '127.0.0.1', ...request], { ISC_PASSWORD: secret, SEGMENT_PORT: String(port), SEGMENT_PROXY: '' });
-  const perlClient = (port: number, secret: string, ...request: string[]) =>
-    run('perl', [join(root, 'segment-request.pl'), '127.0.0.1', ...request], { ISC_PASSWORD: secret, SEGMENT_PORT: String(port), SEGMENT_PROXY: '' });
   const nodeClient = async (port: number, secret: string, request: string) => {
     // the real client (the unit tests' setup replaces it)
     const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>('../src/utils/replication-lag');
@@ -61,8 +52,7 @@ describe.skipIf(!agentBin || !hasPerl)('SIG1 conformance: Perl, TypeScript and R
     for (const d of ['archive', 'source', 'repl']) mkdirSync(join(root, d));
     writeFileSync(join(root, 'archive', 'mydb.fdb.journal-000000007'), 'x');
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
-    for (const name of ['segment-server.pl', 'segment-request.pl']) writeFileSync(join(root, name), REPLICATION_SCRIPTS[name]);
-    perl = await startSegmentServer(join(root, 'segment-server.pl'), {
+    server = await startSegmentServer({
       ARCHIVE_DIR: join(root, 'archive'),
       DATABASE_PATH: join(root, 'mydb.fdb'),
       SOURCE_DIR: join(root, 'source'),
@@ -71,7 +61,7 @@ describe.skipIf(!agentBin || !hasPerl)('SIG1 conformance: Perl, TypeScript and R
       POD_NAME: 'db-0',
       ISC_PASSWORD: 'tok',
     });
-    // fb-agent serve: SEGMENT_PORT=0 takes a free port, reported as the Perl server reports it
+    // fb-agent serve: SEGMENT_PORT=0 takes a free port, reported as the segment server reports it
     const child = spawn(agentBin!, ['serve'], { env: { ...process.env, ISC_PASSWORD: 'tok', SEGMENT_PORT: '0', SEGMENT_LISTEN: '' } });
     rust = await new Promise((resolve, reject) => {
       let out = '';
@@ -88,23 +78,23 @@ describe.skipIf(!agentBin || !hasPerl)('SIG1 conformance: Perl, TypeScript and R
     });
   });
   afterAll(() => {
-    perl?.child.kill();
+    server?.child.kill();
     rust?.child.kill();
     for (const s of servers) s.close();
     if (root) rmSync(root, { recursive: true, force: true });
   });
 
-  it('the Rust client is answered by the Perl server', () => {
-    expect(agent(perl.port, 'tok', 'PING')).toMatchObject({ status: 0, lines: ['OK'] });
+  it('the Rust and TypeScript clients are answered by the segment server', async () => {
+    expect(agent(server.port, 'tok', 'PING')).toMatchObject({ status: 0, lines: ['OK'] });
     // a request with an argument, and a reply of several lines
-    expect(agent(perl.port, 'tok', 'LIST').lines).toEqual(['mydb.fdb.journal-000000007', '.']);
-    expect(agent(perl.port, 'tok', 'GET', 'mydb.fdb.journal-000000007').lines).toEqual(['OK 1', 'x']);
-    expect(agent(perl.port, 'wrong', 'PING').lines).toEqual(['ERR unauthorized (signature)']);
+    expect(agent(server.port, 'tok', 'LIST').lines).toEqual(['mydb.fdb.journal-000000007', '.']);
+    expect(agent(server.port, 'tok', 'GET', 'mydb.fdb.journal-000000007').lines).toEqual(['OK 1', 'x']);
+    expect(agent(server.port, 'wrong', 'PING').lines).toEqual(['ERR unauthorized (signature)']);
+    expect(await nodeClient(server.port, 'tok', 'PING')).toEqual(['OK']);
+    expect(await nodeClient(server.port, 'wrong', 'PING')).toEqual(['ERR unauthorized (signature)']);
   });
 
-  it('the Perl and TypeScript clients are answered by the Rust server', async () => {
-    expect(perlClient(rust.port, 'tok', 'PING')).toMatchObject({ status: 0, lines: ['OK'] });
-    expect(perlClient(rust.port, 'wrong', 'PING').lines).toEqual(['ERR unauthorized (signature)']);
+  it('the Rust and TypeScript clients are answered by fb-agent serve', async () => {
     expect(await nodeClient(rust.port, 'tok', 'PING')).toEqual(['OK']);
     expect(await nodeClient(rust.port, 'wrong', 'PING')).toEqual(['ERR unauthorized (signature)']);
     expect(agent(rust.port, 'tok', 'PING').lines).toEqual(['OK']);
@@ -129,12 +119,12 @@ describe.skipIf(!agentBin || !hasPerl)('SIG1 conformance: Perl, TypeScript and R
       [replayed, ['ERR unauthorized (replay)']],
     ];
     for (const [line, expected] of cases) {
-      expect(await raw(perl.port, line), `Perl: ${line}`).toEqual(expected);
-      expect(await raw(rust.port, line), `Rust: ${line}`).toEqual(expected);
+      expect(await raw(server.port, line), `segment server: ${line}`).toEqual(expected);
+      expect(await raw(rust.port, line), `serve: ${line}`).toEqual(expected);
     }
   });
 
-  it('the Rust client goes through the segment TLS proxy as the Perl client does (CONNECT <host> <port>)', async () => {
+  it('the Rust client goes through the segment TLS proxy (CONNECT <host> <port>)', async () => {
     const firstLines: string[] = [];
     const proxy = createServer((client) => {
       let head = Buffer.alloc(0);
@@ -145,7 +135,7 @@ describe.skipIf(!agentBin || !hasPerl)('SIG1 conformance: Perl, TypeScript and R
         client.off('data', onData);
         firstLines.push(head.subarray(0, nl).toString());
         const upstream = new Socket();
-        upstream.connect(perl.port, '127.0.0.1', () => {
+        upstream.connect(server.port, '127.0.0.1', () => {
           upstream.write(head.subarray(nl + 1));
           client.pipe(upstream);
           upstream.pipe(client);
@@ -166,7 +156,6 @@ describe.skipIf(!agentBin || !hasPerl)('SIG1 conformance: Perl, TypeScript and R
         child.once('exit', () => resolve(out.split('\n').filter((l) => l !== '')));
       });
     expect(await lines(agentBin!, ['request', 'db-1.db-headless', 'PING'])).toEqual(['OK']);
-    expect(await lines('perl', [join(root, 'segment-request.pl'), 'db-1.db-headless', 'PING'])).toEqual(['OK']);
-    expect(firstLines).toEqual(['CONNECT db-1.db-headless 3051', 'CONNECT db-1.db-headless 3051']);
+    expect(firstLines).toEqual(['CONNECT db-1.db-headless 3051']);
   });
 });

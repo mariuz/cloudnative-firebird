@@ -3,7 +3,7 @@
 Status: **Phases 0, 1 and 2 done** (v0.154.0), **Phase 3 started** (v0.155.0: the segment server's
 front, and pullers that wait instead of polling; v0.156.0: the database's state from a
 persistent Firebird attachment; v0.157.0: the other requests about an instance's state;
-v0.158.0: the backup files, also for instances without replication; v0.159.0: the seeds; v0.160.0: the fence, nbackup and synchronous replication; v0.161.0: the in-place promotion; v0.162.0: the pruning and the recovery-point sampler; v0.163.0: the isolation check; v0.164.0: the segment TLS proxy; v0.165.0: TLS end to end in the agent's server and puller; v0.166.0: no Perl server behind the agent's; v0.167.0: the replication init container's helpers; v0.168.0: the primary Lease holder; v0.169.0: the custom metrics exporter and the Jobs' programs). Results below. It answers
+v0.158.0: the backup files, also for instances without replication; v0.159.0: the seeds; v0.160.0: the fence, nbackup and synchronous replication; v0.161.0: the in-place promotion; v0.162.0: the pruning and the recovery-point sampler; v0.163.0: the isolation check; v0.164.0: the segment TLS proxy; v0.165.0: TLS end to end in the agent's server and puller; v0.166.0: no Perl server behind the agent's; v0.167.0: the replication init container's helpers; v0.168.0: the primary Lease holder; v0.169.0: the custom metrics exporter and the Jobs' programs), **done** (v0.170.0: the agent on every cluster, the Perl scripts deleted). Results below. It answers
 the question of whether a Rust core should replace the Perl scripts and the parts critical for
 performance.
 
@@ -47,7 +47,7 @@ server. TLS moved there because a pure-Perl cipher reached under 1 MB/s (ROADMAP
 
 ## Phase 0 results (2026-11-10)
 
-Measured with `hack/bench/segment-server.sh` (Docker, one primary with its segment server and
+Measured with `hack/bench/segment-server.sh` (removed in v0.170.0) (Docker, one primary with its segment server and
 isolation check, a client on the host), on Firebird 4.0.7, 5.0.4 and the 6 snapshot
 (T6.0.0.2455):
 
@@ -85,7 +85,7 @@ the pod (Node for TLS and the Lease holder) and typed, tested formats, not on ra
 ## Phase 2 results (2026-11-10)
 
 `fb-agent puller` is a port of `segment-puller.pl` with the same environment, files, flags and
-log lines. `hack/bench/puller.sh` runs both against one real segment server, side by side, with
+log lines. `hack/bench/puller.sh` (removed in v0.170.0) runs both against one real segment server, side by side, with
 a 16 MB segment appearing in the primary's archive every 1 or 2 seconds (Firebird 5 image):
 
 | | Perl puller | Rust puller |
@@ -307,5 +307,13 @@ the synchronous standby, the backup files, the journal archive and point-in-time
 `jobPodSpec` installs the binary into every Job's pod and replaces each Perl invocation with
 the agent's command; nothing runs Perl on a cluster with the annotation.
 
-Next: the agent as the default, and the Perl scripts deleted.
+Since v0.170.0 the agent is what every cluster runs, and the Perl scripts are deleted, with
+the segment server's front mode. `init-instance.sh` calls the agent's commands itself; the
+ConfigMap keeps it under its former name `init-instance-agent.sh` too, for the pods of
+clusters that opted in, until they have restarted. The tests that compared the Perl scripts
+with the agent check the agent alone.
+
+Left (TODO.md): the Lease holder and the Jobs' programs could do their TLS themselves, so the
+segment TLS proxy sidecar would go, and the Node holder and proxy of the operator image, which
+no pod runs any more, can be deleted.
 

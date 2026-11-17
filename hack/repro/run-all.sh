@@ -9,7 +9,8 @@
 #   (issue 10's cause, refused-attachment.sh, runs once: CYCLES=10 header writes each way)
 #   PARSE_ONLY=1 hack/repro/run-all.sh firebirdsql/firebird:5 logs # the verdicts of logs kept earlier
 #
-# Needs Docker. Every script's output goes to the console and to <log dir>/<test>.log. The
+# Needs Docker, and the fb-agent binary for issue 10 (FB_AGENT_BIN, or a musl build in
+# operator/agent/target). Every script's output goes to the console and to <log dir>/<test>.log. The
 # verdicts (reproduced, not reproduced, unclear) are printed as a Markdown table, appended to
 # $GITHUB_STEP_SUMMARY when set. The exit status says whether every script ran (a failed script
 # or Docker is 1), never what Firebird did: the issues are Firebird's, the verdicts are the result.

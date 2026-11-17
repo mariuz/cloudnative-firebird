@@ -18,19 +18,30 @@ const named = (spec: V1PodSpec, name: string) => [...(spec.initContainers ?? [])
 describe('segment TLS in the instance pods and Jobs', () => {
   beforeAll(() => setOperatorImage('registry.example/cloudnative-firebird:1.2.3'));
 
-  it('runs the proxy as a native sidecar beside a replicated instance, the segment server on localhost', () => {
+  it('runs the proxy as a native sidecar beside a replicated instance, its client side only: the agent does its own TLS', () => {
     const spec = podSpec(makeCluster({ instances: 3, replication: { enabled: true }, segmentTLS: { enabled: true } }));
     const proxy = spec.initContainers![0];
     expect(proxy).toMatchObject({ name: 'segment-tls', image: 'registry.example/cloudnative-firebird:1.2.3', restartPolicy: 'Always' });
-    expect(proxy.ports).toEqual([{ name: 'segments', containerPort: 3051, protocol: 'TCP' }]);
-    expect(env(proxy)).toMatchObject({ SERVER_LISTEN: '0.0.0.0:3051', SERVER_TARGET: '127.0.0.1:3061', CLIENT_LISTEN: '127.0.0.1:3052' });
+    expect(proxy.command).toEqual(['/app/fb-agent', 'segment-tls']);
+    expect(proxy.startupProbe?.exec?.command).toEqual(['/app/fb-agent', 'tcp', '127.0.0.1', '3052']);
+    expect(proxy.resources?.requests).toEqual({ cpu: '10m', memory: '8Mi' });
+    expect(proxy.ports).toBeUndefined();
+    expect(env(proxy)).toMatchObject({ CLIENT_LISTEN: '127.0.0.1:3052' });
+    expect(env(proxy).SERVER_LISTEN).toBeUndefined();
     expect(proxy.securityContext).toMatchObject({ runAsNonRoot: true, readOnlyRootFilesystem: true });
-    // the seeding init container starts after it, and every Perl client goes through it
+    // the seeding init container starts after it, and every client of the pod can go through it
     expect(spec.initContainers!.findIndex((c) => c.name === 'replication-init')).toBeGreaterThan(0);
-    for (const name of ['replication-init', 'segment-server', 'segment-puller']) expect(env(named(spec, name)).SEGMENT_PROXY).toBe('127.0.0.1:3052');
+    for (const name of ['replication-init', 'segment-server', 'segment-puller']) {
+      const c = named(spec, name)!;
+      expect(env(c).SEGMENT_PROXY).toBe('127.0.0.1:3052');
+      // the agent's own TLS: the certificates and the operator's peers in its containers
+      expect(env(c)).toMatchObject({ SEGMENT_TLS_DIR: '/etc/segment-tls', SEGMENT_TLS_PEERS_DIR: '/etc/segment-tls-peers' });
+      expect(c.volumeMounts).toContainEqual({ name: 'segment-tls', mountPath: '/etc/segment-tls', readOnly: true });
+    }
+    // the segment server keeps the segment port and accepts mutual TLS on it; plain on localhost
     const server = named(spec, 'segment-server')!;
-    expect(env(server).SEGMENT_LISTEN).toBe('127.0.0.1:3061');
-    expect((server.ports ?? []).some((p) => p.containerPort === 3051)).toBe(false);
+    expect(env(server)).toMatchObject({ SEGMENT_LISTEN: '127.0.0.1:3061', SEGMENT_TLS_LISTEN: '0.0.0.0:3051' });
+    expect(server.ports).toEqual([{ name: 'segments', containerPort: 3051, protocol: 'TCP' }]);
     // the certificates, not the CA's key
     const volume = spec.volumes!.find((v) => v.name === 'segment-tls')!;
     expect(volume.secret).toMatchObject({ secretName: 'test-cluster-segment-tls' });

@@ -1,23 +1,22 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { ChildProcess, spawnSync } from 'child_process';
+import { ChildProcess } from 'child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { connect, Socket } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { startSegmentServer } from './helpers/segment-server';
+import { agentBin } from './helpers/implementations';
 import { signLine } from './helpers/segment-auth';
 
-const hasPerl = spawnSync('perl', ['-v']).status === 0;
 
 /**
  * The segment server answers its long requests (GET, SEED, TXNS, PLAN, like FILE, STORE, PROMOTE
  * and NBACKUP before) from child processes. In its accept loop, a seed downloaded slowly held
  * every other request: the Lease holder's STATE, the pullers, the operator. The Lease was not
- * renewed and the isolation check fenced the primary (hack/bench/segment-server.sh). The copies
+ * renewed and the isolation check fenced the primary (measured with hack/bench/segment-server.sh, removed in v0.170.0). The copies
  * (a seed, an nbackup, the in-place promotion) still run one at a time, under a lock.
  */
-describe.skipIf(!hasPerl)('segment-server.pl answers other requests during a long one', () => {
+describe.runIf(agentBin)('the segment server: answers other requests during a long one', () => {
   const MB = 1024 * 1024;
   // more than the socket buffers hold: the server blocks writing to a client that does not read
   const SIZE = 64 * MB;
@@ -35,9 +34,7 @@ describe.skipIf(!hasPerl)('segment-server.pl answers other requests during a lon
     // the local server's isql: records the statements it is given (the backup lock of a live seed)
     writeFileSync(join(root, 'bin', 'isql'), `#!/bin/sh\ncat >> ${join(root, 'isql.log')}\n`);
     chmodSync(join(root, 'bin', 'isql'), 0o755);
-    const script = join(root, 'segment-server.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
-    ({ child, port } = await startSegmentServer(script, {
+    ({ child, port } = await startSegmentServer({
       ARCHIVE_DIR: join(root, 'archive'),
       DATABASE_PATH: join(root, 'mydb.fdb'),
       SOURCE_DIR: join(root, 'source'),

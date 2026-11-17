@@ -69,7 +69,7 @@ function rawSegmentRequest(host: string, port: number, line: string, timeoutMs: 
 }
 
 /**
- * A request signed with the SYSDBA password (segment-server.pl): "SIG1 <epoch> <nonce> <mac>
+ * A request signed with the SYSDBA password (the agent's segment server): "SIG1 <epoch> <nonce> <mac>
  * <request>", mac = hex HMAC-SHA256 of "<epoch> <nonce> <request>". The password never crosses
  * the network.
  */

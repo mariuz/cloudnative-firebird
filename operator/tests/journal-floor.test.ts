@@ -21,8 +21,8 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'journal-floor-'));
   for (const d of ['repl', 'journal', 'archive', 'scripts']) mkdirSync(join(dir, d));
   writeFileSync(join(dir, 'db.fdb'), '');
-  // records the sequence it was asked to set
-  writeFileSync(join(dir, 'scripts', 'set-repl-seq.pl'), 'open(my $f, ">", "$ARGV[0].seq") or die; print $f "$ARGV[1]\\n";');
+  // the agent's set-repl-seq, stubbed: records the sequence it was asked to set
+  writeFileSync(join(dir, 'scripts', 'fb-agent'), '#!/bin/sh\n[ "$1" = set-repl-seq ] || exit 2\necho "$3" > "$2.seq"\n', { mode: 0o755 });
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
@@ -55,6 +55,7 @@ const run = (opts: { floor?: string; header: number; primary?: boolean; replica?
         JOURNAL_DIR: join(dir, 'journal'),
         ARCHIVE_DIR: join(dir, 'archive'),
         SCRIPT_DIR: join(dir, 'scripts'),
+        FB_AGENT: join(dir, 'scripts', 'fb-agent'),
       },
     },
   );
@@ -124,21 +125,21 @@ describe('the journal floor (init-instance.sh)', () => {
   });
 });
 
-describe('the in-place promotion (segment-server.pl promote_here)', () => {
-  const script = readFileSync(join(__dirname, '..', 'src', 'replication', 'segment-server.pl'), 'utf8');
-  const promote = script.slice(script.indexOf('sub promote_here'), script.indexOf('sub seed_from_primary'));
+describe('the in-place promotion (the agent\'s PROMOTE, agent/fb-agent/src/promote.rs)', () => {
+  const source = readFileSync(join(__dirname, '..', 'agent', 'fb-agent', 'src', 'promote.rs'), 'utf8');
 
   it('writes the journal floor with the header, and removes it when the promotion is refused', () => {
-    expect(script).toContain('my $journal_floor = "$base/journal-floor";');
-    const setSeq = promote.indexOf('set-repl-seq.pl');
-    expect(promote.indexOf('write_file($journal_floor, "$seq\\n")')).toBeGreaterThan(setSeq);
-    expect(promote).toContain('unlink "$bootstrap_seed.tmp", $journal_floor;');
+    const setSeq = source.indexOf('set_header_sequence(&files.database, sequence)');
+    expect(setSeq).toBeGreaterThan(0);
+    expect(source.indexOf('write_file(&files.base.join("journal-floor"), &format!("{sequence}\\n"))')).toBeGreaterThan(setSeq);
+    expect(source).toContain('let journal_floor = files.base.join("journal-floor");');
+    expect(source).toContain('let _ = fs::remove_file(&journal_floor);');
   });
 
   it('checks the sequence the server journals after before it reports the promotion', () => {
-    const check = promote.indexOf('die "the journal would continue after segment $live, not $seq\\n" if $live < $seq;');
-    expect(check).toBeGreaterThan(promote.indexOf('enable-publication.sql'));
-    expect(check).toBeLessThan(promote.indexOf('print $client "OK $seq $rounds\\n";\n    print "promoted in place'));
-    expect(check).toBeLessThan(promote.indexOf('write_file($promoted_flag, time . "\\n");\n    if (defined $lineage'));
+    const check = source.indexOf('return Err(format!("the journal would continue after segment {live}, not {sequence}"));');
+    expect(check).toBeGreaterThan(source.indexOf('ALTER DATABASE ENABLE PUBLICATION'));
+    expect(check).toBeLessThan(source.indexOf('let _ = writeln!(client, "OK {sequence} {rounds}");'));
+    expect(check).toBeLessThan(source.indexOf('write_file(&files.base.join("promoted"), &format!("{now}\\n"));'));
   });
 });

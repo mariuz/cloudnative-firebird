@@ -7,7 +7,7 @@
 #
 #   1. i0 primary, i1 and i2 read-only replicas fed with i0's archived segments (the segment
 #      puller's job), rows written;
-#   2. i0 is lost: i1 is promoted in place (segment-server.pl PROMOTE: full shutdown, header
+#   2. i0 is lost: i1 is promoted in place (the segment server's PROMOTE: full shutdown, header
 #      sequence set offline, journal and archive cleared, online, replica mode none, publication)
 #      and i0 is re-seeded from a locked copy of the replica i2 (nbackup -SEQ -F, its control file);
 #   3. rows written on i1; then i1 is lost: i0 is promoted in place, and i1 is re-seeded right
@@ -23,7 +23,8 @@
 #
 # Prints per run "journal continued after segment P (first new segment N)" or "journal restarted
 # below the promotion point P (first new segment N)", then "runs: <k> of <n> restarted below".
-# Needs Docker only.
+# Needs Docker and the fb-agent binary (its set-repl-seq): FB_AGENT_BIN, or a musl build in
+# operator/agent/target.
 set -eu
 IMAGE=${IMAGE:-firebirdsql/firebird:6-snapshot}
 # container names: <NAME>0, <NAME>1, <NAME>2 (two runs side by side need different names)
@@ -31,6 +32,8 @@ NAME=${NAME:-fbj}
 RUNS=${RUNS:-1}
 here=$(cd "$(dirname "$0")" && pwd)
 scripts=$(cd "$here/../../operator/src/replication" && pwd)
+agent=${FB_AGENT_BIN:-$here/../../operator/agent/target/x86_64-unknown-linux-musl/release/fb-agent}
+[ -x "$agent" ] || { echo "no fb-agent binary at $agent (set FB_AGENT_BIN)"; exit 1; }
 work=
 cleanup() {
   [ -n "$work" ] || return 0
@@ -66,7 +69,7 @@ value() { echo "SET LIST ON; SELECT $1 AS V FROM RDB\$DATABASE;" | isql -q local
 EOF
 )
 
-# the HDR_repl_seq clump of a header page (layout as in set-repl-seq.pl), "none" without it
+# the HDR_repl_seq clump of a header page (layout as fb-agent set-repl-seq writes it), "none" without it
 hdr_seq_pl=$(cat <<'EOF'
 open(my $fh, '<:raw', $ARGV[0]) or die "open: $!\n";
 read($fh, my $head, 20);
@@ -91,7 +94,7 @@ files() { docker run --rm -v "$work:/w" --entrypoint sh "$IMAGE" -c "$1"; }
 # closed.pl <database> <wait> <command...>: runs the command (the header write) holding the
 # exclusive lock a SuperServer holds on a database it has open, and tells whether the server still
 # had it open after the full shutdown. With <wait> 1 it first waits up to 30 s for the server to
-# close it, as segment-server.pl does since v0.147.0; with 0 it writes at once, as before.
+# close it, as the segment server does since v0.147.0; with 0 it writes at once, as before.
 closed_pl=$(cat <<'EOF'
 use Fcntl qw(:flock);
 my ($db, $wait, @cmd) = @ARGV;
@@ -129,13 +132,13 @@ write() { for n in $(seq "$2" "$3"); do x "$1" "sql 'insert into app values ($n)
 # applied <i>: the replica's control file position (u64 at 16)
 applied() { docker exec "${NAME}$1" sh -c 'od -An -tu8 -j16 -N8 "$(ls -d /data/s/{* | head -1)"' | tr -d ' '; }
 header() { x "$1" 'perl /w/hdr-seq.pl $DB'; }
-# promote <i> <seq>: segment-server.pl promote_here, in place (the server keeps running); the
+# promote <i> <seq>: the segment server's PROMOTE, in place (the server keeps running); the
 # header page's replication sequence, read from the file (not through an engine), is printed
 # after each step
 promote() {
   x "$1" "h() { printf '%s %s; ' \"\$1\" \"\$(perl /w/hdr-seq.pl \$DB)\"; }
     fbsvcmgr localhost:service_mgr action_properties dbname \$DB prp_shutdown_mode prp_sm_full prp_force_shutdown 0 &&
-    perl /w/closed.pl \$DB ${WAIT_CLOSED:-0} perl /scripts/set-repl-seq.pl \$DB $2 && h set && rm -f /data/j/* /data/a/* /data/seed.fdb && cp \$DB /data/seed.fdb.tmp &&
+    perl /w/closed.pl \$DB ${WAIT_CLOSED:-0} /w/fb-agent set-repl-seq \$DB $2 && h set && rm -f /data/j/* /data/a/* /data/seed.fdb && cp \$DB /data/seed.fdb.tmp &&
     fbsvcmgr localhost:service_mgr action_properties dbname \$DB prp_online_mode prp_sm_normal && h online &&
     gfix -replica none localhost:\$DB && h replica-none && isql -q -b -i /scripts/enable-publication.sql localhost:\$DB && h published &&
     rm -f /data/s/*; echo"
@@ -171,6 +174,7 @@ for run in $(seq 1 "$RUNS"); do
   printf '%s\n' "$env_sh" > "$work/env.sh"
   printf '%s\n' "$hdr_seq_pl" > "$work/hdr-seq.pl"
   printf '%s\n' "$closed_pl" > "$work/closed.pl"
+  cp "$agent" "$work/fb-agent"
 
   # 1. a primary and two replicas seeded offline
   docker run --rm -v "$work/i0:/data" -v "$work:/w" -v "$scripts:/scripts:ro" --entrypoint bash "$IMAGE" -c '. /w/env.sh

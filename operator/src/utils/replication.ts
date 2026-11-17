@@ -3,6 +3,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { V1Container, V1EnvVar, V1VolumeMount } from '@kubernetes/client-node';
 import { FirebirdCluster } from '../types';
+import { AGENT_PATH } from './agent';
 
 /**
  * Journal-based asynchronous replication for Firebird 4+.
@@ -13,7 +14,7 @@ import { FirebirdCluster } from '../types';
  *   full segments;
  * - replicas are seeded with a physical copy (init-instance.sh), preferably of a ready
  *   replica, run in read-only replica mode and apply segments from journal_source_directory.
- * Segments are shipped by two sidecars running the Firebird image's perl: segment-server
+ * Segments are shipped by two sidecars running the agent (utils/agent.ts): segment-server
  * serves the local archive (and seed copies) and segment-puller fetches new segments from
  * the current primary. The operator publishes the primary and the ready replicas (seed
  * sources) in the cluster ConfigMap. Seeds avoid locking the primary: see ISSUES.md, issue 2.
@@ -42,84 +43,35 @@ export const RESEED_ANNOTATION = 'firebird.cloudnative-firebird.io/reseed';
 
 const SCRIPT_DIR = join(__dirname, '..', 'replication');
 
-/** Reads a script, replacing each "#@include <file>" line with that file (shared Perl code) */
 function readScript(name: string): string {
-  return readFileSync(join(SCRIPT_DIR, name), 'utf8').replace(/^#@include (\S+)\n/gm, (_line, file: string) =>
-    readFileSync(join(SCRIPT_DIR, file), 'utf8'),
-  );
+  return readFileSync(join(SCRIPT_DIR, name), 'utf8');
 }
 
-/** Replication helper scripts shipped in the cluster ConfigMap, keyed by file name */
+/** Replication files shipped in the cluster ConfigMap, keyed by file name */
 export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
-  [
-    'segment-server.pl',
-    'segment-puller.pl',
-    'fetch-seed.pl',
-    'init-instance.sh',
-    'replica-control.pl',
-    'enable-publication.sql',
-    'backup-file.pl',
-    'set-repl-seq.pl',
-    'switchover.pl',
-    'failover.pl',
-    'isolation-check.pl',
-    'segment-request.pl',
-  ].map(
-    (name) => [name, readScript(name)],
-  ),
+  ['init-instance.sh', 'enable-publication.sql'].map((name) => [name, readScript(name)]),
 );
 
-/** Scripts inlined into containers: the image check and major upgrade Jobs, the archive follower, the metrics exporter */
+/** Scripts inlined into containers: the image check and major upgrade Jobs, the archive follower */
 export const UPGRADE_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
-  ['image-check.sh', 'major-upgrade.sh', 'archive-follower.sh', 'metrics-exporter.pl'].map((name) => [name, readScript(name)]),
+  ['image-check.sh', 'major-upgrade.sh', 'archive-follower.sh'].map((name) => [name, readScript(name)]),
 );
 
 /**
- * Scripts only Jobs run (journal archive, point-in-time recovery), shipped in every cluster's
- * ConfigMap. Not part of any pod template hash: changing them restarts no instance.
+ * Scripts only Jobs run (point-in-time recovery), shipped in every cluster's ConfigMap. Not part
+ * of any pod template hash: changing them restarts no instance.
  */
 export const JOB_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
-  ['fetch-segments.pl', 'pitr-plan.pl', 'pitr-restore.sh', 'sync-standby.pl'].map((name) => [
-    name,
-    readScript(name),
-  ]),
+  ['pitr-restore.sh'].map((name) => [name, readScript(name)]),
 );
 
-/** The replication init container's script on clusters that run the Rust agent (utils/agent.ts) */
+/**
+ * The replication init's script under the name the pods that opted into the agent (v0.152.0 to
+ * v0.169.0) run, until the rolling update has replaced them: the same script. Not part of the pod
+ * template hash.
+ */
 export const AGENT_INIT_SCRIPT = 'init-instance-agent.sh';
-
-/**
- * init-instance.sh with each Perl helper replaced by the agent's command of the same arguments,
- * files and output (operator/agent/fb-agent/src/init.rs). Derived, so the two cannot drift, and
- * a key of its own, so init-instance.sh stays as it is: a change to that script would restart
- * the instances of every cluster with replication (the pod template's hash covers it).
- */
-function agentInitScript(): string {
-  const helpers: [string, string][] = [
-    ['perl "$SCRIPT_DIR/pitr-plan.pl" --reposition', '"$FB_AGENT" reposition'],
-    ['perl "$SCRIPT_DIR/set-repl-seq.pl"', '"$FB_AGENT" set-repl-seq'],
-    ['perl "$SCRIPT_DIR/replica-control.pl"', '"$FB_AGENT" replica-control'],
-    ['perl "$SCRIPT_DIR/segment-request.pl"', '"$FB_AGENT" request'],
-    ['perl "$SCRIPT_DIR/fetch-seed.pl"', '"$FB_AGENT" fetch-seed'],
-    ['set -eu\n', 'set -eu\necho "replication init with the helpers of $("$FB_AGENT" version)"\n'],
-  ];
-  let script = readScript('init-instance.sh');
-  for (const [perl, agent] of helpers) {
-    if (!script.includes(perl)) throw new Error(`init-instance.sh no longer has: ${perl}`);
-    script = script.split(perl).join(agent);
-  }
-  // a helper added to init-instance.sh needs its command in the agent first
-  const left = script.split('\n').filter((line) => /^[^#]*\bperl\b/.test(line));
-  if (left.length) throw new Error(`init-instance.sh runs Perl the agent has no command for: ${left.join(' | ')}`);
-  return script;
-}
-
-/**
- * Scripts of the clusters that run the Rust agent, shipped in the ConfigMap of every cluster
- * with replication. Not part of the pod template hash: the annotation changes the pod template
- * itself.
- */
-export const AGENT_SCRIPTS: Readonly<Record<string, string>> = { [AGENT_INIT_SCRIPT]: agentInitScript() };
+export const AGENT_SCRIPTS: Readonly<Record<string, string>> = { [AGENT_INIT_SCRIPT]: REPLICATION_SCRIPTS['init-instance.sh'] };
 
 /** Returns true when journal replication is configured for the cluster */
 export function replicationEnabled(cluster: FirebirdCluster): boolean {
@@ -229,7 +181,7 @@ function replicationEnv(
 }
 
 /**
- * Primary isolation check (isolation-check.pl, started by the segment server), with automatic
+ * Primary isolation check (`fb-agent isolation-check`, started by the segment server), with automatic
  * failover only: only then can a replica be promoted while the primary is cut off.
  */
 export function isolationCheckTimeoutSeconds(cluster: FirebirdCluster): number | undefined {
@@ -302,7 +254,7 @@ export function buildReplicationContainers(
       {
         name: 'segment-server',
         image: options.image,
-        command: ['perl', `${OPERATOR_CONFIG_DIR}/segment-server.pl`],
+        command: [AGENT_PATH, 'segment-server'],
         ports: [{ name: 'segments', containerPort: SEGMENT_PORT, protocol: 'TCP' }],
         env,
         volumeMounts: [...mounts, confMount],
@@ -310,7 +262,7 @@ export function buildReplicationContainers(
       {
         name: 'segment-puller',
         image: options.image,
-        command: ['perl', `${OPERATOR_CONFIG_DIR}/segment-puller.pl`],
+        command: [AGENT_PATH, 'puller'],
         env,
         volumeMounts: mounts,
       },

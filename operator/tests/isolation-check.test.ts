@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { createServer, Server, Socket } from 'net';
 import { signLine } from './helpers/segment-auth';
-import { REPLICATION_SCRIPTS } from '../src/utils/replication';
+import { agentBin } from './helpers/implementations';
 
 /** One request to a segment server (the shared client is mocked in unit tests) */
 const rawRequest = (port: number, line: string): Promise<string[]> =>
@@ -20,8 +20,6 @@ const rawRequest = (port: number, line: string): Promise<string[]> =>
 /** "<token> <request>", signed with the token as the clients send it */
 const segmentRequest = (port: number, line: string): Promise<string[]> => rawRequest(port, signLine(line));
 
-const hasPerl = spawnSync('perl', ['-v']).status === 0;
-
 /** A port no other server listens on */
 const freePort = (): Promise<number> =>
   new Promise((resolve, reject) => {
@@ -34,13 +32,12 @@ const freePort = (): Promise<number> =>
   });
 
 /**
- * A directory with the scripts and a fake fbsvcmgr: it logs its arguments, answers header
+ * A directory with a fake fbsvcmgr: it logs its arguments, answers header
  * statistics with the state in "<dir>/state" (online or shutdown), fails when "<dir>/fail"
  * exists, and hangs (a server that answers nothing) when "<dir>/hang" exists.
  */
 function workspace() {
   const dir = mkdtempSync(join(tmpdir(), 'fb-isolation-'));
-  for (const name of ['isolation-check.pl', 'segment-server.pl']) writeFileSync(join(dir, name), REPLICATION_SCRIPTS[name]);
   mkdirSync(join(dir, 'bin'));
   const fake = join(dir, 'bin', 'fbsvcmgr');
   writeFileSync(
@@ -62,27 +59,17 @@ exit 0
 }
 
 /**
- * The isolation check has two implementations, isolation-check.pl and \`fb-agent isolation-check\`
- * (docs/rust-agent-segment-server.md), which run the same scenarios. The Rust one needs the
- * fb-agent binary (FB_AGENT_BIN, or a build in agent/target) and is skipped without it; the "Rust
- * agent" CI job runs this file with it. It asks the local server over its own attachments first
- * (nothing listens on FIREBIRD_PORT here) and then runs fbsvcmgr, the fake one, as the Perl check.
+ * The isolation check, \`fb-agent isolation-check\` (docs/rust-agent-segment-server.md). It needs
+ * the fb-agent binary (FB_AGENT_BIN, or a build in agent/target) and is skipped without it; the
+ * "Rust agent" CI job runs this file with it. It asks the local server over its own attachments
+ * first (nothing listens on FIREBIRD_PORT here) and then runs fbsvcmgr, the fake one.
  */
-const agentBin = [
-  process.env.FB_AGENT_BIN,
-  ...['x86_64-unknown-linux-musl/release', 'aarch64-unknown-linux-musl/release', 'release', 'debug'].map((d) =>
-    join(__dirname, '..', 'agent', 'target', d, 'fb-agent'),
-  ),
-].find((p) => p && existsSync(p));
-const implementations = [
-  { name: 'Perl (isolation-check.pl)', available: hasPerl, command: (dir: string) => ['perl', join(dir, 'isolation-check.pl')] },
-  { name: 'Rust (fb-agent isolation-check)', available: Boolean(agentBin), command: () => [agentBin!, 'isolation-check'] },
-];
+const implementations = [{ name: 'Rust (fb-agent isolation-check)', available: Boolean(agentBin), command: () => [agentBin!, 'isolation-check'] }];
 let implementation = implementations[0];
 
 /** Runs one isolation check */
 function check(ws: ReturnType<typeof workspace>, env: Record<string, string>): string {
-  const [program, ...args] = implementation.command(ws.dir);
+  const [program, ...args] = implementation.command();
   const r = spawnSync(program, args, {
     env: {
       FIREBIRD_PORT: '1',
@@ -107,7 +94,7 @@ const longAgo = String(Math.floor(Date.now() / 1000) - 60);
 const closedPort = '1';
 
 describe.each(implementations)('isolation check: $name', (candidate) => {
-  const hasPerl = candidate.available;
+  const available = candidate.available;
   let listener: Server;
   let port: string;
   beforeAll(async () => {
@@ -119,7 +106,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
   afterAll(() => listener.close());
 
   it('fences a primary that reached neither the API server nor another instance for the timeout', () => {
-    if (!hasPerl) return;
+    if (!available) return;
     const ws = workspace();
     const out = check(ws, { KUBERNETES_SERVICE_HOST: '127.0.0.1', KUBERNETES_SERVICE_PORT: closedPort, LAST_CONNECTED: longAgo });
     expect(out).toMatch(/fencing the primary/);
@@ -130,7 +117,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
   });
 
   it('waits for the timeout before fencing', () => {
-    if (!hasPerl) return;
+    if (!available) return;
     const ws = workspace();
     const out = check(ws, { KUBERNETES_SERVICE_HOST: '127.0.0.1', KUBERNETES_SERVICE_PORT: closedPort });
     expect(out).toMatch(/isolated for \d+s \(fencing after 20s\)/);
@@ -138,7 +125,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
   });
 
   it('leaves a primary alone while it reaches the API server', () => {
-    if (!hasPerl) return;
+    if (!available) return;
     const ws = workspace();
     check(ws, { KUBERNETES_SERVICE_HOST: '127.0.0.1', KUBERNETES_SERVICE_PORT: port, LAST_CONNECTED: longAgo });
     expect(ws.calls()).toEqual([]);
@@ -146,7 +133,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
   });
 
   it('leaves a primary alone while it reaches another instance, but does not count itself', () => {
-    if (!hasPerl) return;
+    if (!available) return;
     const peers = { PEERS_SERVICE: 'localhost', SEGMENT_PORT: port, LAST_CONNECTED: longAgo };
     const ws = workspace();
     check(ws, peers);
@@ -158,7 +145,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
   });
 
   it('never fences a replica', () => {
-    if (!hasPerl) return;
+    if (!available) return;
     const ws = workspace();
     writeFileSync(join(ws.dir, 'primary'), 'db-1.db-headless\n');
     check(ws, { LAST_CONNECTED: longAgo });
@@ -166,7 +153,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
   });
 
   it('forgets a fence it could not apply, and one lifted by bringing the database online', () => {
-    if (!hasPerl) return;
+    if (!available) return;
     const ws = workspace();
     writeFileSync(join(ws.dir, 'fail'), '');
     expect(check(ws, { LAST_CONNECTED: longAgo })).toMatch(/full shutdown failed/);
@@ -201,7 +188,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
     };
 
     it('fences it although it reaches the API server', () => {
-      if (!hasPerl) return;
+      if (!available) return;
       const ws = workspace();
       contactedAt(ws, minutesAgo(2));
       expect(check(ws, env(ws))).toMatch(/neither the operator nor any replica has reached this primary for 1[0-9]{2}s; fencing/);
@@ -210,7 +197,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
     });
 
     it('leaves it alone while the operator or a replica reached it recently', () => {
-      if (!hasPerl) return;
+      if (!available) return;
       const ws = workspace();
       contactedAt(ws, minutesAgo(0));
       check(ws, env(ws));
@@ -218,7 +205,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
     });
 
     it('counts from when the instance became the primary, not from an earlier contact', () => {
-      if (!hasPerl) return;
+      if (!available) return;
       const ws = workspace();
       contactedAt(ws, minutesAgo(5));
       check(ws, env(ws, { LAST_CONTACT_BASE: String(minutesAgo(0)) }));
@@ -229,7 +216,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
       const cache = (ws: ReturnType<typeof workspace>) => join(ws.dir, 'self-fenced.peers');
 
       it('remembers the peers of every answer', () => {
-        if (!hasPerl) return;
+        if (!available) return;
         const ws = workspace();
         contactedAt(ws, minutesAgo(0));
         check(ws, env(ws));
@@ -237,7 +224,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
       });
 
       it('fences a primary nothing reaches when none of the peers it knew answers either', () => {
-        if (!hasPerl) return;
+        if (!available) return;
         const ws = workspace();
         writeFileSync(cache(ws), '127.0.0.1\n');
         contactedAt(ws, minutesAgo(2));
@@ -253,7 +240,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
       });
 
       it('leaves it alone while a peer it knew still answers: a DNS outage alone', () => {
-        if (!hasPerl) return;
+        if (!available) return;
         const ws = workspace();
         writeFileSync(cache(ws), '127.0.0.1\n');
         contactedAt(ws, minutesAgo(2));
@@ -262,7 +249,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
       });
 
       it('also goes by the addresses the operator publishes: a peer that restarted with a new address', () => {
-        if (!hasPerl) return;
+        if (!available) return;
         const ws = workspace();
         // the last answer is stale (an address nothing answers on any more) ...
         writeFileSync(cache(ws), '192.0.2.1\n');
@@ -282,7 +269,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
       });
 
       it('without known peers, goes by the operator\'s list of ready replicas', () => {
-        if (!hasPerl) return;
+        if (!available) return;
         const listed = workspace();
         writeFileSync(join(listed.dir, 'seed-sources'), 'db-1.db-headless\n');
         contactedAt(listed, minutesAgo(2));
@@ -296,7 +283,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
       });
 
       it('trusts an answer of "no such name": no peers', () => {
-        if (!hasPerl) return;
+        if (!available) return;
         const ws = workspace();
         writeFileSync(cache(ws), '127.0.0.1\n');
         contactedAt(ws, minutesAgo(2));
@@ -307,7 +294,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
     });
 
     it('leaves a primary without replicas alone, and does nothing when off', () => {
-      if (!hasPerl) return;
+      if (!available) return;
       const alone = workspace();
       contactedAt(alone, minutesAgo(5));
       // the only address of the headless Service is this pod's own
@@ -321,7 +308,7 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
   });
 
   it('gives up on a hung local server after the local timeouts, and fences again on the next check', () => {
-    if (!hasPerl) return;
+    if (!available) return;
     const ws = workspace();
     writeFileSync(join(ws.dir, 'hang'), '');
     const started = Date.now();
@@ -339,25 +326,25 @@ describe.each(implementations)('isolation check: $name', (candidate) => {
   });
 
   it('does nothing when disabled', () => {
-    if (!hasPerl) return;
+    if (!available) return;
     const ws = workspace();
     check(ws, { ISOLATION_TIMEOUT_SECONDS: '0', LAST_CONNECTED: longAgo });
     expect(ws.calls()).toEqual([]);
   });
 });
 
-describe('segment server ISOLATION and REJOIN', () => {
+describe.skipIf(!agentBin)('segment server ISOLATION and REJOIN', () => {
   let server: ChildProcess | undefined;
   afterAll(() => server?.kill());
 
   it('reports the isolation fence and lifts it on request', { timeout: 30_000 }, async () => {
-    if (!hasPerl) return;
     const ws = workspace();
     const base = join(ws.dir, 'repl');
     for (const d of ['archive', 'source']) mkdirSync(join(base, d), { recursive: true });
     const port = await freePort();
-    server = spawn('perl', [join(ws.dir, 'segment-server.pl')], {
+    server = spawn(agentBin!, ['segment-server'], {
       env: {
+        FIREBIRD_PORT: '1',
         PATH: `${join(ws.dir, 'bin')}:${process.env.PATH}`,
         ARCHIVE_DIR: join(base, 'archive'),
         SOURCE_DIR: join(base, 'source'),
@@ -407,7 +394,7 @@ describe('segment server ISOLATION and REJOIN', () => {
     expect(existsSync(join(base, 'self-fenced'))).toBe(false);
     expect(await ask('ISOLATION')).toEqual(['OK online']);
 
-    // the primary Lease holder (lease-holder.ts): the database's state, and the same fence
+    // the primary Lease holder (`fb-agent lease-holder`): the database's state, and the same fence
     writeFileSync(join(ws.dir, 'state'), 'online');
     expect(await ask('STATE')).toEqual(['OK online']);
     expect(await ask('FENCE the Lease is held by db-1')).toEqual(['OK']);
@@ -445,19 +432,19 @@ describe('segment server ISOLATION and REJOIN', () => {
   });
 });
 
-describe('segment server with a hung local server', () => {
+describe.skipIf(!agentBin)('segment server with a hung local server', () => {
   let server: ChildProcess | undefined;
   afterAll(() => server?.kill());
 
   it('answers STATE, FENCE and REJOIN with an error after the local timeouts, and serves on', { timeout: 30_000 }, async () => {
-    if (!hasPerl) return;
     const ws = workspace();
     const base = join(ws.dir, 'repl');
     for (const d of ['archive', 'source']) mkdirSync(join(base, d), { recursive: true });
     const port = await freePort();
     let log = '';
-    server = spawn('perl', [join(ws.dir, 'segment-server.pl')], {
+    server = spawn(agentBin!, ['segment-server'], {
       env: {
+        FIREBIRD_PORT: '1',
         PATH: `${join(ws.dir, 'bin')}:${process.env.PATH}`,
         ARCHIVE_DIR: join(base, 'archive'),
         SOURCE_DIR: join(base, 'source'),
@@ -502,7 +489,7 @@ describe('segment server with a hung local server', () => {
     expect(existsSync(join(base, 'self-fenced'))).toBe(true);
     // requests that need no local command are served as before
     expect(await ask('ISOLATION')).toEqual(['OK fenced 1700000000']);
-    expect(log).toMatch(/fbsvcmgr action_db_stats timed out after 1s/);
+    expect(log).toMatch(/fbsvcmgr timed out after 1s/);
     expect(log).toMatch(/fbsvcmgr timed out after 2s/);
     // the server answers again once it does
     spawnSync('rm', [join(ws.dir, 'hang'), join(base, 'self-fenced')]);

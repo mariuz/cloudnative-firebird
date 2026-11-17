@@ -1,31 +1,23 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { ChildProcess, spawn, spawnSync } from 'child_process';
+import { ChildProcess, spawn } from 'child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'fs';
 import { connect, Server } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { REPLICATION_SCRIPTS } from '../src/utils/replication';
-import { startSegmentServer } from './helpers/segment-server';
+import { agentBin } from './helpers/implementations';
 import { signLine } from './helpers/segment-auth';
 import { createTlsCertificates } from '../src/utils/certificates';
 import { SegmentTlsFiles, startClient, startServer } from '../src/segment-tls';
 
 /**
- * The segment server's front (`fb-agent segment-server`, docs/rust-agent-segment-server.md): it
- * answers PING, LIST, GET, WAIT, the requests about the instance's state, the backup files and the seeds itself and forwards
- * the other requests to segment-server.pl, which it runs behind it. The same requests go to the Perl server alone and to the front: the
- * replies must be the same, except for WAIT, which only the front knows.
+ * The segment server (`fb-agent segment-server`, docs/rust-agent-segment-server.md): it answers
+ * PING, LIST, GET, WAIT, the requests about the instance's state, the backup files, the seeds and
+ * the changes of role itself, and refuses what it does not have in the words of the Perl server it
+ * replaced (removed in v0.170.0), whose replies these tests compared it with until then.
  *
  * Needs the fb-agent binary (FB_AGENT_BIN, or a build in agent/target); skipped without it. The
  * "Rust agent" CI job runs this file with it.
  */
-const agentBin = [
-  process.env.FB_AGENT_BIN,
-  ...['x86_64-unknown-linux-musl/release', 'aarch64-unknown-linux-musl/release', 'release', 'debug'].map((d) =>
-    join(__dirname, '..', 'agent', 'target', d, 'fb-agent'),
-  ),
-].find((p) => p && existsSync(p));
-const hasPerl = spawnSync('perl', ['-v']).status === 0;
 
 /** a journal segment file: the 48-byte header with its length, and `size` bytes in all */
 const segment = (sequence: number, length: number, size = length): Buffer => {
@@ -36,14 +28,8 @@ const segment = (sequence: number, length: number, size = length): Buffer => {
   return b.subarray(0, size);
 };
 
-// twice: as the front of the Perl server, and alone (step 7: no Perl server behind it), where
-// the agent gives the refusals and asks the image's tools itself
-describe.skipIf(!agentBin || !hasPerl).each([
-  { standalone: false, mode: 'with the Perl server behind it' },
-  { standalone: true, mode: 'without the Perl server' },
-])('the segment server front (fb-agent) and segment-server.pl, $mode', ({ standalone }) => {
+describe.skipIf(!agentBin)('the segment server (fb-agent segment-server)', () => {
   let root: string;
-  let perl: { child: ChildProcess; port: number };
   let front: { child: ChildProcess; port: number; out: () => string };
   const children: ChildProcess[] = [];
   const archive = () => join(root, 'archive');
@@ -73,14 +59,17 @@ describe.skipIf(!agentBin || !hasPerl).each([
     });
   const lines = async (port: number, request: string, secret?: string) =>
     (await ask(port, request, undefined, secret)).toString().split('\n').filter((l) => l !== '');
-  /** the same request to the Perl server and to the front: the two replies */
-  const both = async (request: string) => [await lines(perl.port, request), await lines(front.port, request)];
+  /** the reply of the server to a request */
+  const reply = (request: string) => lines(front.port, request);
+  /** replies, with the test's directory named ROOT, for the snapshots */
+  const named = (replies: Record<string, string[]>) =>
+    Object.fromEntries(Object.entries(replies).map(([k, v]) => [k, v.map((l) => l.split(root).join('ROOT'))]));
   const startFront = async (
     replDir: string,
     own: Record<string, string> = { ...env(), REPLICATION_DIR: replDir },
   ): Promise<{ child: ChildProcess; port: number; out: () => string }> => {
-    const child = spawn(agentBin!, ['segment-server', ...(standalone ? [] : ['--', 'perl', join(root, 'segment-server.pl')])], {
-      env: { ...process.env, ...own, SEGMENT_PORT: '0', SEGMENT_LISTEN: '', BACKEND_PORT: '0' },
+    const child = spawn(agentBin!, ['segment-server'], {
+      env: { ...process.env, ...own, SEGMENT_PORT: '0', SEGMENT_LISTEN: '' },
     });
     children.push(child);
     let out = '';
@@ -90,8 +79,7 @@ describe.skipIf(!agentBin || !hasPerl).each([
       child.stdout.on('data', (d) => {
         out += d.toString();
         const m = /\(fb-agent [^)]+\) listening on [^\s:]+:(\d+),/.exec(out);
-        // ready once the Perl server behind it listens too
-        if (m && (standalone || /(?:segment|backup file) server listening on 127\.0\.0\.1:\d+/.test(out))) {
+        if (m) {
           clearTimeout(timer);
           resolve({ child, port: Number(m[1]), out: () => out });
         }
@@ -102,7 +90,7 @@ describe.skipIf(!agentBin || !hasPerl).each([
 
   beforeEach(async () => {
     root = mkdtempSync(join(tmpdir(), 'segfront-'));
-    for (const d of ['archive', 'source', 'data', 'repl-perl', 'repl-front']) mkdirSync(join(root, d));
+    for (const d of ['archive', 'source', 'data', 'repl-front']) mkdirSync(join(root, d));
     writeFileSync(join(archive(), 'mydb.fdb.journal-000000007'), segment(7, 300_000));
     // still being copied into the archive: shorter than its header says
     writeFileSync(join(archive(), 'mydb.fdb.journal-000000008'), segment(8, 5000, 1200));
@@ -110,72 +98,118 @@ describe.skipIf(!agentBin || !hasPerl).each([
     writeFileSync(join(archive(), 'mydb.fdb.journal-000000009'), 'x');
     writeFileSync(join(root, 'data', 'nightly.nbk'), Buffer.alloc(70_000, 3));
     writeFileSync(join(root, 'primary'), 'db-0.db-headless\n');
-    writeFileSync(join(root, 'segment-server.pl'), REPLICATION_SCRIPTS['segment-server.pl']);
-    perl = await startSegmentServer(join(root, 'segment-server.pl'), { ...env(), REPLICATION_DIR: join(root, 'repl-perl') });
-    children.push(perl.child);
     front = await startFront(join(root, 'repl-front'));
   });
   afterEach(() => {
     for (const c of children.splice(0)) c.kill('SIGKILL');
-    spawnSync('pkill', ['-KILL', '-f', join(root, 'segment-server.pl')]);
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('lists and serves the archived segments alike, without one still being copied', async () => {
-    const [p, f] = await both('LIST');
-    expect(p).toEqual(['mydb.fdb.journal-000000007', 'mydb.fdb.journal-000000009', '.']);
-    expect(f).toEqual(p);
+  it('lists and serves the archived segments, without one still being copied', async () => {
+    expect(await reply('LIST')).toEqual(['mydb.fdb.journal-000000007', 'mydb.fdb.journal-000000009', '.']);
     const whole = Buffer.concat([Buffer.from('OK 300000\n'), segment(7, 300_000)]);
-    expect((await ask(perl.port, 'GET mydb.fdb.journal-000000007')).equals(whole)).toBe(true);
     expect((await ask(front.port, 'GET mydb.fdb.journal-000000007')).equals(whole)).toBe(true);
-    for (const request of ['PING', 'GET mydb.fdb.journal-000000001', 'GET ../primary', 'GET', 'NOSUCH']) {
-      const [a, b] = await both(request);
-      expect(b, request).toEqual(a);
-    }
-    expect(await lines(front.port, 'GET mydb.fdb.journal-000000001')).toEqual(['ERR bad request']);
+    const replies: Record<string, string[]> = {};
+    for (const request of ['PING', 'GET mydb.fdb.journal-000000001', 'GET ../primary', 'GET', 'NOSUCH']) replies[request] = await reply(request);
+    expect(replies).toMatchInlineSnapshot(`
+      {
+        "GET": [
+          "ERR bad request",
+        ],
+        "GET ../primary": [
+          "ERR bad request",
+        ],
+        "GET mydb.fdb.journal-000000001": [
+          "ERR bad request",
+        ],
+        "NOSUCH": [
+          "ERR bad request",
+        ],
+        "PING": [
+          "OK",
+        ],
+      }
+    `);
     // once the copy is complete it is listed
     writeFileSync(join(archive(), 'mydb.fdb.journal-000000008'), segment(8, 5000));
-    expect((await both('LIST')).map((l) => l[1])).toEqual(['mydb.fdb.journal-000000008', 'mydb.fdb.journal-000000008']);
+    expect((await reply('LIST'))[1]).toBe('mydb.fdb.journal-000000008');
   });
 
-  it('passes STATE to the Perl server when it cannot reach the Firebird server itself', async () => {
-    // nothing listens on FIREBIRD_PORT: the front has no service attachment, the Perl server's fbsvcmgr answers
-    const [p, f] = await both('STATE');
-    expect(p).toEqual([`ERR cannot read the state of ${join(root, 'data', 'mydb.fdb')}`]);
-    expect(f).toEqual(p);
+  it('cannot read STATE without the Firebird server or its tools', async () => {
+    // nothing listens on FIREBIRD_PORT, and there is no fbsvcmgr here
+    expect(await reply('STATE')).toEqual([`ERR cannot read the state of ${join(root, 'data', 'mydb.fdb')}`]);
   });
 
-  it('answers the requests about the instance from its files, as the Perl server does', async () => {
+  it('answers the requests about the instance from its files', async () => {
     const inBoth = (name: string, content: string | Buffer | null) => {
-      for (const dir of ['repl-perl', 'repl-front']) {
-        if (content === null) rmSync(join(root, dir, name), { force: true });
-        else writeFileSync(join(root, dir, name), content);
-      }
+      if (content === null) rmSync(join(root, 'repl-front', name), { force: true });
+      else writeFileSync(join(root, 'repl-front', name), content);
     };
     const requests = [
       'HEADER', 'ISOLATION', 'POSITION', 'PRIMARYSEEN', 'FOLLOW', 'SYNCTO', 'POINTS 7', 'POINTS 8', 'LINEAGE', 'ARCHIVED',
-      // refused arguments: the Perl server's words, through the front
+      // refused arguments
       'POINTS x', 'POINTS', 'UPLOADED', 'UPLOADED x', 'RETAIN', 'RETAIN x',
     ];
-    /** every request to both; the ages in two replies may be a second apart, so a difference is asked again */
+    /** every request; a snapshot of the replies but those that hold ages */
     const same = async (stage: string) => {
       const replies: Record<string, string[]> = {};
       for (const request of requests) {
-        let [a, b] = await both(request);
-        for (let i = 0; i < 3 && JSON.stringify(a) !== JSON.stringify(b); i++) {
-          // (the two servers read the clock in different ways: apart for a few milliseconds around a second's start)
-          await new Promise((r) => setTimeout(r, 30));
-          [a, b] = await both(request);
-        }
-        expect(b, `${stage}: ${request}`).toEqual(a);
-        expect(a.length, `${stage}: ${request}`).toBeGreaterThan(0);
-        replies[request] = b;
+        replies[request] = await reply(request);
+        expect(replies[request].length, `${stage}: ${request}`).toBeGreaterThan(0);
       }
       return replies;
     };
+    const steady = (replies: Record<string, string[]>) =>
+      named(Object.fromEntries(Object.entries(replies).filter(([request]) => !['ARCHIVED', 'PRIMARYSEEN'].includes(request))));
 
     // the primary, with nothing recorded yet and no database file
     let r = await same('empty primary');
+    expect(steady(r)).toMatchInlineSnapshot(`
+      {
+        "FOLLOW": [
+          "OK none",
+        ],
+        "HEADER": [
+          "ERR cannot read the header of ROOT/data/mydb.fdb",
+        ],
+        "ISOLATION": [
+          "OK online",
+        ],
+        "LINEAGE": [
+          ".",
+        ],
+        "POINTS": [
+          "ERR bad request",
+        ],
+        "POINTS 7": [
+          ".",
+        ],
+        "POINTS 8": [
+          ".",
+        ],
+        "POINTS x": [
+          "ERR bad request",
+        ],
+        "POSITION": [
+          "OK primary",
+        ],
+        "RETAIN": [
+          "ERR bad request",
+        ],
+        "RETAIN x": [
+          "ERR bad request",
+        ],
+        "SYNCTO": [
+          "OK none",
+        ],
+        "UPLOADED": [
+          "ERR bad request",
+        ],
+        "UPLOADED x": [
+          "ERR bad request",
+        ],
+      }
+    `);
     expect(r['POSITION']).toEqual(['OK primary']);
     expect(r['ISOLATION']).toEqual(['OK online']);
     expect(r['HEADER'][0]).toMatch(/^ERR cannot read the header of /);
@@ -192,10 +226,60 @@ describe.skipIf(!agentBin || !hasPerl).each([
     inBoth('primary-seen', `${Math.floor(Date.now() / 1000) - 60} db-1.db-headless\n`);
     inBoth('follow.state', 'applied 12\n');
     inBoth('sync.conf', 'sync_replica = db-1.db-headless:3050/x\n# sync_replica = no:1\nsync_replica=db-2.db-headless:1\n');
-    for (const dir of ['repl-perl', 'repl-front']) mkdirSync(join(root, dir, 'points'), { recursive: true });
+    mkdirSync(join(root, 'repl-front', 'points'), { recursive: true });
     inBoth('points/7', '100 48\nbad\n101 96\n102 1');
     inBoth('lineage', '3 1700000000\nx\n4 1700000100 \n');
     r = await same('primary with records');
+    expect(steady(r)).toMatchInlineSnapshot(`
+      {
+        "FOLLOW": [
+          "OK applied 12",
+        ],
+        "HEADER": [
+          "OK 77",
+        ],
+        "ISOLATION": [
+          "OK fenced 1700000000 lease",
+        ],
+        "LINEAGE": [
+          "mydb.fdb.lineage-3-1700000000",
+          "mydb.fdb.lineage-4-1700000100",
+          ".",
+        ],
+        "POINTS": [
+          "ERR bad request",
+        ],
+        "POINTS 7": [
+          "100 48",
+          "101 96",
+          ".",
+        ],
+        "POINTS 8": [
+          ".",
+        ],
+        "POINTS x": [
+          "ERR bad request",
+        ],
+        "POSITION": [
+          "OK primary",
+        ],
+        "RETAIN": [
+          "ERR bad request",
+        ],
+        "RETAIN x": [
+          "ERR bad request",
+        ],
+        "SYNCTO": [
+          "OK db-1.db-headless,db-2.db-headless",
+        ],
+        "UPLOADED": [
+          "ERR bad request",
+        ],
+        "UPLOADED x": [
+          "ERR bad request",
+        ],
+      }
+    `);
     expect(r['HEADER']).toEqual(['OK 77']);
     expect(r['ISOLATION']).toEqual(['OK fenced 1700000000 lease']);
     expect(r['PRIMARYSEEN'][0]).toMatch(/^OK (59|6\d) db-1\.db-headless$/);
@@ -210,7 +294,58 @@ describe.skipIf(!agentBin || !hasPerl).each([
 
     // a replica: its control file, and the segments fetched after it
     writeFileSync(join(root, 'primary'), 'db-1.db-headless\n');
-    expect((await same('replica without a control file'))['POSITION']).toEqual(['ERR no replica control file']);
+    r = await same('replica without a control file');
+    expect(r['POSITION']).toEqual(['ERR no replica control file']);
+    expect(steady(r)).toMatchInlineSnapshot(`
+      {
+        "FOLLOW": [
+          "OK applied 12",
+        ],
+        "HEADER": [
+          "OK 77",
+        ],
+        "ISOLATION": [
+          "OK fenced 1700000000 lease",
+        ],
+        "LINEAGE": [
+          "mydb.fdb.lineage-3-1700000000",
+          "mydb.fdb.lineage-4-1700000100",
+          ".",
+        ],
+        "POINTS": [
+          "ERR bad request",
+        ],
+        "POINTS 7": [
+          "100 48",
+          "101 96",
+          ".",
+        ],
+        "POINTS 8": [
+          ".",
+        ],
+        "POINTS x": [
+          "ERR bad request",
+        ],
+        "POSITION": [
+          "ERR no replica control file",
+        ],
+        "RETAIN": [
+          "ERR bad request",
+        ],
+        "RETAIN x": [
+          "ERR bad request",
+        ],
+        "SYNCTO": [
+          "OK db-1.db-headless,db-2.db-headless",
+        ],
+        "UPLOADED": [
+          "ERR bad request",
+        ],
+        "UPLOADED x": [
+          "ERR bad request",
+        ],
+      }
+    `);
     const control = Buffer.alloc(40);
     control.write('FBREPLCTL\0', 0, 'latin1');
     control.writeUInt16LE(1, 10);
@@ -218,7 +353,58 @@ describe.skipIf(!agentBin || !hasPerl).each([
     control.writeUInt32LE(1234, 24);
     writeFileSync(join(root, 'source', '{6A0B3C1D-0000-4000-8000-000000000001}'), control);
     for (const n of [41, 42, 43]) writeFileSync(join(root, 'source', `mydb.fdb.journal-0000000${n}`), segment(n, 100));
-    expect((await same('replica'))['POSITION']).toEqual(['OK 41 1234 2']);
+    r = await same('replica');
+    expect(r['POSITION']).toEqual(['OK 41 1234 2']);
+    expect(steady(r)).toMatchInlineSnapshot(`
+      {
+        "FOLLOW": [
+          "OK applied 12",
+        ],
+        "HEADER": [
+          "OK 77",
+        ],
+        "ISOLATION": [
+          "OK fenced 1700000000 lease",
+        ],
+        "LINEAGE": [
+          "mydb.fdb.lineage-3-1700000000",
+          "mydb.fdb.lineage-4-1700000100",
+          ".",
+        ],
+        "POINTS": [
+          "ERR bad request",
+        ],
+        "POINTS 7": [
+          "100 48",
+          "101 96",
+          ".",
+        ],
+        "POINTS 8": [
+          ".",
+        ],
+        "POINTS x": [
+          "ERR bad request",
+        ],
+        "POSITION": [
+          "OK 41 1234 2",
+        ],
+        "RETAIN": [
+          "ERR bad request",
+        ],
+        "RETAIN x": [
+          "ERR bad request",
+        ],
+        "SYNCTO": [
+          "OK db-1.db-headless,db-2.db-headless",
+        ],
+        "UPLOADED": [
+          "ERR bad request",
+        ],
+        "UPLOADED x": [
+          "ERR bad request",
+        ],
+      }
+    `);
     // a synchronous standby that has seen the end of the archive
     inBoth('sync-standby', '');
     inBoth('sync-seen', '57\n');
@@ -228,7 +414,7 @@ describe.skipIf(!agentBin || !hasPerl).each([
     expect((await same('promoted'))['POSITION']).toEqual(['OK primary']);
 
     // the numbers the pruning reads
-    for (const [dir, port] of [['repl-perl', perl.port], ['repl-front', front.port]] as const) {
+    for (const [dir, port] of [['repl-front', front.port]] as const) {
       expect(await lines(port, 'UPLOADED 12'), dir).toEqual(['OK']);
       expect(readFileSync(join(root, dir, 'uploaded-floor'), 'utf8'), dir).toBe('12\n');
       expect(await lines(port, 'RETAIN 9'), dir).toEqual(['OK']);
@@ -240,14 +426,12 @@ describe.skipIf(!agentBin || !hasPerl).each([
       await lines(port, 'POSITION');
       expect(existsSync(join(root, dir, 'last-contact')), dir).toBe(true);
     }
-    // the Perl server has no local Firebird to ask here, and neither has the front
-    const [pv, fv] = await both('VERSION');
-    expect(pv).toEqual(['ERR cannot read the engine version']);
-    expect(fv).toEqual(pv);
+    // there is no local Firebird to ask here
+    expect(await reply('VERSION')).toEqual(['ERR cannot read the engine version']);
   });
 
-  it('refuses what the Perl server refuses, in its words', async () => {
-    for (const port of [perl.port, front.port]) {
+  it('refuses unsigned, wrongly signed, replayed and late requests', async () => {
+    for (const port of [front.port]) {
       expect(await lines(port, 'PING', 'wrong')).toEqual(['ERR unauthorized (signature)']);
       expect(await lines(port, 'tok PING'.replace(/^/, ''), '')).toEqual(['ERR unauthorized (signature)']);
       const once = signLine('tok LIST');
@@ -257,7 +441,7 @@ describe.skipIf(!agentBin || !hasPerl).each([
     }
   });
 
-  it('tells where transactions begin in the archive, and refuses a seed, as the Perl server does', async () => {
+  it('tells where transactions begin in the archive, and refuses a seed', async () => {
     /** a segment with blocks of [transaction, flags, payload size] */
     const withBlocks = (sequence: number, blocks: Array<[number, number, number]>): Buffer => {
       const body = Buffer.concat(
@@ -287,22 +471,77 @@ describe.skipIf(!agentBin || !hasPerl).each([
     ];
     const replies: Record<string, string[]> = {};
     for (const request of requests) {
-      const [a, b] = await both(request);
-      expect(b, request).toEqual(a);
-      expect(a.length, request).toBeGreaterThan(0);
-      replies[request] = b;
+      replies[request] = await reply(request);
+      expect(replies[request].length, request).toBeGreaterThan(0);
     }
+    expect(named(replies)).toMatchInlineSnapshot(`
+      {
+        "PLAN 10 0 ": [
+          "50 10 1",
+          "51 10 0",
+          "506381209866536711 7 1",
+          "578721382704613384 8 0",
+          ".",
+        ],
+        "PLAN 11 1": [
+          "ERR bad request",
+        ],
+        "PLAN 11 52 51": [
+          "51 10 0",
+          "52 11 1",
+          "60 11 1",
+          "506381209866536711 7 1",
+          "578721382704613384 8 0",
+          ".",
+        ],
+        "PLAN 11 99 ": [
+          "506381209866536711 7 1",
+          "578721382704613384 8 0",
+          ".",
+        ],
+        "PLAN 11 x 1": [
+          "ERR bad request",
+        ],
+        "SEED": [
+          "ERR no safe seed source on the primary; add a replica seed source, restart the primary cleanly for a fresh offline seed, or allow live seeds (allowLiveSeedFromPrimary)",
+        ],
+        "TXNS": [
+          "ERR bad request",
+        ],
+        "TXNS 10 50,52": [
+          "50 10",
+          ".",
+        ],
+        "TXNS 11": [
+          "ERR bad request",
+        ],
+        "TXNS 11 ": [
+          ".",
+        ],
+        "TXNS 11 50,52,53": [
+          "50 10",
+          "52 11",
+          ".",
+        ],
+        "TXNS 11 a": [
+          "ERR bad request",
+        ],
+        "TXNS x 1": [
+          "ERR bad request",
+        ],
+      }
+    `);
     expect(replies['TXNS 11 50,52,53']).toEqual(['50 10', '52 11', '.']);
     // (the other fixture segments are filled with one byte, which also reads as blocks of huge transaction numbers)
     expect(replies['PLAN 11 52 51'].filter((l) => !/^\d{6,} /.test(l))).toEqual(['51 10 0', '52 11 1', '60 11 1', '.']);
     expect(replies['SEED'][0]).toMatch(/^ERR no safe seed source on the primary/);
   });
 
-  it('changes what the instance does (SYNC, STANDBY, FENCE, REJOIN, NBACKUP, PROMOTE) as the Perl server does', async () => {
+  it('changes what the instance does (SYNC, STANDBY, FENCE, REJOIN, NBACKUP, PROMOTE)', async () => {
     const repl = (dir: string, name: string) => join(root, dir, name);
-    const dirs = [['repl-perl', () => perl.port], ['repl-front', () => front.port]] as const;
-    // refused arguments, and requests that need the local Firebird server, which is not there:
-    // the front passes those on, and the Perl server's fbsvcmgr fails in its words
+    const dirs = [['repl-front', () => front.port]] as const;
+    // refused arguments, and requests that need the local Firebird server, which is not there,
+    // nor are its tools
     const requests = [
       'SYNC', 'SYNC a,,b', 'SYNC -a', 'SYNC a b', 'STANDBY', 'STANDBY off', 'STANDBY off x', 'STANDBY maybe',
       'STANDBY on', 'REJOIN', 'FENCE lease lost', 'NBACKUP', 'NBACKUP 3 a.nbk', 'NBACKUP 0 a.fbk', 'NBACKUP 0 ../a.nbk', 'NBACKUP 0 a.nbk',
@@ -311,11 +550,76 @@ describe.skipIf(!agentBin || !hasPerl).each([
     ];
     const replies: Record<string, string[]> = {};
     for (const request of requests) {
-      const [a, b] = await both(request);
-      expect(b, request).toEqual(a);
-      expect(a.length, request).toBeGreaterThan(0);
-      replies[request] = b;
+      replies[request] = await reply(request);
+      expect(replies[request].length, request).toBeGreaterThan(0);
     }
+    expect(named(replies)).toMatchInlineSnapshot(`
+      {
+        "FENCE lease lost": [
+          "ERR cannot shut ROOT/data/mydb.fdb down",
+        ],
+        "NBACKUP": [
+          "ERR bad request",
+        ],
+        "NBACKUP 0 ../a.nbk": [
+          "ERR bad request",
+        ],
+        "NBACKUP 0 a.fbk": [
+          "ERR bad request",
+        ],
+        "NBACKUP 0 a.nbk": [
+          "ERR nbackup failed",
+        ],
+        "NBACKUP 3 a.nbk": [
+          "ERR bad request",
+        ],
+        "PROMOTE": [
+          "ERR bad request",
+        ],
+        "PROMOTE 7": [
+          "ERR cannot read the replica mode",
+        ],
+        "PROMOTE 7 8": [
+          "ERR bad request",
+        ],
+        "PROMOTE none": [
+          "ERR cannot read the replica mode",
+        ],
+        "PROMOTE x": [
+          "ERR bad request",
+        ],
+        "REJOIN": [
+          "OK",
+        ],
+        "STANDBY": [
+          "ERR bad request",
+        ],
+        "STANDBY maybe": [
+          "ERR bad request",
+        ],
+        "STANDBY off": [
+          "ERR bad request",
+        ],
+        "STANDBY off x": [
+          "ERR bad request",
+        ],
+        "STANDBY on": [
+          "ERR this instance is the primary",
+        ],
+        "SYNC": [
+          "ERR bad request",
+        ],
+        "SYNC -a": [
+          "ERR bad request",
+        ],
+        "SYNC a b": [
+          "ERR bad request",
+        ],
+        "SYNC a,,b": [
+          "ERR bad request",
+        ],
+      }
+    `);
     expect(replies['STANDBY on']).toEqual(['ERR this instance is the primary']);
     expect(replies['FENCE lease lost'][0]).toMatch(/^ERR cannot shut .* down$/);
     expect(replies['NBACKUP 0 a.nbk']).toEqual(['ERR nbackup failed']);
@@ -325,12 +629,24 @@ describe.skipIf(!agentBin || !hasPerl).each([
     for (const [dir] of dirs) expect(existsSync(repl(dir, 'self-fenced')), dir).toBe(false);
     expect(readdirSync(join(root, 'data')).filter((n) => n.startsWith('a.nbk'))).toEqual([]);
 
-    // synchronous replication: the same file from both
+    // synchronous replication
     for (const [dir, port] of dirs) {
       expect(await lines(port(), 'SYNC db-1.db-headless,db-2.db-headless'), dir).toEqual(['OK']);
       expect(await lines(port(), 'SYNCTO'), dir).toEqual(['OK db-1.db-headless,db-2.db-headless']);
     }
-    expect(readFileSync(repl('repl-front', 'sync.conf'), 'utf8')).toBe(readFileSync(repl('repl-perl', 'sync.conf'), 'utf8'));
+    expect(readFileSync(repl('repl-front', 'sync.conf'), 'utf8').split(root).join('ROOT')).toMatchInlineSnapshot(`
+      "sync_replica = db-1.db-headless:ROOT/data/mydb.fdb
+      {
+        username = SYSDBA
+        password_env = ISC_PASSWORD
+      }
+      sync_replica = db-2.db-headless:ROOT/data/mydb.fdb
+      {
+        username = SYSDBA
+        password_env = ISC_PASSWORD
+      }
+      "
+    `);
     expect(readFileSync(repl('repl-front', 'sync.conf'), 'utf8')).toContain(`sync_replica = db-1.db-headless:${join(root, 'data', 'mydb.fdb')}\n{\n`);
     for (const [dir, port] of dirs) {
       expect(await lines(port(), 'SYNC none'), dir).toEqual(['OK']);
@@ -367,13 +683,15 @@ describe.skipIf(!agentBin || !hasPerl).each([
       rmSync(controlPath);
     }
     // the control file: at segment 57, no transactions, the database's own sequence kept
-    expect(after[1].equals(after[0])).toBe(true);
-    expect(after[1].length).toBe(40);
-    expect(after[1].readBigUInt64LE(16)).toBe(57n);
-    expect(after[1].readBigUInt64LE(32)).toBe(9n);
+    expect(after[0].length).toBe(40);
+    expect(after[0].subarray(0, 10).toString('latin1')).toBe('FBREPLCTL\0');
+    expect(after[0].readUInt32LE(12)).toBe(0);
+    expect(after[0].readBigUInt64LE(16)).toBe(57n);
+    expect(after[0].readUInt32LE(24)).toBe(0);
+    expect(after[0].readBigUInt64LE(32)).toBe(9n);
   }, 60_000);
 
-  it('prunes the archive and samples the recovery points itself, as the Perl server alone does', async () => {
+  it('prunes the archive and samples the recovery points itself', async () => {
     const now = Math.floor(Date.now() / 1000);
     /** an instance's directories: segments 1 to 6 aged 10 days, 10 days, 2 days, 2 days, an hour, an hour */
     const instance = (name: string, floor: string) => {
@@ -415,47 +733,32 @@ describe.skipIf(!agentBin || !hasPerl).each([
       for (let i = 0; i < 80 && !what(); i++) await new Promise((r) => setTimeout(r, 100));
     };
     const run = async (floor: string, extra: Record<string, string>) => {
-      const alone = instance(`perl-${floor}`, floor);
       const fronted = instance(`front-${floor}`, floor);
-      const server = await startSegmentServer(join(root, 'segment-server.pl'), { ...alone.env, ...extra });
-      children.push(server.child);
       const agent = await startFront('', { ...fronted.env, ...extra });
-      return { alone: alone.base, fronted: fronted.base, agent };
+      return { fronted: fronted.base, agent };
     };
 
     // a replica still needs segment 4 on: kept past the retention age, 3 is not, and none past the maximum
     const kept = await run('3', {});
-    await until(() => archived(kept.alone).length === 3 && archived(kept.fronted).length === 3);
-    expect(archived(kept.alone)).toEqual([4, 5, 6]);
+    await until(() => archived(kept.fronted).length === 3);
     expect(archived(kept.fronted)).toEqual([4, 5, 6]);
-    expect(kept.agent.out()).toContain(
-      `the agent prunes the archive and samples the recovery points${standalone ? '\n' : "; the Perl server's own are off"}`,
-    );
-    // the Perl server behind the front was started with its pruning and its sampler off
-    const backend = spawnSync('pgrep', ['-P', String(kept.agent.child.pid)]).stdout.toString().trim().split('\n')[0];
-    if (standalone) expect(backend).toBe('');
-    const environment = standalone ? [] : readFileSync(`/proc/${backend}/environ`, 'utf8').split('\0');
-    for (const off of ['SEGMENT_RETENTION_SECONDS=4000000000', 'SEGMENT_MAX_RETENTION_SECONDS=4000000000', 'PRUNE_APPLIED=false', 'RECOVERY_POINTS=false']) {
-      if (!standalone) expect(environment, off).toContain(off);
-    }
+    expect(kept.agent.out()).toContain('the agent prunes the archive and samples the recovery points\n');
     // each new length of the segment being written is a recovery point, once
-    await until(() => points(kept.alone).length === 1 && points(kept.fronted).length === 1);
-    for (const base of [kept.alone, kept.fronted]) writeFileSync(join(base, 'journal', 'mydb.fdb.journal-000000009'), segment(9, 260));
-    await until(() => points(kept.alone).length === 2 && points(kept.fronted).length === 2);
+    await until(() => points(kept.fronted).length === 1);
+    writeFileSync(join(kept.fronted, 'journal', 'mydb.fdb.journal-000000009'), segment(9, 260));
+    await until(() => points(kept.fronted).length === 2);
     await new Promise((r) => setTimeout(r, 1500));
-    expect(points(kept.alone)).toEqual(['100', '260']);
     expect(points(kept.fronted)).toEqual(['100', '260']);
 
     // early pruning: what every replica applied goes at once, whatever its age
     const early = await run('6', { PRUNE_APPLIED: 'true' });
-    await until(() => archived(early.alone).length === 1 && archived(early.fronted).length === 1);
-    expect(archived(early.alone)).toEqual([6]);
+    await until(() => archived(early.fronted).length === 1);
     expect(archived(early.fronted)).toEqual([6]);
   }, 60_000);
 
   it('runs the isolation check itself, once: a primary cut off from everything is fenced', async () => {
     // a fake fbsvcmgr that records its calls and reports the database as shut down afterwards (the
-    // agent's own attachment finds no server here and falls back to it, as the Perl check runs it)
+    // agent's own attachment finds no server here and falls back to it)
     mkdirSync(join(root, 'bin'));
     writeFileSync(
       join(root, 'bin', 'fbsvcmgr'),
@@ -475,25 +778,21 @@ describe.skipIf(!agentBin || !hasPerl).each([
       KUBERNETES_SERVICE_HOST: '127.0.0.1',
       KUBERNETES_SERVICE_PORT: '1',
     });
-    expect(agent.out()).toContain(`the agent runs the isolation check${standalone ? '\n' : "; the Perl server's own is off"}`);
-    if (!standalone) {
-      const backend = spawnSync('pgrep', ['-P', String(agent.child.pid)]).stdout.toString().trim().split('\n')[0];
-      expect(readFileSync(`/proc/${backend}/environ`, 'utf8').split('\0')).toContain('ISOLATION_TIMEOUT_SECONDS=0');
-    }
+    expect(agent.out()).toContain('the agent runs the isolation check\n');
     for (let i = 0; i < 100 && !existsSync(join(repl, 'self-fenced')); i++) await new Promise((r) => setTimeout(r, 100));
     expect(existsSync(join(repl, 'self-fenced'))).toBe(true);
     expect(agent.out()).toMatch(/isolated: neither the Kubernetes API server nor another instance reachable for \d+s; fencing the primary/);
-    // one full shutdown: the Perl server behind the front ran no check of its own
+    // one full shutdown
     await new Promise((r) => setTimeout(r, 2500));
     const calls = readFileSync(join(root, 'calls'), 'utf8').trim().split('\n');
     expect(calls.filter((c) => c.includes('prp_shutdown_mode'))).toEqual([
       `localhost:service_mgr action_properties dbname ${join(root, 'data', 'mydb.fdb')} prp_shutdown_mode prp_sm_full prp_force_shutdown 0`,
     ]);
-    // the fence shows in the front's own answers
+    // the fence shows in its answers
     expect(await lines(agent.port, 'ISOLATION')).toEqual([expect.stringMatching(/^OK fenced \d+$/)]);
   }, 30_000);
 
-  it('copies, lists and removes the backup files as the Perl server does', async () => {
+  it('copies, lists and removes the backup files', async () => {
     const data = (name: string) => join(root, 'data', name);
     mkdirSync(data('dir.nbk'));
     writeFileSync(data('mydb.fdb'), 'x');
@@ -501,24 +800,95 @@ describe.skipIf(!agentBin || !hasPerl).each([
     writeFileSync(data('replica.nbk.ctl'), 'c');
     const requests = [
       'FILES', 'EXISTS mydb.fdb', 'EXISTS none.fdb', 'EXISTS dir.nbk', 'EXISTS', 'EXISTS ../primary', 'EXISTS .hidden',
-      // refused, or not a file: the Perl server's words
+      // refused, or not a file
       'FILE', 'FILE none.nbk', 'FILE mydb.fdb', 'FILE ../primary', 'FILE dir.nbk', 'STORE', 'STORE a.nbk', 'STORE a.nbk x',
       'STORE mydb.fdb 1', 'STORE ../a.nbk 1', 'REMOVE', 'REMOVE mydb.fdb', 'REMOVE ../primary', 'REMOVE none.nbk', 'REMOVE dir.nbk',
     ];
+    const replies: Record<string, string[]> = {};
     for (const request of requests) {
-      const [a, b] = await both(request);
-      expect(b, request).toEqual(a);
-      expect(a.length, request).toBeGreaterThan(0);
+      replies[request] = await reply(request);
+      expect(replies[request].length, request).toBeGreaterThan(0);
     }
+    expect(named(replies)).toMatchInlineSnapshot(`
+      {
+        "EXISTS": [
+          "ERR bad request",
+        ],
+        "EXISTS ../primary": [
+          "ERR bad request",
+        ],
+        "EXISTS .hidden": [
+          "ERR bad request",
+        ],
+        "EXISTS dir.nbk": [
+          "OK yes",
+        ],
+        "EXISTS mydb.fdb": [
+          "OK yes",
+        ],
+        "EXISTS none.fdb": [
+          "OK no",
+        ],
+        "FILE": [
+          "ERR bad request",
+        ],
+        "FILE ../primary": [
+          "ERR bad request",
+        ],
+        "FILE dir.nbk": [
+          "ERR bad request",
+        ],
+        "FILE mydb.fdb": [
+          "ERR bad request",
+        ],
+        "FILE none.nbk": [
+          "ERR bad request",
+        ],
+        "FILES": [
+          "empty.fbk",
+          "nightly.nbk",
+          "replica.nbk.ctl",
+          ".",
+        ],
+        "REMOVE": [
+          "ERR bad request",
+        ],
+        "REMOVE ../primary": [
+          "ERR bad request",
+        ],
+        "REMOVE dir.nbk": [
+          "ERR remove dir.nbk: Is a directory",
+        ],
+        "REMOVE mydb.fdb": [
+          "ERR bad request",
+        ],
+        "REMOVE none.nbk": [
+          "OK",
+        ],
+        "STORE": [
+          "ERR bad request",
+        ],
+        "STORE ../a.nbk 1": [
+          "ERR bad request",
+        ],
+        "STORE a.nbk": [
+          "ERR bad request",
+        ],
+        "STORE a.nbk x": [
+          "ERR bad request",
+        ],
+        "STORE mydb.fdb 1": [
+          "ERR bad request",
+        ],
+      }
+    `);
     expect(await lines(front.port, 'FILES')).toEqual(['empty.fbk', 'nightly.nbk', 'replica.nbk.ctl', '.']);
     expect(existsSync(data('mydb.fdb'))).toBe(true);
-    for (const name of ['nightly.nbk', 'empty.fbk']) {
-      const [a, b] = [await ask(perl.port, `FILE ${name}`), await ask(front.port, `FILE ${name}`)];
-      expect(b.equals(a), name).toBe(true);
-    }
+    expect((await ask(front.port, 'FILE nightly.nbk')).equals(Buffer.concat([Buffer.from('OK 70000\n'), Buffer.alloc(70_000, 3)]))).toBe(true);
+    expect((await ask(front.port, 'FILE empty.fbk')).toString()).toBe('OK 0\n');
     // uploads: whole, empty, and one whose client stops early (nothing is left behind)
     const body = Buffer.alloc(300_000, 9);
-    for (const [who, port] of [['perl', perl.port], ['front', front.port]] as const) {
+    for (const [who, port] of [['front', front.port]] as const) {
       expect((await ask(port, `STORE ${who}.nbk ${body.length}`, body)).toString(), who).toBe('OK\n');
       expect(readFileSync(data(`${who}.nbk`)).equals(body), who).toBe(true);
       expect((await ask(port, `STORE ${who}-0.fbk 0`)).toString(), who).toBe('OK\n');
@@ -542,18 +912,60 @@ describe.skipIf(!agentBin || !hasPerl).each([
     }
   });
 
-  it('without replication (FILES_ONLY) serves the backup files and refuses the rest, as the Perl server does', async () => {
+  it('without replication (FILES_ONLY) serves the backup files and refuses the rest', async () => {
     const own = { DATABASE_PATH: join(root, 'data', 'mydb.fdb'), POD_NAME: 'db-0', ISC_PASSWORD: 'tok', FIREBIRD_PORT: '1', FILES_ONLY: 'true' };
-    const perlFiles = await startSegmentServer(join(root, 'segment-server.pl'), own);
-    children.push(perlFiles.child);
     const frontFiles = await startFront('', own);
     expect(frontFiles.out()).toMatch(/backup file server \(fb-agent [^)]+\) listening on /);
     const requests = ['PING', 'FILES', 'EXISTS nightly.nbk', 'LIST', 'GET mydb.fdb.journal-000000007', 'WAIT 1', 'STATE', 'POSITION', 'HEADER', 'VERSION', 'ARCHIVED', 'SEED', 'NOSUCH'];
+    const replies: Record<string, string[]> = {};
     for (const request of requests) {
-      const [a, b] = [await lines(perlFiles.port, request), await lines(frontFiles.port, request)];
-      expect(b, request).toEqual(a);
-      expect(a.length, request).toBeGreaterThan(0);
+      replies[request] = await lines(frontFiles.port, request);
+      expect(replies[request].length, request).toBeGreaterThan(0);
     }
+    expect(named(replies)).toMatchInlineSnapshot(`
+      {
+        "ARCHIVED": [
+          "ERR not available without replication",
+        ],
+        "EXISTS nightly.nbk": [
+          "OK yes",
+        ],
+        "FILES": [
+          "nightly.nbk",
+          ".",
+        ],
+        "GET mydb.fdb.journal-000000007": [
+          "ERR not available without replication",
+        ],
+        "HEADER": [
+          "ERR not available without replication",
+        ],
+        "LIST": [
+          "ERR not available without replication",
+        ],
+        "NOSUCH": [
+          "ERR not available without replication",
+        ],
+        "PING": [
+          "OK",
+        ],
+        "POSITION": [
+          "ERR not available without replication",
+        ],
+        "SEED": [
+          "ERR not available without replication",
+        ],
+        "STATE": [
+          "ERR not available without replication",
+        ],
+        "VERSION": [
+          "ERR not available without replication",
+        ],
+        "WAIT 1": [
+          "ERR not available without replication",
+        ],
+      }
+    `);
     expect(await lines(frontFiles.port, 'LIST')).toEqual(['ERR not available without replication']);
     expect(await lines(frontFiles.port, 'FILES')).toEqual(['nightly.nbk', '.']);
     const file = Buffer.concat([Buffer.from('OK 70000\n'), Buffer.alloc(70_000, 3)]);
@@ -563,12 +975,46 @@ describe.skipIf(!agentBin || !hasPerl).each([
     expect(readFileSync(join(root, 'data', 'restore-2.nbk')).equals(body)).toBe(true);
   });
 
-  it('gives the same replies for requests of every kind, through the front or not', async () => {
-    for (const request of ['ARCHIVED', 'PRIMARYSEEN', 'FILES', 'EXISTS', 'ISOLATION', 'SYNCTO', 'POINTS 7', 'RETAIN none', 'FOLLOW', 'NOSUCH 1']) {
-      const [a, b] = await both(request);
-      expect(b, request).toEqual(a);
-      expect(a.length, request).toBeGreaterThan(0);
+  it('answers requests of every kind', async () => {
+    const replies: Record<string, string[]> = {};
+    for (const request of ['PRIMARYSEEN', 'FILES', 'EXISTS', 'ISOLATION', 'SYNCTO', 'POINTS 7', 'RETAIN none', 'FOLLOW', 'NOSUCH 1']) {
+      replies[request] = await reply(request);
+      expect(replies[request].length, request).toBeGreaterThan(0);
     }
+    expect(named(replies)).toMatchInlineSnapshot(`
+      {
+        "EXISTS": [
+          "ERR bad request",
+        ],
+        "FILES": [
+          "nightly.nbk",
+          ".",
+        ],
+        "FOLLOW": [
+          "OK none",
+        ],
+        "ISOLATION": [
+          "OK online",
+        ],
+        "NOSUCH 1": [
+          "ERR bad request",
+        ],
+        "POINTS 7": [
+          ".",
+        ],
+        "PRIMARYSEEN": [
+          "OK never",
+        ],
+        "RETAIN none": [
+          "OK",
+        ],
+        "SYNCTO": [
+          "OK none",
+        ],
+      }
+    `);
+    // segments 7 and 8 have a header (8 is still being copied), 9 not; their ages in seconds
+    expect(await reply('ARCHIVED')).toEqual([expect.stringMatching(/^7 \d+$/), expect.stringMatching(/^8 \d+$/), '.']);
     expect(await lines(front.port, 'FILES')).toEqual(['nightly.nbk', '.']);
     // a download through the front
     const file = Buffer.concat([Buffer.from('OK 70000\n'), Buffer.alloc(70_000, 3)]);
@@ -579,16 +1025,15 @@ describe.skipIf(!agentBin || !hasPerl).each([
     expect(readFileSync(join(root, 'data', 'restore-1.nbk')).equals(body)).toBe(true);
     expect((await ask(front.port, 'REMOVE restore-1.nbk')).toString()).toBe('OK\n');
     expect(existsSync(join(root, 'data', 'restore-1.nbk'))).toBe(false);
-    // the requests it answers itself count as contact for the isolation check, as the Perl server's do
-    for (const [dir, port] of [['repl-perl', perl.port], ['repl-front', front.port]] as const) {
+    // the requests count as contact for the isolation check
+    for (const [dir, port] of [['repl-front', front.port]] as const) {
       rmSync(join(root, dir, 'last-contact'), { force: true });
       await lines(port, 'LIST');
       expect(Math.abs(Number(readFileSync(join(root, dir, 'last-contact'), 'utf8')) - Date.now() / 1000), dir).toBeLessThan(5);
     }
   });
 
-  it('WAIT answers as soon as a complete segment is archived; the Perl server does not know it', async () => {
-    expect(await lines(perl.port, 'WAIT 5 mydb.fdb.journal-000000009')).toEqual(['ERR bad request']);
+  it('WAIT answers as soon as a complete segment is archived', async () => {
     for (const bad of ['WAIT', 'WAIT 0', 'WAIT 61', 'WAIT x', 'WAIT 5 ../primary', 'WAIT 5 a b']) {
       expect(await lines(front.port, bad), bad).toEqual(['ERR bad request']);
     }
@@ -679,8 +1124,7 @@ describe.skipIf(!agentBin || !hasPerl).each([
     const tlsPort = Number(/accepts mutual TLS itself on 127\.0\.0\.1:(\d+)/.exec(direct.out())![1]);
     const servers: Server[] = [];
     try {
-      // a client of the cluster: the Node proxy's client side, as the Perl clients and the
-      // instances not switched yet use it
+      // a client of the cluster: the segment TLS proxy's client side (Node's here)
       const proxy = await startClient(() => files, 0);
       servers.push(proxy);
       const proxyPort = (proxy.address() as { port: number }).port;
@@ -696,7 +1140,7 @@ describe.skipIf(!agentBin || !hasPerl).each([
             if (body) sock.write(body);
           });
         });
-      // the same replies as on the plain port, the front's own and the Perl server's behind it
+      // the same replies as on the plain port
       for (const request of [
         'PING', 'LIST', 'GET mydb.fdb.journal-000000007', 'FILES', 'FILE nightly.nbk', 'POSITION', 'ISOLATION',
         'WAIT 1 mydb.fdb.journal-000000009', 'NOSUCH', 'GET ../primary', 'STORE bad/name 5', 'PROMOTE x',
@@ -791,21 +1235,12 @@ describe.skipIf(!agentBin || !hasPerl).each([
     }
   }, 60_000);
 
-  it('stops once the Firebird server has stopped, and ends when a Perl server behind it ends', async () => {
+  it('stops once the Firebird server has stopped', async () => {
     // 'close': the output has been read when it fires, which 'exit' does not wait for
     const exited = new Promise<number | null>((resolve) => front.child.once('close', (code) => resolve(code)));
     front.child.kill('SIGTERM');
-    // the Perl server exits once the Firebird server has stopped (nothing listens on FIREBIRD_PORT)
+    // nothing listens on FIREBIRD_PORT: it stops at once
     expect(await exited).toBe(0);
     expect(front.out()).toContain('stopping: the Firebird server has stopped');
-    if (standalone) {
-      expect(front.out()).toContain('no Perl server behind it');
-      return;
-    }
-    // a backend that dies takes the front with it (the container restarts)
-    const second = await startFront(join(root, 'repl-front'));
-    const ended = new Promise<number | null>((resolve) => second.child.once('exit', (code) => resolve(code)));
-    spawnSync('pkill', ['-KILL', '-f', join(root, 'segment-server.pl')]);
-    expect(await ended).not.toBe(0);
   });
 });

@@ -3,12 +3,13 @@ import { V1Job } from '@kubernetes/client-node';
 import { API_GROUP, FirebirdCluster } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, jobPodSpec } from './resources';
 import { OPERATOR_CONFIG_DIR, SEGMENT_PORT, contactTimeoutSeconds, instanceHost, isolationCheckTimeoutSeconds } from './replication';
+import { AGENT_PATH } from './agent';
 
 /**
  * Planned switchover, requested with the targetPrimary annotation (CloudNativePG's
  * `kubectl cnpg promote`, which sets status.targetPrimary):
  *
- * 1. Stopping: a Job (switchover.pl) shuts the old primary down (no more writes), reads its last
+ * 1. Stopping: a Job (`fb-agent switchover`) shuts the old primary down (no more writes), reads its last
  *    replication sequence S and waits until segment S is archived and every ready replica, the
  *    target included, has applied it.
  *    Then it asks the target's segment server to promote it in place (PROMOTE): a short full
@@ -66,7 +67,7 @@ export function buildSwitchoverJob(
             {
               name: 'switchover',
               image: clusterImage(cluster),
-              command: ['perl', `${OPERATOR_CONFIG_DIR}/switchover.pl`],
+              command: [AGENT_PATH, 'switchover'],
               env: [
                 ...superuserClientEnv(cluster),
                 { name: 'OLD_PRIMARY', value: instanceHost(cluster, options.from) },
@@ -97,7 +98,7 @@ export const DEFAULT_FAILOVER_DELAY_SECONDS = 30;
 /** Time the isolation check may need beyond its timeout to fence (check interval and timeouts) */
 export const ISOLATION_FENCE_MARGIN_SECONDS = 10;
 
-/** How often a replica's segment puller reaches the primary (segment-puller.pl POLL_SECONDS) */
+/** How often a replica's segment puller reaches the primary (the puller's POLL_SECONDS) */
 export const SEGMENT_PULL_SECONDS = 5;
 
 /**
@@ -200,7 +201,7 @@ export function buildPromoteJob(cluster: FirebirdCluster, target: string, archiv
               command: [
                 'sh',
                 '-c',
-                `reply=$(perl ${OPERATOR_CONFIG_DIR}/segment-request.pl "$TARGET" ${request}); echo "$reply"; ` +
+                `reply=$(${AGENT_PATH} request "$TARGET" ${request}); echo "$reply"; ` +
                   '{ printf "%s" "$reply" > /dev/termination-log; } 2>/dev/null; [ -n "$reply" ]',
               ],
               env: [
@@ -224,7 +225,7 @@ export function failoverJobName(cluster: FirebirdCluster): string {
 
 /**
  * Election Job for an automatic failover: reports the most advanced ready replica in its
- * termination message (failover.pl). It changes nothing, so it can be discarded if the primary
+ * termination message (`fb-agent failover`). It changes nothing, so it can be discarded if the primary
  * recovers.
  */
 export function buildFailoverJob(cluster: FirebirdCluster, candidates: string[]): V1Job {
@@ -252,7 +253,7 @@ export function buildFailoverJob(cluster: FirebirdCluster, candidates: string[])
             {
               name: 'failover',
               image: clusterImage(cluster),
-              command: ['perl', `${OPERATOR_CONFIG_DIR}/failover.pl`],
+              command: [AGENT_PATH, 'failover'],
               env: [
                 ...superuserClientEnv(cluster),
                 { name: 'CANDIDATES', value: candidates.map((p) => instanceHost(cluster, p)).join(' ') },

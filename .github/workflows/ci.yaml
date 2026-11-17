@@ -29,6 +29,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # the agent's binary, which the tests of the segment server and the Jobs' programs run
+      # (the toolchain of rust-toolchain.toml, installed by rustup on first use)
+      - name: Build the agent
+        working-directory: operator/agent
+        run: cargo build --release --locked
+
       - name: Lint
         run: npm run lint
 
@@ -91,26 +97,22 @@ jobs:
           cache: "npm"
           cache-dependency-path: operator/package-lock.json
 
-      # the Perl, TypeScript and Rust implementations of the signed request protocol against
-      # each other, and the Perl and Rust pullers through the same scenarios (the Rust side is
-      # skipped in the unit tests job, which has no binary)
-      - name: Conformance (Perl, TypeScript, Rust)
+      # the static binary the pods run, through the tests of the agent's programs: the signed
+      # request protocol (TypeScript and Rust), the puller, the segment server, the isolation
+      # check, the segment TLS proxy, the replication init's helpers, the Lease holder, the
+      # metrics exporter and the Jobs' programs
+      - name: Conformance (the static binary)
         working-directory: operator
         run: |
           npm ci
           FB_AGENT_BIN="$PWD/agent/target/x86_64-unknown-linux-musl/release/fb-agent" NO_COLOR=1 \
             npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts tests/isolation-check.test.ts tests/segment-tls-conformance.test.ts tests/init-helpers-conformance.test.ts tests/lease-holder-conformance.test.ts tests/metrics-exporter-conformance.test.ts tests/jobs-conformance.test.ts tests/switchover.test.ts tests/sync-scripts.test.ts tests/replication-scripts.test.ts 2>&1 | tee /tmp/conformance.txt
-          # none skipped: 4 protocol cases, 8 puller scenarios for each implementation, 15 for the
-          # segment server with the Perl server behind it and 15 without, and the isolation
-          # check's file (18 scenarios for each implementation, 2 more), 26 for the segment TLS proxies together, 3 for the replication
-          # init's helpers, 7 for the lease holder, 5 for the metrics exporter, 3 for the Jobs'
-          # programs, and the script tests that run once per implementation (switchover,
-          # sync-standby, fetch-segments, pitr-plan, set-repl-seq) with the files they share
-          # (colour codes stripped: the runner's output has them)
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +239 passed \(239\)'
+          # none skipped: every test of these files runs the static binary, or the protocol and
+          # files it shares with the operator (colour codes stripped: the runner's output has them)
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +164 passed \(164\)'
 
-      # STATE from the front's service attachment and from the Perl server's fbsvcmgr, side by
-      # side in every state of the database, on real servers (docs/rust-agent-segment-server.md)
+      # STATE from the segment server's service attachment in every state of the database, on
+      # real servers (docs/rust-agent-segment-server.md)
       - name: Database state against Firebird 4 and 5
         working-directory: .
         run: hack/agent/state.sh firebirdsql/firebird:4 firebirdsql/firebird:5
@@ -121,9 +123,9 @@ jobs:
         continue-on-error: true
         run: hack/agent/state.sh firebirdsql/firebird:6-snapshot
 
-      # SEED from the front (its own SQL attachments: the backup lock, the replication sequence,
-      # the database's GUID) and from the Perl server (isql): a live, an offline and a replica
-      # seed from each, and every copy opened as a database
+      # SEED from the segment server (its own SQL attachments: the backup lock, the replication
+      # sequence, the database's GUID): a live, an offline and a replica seed, and every copy
+      # opened as a database
       - name: Seeds against Firebird 4 and 5
         working-directory: .
         run: hack/agent/seed.sh firebirdsql/firebird:4 firebirdsql/firebird:5
@@ -133,8 +135,8 @@ jobs:
         continue-on-error: true
         run: hack/agent/seed.sh firebirdsql/firebird:6-snapshot
 
-      # FENCE, REJOIN and NBACKUP from the front (its own service attachments) and from the Perl
-      # server, with fbsvcmgr wrapped to record its calls: the front needs none
+      # FENCE, REJOIN and NBACKUP from the segment server (its own service attachments), with
+      # fbsvcmgr wrapped to record its calls: it needs none
       - name: Fence and nbackup against Firebird 4 and 5
         working-directory: .
         run: hack/agent/role.sh firebirdsql/firebird:4 firebirdsql/firebird:5
@@ -144,8 +146,8 @@ jobs:
         continue-on-error: true
         run: hack/agent/role.sh firebirdsql/firebird:6-snapshot
 
-      # PROMOTE by the front and by the Perl server from the same start: the same reply and the
-      # same left behind, a failed promotion undone, and no fbsvcmgr for the front
+      # PROMOTE by the segment server: the reply and what is left behind, a failed promotion
+      # undone, and no fbsvcmgr
       - name: In-place promotion against Firebird 4 and 5
         working-directory: .
         run: hack/agent/promote.sh firebirdsql/firebird:4 firebirdsql/firebird:5
@@ -155,9 +157,8 @@ jobs:
         continue-on-error: true
         run: hack/agent/promote.sh firebirdsql/firebird:6-snapshot
 
-      # the segment server without the Perl server behind it (v0.166.0): over its own attachments
-      # with no tool run, through isql, fbsvcmgr and gfix when those are refused, and its
-      # refusals with neither
+      # the segment server over its own attachments with no tool run, through isql, fbsvcmgr and
+      # gfix when those are refused, and its refusals with neither
       - name: The segment server alone against Firebird 4 and 5
         working-directory: .
         run: hack/agent/alone.sh firebirdsql/firebird:4 firebirdsql/firebird:5
@@ -167,9 +168,8 @@ jobs:
         continue-on-error: true
         run: hack/agent/alone.sh firebirdsql/firebird:6-snapshot
 
-      # the replication init container with the agent's helpers (v0.167.0) and with the Perl
-      # ones, from the same start: a primary created, a replica seeded from its segment server,
-      # the header's replication sequence
+      # the replication init container with the agent's helpers: a primary created, a replica
+      # seeded from its segment server, the header's replication sequence
       - name: The replication init against Firebird 4 and 5
         working-directory: .
         run: hack/agent/init.sh firebirdsql/firebird:4 firebirdsql/firebird:5
@@ -470,15 +470,13 @@ jobs:
           # the conditions kept their transition times through those resyncs
           kubectl get firebirdcluster test-cluster -o jsonpath='{range .status.conditions[*]}{.type}={.status} since {.lastTransitionTime}{"\n"}{end}'
 
-      - name: Verify the Rust agent reaches an instance pod
+      - name: Verify the Rust agent runs in an instance pod
         run: |
-          # docs/rust-agent-roadmap.md, Phase 1: the annotation has the operator image's fb-agent
-          # binary copied into the instance pods (an init container, a rolling restart). Without
-          # replication the backup file server is the agent's front in its files-only mode, with
-          # the Perl script behind it (Phase 3, step 3): the backups and restores of the steps
+          # docs/rust-agent-roadmap.md: the operator image's fb-agent binary is copied into every
+          # instance pod (an init container). Without replication the backup file server is the
+          # agent's segment server in its files-only mode: the backups and restores of the steps
           # below go through it.
-          kubectl annotate firebirdcluster test-cluster firebird.cloudnative-firebird.io/agent=rust
-          timeout 240 bash -c 'until kubectl get pod test-cluster-0 -o jsonpath="{.spec.initContainers[*].name}" 2>/dev/null | grep -qw agent-install; do sleep 3; done'
+          kubectl get pod test-cluster-0 -o jsonpath="{.spec.initContainers[*].name}" | grep -qw agent-install
           kubectl wait pod/test-cluster-0 --for=condition=Ready --timeout=300s
           kubectl exec test-cluster-0 -c backup-files -- sh -c '$FB_AGENT version' | tee /tmp/agent-version.txt
           grep -q '^fb-agent [0-9]' /tmp/agent-version.txt
@@ -491,11 +489,11 @@ jobs:
             'p=${SEGMENT_LISTEN:+${SEGMENT_LISTEN##*:}}; ISC_PASSWORD=wrong SEGMENT_PROXY= SEGMENT_PORT=${p:-$SEGMENT_PORT} $FB_AGENT request 127.0.0.1 PING' | grep -q 'ERR unauthorized (signature)'
           [ "$(kubectl get pod test-cluster-0 -o jsonpath='{.spec.containers[?(@.name=="backup-files")].command}')" = '["/opt/fb-agent/fb-agent","segment-server"]' ]
           kubectl logs test-cluster-0 -c backup-files | grep -q 'backup file server (fb-agent .*) listening on '
-          # no Perl server behind it (v0.166.0)
-          kubectl logs test-cluster-0 -c backup-files | grep -q 'no Perl server behind it'
-          if kubectl exec test-cluster-0 -c backup-files -- sh -c 'cat /proc/[0-9]*/cmdline' | tr '\0' ' ' | grep -q 'segment-server\.pl'; then echo "a Perl segment server runs"; exit 1; fi
-          # the front answers the backup file requests; the journal's are refused, as by the Perl
-          # server alone (no replication here)
+          # no Perl runs in the pod's containers (v0.170.0)
+          for c in firebird backup-files; do
+            if kubectl exec test-cluster-0 -c "$c" -- sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null' | tr '\0' ' ' | grep -qw perl; then echo "$c runs Perl"; exit 1; fi
+          done
+          # the server answers the backup file requests; the journal's are refused (no replication here)
           ask() { kubectl exec test-cluster-0 -c backup-files -- sh -c "p=\${SEGMENT_LISTEN:+\${SEGMENT_LISTEN##*:}}; SEGMENT_PROXY= SEGMENT_PORT=\${p:-\$SEGMENT_PORT} \$FB_AGENT request 127.0.0.1 $1"; }
           ask FILES | tail -1 | grep -qx '\.'
           [ "$(ask 'EXISTS no-such-file')" = "OK no" ]
@@ -1158,8 +1156,9 @@ jobs:
           old_uid=$(kubectl get pod repl-1 -o jsonpath={.metadata.uid})
           # the replica's position goes past everything the primary journaled, as when the primary's
           # journal restarts below it (v0.144.0): it would skip every new segment as applied already
-          kubectl exec repl-1 -c segment-server -- perl -e 'opendir(my $d, $ENV{SOURCE_DIR}) or die; my ($c) = grep { /^\{/ } readdir($d);
-            open(my $h, "+<:raw", "$ENV{SOURCE_DIR}/$c") or die; seek($h, 16, 0); print $h pack("Q<", 999999); close $h or die'
+          # (the control file's sequence at offset 16, little-endian: 999999 = 0x0f423f)
+          kubectl exec repl-1 -c segment-server -- sh -c 'c=$(ls "$SOURCE_DIR" | grep "^{" | head -n 1); [ -n "$c" ] &&
+            printf "\077\102\017\000\000\000\000\000" | dd of="$SOURCE_DIR/$c" bs=1 seek=16 conv=notrunc status=none'
           # the operator warns and re-seeds it (within a resync interval)
           timeout 180 bash -c "until [ -n \"\$(kubectl get pod repl-1 -o jsonpath={.metadata.uid} 2>/dev/null)\" ] && [ \"\$(kubectl get pod repl-1 -o jsonpath={.metadata.uid} 2>/dev/null)\" != '$old_uid' ]; do sleep 3; done"
           kubectl get events --field-selector involvedObject.name=repl,reason=JournalBehindReplicas -o jsonpath='{range .items[*]}{.message}{"\n"}{end}' \
@@ -1948,10 +1947,9 @@ jobs:
           replica=$(echo "$replicas" | head -1)
           # supervised: the rolling update restarts the replicas with the proxy and leaves the
           # primary plain until it is let go below, so the mixed mode can be checked
-          # with the same restart the instances get the Rust agent: the segment puller runs from it,
-          # and the segment server is the agent's, with no Perl server behind it (docs/rust-agent-roadmap.md,
-          # Phases 2 and 3): what follows replicates through them
-          kubectl patch firebirdcluster repl --type merge -p '{"metadata":{"annotations":{"firebird.cloudnative-firebird.io/agent":"rust"}},"spec":{"segmentTLS":{"enabled":true},"primaryUpdateStrategy":"supervised"}}'
+          # the agent's segment servers and pullers (docs/rust-agent-roadmap.md) do their TLS
+          # themselves: what follows replicates through them
+          kubectl patch firebirdcluster repl --type merge -p '{"spec":{"segmentTLS":{"enabled":true},"primaryUpdateStrategy":"supervised"}}'
           # the operator creates the cluster's CA and certificate
           timeout 60 bash -c 'until kubectl get secret repl-segment-tls >/dev/null 2>&1; do sleep 2; done'
           [ "$(kubectl get secret repl-segment-tls -o jsonpath={.type})" = kubernetes.io/tls ]
@@ -1972,16 +1970,15 @@ jobs:
           for i in $(seq 401 405); do sql "$primary" "insert into app values ($i, 'mixed'); commit;" >/dev/null; done
           for pod in $replicas; do wait_count "$pod" $((before + 5)); done
           echo "replicas running the proxy kept replicating from the plain primary"
-          # ... pulled by the Rust puller, which reaches the plain primary itself (plain-peers)
+          # ... pulled by the agent's puller, which reaches the plain primary itself (plain-peers)
           for pod in $replicas; do
             [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="segment-puller")].command}')" = '["/opt/fb-agent/fb-agent","puller"]' ]
             kubectl logs "$pod" -c segment-puller | grep -q '^segment puller: source='
             kubectl logs "$pod" -c segment-puller | grep -q "^fetched .* from $primary"
           done
-          [ "$(kubectl get pod "$primary" -o jsonpath='{.spec.containers[?(@.name=="segment-puller")].command}')" = '["perl","/etc/firebird-operator/segment-puller.pl"]' ]
-          echo "the replicas' Rust pullers fetched the segments from the primary, which still runs the Perl one"
-          # ... and a plain client (the primary, no proxy yet) still reaches a replica's segment server
-          kubectl exec "$primary" -c segment-server -- perl /etc/firebird-operator/segment-request.pl "$replica.repl-headless" PING | tee /tmp/mixed-ping.txt
+          echo "the replicas' pullers fetched the segments from the plain primary"
+          # ... and a plain client (the primary, no TLS yet) still reaches a replica's segment server
+          kubectl exec "$primary" -c segment-server -- sh -c '$FB_AGENT request "$0" PING' "$replica.repl-headless" | tee /tmp/mixed-ping.txt
           grep -q '^OK' /tmp/mixed-ping.txt
 
           # the primary is let go and restarts last
@@ -1997,12 +1994,11 @@ jobs:
           # (v0.165.0); its plain listener is on localhost only, for the pod's own clients
           kubectl logs "$primary" -c segment-server | grep -q 'accepts mutual TLS itself on 0.0.0.0:3051'
           kubectl logs "$primary" -c segment-server | grep -q 'listening on 127.0.0.1:3061'
-          # that is the agent's server, with no Perl server behind it (v0.166.0)
+          # that is the agent's server, and no Perl runs (v0.170.0)
           [ "$(kubectl get pod "$primary" -o jsonpath='{.spec.containers[?(@.name=="segment-server")].command}')" = '["/opt/fb-agent/fb-agent","segment-server"]' ]
           kubectl logs "$primary" -c segment-server | grep -q 'segment server (fb-agent .*) listening on 127.0.0.1:3061'
           for pod in repl-0 repl-1 repl-2; do
-            kubectl logs "$pod" -c segment-server | grep -q 'no Perl server behind it'
-            if kubectl exec "$pod" -c segment-server -- sh -c 'cat /proc/[0-9]*/cmdline' | tr '\0' ' ' | grep -q 'segment-server\.pl'; then echo "$pod: a Perl segment server runs"; exit 1; fi
+            if kubectl exec "$pod" -c segment-server -- sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null' | tr '\0' ' ' | grep -qw perl; then echo "$pod: Perl runs"; exit 1; fi
           done
           timeout 120 bash -c 'until [ -z "$(kubectl get configmap repl-segment-tls-peers -o jsonpath={.data.plain-peers})" ]; do sleep 5; done'
 
@@ -2020,7 +2016,7 @@ jobs:
           # (step 2)
           kubectl exec "$replica" -c segment-puller -- /opt/fb-agent/fb-agent request "$primary.repl-headless" STATE | grep -qx 'OK online'
           kubectl logs "$primary" -c segment-server | grep -q 'database state from a service attachment to the local server'
-          # what it does not have, or is asked wrongly, it refuses itself, in the Perl server's words
+          # what it does not have, or is asked wrongly, it refuses
           for request in NOSUCH 'GET nothing' 'NBACKUP 7 x.nbk' 'STANDBY maybe'; do
             kubectl exec "$primary" -c segment-server -- sh -c "SEGMENT_PROXY= SEGMENT_PORT=3061 /opt/fb-agent/fb-agent request 127.0.0.1 $request" 2>&1 | grep -qx 'ERR bad request'
           done
@@ -2030,7 +2026,7 @@ jobs:
             [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.initContainers[?(@.name=="segment-tls")].command}')" = '["/app/fb-agent","segment-tls"]' ]
             kubectl logs "$pod" -c segment-tls | grep -q 'segment TLS: client proxy on 127.0.0.1:3052'
             # and the segment server accepts mutual TLS itself (v0.165.0): the proxy has the client
-            # side only, for the pod's Perl clients, and the pullers connect over TLS themselves
+            # side only, for the pod's other clients, and the pullers connect over TLS themselves
             if kubectl logs "$pod" -c segment-tls | grep -q 'segment TLS: accepting on'; then echo "$pod: the proxy still has the segment port"; exit 1; fi
             kubectl logs "$pod" -c segment-server | grep -q 'segment TLS: the segment server accepts mutual TLS itself on 0.0.0.0:3051'
             [ "$(kubectl get pod "$pod" -o jsonpath='{.spec.containers[?(@.name=="segment-puller")].env[?(@.name=="SEGMENT_TLS_DIR")].value}')" = /etc/segment-tls ]
@@ -2068,7 +2064,7 @@ jobs:
           # by the init container with the agent's helpers (v0.167.0): the seed fetched by the
           # agent, over TLS it makes itself (the container has the certificates), and the
           # control file written by it
-          [ "$(kubectl get pod "$replica" -o jsonpath='{.spec.initContainers[?(@.name=="replication-init")].command}')" = '["sh","/etc/firebird-operator/init-instance-agent.sh"]' ]
+          [ "$(kubectl get pod "$replica" -o jsonpath='{.spec.initContainers[?(@.name=="replication-init")].command}')" = '["sh","/etc/firebird-operator/init-instance.sh"]' ]
           [ "$(kubectl get pod "$replica" -o jsonpath='{.spec.initContainers[?(@.name=="replication-init")].env[?(@.name=="SEGMENT_TLS_DIR")].value}')" = /etc/segment-tls ]
           grep -q '^replication init with the helpers of fb-agent [0-9]' /tmp/agent-reseed.log
           grep -Eq '^fetched (replica|offline|live) seed copy \([0-9]+ bytes\) from ' /tmp/agent-reseed.log
@@ -2077,13 +2073,12 @@ jobs:
             kubectl logs "$pod" -c segment-server | grep -E 'locked copy|served .* seed' || true
           done | tee /tmp/agent-seed-source.log
           grep -Eq '^locked copy \(fb-agent\): locked=1 copied=1 unlocked=1|^served offline bootstrap seed' /tmp/agent-seed-source.log
-          if grep -q '^locked copy: ' /tmp/agent-seed-source.log; then echo "a Perl server made the seed copy, not the agent"; exit 1; fi
           timeout 120 bash -c "while kubectl get firebirdcluster repl -o jsonpath={.status.reseedingInstances} | grep -q $replica; do sleep 5; done"
           # the operator reaches the segment servers over TLS too: the lag is measured again
           timeout 120 bash -c "until [ \"\$(kubectl get pod $replica -o jsonpath='{.metadata.annotations.firebird\\.cloudnative-firebird\\.io/replication-lag-seconds}')\" = 0 ]; do sleep 5; done" \
             || { kubectl get firebirdcluster repl -o jsonpath='{.status.replicationStatus}'; exit 1; }
           # a signed request through the proxy is answered
-          kubectl exec "$replica" -c segment-server -- perl /etc/firebird-operator/segment-request.pl "$primary.repl-headless" PING | tee /tmp/tls-ping.txt
+          kubectl exec "$replica" -c segment-server -- sh -c '$FB_AGENT request "$0" PING' "$primary.repl-headless" | tee /tmp/tls-ping.txt
           grep -q '^OK' /tmp/tls-ping.txt
 
           # Jobs reach the instances through their own proxy, and still meet the restricted Pod Security Standard
@@ -2104,8 +2099,14 @@ jobs:
           done
           [ "$phase" = Completed ] || { kubectl get firebirdbackup repl-tls -o yaml; kubectl logs job/backup-repl-tls --all-containers || true; exit 1; }
           [ "$(kubectl get job backup-repl-tls -o jsonpath='{.spec.template.spec.initContainers[0].name}')" = segment-tls ]
-          # the Jobs of a cluster with the agent have it too (v0.169.0), installed after the proxy
-          [ "$(kubectl get job backup-repl-tls -o jsonpath='{.spec.template.spec.initContainers[1].name}')" = agent-install ]
+          # a Job that runs the agent has it (v0.169.0), installed after the proxy; this local
+          # nbackup runs only fbsvcmgr, and gets none
+          job_spec() { kubectl get job backup-repl-tls -o json | jq -c '.spec.template.spec'; }
+          if job_spec | jq -r '[.initContainers[], .containers[]] | .[] | select(.name != "agent-install" and .restartPolicy != "Always") | ((.command // []) + (.args // [])) | join(" ")' | grep -q 'fb-agent'; then
+            [ "$(job_spec | jq -r '.initContainers[1].name')" = agent-install ]
+          else
+            if job_spec | jq -e '.initContainers[] | select(.name == "agent-install")' >/dev/null; then echo "the agent is installed into a Job that does not run it"; exit 1; fi
+          fi
           if kubectl get job backup-repl-tls -o json | jq -r '.spec.template.spec | [.initContainers[], .containers[]] | .[] | ((.command // []) + (.args // [])) | join(" ")' | grep -qw perl; then
             echo "the backup Job runs Perl"; exit 1
           fi
@@ -2120,8 +2121,7 @@ jobs:
           # once the switch's grace period is over, a request in plain text is refused
           until_ms=$(kubectl get configmap repl-segment-tls-peers -o jsonpath='{.data.accept-plain-until}')
           while [ "$(date +%s%3N)" -lt $((until_ms + 15000)) ]; do sleep 10; done
-          if kubectl exec "$replica" -c segment-server -- env -u SEGMENT_PROXY \
-              perl /etc/firebird-operator/segment-request.pl "$primary.repl-headless" PING 2>&1 | grep -q '^OK'; then
+          if kubectl exec "$replica" -c segment-server -- sh -c 'env -u SEGMENT_PROXY $FB_AGENT request "$0" PING' "$primary.repl-headless" 2>&1 | grep -q '^OK'; then
             echo "the segment server answered a plain connection"; exit 1
           fi
           echo "plain connections are refused"
@@ -2230,10 +2230,8 @@ jobs:
           reasons=$(kubectl get events --field-selector involvedObject.name=lmig -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}')
           echo "$reasons" | grep -qx PrimaryLeaseMigrationStarted
           echo "$reasons" | grep -qx PrimaryLeaseMigrated
-          # with the Rust agent the holder is the agent's (v0.168.0), from the same image: after the
-          # instances restarted with it, the primary renews the Lease through the API server
-          # and the replica holds nothing
-          kubectl annotate firebirdcluster lmig firebird.cloudnative-firebird.io/agent=rust
+          # the holder is the agent's (v0.168.0), from the operator image: the primary renews the
+          # Lease through the API server and the replica holds nothing
           agent_holders() {
             for pod in lmig-0 lmig-1; do
               kubectl get pod $pod -o jsonpath='{.spec.initContainers[?(@.name=="lease-holder")].command}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}' 2>/dev/null
@@ -3148,9 +3146,7 @@ jobs:
           if scrape | grep -q '^firebird_attachments_total'; then echo 'the removed query still runs'; exit 1; fi
           [ "$(kubectl get pod metrics-0 -o jsonpath={.metadata.uid})" = "$uid" ]
           [ "$(kubectl get pod metrics-0 -o jsonpath='{.status.containerStatuses[?(@.name=="metrics-exporter")].restartCount}')" = 0 ]
-          # with the Rust agent the exporter is the agent's (v0.169.0): the instance restarts with
-          # it and serves the same metrics, from the real isql
-          kubectl annotate firebirdcluster metrics firebird.cloudnative-firebird.io/agent=rust
+          # the exporter is the agent's (v0.169.0): it serves the metrics from the real isql
           timeout 300 bash -c 'until [ "$(kubectl get pod metrics-0 -o jsonpath="{.spec.containers[?(@.name==\"metrics-exporter\")].command}" 2>/dev/null)" = "[\"/opt/fb-agent/fb-agent\",\"metrics-exporter\"]" ]; do sleep 3; done' \
             || { kubectl get pod metrics-0 -o jsonpath='{.spec.containers[*].command}'; echo; exit 1; }
           kubectl wait pod/metrics-0 --for=condition=Ready --timeout=600s

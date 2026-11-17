@@ -58,7 +58,7 @@ describe('backup retention', () => {
     // through the instance's backup file server
     const serverSide = buildBackupCronJob(cluster({ enabled: true, retentionPolicy: '7d' }), 'db-0');
     const args = serverSide.spec!.jobTemplate.spec!.template.spec!.containers[0].args![0];
-    expect(args).toContain('backup-file.pl list');
+    expect(args).toContain('fb-agent backup-file list');
     expect(args).toContain(`grep -E '^backup-db-[0-9]{8}T[0-9]{6}Z[.]fbk$'`);
   });
 
@@ -71,14 +71,17 @@ describe('backup retention', () => {
     const [c] = pod.containers;
     const args = c.args![0];
     // after the backup and its verification, never before
-    expect(args.indexOf('action_backup')).toBeLessThan(args.indexOf('backup-file.pl list'));
-    expect(args.indexOf('restored and validated')).toBeLessThan(args.indexOf('backup-file.pl list'));
+    expect(args.indexOf('action_backup')).toBeLessThan(args.indexOf('fb-agent backup-file list'));
+    expect(args.indexOf('restored and validated')).toBeLessThan(args.indexOf('fb-agent backup-file list'));
     expect(args).toContain(`grep -E '^backup-db-[0-9]{8}T[0-9]{6}Z[.]fbk$'`);
-    expect(args).toContain(`perl /etc/firebird-operator/backup-file.pl remove "$k"`);
+    expect(args).toContain(`/opt/fb-agent/fb-agent backup-file remove "$k"`);
     expect(args).toContain(`- ${7 * 86400} ))`);
     expect(c.env?.find((e) => e.name === 'SEGMENT_PORT')?.value).toBe('3051');
-    expect(c.volumeMounts?.map((m) => m.name)).toEqual(['cluster-config']);
-    expect(pod.volumes).toEqual([{ name: 'cluster-config', configMap: { name: 'db-config' } }]);
+    expect(c.volumeMounts?.map((m) => m.name)).toEqual(['cluster-config', 'fb-agent']);
+    expect(pod.volumes).toEqual([
+      { name: 'cluster-config', configMap: { name: 'db-config' } },
+      { name: 'fb-agent', emptyDir: {} },
+    ]);
 
     const sched = buildScheduledBackupCronJob(scheduled({ retentionPolicy: '1w' }), repl(undefined), 'db-0');
     expect(sched.spec!.jobTemplate.spec!.template.spec!.containers[0].args![0]).toContain('^backup-db[.]nightly-');
@@ -86,7 +89,7 @@ describe('backup retention', () => {
     const physical = buildBackupCronJob(repl({ enabled: true, type: 'physical', retentionPolicy: '7d' }), 'db-0');
     const script = physical.spec!.jobTemplate.spec!.template.spec!.containers[0].args![0];
     expect(script.indexOf('action_nbak')).toBeLessThan(script.indexOf('rdb$backup_history'));
-    expect(script.indexOf('> $rt/history')).toBeLessThan(script.indexOf('backup-file.pl list'));
+    expect(script.indexOf('> $rt/history')).toBeLessThan(script.indexOf('fb-agent backup-file list'));
     expect(script).toContain(`grep -E '^nbackup-l[0-2]-db-[0-9]{8}T[0-9]{6}Z[.]nbk$'`);
     expect(script).toContain(' $rt/history $rt/all $rt/series > $rt/expired');
     expect(serverSideRetentionScript('x', 60)).toMatch(/^rt=\$\(mktemp -d\); .*; rm -rf "\$rt"$/);

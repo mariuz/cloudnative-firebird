@@ -3,25 +3,17 @@ import { ChildProcess, spawnSync } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { JOB_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { startSegmentServer } from './helpers/segment-server';
+import { agentBin } from './helpers/implementations';
 
 /**
- * The replication init container's helpers (docs/rust-agent-roadmap.md): on clusters that run
- * the agent, init-instance.sh calls `fb-agent fetch-seed | replica-control | set-repl-seq |
- * reposition | request` where it called a Perl script. Each pair gets the same arguments here:
- * the files they write, what they print and whether they succeed must be the same.
+ * The replication init container's helpers (docs/rust-agent-roadmap.md): init-instance.sh calls
+ * `fb-agent fetch-seed | replica-control | set-repl-seq | reposition | request`, where it called
+ * Perl scripts before v0.170.0: the files they write, what they print and whether they succeed.
  *
  * Needs the fb-agent binary (FB_AGENT_BIN, or a build in agent/target); skipped without it. The
  * "Rust agent" CI job runs this file with it.
  */
-const agentBin = [
-  process.env.FB_AGENT_BIN,
-  ...['x86_64-unknown-linux-musl/release', 'aarch64-unknown-linux-musl/release', 'release', 'debug'].map((d) =>
-    join(__dirname, '..', 'agent', 'target', d, 'fb-agent'),
-  ),
-].find((p) => p && existsSync(p));
-const hasPerl = spawnSync('perl', ['-v']).status === 0;
 
 /** a replica control file: position, db_sequence and active transactions [id, first segment] */
 const control = (sequence: number, dbSequence: number, active: Array<[number, number]> = []): Buffer => {
@@ -38,7 +30,7 @@ const control = (sequence: number, dbSequence: number, active: Array<[number, nu
   return b;
 };
 
-/** a header page as set-repl-seq.pl expects it: ODS 13 (clumps from 128) or 14 (from 148) */
+/** a header page as set-repl-seq expects it: ODS 13 (clumps from 128) or 14 (from 148) */
 const headerPage = (ods: 13 | 14, clumps: number[] = []): Buffer => {
   const page = Buffer.alloc(8192);
   page[0] = 1;
@@ -69,48 +61,29 @@ const withBlocks = (sequence: number, blocks: Array<[number, number, number]>): 
   return Buffer.concat([header, body]);
 };
 
-describe.skipIf(!agentBin || !hasPerl)('the replication init helpers: fb-agent and the Perl scripts', () => {
+describe.skipIf(!agentBin)('the replication init helpers of fb-agent', () => {
   let root: string;
   const children: ChildProcess[] = [];
-  /** the two working directories, with the same files */
-  const dirs = () => ({ perl: join(root, 'perl'), agent: join(root, 'agent') });
-  const script = (name: string) => join(root, name);
+  /** the working directory */
+  const dirs = () => ({ agent: join(root, 'agent') });
   const run = (command: string, args: string[], env: Record<string, string> = {}) => {
     const done = spawnSync(command, args, { env: { ...process.env, ISC_PASSWORD: 'tok', SEGMENT_PROXY: '', ...env } });
     return { status: done.status, out: done.stdout.toString(), err: done.stderr.toString() };
   };
-  /** the directory's files and their bytes */
-  const files = (dir: string) => Object.fromEntries(readdirSync(dir).sort().map((name) => [name, readFileSync(join(dir, name)).toString('hex')]));
-  /**
-   * runs the Perl helper and the agent's command, each in its directory (`{}` in an argument),
-   * and expects the same status, output (with the directory's name taken out) and files
-   */
-  const both = (perlScript: string, perlArgs: string[], agentArgs: string[], env: Record<string, string> = {}) => {
-    const { perl, agent } = dirs();
-    const at = (dir: string, args: string[]) => args.map((a) => a.split('{}').join(dir));
-    const p = run('perl', [script(perlScript), ...at(perl, perlArgs)], env);
-    const a = run(agentBin!, at(agent, agentArgs), env);
-    const what = agentArgs.join(' ');
-    expect(a.status === 0, `${what}: ${a.err}${p.err}`).toBe(p.status === 0);
-    expect(a.out.split(agent).join('DIR'), what).toBe(p.out.split(perl).join('DIR'));
-    expect(files(agent), what).toEqual(files(perl));
-    return { perl: p, agent: a };
+  /** runs the agent's command in its directory (`{}` in an argument) */
+  const both = (agentArgs: string[], env: Record<string, string> = {}) => {
+    const { agent } = dirs();
+    const a = run(agentBin!, agentArgs.map((arg) => arg.split('{}').join(agent)), env);
+    return { agent: { ...a, out: a.out.split(agent).join('DIR') } };
   };
-  const put = (name: string, content: Buffer | string) => {
-    for (const dir of Object.values(dirs())) writeFileSync(join(dir, name), content);
-  };
+  const put = (name: string, content: Buffer | string) => writeFileSync(join(dirs().agent, name), content);
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'inithelpers-'));
-    for (const dir of Object.values(dirs())) mkdirSync(dir);
-    for (const name of ['fetch-seed.pl', 'replica-control.pl', 'set-repl-seq.pl', 'segment-request.pl', 'segment-server.pl']) {
-      writeFileSync(script(name), REPLICATION_SCRIPTS[name]);
-    }
-    writeFileSync(script('pitr-plan.pl'), JOB_SCRIPTS['pitr-plan.pl']);
+    mkdirSync(dirs().agent);
   });
   afterEach(() => {
     for (const c of children.splice(0)) c.kill('SIGKILL');
-    spawnSync('pkill', ['-KILL', '-f', join(root, 'segment-server.pl')]);
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -121,7 +94,7 @@ describe.skipIf(!agentBin || !hasPerl)('the replication init helpers: fb-agent a
     // a clump already there, behind another one
     put('with.fdb', headerPage(14, [5, 2, 9, 9, 11, 8, 1, 0, 0, 0, 0, 0, 0, 0, 0]));
     for (const name of ['db13.fdb', 'db14.fdb', 'with.fdb']) {
-      const { agent } = both('set-repl-seq.pl', [`{}/${name}`, '4660'], ['set-repl-seq', `{}/${name}`, '4660']);
+      const { agent } = both(['set-repl-seq', `{}/${name}`, '4660']);
       expect(agent.status).toBe(0);
       expect(agent.out).toContain('set to 4660');
     }
@@ -130,30 +103,30 @@ describe.skipIf(!agentBin || !hasPerl)('the replication init helpers: fb-agent a
     expect(written.readUInt16LE(36)).toBe(158);
     // the pages after the header are not touched
     expect(written.subarray(8192).equals(Buffer.alloc(8192, 7))).toBe(true);
-    // refused alike: not a database, an unknown structure, not a number
+    // refused: not a database, an unknown structure, not a number
     put('junk.fdb', Buffer.alloc(100));
     const unknown = headerPage(13);
     unknown.writeUInt16LE(12 | 0x8000, 18);
     put('old.fdb', unknown);
     for (const [name, sequence] of [['junk.fdb', '5'], ['old.fdb', '5'], ['db13.fdb', 'x'], ['missing.fdb', '5']]) {
-      const { agent } = both('set-repl-seq.pl', [`{}/${name}`, sequence], ['set-repl-seq', `{}/${name}`, sequence]);
+      const { agent } = both(['set-repl-seq', `{}/${name}`, sequence]);
       expect(agent.status, name).not.toBe(0);
     }
   });
 
   it('adopt the control file of a replica seed, and reposition one', () => {
     put('from.ctl', control(7, 3, [[40, 6], [44, 7]]));
-    const adopted = both('replica-control.pl', ['--adopt', '{}/from.ctl', '9', '{}/target'], ['replica-control', '--adopt', '{}/from.ctl', '9', '{}/target']);
+    const adopted = both(['replica-control', '--adopt', '{}/from.ctl', '9', '{}/target']);
     expect(adopted.agent.out).toBe('replica control: adopted position after segment 7 with 2 active transaction(s)\n');
     expect(readFileSync(join(dirs().agent, 'target')).equals(control(7, 9, [[40, 6], [44, 7]]))).toBe(true);
-    const moved = both('pitr-plan.pl', ['--reposition', '12', '{}/target'], ['reposition', '12', '{}/target']);
+    const moved = both(['reposition', '12', '{}/target']);
     expect(moved.agent.out).toBe('the replay continues after segment 12\n');
     expect(readFileSync(join(dirs().agent, 'target')).equals(control(12, 9))).toBe(true);
-    // refused alike
+    // refused
     put('junk.ctl', 'short');
-    expect(both('replica-control.pl', ['--adopt', '{}/junk.ctl', '9', '{}/other'], ['replica-control', '--adopt', '{}/junk.ctl', '9', '{}/other']).agent.status).not.toBe(0);
-    expect(both('pitr-plan.pl', ['--reposition', '12', '{}/junk.ctl'], ['reposition', '12', '{}/junk.ctl']).agent.status).not.toBe(0);
-    expect(both('pitr-plan.pl', ['--reposition', 'x', '{}/target'], ['reposition', 'x', '{}/target']).agent.status).not.toBe(0);
+    expect(both(['replica-control', '--adopt', '{}/junk.ctl', '9', '{}/other']).agent.status).not.toBe(0);
+    expect(both(['reposition', '12', '{}/junk.ctl']).agent.status).not.toBe(0);
+    expect(both(['reposition', 'x', '{}/target']).agent.status).not.toBe(0);
   });
 
   it('fetch a seed, ask a segment server, and write the control file of a seed from the primary', async () => {
@@ -165,7 +138,13 @@ describe.skipIf(!agentBin || !hasPerl)('the replication init helpers: fb-agent a
     // the primary's offline bootstrap seed: served as it is
     const seed = Buffer.alloc(300_000, 5);
     writeFileSync(join(repl, 'bootstrap-seed.fdb'), seed);
-    const server = await startSegmentServer(script('segment-server.pl'), {
+    // the image's isql, which the server asks where the local server does not answer: the
+    // replication sequence of a primary that has not journalled since its bootstrap seed
+    const bin = join(root, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'isql'), '#!/bin/sh\ncat >/dev/null\necho "V                               0"\n', { mode: 0o755 });
+    const server = await startSegmentServer({
+      PATH: `${bin}:${process.env.PATH}`,
       ARCHIVE_DIR: join(root, 'archive'),
       DATABASE_PATH: join(root, 'data', 'mydb.fdb'),
       SOURCE_DIR: join(root, 'source'),
@@ -178,38 +157,41 @@ describe.skipIf(!agentBin || !hasPerl)('the replication init helpers: fb-agent a
     children.push(server.child);
     const env = { SEGMENT_PORT: String(server.port) };
 
-    const fetched = both('fetch-seed.pl', ['127.0.0.1', '{}/work.fdb'], ['fetch-seed', '127.0.0.1', '{}/work.fdb'], env);
+    const fetched = both(['fetch-seed', '127.0.0.1', '{}/work.fdb'], env);
     expect(fetched.agent.out).toBe('fetched offline seed copy (300000 bytes) from 127.0.0.1\n');
     expect(readFileSync(join(dirs().agent, 'work.fdb')).equals(seed)).toBe(true);
     expect(readFileSync(join(dirs().agent, 'work.fdb.kind'), 'utf8')).toBe('offline\n');
     expect(readdirSync(dirs().agent).sort()).toEqual(['work.fdb', 'work.fdb.kind']);
 
     // a request, for the script's SYNCTO
-    for (const request of [['SYNCTO'], ['POSITION'], ['NOSUCH']]) {
-      both('segment-request.pl', ['127.0.0.1', ...request], ['request', '127.0.0.1', ...request], env);
+    for (const [request, reply] of [
+      ['SYNCTO', 'OK none\n'],
+      ['POSITION', 'OK primary\n'],
+      ['NOSUCH', 'ERR bad request\n'],
+    ]) {
+      expect(both(['request', '127.0.0.1', request], env).agent, request).toMatchObject({ status: 0, out: reply });
     }
 
     // an offline seed: no candidates, nothing asked
-    const offline = both('replica-control.pl', ['127.0.0.1', '11', '11', '{}/offline.ctl'], ['replica-control', '127.0.0.1', '11', '11', '{}/offline.ctl'], env);
+    const offline = both(['replica-control', '127.0.0.1', '11', '11', '{}/offline.ctl'], env);
     expect(offline.agent.out).toBe('replica control: continue after segment 11, replay 0 transaction(s)\n');
     // candidates without --next: TXNS tells where those in the journal begin (53 is not there)
-    const txns = both('replica-control.pl', ['127.0.0.1', '11', '4', '{}/txns.ctl', '52', '50', '53'], ['replica-control', '127.0.0.1', '11', '4', '{}/txns.ctl', '52', '50', '53'], env);
+    const txns = both(['replica-control', '127.0.0.1', '11', '4', '{}/txns.ctl', '52', '50', '53'], env);
     expect(txns.agent.out).toBe('replica control: continue after segment 11, replay 2 transaction(s) (50 from segment 10, 52 from segment 11)\n');
     expect(readFileSync(join(dirs().agent, 'txns.ctl')).equals(control(11, 4, [[50, 10], [52, 11]]))).toBe(true);
     // a live seed (--next): PLAN, with the transactions numbered from <next> on that began in the archive
-    const plan = both('replica-control.pl', ['--next', '55', '127.0.0.1', '11', '4', '{}/plan.ctl', '52'], ['replica-control', '--next', '55', '127.0.0.1', '11', '4', '{}/plan.ctl', '52'], env);
+    const plan = both(['replica-control', '--next', '55', '127.0.0.1', '11', '4', '{}/plan.ctl', '52'], env);
     expect(plan.agent.status).toBe(0);
     expect(plan.agent.out).toContain('52 from segment 11');
     expect(plan.agent.out).toContain('60 from segment 11');
-    // a transaction that began before the oldest archived segment: no control file, alike
-    const partial = both('replica-control.pl', ['--next', '55', '127.0.0.1', '11', '4', '{}/partial.ctl', '51'], ['replica-control', '--next', '55', '127.0.0.1', '11', '4', '{}/partial.ctl', '51'], env);
+    // a transaction that began before the oldest archived segment: no control file
+    const partial = both(['replica-control', '--next', '55', '127.0.0.1', '11', '4', '{}/partial.ctl', '51'], env);
     expect(partial.agent.status).not.toBe(0);
     expect(partial.agent.err).toContain('transaction 51 began before the oldest archived segment of 127.0.0.1 (10 is its first); cannot seed from this copy');
-    expect(partial.perl.err).toContain('transaction 51 began before the oldest archived segment of 127.0.0.1 (10 is its first); cannot seed from this copy');
     expect(existsSync(join(dirs().agent, 'partial.ctl'))).toBe(false);
-    // nobody listening, a wrong password: both fail, and nothing is written
-    expect(both('fetch-seed.pl', ['127.0.0.1', '{}/none.fdb'], ['fetch-seed', '127.0.0.1', '{}/none.fdb'], { SEGMENT_PORT: '1' }).agent.status).not.toBe(0);
-    expect(both('fetch-seed.pl', ['127.0.0.1', '{}/none.fdb'], ['fetch-seed', '127.0.0.1', '{}/none.fdb'], { ...env, ISC_PASSWORD: 'wrong' }).agent.status).not.toBe(0);
+    // nobody listening, a wrong password: it fails, and nothing is written
+    expect(both(['fetch-seed', '127.0.0.1', '{}/none.fdb'], { SEGMENT_PORT: '1' }).agent.status).not.toBe(0);
+    expect(both(['fetch-seed', '127.0.0.1', '{}/none.fdb'], { ...env, ISC_PASSWORD: 'wrong' }).agent.status).not.toBe(0);
     expect(existsSync(join(dirs().agent, 'none.fdb'))).toBe(false);
   });
 });

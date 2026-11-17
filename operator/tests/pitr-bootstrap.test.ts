@@ -50,7 +50,8 @@ describe('point-in-time bootstrap', () => {
     const pod = job.spec!.template.spec!;
     expect(pod.volumes).toContainEqual({ name: 'firebird-data', persistentVolumeClaim: { claimName: 'firebird-data-test-cluster-0' } });
     expect(pod.securityContext).toMatchObject({ runAsUser: 84, runAsNonRoot: true, fsGroup: 84 });
-    expect(pod.initContainers![0].args![0]).toContain(`s3 cp 's3://backups/prod/nbackup-l1-b.nbk' /work/chain/1.nbk`);
+    expect(pod.initContainers![0].name).toBe('agent-install');
+    expect(pod.initContainers![1].args![0]).toContain(`s3 cp 's3://backups/prod/nbackup-l1-b.nbk' /work/chain/1.nbk`);
     const [firebird, fetch] = pod.containers;
     expect(firebird.args![0]).toBe('set -eu; . /etc/firebird-operator/pitr-restore.sh');
     const env = Object.fromEntries((firebird.env ?? []).map((e) => [e.name, e.value]));

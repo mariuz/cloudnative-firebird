@@ -91,7 +91,9 @@ describe('restores', () => {
     const physical = podOf(
       buildRestoreJob(restore(), makeCluster({ replication: { enabled: true } }), { type: 'physical', path: 'l0.nbk', s3: sseC }, 'db-1'),
     );
-    expect(script(physical.initContainers![0])).toContain(`aws s3 cp ${SSE_C_ARGS} 's3://bkt/fb/l0.nbk'`);
+    // after the agent's installer (the restore puts the files through the agent's backup-file)
+    expect(physical.initContainers![0].name).toBe('agent-install');
+    expect(script(physical.initContainers![1])).toContain(`aws s3 cp ${SSE_C_ARGS} 's3://bkt/fb/l0.nbk'`);
     expect(keyVolume(physical)).toBeDefined();
     const plain = podOf(buildRestoreJob(restore(), makeCluster(), { type: 'logical', path: 'x.fbk', s3: sseS3 }));
     expect(script(plain.initContainers![0])).toContain(`set -eu; aws s3 cp 's3://bkt/fb/x.fbk' /work/backup.fbk`);
@@ -103,7 +105,8 @@ describe('restores', () => {
     const cluster = makeCluster({ replication: { enabled: true, journalArchiveS3: journals } });
     const chain = { type: 'physical' as const, path: 'l0.nbk', s3: sseC };
     const pod = podOf(buildRestoreJob(restore({ restoreType: 'physical', pointInTime: { targetSegment: 9 } }), cluster, chain, 'db-1'));
-    const download = pod.initContainers![0];
+    expect(pod.initContainers![0].name).toBe('agent-install');
+    const download = pod.initContainers![1];
     expect(script(download)).toContain(`s3 cp --sse-c AES256 --sse-c-key fileb:///var/run/s3-sse-c/chain/key 's3://bkt/fb/l0.nbk' /work/chain/0.nbk`);
     expect(script(download)).toContain(`s3 cp --sse-c AES256 --sse-c-key fileb:///var/run/s3-sse-c/chain/key 's3://bkt/fb/l0.nbk.ctl'`);
     expect(download.volumeMounts?.map((m) => m.name)).toContain('chain-sse-c');

@@ -125,6 +125,40 @@ pub fn promote(
     Answer::Reply(String::new())
 }
 
+/// The full shutdown of the in-place promotion, tried `attempts` times `pause` apart while the
+/// server refuses it (busy, a lock time-out): a database left in full shutdown despite the error
+/// counts as shut down. Err: every message, for the offline promotion the operator falls back to.
+fn shut_down(
+    attempts: u32,
+    pause: Duration,
+    mut shut: impl FnMut() -> Result<(), String>,
+    is_shut: impl Fn() -> bool,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for attempt in 1..=attempts {
+        match shut() {
+            Ok(()) => return Ok(()),
+            Err(why) => failures.push(why),
+        }
+        // a shutdown that went through despite the error
+        if is_shut() {
+            return Ok(());
+        }
+        println!(
+            "full shutdown attempt {attempt} of {attempts} failed: {}",
+            failures.last().map(String::as_str).unwrap_or("")
+        );
+        if attempt < attempts {
+            thread::sleep(pause);
+        }
+    }
+    Err(format!(
+        "full shutdown failed after {} attempts: {}",
+        failures.len(),
+        failures.join("; ")
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run(
     files: &Files,
@@ -184,39 +218,19 @@ fn run(
     let mut rounds = 0;
     for round in 1..=limits.header_attempts {
         rounds = round;
-        let mut failures = Vec::new();
-        for attempt in 1..=limits.shutdown_attempts {
-            match database.shut_down() {
-                Ok(()) => {
-                    progress.shut = true;
-                    break;
-                }
-                Err(failed) => {
-                    let why = Some(message(&failed, database.command_limit)).filter(|m| !m.is_empty());
-                    failures.push(why.unwrap_or_else(|| "no message".into()));
-                }
-            }
-            // a shutdown that went through despite the error
-            if state() == Some(State::Shutdown) {
-                progress.shut = true;
-                break;
-            }
-            println!(
-                "full shutdown attempt {attempt} of {} failed: {}",
-                limits.shutdown_attempts,
-                failures.last().map(String::as_str).unwrap_or("")
-            );
-            if attempt < limits.shutdown_attempts {
-                thread::sleep(limits.shutdown_pause);
-            }
-        }
-        if !progress.shut {
-            return Err(format!(
-                "full shutdown failed after {} attempts: {}",
-                failures.len(),
-                failures.join("; ")
-            ));
-        }
+        shut_down(
+            limits.shutdown_attempts,
+            limits.shutdown_pause,
+            || {
+                database.shut_down().map_err(|failed| {
+                    Some(message(&failed, database.command_limit))
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or_else(|| "no message".into())
+                })
+            },
+            || state() == Some(State::Shutdown),
+        )?;
+        progress.shut = true;
         // An attachment refused for the full shutdown still writes the header page (ISSUES.md,
         // issue 10): one that read the header before the sequence is written would write it back
         // without it, and the journal would restart at segment 1. The server holds an exclusive
@@ -350,4 +364,48 @@ fn run(
         println!("no offline bootstrap seed: the copy could not be prepared");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// shut_down against outcomes, one per attempt: (calls, result)
+    fn run(outcomes: &[&str], left_shut: bool, attempts: u32) -> (usize, Result<(), String>) {
+        let calls = Cell::new(0);
+        let result = shut_down(
+            attempts,
+            Duration::ZERO,
+            || {
+                let outcome = outcomes.get(calls.get()).copied().unwrap_or("ok");
+                calls.set(calls.get() + 1);
+                if outcome == "ok" {
+                    Ok(())
+                } else {
+                    Err(outcome.to_string())
+                }
+            },
+            || left_shut,
+        );
+        (calls.get(), result)
+    }
+
+    #[test]
+    fn full_shutdown_retries() {
+        // at once when the server shuts the database down
+        assert_eq!(run(&["ok"], false, 5), (1, Ok(())));
+        // retried while it fails, and goes on once it works
+        assert_eq!(
+            run(&["lock time-out on wait transaction", "object in use", "ok"], false, 5),
+            (3, Ok(()))
+        );
+        // a database left in full shutdown despite the error counts as shut down
+        assert_eq!(run(&["connection lost"], true, 5), (1, Ok(())));
+        // gives up after the last attempt, with every message
+        assert_eq!(
+            run(&["busy", "busy", "still busy"], false, 3),
+            (3, Err("full shutdown failed after 3 attempts: busy; busy; still busy".into()))
+        );
+    }
 }

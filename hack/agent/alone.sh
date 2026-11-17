@@ -1,12 +1,12 @@
 #!/bin/bash
-# Checks the agent's segment server without the Perl server behind it
-# (docs/rust-agent-segment-server.md, step 7) against real Firebird servers. Three servers on
+# Checks the agent's segment server, which answers every request itself
+# (docs/rust-agent-segment-server.md, step 7), against real Firebird servers. Three servers on
 # the same database:
 #
 #   alone    (3051) reaches the Firebird server over its own attachments: no tool is run
 #   tools    (3052) is given a port nothing listens on for its own attachments: it asks isql,
-#            fbsvcmgr and gfix, as the Perl server did, and they are recorded
-#   nothing  (3053) has neither: it refuses, in the Perl server's words
+#            fbsvcmgr and gfix, and they are recorded
+#   nothing  (3053) has neither: it refuses
 #
 #   hack/agent/alone.sh [image ...]      (default: Firebird 4, 5 and the 6 snapshot)
 #
@@ -71,9 +71,9 @@ for image in "${images[@]}"; do
   echo "server: $(x 'isql -z </dev/null 2>/dev/null | head -n 1')"
   version=$(x 'echo "SET LIST ON; SELECT RDB\$GET_CONTEXT('"'SYSTEM', 'ENGINE_VERSION'"') AS V FROM RDB\$DATABASE;" | isql -q localhost:/data/db.fdb' | awk '$1 == "V" { print $2 }')
 
-  # no Perl server anywhere: the agent's own processes only
-  is "no Perl server runs" 'ps -eo args | grep -c "[s]egment-server.pl"' "0"
-  is "the server says so" 'grep -c "no Perl server behind it" /data/alone.log' "1"
+  # the agent's own processes only
+  is "no Perl runs" 'ps -eo args | grep -cw "[p]erl"' "0"
+  is "the server started" 'grep -c "^segment server (fb-agent [^)]*) listening on 0.0.0.0:3051, serving /data/a$" /data/alone.log' "1"
 
   # over its own attachments: every request, and no tool
   is "STATE" 'alone STATE' "OK online"
@@ -91,7 +91,7 @@ for image in "${images[@]}"; do
   is "a file that is not there" 'alone GET db.fdb.journal-000000001' "ERR bad request"
   is "no tool was needed" 'calls' "0"
 
-  # its own attachments refused: the tools, as the Perl server ran them
+  # its own attachments refused: the image's tools
   is "STATE through fbsvcmgr" 'tools STATE' "OK online"
   is "fbsvcmgr ran" 'called fbsvcmgr' "1"
   is "VERSION through isql" 'tools VERSION' "OK $version"
@@ -104,11 +104,11 @@ for image in "${images[@]}"; do
   is "rows after the fence" 'rows localhost:/data/db.fdb' "2"
   is "NBACKUP through fbsvcmgr" 'tools NBACKUP 0 tools.nbk' "OK"
   is "the nbackup restores" 'nbackup -R /data/out/tools.fdb /data/tools.nbk >/dev/null 2>&1; chown firebird /data/out/tools.fdb; rows /data/out/tools.fdb' "2"
-  is "a file that exists is refused, in the Perl server's words" 'tools NBACKUP 0 tools.nbk' "ERR nbackup failed"
+  is "a file that exists is refused" 'tools NBACKUP 0 tools.nbk' "ERR nbackup failed"
   is "a live SEED through isql is a database" 'tools SEED > /data/out/seed-tools.raw; head -c 40 /data/out/seed-tools.raw | head -n 1 | cut -d" " -f1' "OK"
   is "the backup lock is released" 'echo "SET LIST ON; SELECT MON\$BACKUP_STATE AS V FROM MON\$DATABASE;" | isql -q localhost:/data/db.fdb | awk "\$1 == \"V\" { print \$2 }"' "0"
 
-  # neither: refused, in the Perl server's words, and nothing left changed
+  # neither: refused, and nothing left changed
   is "STATE with nobody to ask" 'nothing STATE' "ERR cannot read the state of /data/db.fdb"
   is "VERSION with nobody to ask" 'nothing VERSION' "ERR cannot read the engine version"
   is "FENCE with nobody to ask" 'nothing FENCE' "ERR cannot shut /data/db.fdb down"

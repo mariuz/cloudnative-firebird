@@ -5,6 +5,9 @@ Phase 3 of the [Rust agent roadmap](rust-agent-roadmap.md). The segment server
 journal archive, seeds, backup files, the promotion, the fences. This note says how it moves,
 in which order, and what the steps done so far contain (v0.155.0 to v0.165.0).
 
+*Since v0.170.0 the Perl server is deleted and the front mode with it: `fb-agent segment-server`
+alone, on every cluster. What follows is the history of the move.*
+
 ## The approach: a front, with the Perl server behind it
 
 *(Since v0.166.0 the Perl server is no longer behind it: see step 7. This is how it got there.)*
@@ -77,7 +80,7 @@ instance is the primary, the pause for a seed copy, the synchronous standby chec
 - The front looks at the archive every 100 ms while someone waits, once for all waiting pullers,
   and reads the directory again only when it changed.
 
-Measured with `hack/bench/puller.sh` (Firebird 5 image, a 16 MB segment every 2 s, poll 5 s),
+Measured with `hack/bench/puller.sh` (removed in v0.170.0) (Firebird 5 image, a 16 MB segment every 2 s, poll 5 s),
 three replicas side by side on one archive:
 
 | | Perl puller, Perl server | Rust puller, Perl server | Rust puller, front (WAIT) |

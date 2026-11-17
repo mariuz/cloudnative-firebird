@@ -89,10 +89,12 @@ describe('major version upgrades', () => {
     const primary = buildMajorUpgradeJob(cluster, upgrade('Converting'), 0, 'firebird-data-test-cluster-0');
     const spec = primary.spec!.template.spec!;
     expect(primary.metadata?.name).toBe(majorUpgradeJobName(cluster, 0));
-    expect(spec.initContainers?.[0].image).toBe(FB5);
+    // the agent's installer first (set-repl-seq), then the old image's backup
+    expect(spec.initContainers?.[0].name).toBe('agent-install');
+    expect(spec.initContainers?.[1].image).toBe(FB5);
     expect(spec.containers[0].image).toBe(FB6);
     const env = (c: { env?: Array<{ name: string; value?: string }> }) => Object.fromEntries((c.env ?? []).map((e) => [e.name, e.value]));
-    expect(env(spec.initContainers![0])).toMatchObject({ MODE: 'backup', ROLE: 'primary', TARGET_ODS: '14' });
+    expect(env(spec.initContainers![1])).toMatchObject({ MODE: 'backup', ROLE: 'primary', TARGET_ODS: '14' });
     expect(env(spec.containers[0])).toMatchObject({ MODE: 'restore', ROLE: 'primary', REPLICATION_DIR: '/var/lib/firebird/data/replication' });
     expect(spec.volumes?.[0]).toEqual({ name: 'firebird-data', persistentVolumeClaim: { claimName: 'firebird-data-test-cluster-0' } });
     expect(spec.tolerations).toEqual([{ key: 'db', operator: 'Exists' }]);

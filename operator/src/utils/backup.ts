@@ -1,4 +1,5 @@
 import { clusterImage } from './image-catalog';
+import { AGENT_PATH } from './agent';
 import {
   V1Container,
   V1CronJob,
@@ -299,7 +300,7 @@ export function ownerReference(kind: string, name: string, uid: string | undefin
 const workVolume: V1Volume = { name: 'work', emptyDir: {} };
 const workMount: V1VolumeMount = { name: 'work', mountPath: WORK_DIR };
 
-/** The cluster ConfigMap, which ships backup-file.pl (replication clusters only) */
+/** The cluster ConfigMap (point-in-time recovery reads pitr-restore.sh from it) */
 function configVolume(cluster: FirebirdCluster): V1Volume {
   return { name: 'cluster-config', configMap: { name: `${cluster.metadata.name}-config` } };
 }
@@ -307,9 +308,9 @@ const configMount: V1VolumeMount = { name: 'cluster-config', mountPath: OPERATOR
 
 /**
  * Shell command moving backup files through the primary's segment server, or its backup file
- * server without replication (see backup-file.pl)
+ * server without replication (`fb-agent backup-file`)
  */
-const BACKUP_FILE = `perl ${OPERATOR_CONFIG_DIR}/backup-file.pl`;
+const BACKUP_FILE = `${AGENT_PATH} backup-file`;
 
 /**
  * Pod spec that takes one backup of the primary. `fileName` may contain shell expressions
@@ -768,7 +769,7 @@ export function buildRestoreJob(
   };
 }
 
-/** Backup file names the segment server's FILE command serves (see segment-server.pl) */
+/** Backup file names the segment server's FILE command serves (the agent's segment server) */
 const SERVER_BACKUP_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:nbk|fbk)$/;
 
 /** Journal archive a point-in-time recovery replays: its own journalS3, or the cluster's */
@@ -1075,7 +1076,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
     // lets the primary delete applied segments only up to there)
     name: 'report-uploaded',
     image: clusterImage(cluster),
-    command: ['perl', `${OPERATOR_CONFIG_DIR}/fetch-segments.pl`],
+    command: [AGENT_PATH, 'fetch-segments'],
     env: [
       ...superuserClientEnv(cluster),
       { name: 'FIREBIRD_HOST', value: instanceHost(cluster, primaryPod ?? `${name}-0`) },
@@ -1105,7 +1106,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
       {
         name: 'fetch-segments',
         image: clusterImage(cluster),
-        command: ['perl', `${OPERATOR_CONFIG_DIR}/fetch-segments.pl`],
+        command: [AGENT_PATH, 'fetch-segments'],
         env: [
           ...superuserClientEnv(cluster),
           { name: 'FIREBIRD_HOST', value: instanceHost(cluster, primaryPod ?? `${name}-0`) },

@@ -1,11 +1,11 @@
 import { loadYaml, V1Container, V1Secret, V1Volume } from '@kubernetes/client-node';
 import { API_GROUP, FirebirdCluster, RESOURCE_KIND } from '../types';
-import { UPGRADE_SCRIPTS } from './replication';
+import { AGENT_PATH } from './agent';
 
 /**
  * Custom metrics (CloudNativePG monitoring.customQueriesConfigMap and customQueriesSecret): SQL
  * queries in CloudNativePG's format, from ConfigMap and Secret keys, which the metrics-exporter
- * sidecar of every instance (metrics-exporter.pl) runs on each scrape and serves as Prometheus
+ * sidecar of every instance (`fb-agent metrics-exporter`) runs on each scrape and serves as Prometheus
  * metrics. The operator merges and validates them into one rendered Secret, mounted into the
  * sidecar: changed queries apply at the next scrape, without restarting the instances.
  *
@@ -150,7 +150,7 @@ export function mergeCustomQueries(lists: CustomQuery[][]): CustomQuery[] {
   return [...byName.values()];
 }
 
-/** The queries in the exporter's line format (metrics-exporter.pl) */
+/** The queries in the exporter's line format (`fb-agent metrics-exporter`) */
 export function renderCustomQueries(queries: CustomQuery[]): string {
   return queries
     .map((q) =>
@@ -206,7 +206,7 @@ export function buildMetricsExporterContainer(
   return {
     name: METRICS_EXPORTER_CONTAINER,
     image: options.image,
-    command: ['perl', '-e', UPGRADE_SCRIPTS['metrics-exporter.pl']],
+    command: [AGENT_PATH, 'metrics-exporter'],
     ports: [{ name: METRICS_EXPORTER_PORT_NAME, containerPort: METRICS_EXPORTER_PORT, protocol: 'TCP' }],
     env: [
       ...(options.credentials ?? []),

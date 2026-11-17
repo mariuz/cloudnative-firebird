@@ -1,14 +1,14 @@
 import { describe, it, expect, vi, Mock } from 'vitest';
-import { spawnSync } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'fs';
 import { createServer } from 'net';
 import { fakeSegmentServer } from './helpers/segment-auth';
 import { startSegmentServer } from './helpers/segment-server';
+import { agentBin } from './helpers/implementations';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { KubeConfig, V1Pod } from '@kubernetes/client-node';
 import { computeLag, journalBehind, parseArchived, parsePosition, SegmentClient, segmentRetention } from '../src/utils/replication-lag';
-import { maxSegmentRetentionHours, REPLICATION_SCRIPTS, RESEED_ANNOTATION } from '../src/utils/replication';
+import { maxSegmentRetentionHours, RESEED_ANNOTATION } from '../src/utils/replication';
 import { REPLICATION_LAG_ANNOTATION } from '../src/utils/routing';
 import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
 import { FirebirdCluster } from '../src/types';
@@ -121,8 +121,7 @@ describe('replication lag computation', () => {
   });
 });
 
-const hasPerl = spawnSync('perl', ['-v']).status === 0;
-describe.skipIf(!hasPerl)('segment-server.pl ARCHIVED', () => {
+describe.runIf(agentBin)('the segment server: ARCHIVED', () => {
   it('lists the sequence and age of every archived segment', async () => {
     const root = mkdtempSync(join(tmpdir(), 'segsrv-'));
     for (const d of ['archive', 'source', 'repl']) mkdirSync(join(root, d));
@@ -138,10 +137,8 @@ describe.skipIf(!hasPerl)('segment-server.pl ARCHIVED', () => {
     };
     segment('mydb.fdb.journal-000000007', 7, 120);
     segment('mydb.fdb.journal-000000008', 8, 30);
-    const script = join(root, 'segment-server.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
-    const { child, port } = await startSegmentServer(script, {
+    const { child, port } = await startSegmentServer({
       ARCHIVE_DIR: join(root, 'archive'),
       DATABASE_PATH: join(root, 'mydb.fdb'),
       SOURCE_DIR: join(root, 'source'),
@@ -165,7 +162,13 @@ describe.skipIf(!hasPerl)('segment-server.pl ARCHIVED', () => {
   });
 });
 
-describe.skipIf(!hasPerl)('segment-server.pl RETAIN and pruning', () => {
+/**
+ * The agent prunes the archive in a thread that starts with the server (agent/fb-agent/src/background.rs),
+ * beside the requests: the tests give its first round a moment before they look at the archive
+ */
+const firstPrune = () => new Promise((resolve) => setTimeout(resolve, 500));
+
+describe.runIf(agentBin)('the segment server: RETAIN and pruning', () => {
   it('keeps segments replicas have not applied past the retention age, up to the maximum', async () => {
     const root = mkdtempSync(join(tmpdir(), 'segsrv-'));
     for (const d of ['archive', 'source', 'repl']) mkdirSync(join(root, d));
@@ -186,9 +189,7 @@ describe.skipIf(!hasPerl)('segment-server.pl RETAIN and pruning', () => {
     // the floor survives a restart of the primary's segment server
     writeFileSync(join(root, 'repl', 'retain-floor'), '8\n');
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
-    const script = join(root, 'segment-server.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
-    const { child, port } = await startSegmentServer(script, {
+    const { child, port } = await startSegmentServer({
       ARCHIVE_DIR: join(root, 'archive'),
       DATABASE_PATH: join(root, 'mydb.fdb'),
       SOURCE_DIR: join(root, 'source'),
@@ -203,7 +204,8 @@ describe.skipIf(!hasPerl)('segment-server.pl RETAIN and pruning', () => {
       const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
         '../src/utils/replication-lag',
       );
-      // the first request is served after the startup prune
+      // after the prune at startup
+      await firstPrune();
       const archived = parseArchived(await segmentRequest('127.0.0.1', port, 'tok ARCHIVED'));
       expect(archived.map((s) => s.sequence)).toEqual([9, 10]);
 
@@ -220,7 +222,7 @@ describe.skipIf(!hasPerl)('segment-server.pl RETAIN and pruning', () => {
   });
 });
 
-describe.skipIf(!hasPerl)('segment-server.pl keeps the segments after the offline seed', () => {
+describe.runIf(agentBin)('the segment server: keeps the segments after the offline seed', () => {
   it('without a replica floor, the segments after the bootstrap seed are kept, up to the maximum', async () => {
     const root = mkdtempSync(join(tmpdir(), 'segsrv-'));
     for (const d of ['archive', 'source', 'repl']) mkdirSync(join(root, d));
@@ -240,9 +242,7 @@ describe.skipIf(!hasPerl)('segment-server.pl keeps the segments after the offlin
     writeFileSync(join(root, 'repl', 'bootstrap-seed.fdb'), 'seed');
     writeFileSync(join(root, 'repl', 'bootstrap-seed.seq'), '8\n');
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
-    const script = join(root, 'segment-server.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
-    const { child, port } = await startSegmentServer(script, {
+    const { child, port } = await startSegmentServer({
       ARCHIVE_DIR: join(root, 'archive'),
       DATABASE_PATH: join(root, 'mydb.fdb'),
       SOURCE_DIR: join(root, 'source'),
@@ -257,6 +257,7 @@ describe.skipIf(!hasPerl)('segment-server.pl keeps the segments after the offlin
       const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
         '../src/utils/replication-lag',
       );
+      await firstPrune();
       const archived = parseArchived(await segmentRequest('127.0.0.1', port, 'tok ARCHIVED'));
       expect(archived.map((s) => s.sequence)).toEqual([9]);
     } finally {
@@ -475,7 +476,7 @@ describe('replication lag reconciliation', () => {
   });
 });
 
-describe.skipIf(!hasPerl)('segment-server.pl pruneAppliedSegments', () => {
+describe.runIf(agentBin)('the segment server: pruneAppliedSegments', () => {
   /** Starts the real segment server on young segments 7..11 with the given floor files and env */
   async function archivedAfterStartup(options: { floor?: string; uploaded?: string; env: Record<string, string> }) {
     const root = mkdtempSync(join(tmpdir(), 'segsrv-'));
@@ -490,9 +491,7 @@ describe.skipIf(!hasPerl)('segment-server.pl pruneAppliedSegments', () => {
     if (options.floor) writeFileSync(join(root, 'repl', 'retain-floor'), options.floor);
     if (options.uploaded) writeFileSync(join(root, 'repl', 'uploaded-floor'), options.uploaded);
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
-    const script = join(root, 'segment-server.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
-    const { child, port } = await startSegmentServer(script, {
+    const { child, port } = await startSegmentServer({
       ARCHIVE_DIR: join(root, 'archive'),
       DATABASE_PATH: join(root, 'mydb.fdb'),
       SOURCE_DIR: join(root, 'source'),
@@ -508,6 +507,7 @@ describe.skipIf(!hasPerl)('segment-server.pl pruneAppliedSegments', () => {
       const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>(
         '../src/utils/replication-lag',
       );
+      await firstPrune();
       const sequences = parseArchived(await segmentRequest('127.0.0.1', port, 'tok ARCHIVED')).map((s) => s.sequence);
       expect(await segmentRequest('127.0.0.1', port, 'tok UPLOADED 12')).toEqual(['OK']);
       expect(readFileSync(join(root, 'repl', 'uploaded-floor'), 'utf8')).toBe('12\n');
@@ -536,7 +536,7 @@ describe.skipIf(!hasPerl)('segment-server.pl pruneAppliedSegments', () => {
   });
 });
 
-describe.skipIf(!hasPerl)('segment-server.pl HEADER', () => {
+describe.runIf(agentBin)('the segment server: HEADER', () => {
   // header page: ODS version at 18, then hdr_end and the clumps (66 / 128 in ODS 13, 36 / 148 in ODS 14)
   const page = (ods: number, seq?: number) => {
     const [endAt, start] = ods === 14 ? [36, 148] : [66, 128];
@@ -563,10 +563,8 @@ describe.skipIf(!hasPerl)('segment-server.pl HEADER', () => {
     const root = mkdtempSync(join(tmpdir(), 'segsrv-'));
     for (const d of ['archive', 'source', 'repl']) mkdirSync(join(root, d));
     const db = join(root, 'mydb.fdb');
-    const script = join(root, 'segment-server.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
-    const { child, port } = await startSegmentServer(script, {
+    const { child, port } = await startSegmentServer({
       ARCHIVE_DIR: join(root, 'archive'),
       DATABASE_PATH: db,
       SOURCE_DIR: join(root, 'source'),
@@ -594,7 +592,7 @@ describe.skipIf(!hasPerl)('segment-server.pl HEADER', () => {
   });
 });
 
-describe.skipIf(!hasPerl)('segment-server.pl PLAN', () => {
+describe.runIf(agentBin)('the segment server: PLAN', () => {
   /** A journal segment with [transaction, flags] blocks (BEGIN 1, END 2) */
   const segment = (seq: number, blocks: Array<[number, number]>) => {
     const body = Buffer.concat(
@@ -620,10 +618,8 @@ describe.skipIf(!hasPerl)('segment-server.pl PLAN', () => {
     writeFileSync(join(root, 'archive', 'db.fdb.journal-000000002'), segment(2, [[7, 0], [12, 1], [5, 3]]));
     writeFileSync(join(root, 'archive', 'db.fdb.journal-000000003'), segment(3, [[12, 0], [41, 1], [30, 1]]));
     writeFileSync(join(root, 'archive', 'db.fdb.journal-000000004'), segment(4, [[50, 1]]));
-    const script = join(root, 'segment-server.pl');
-    writeFileSync(script, REPLICATION_SCRIPTS['segment-server.pl']);
     writeFileSync(join(root, 'repl', 'primary'), 'db-0.db-headless\n');
-    const { child, port } = await startSegmentServer(script, {
+    const { child, port } = await startSegmentServer({
       ARCHIVE_DIR: join(root, 'archive'),
       DATABASE_PATH: join(root, 'db.fdb'),
       SOURCE_DIR: join(root, 'source'),

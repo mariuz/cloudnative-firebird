@@ -14,12 +14,13 @@
 #
 # Seeds avoid locking the primary: see ISSUES.md, issue 2.
 set -eu
+echo "replication init with the helpers of $("$FB_AGENT" version)"
 # files for the server: chown as root; as the firebird user (runAsFirebirdUser) they are its own
 own() { [ "$(id -u)" -ne 0 ] || chown "$@"; }
 mkdir -p "$JOURNAL_DIR" "$ARCHIVE_DIR" "$SOURCE_DIR"
 own firebird:firebird "$JOURNAL_DIR" "$ARCHIVE_DIR" "$SOURCE_DIR"
 primary=$(cat "$PRIMARY_FILE" 2>/dev/null || true)
-# a promotion in place (segment-server.pl PROMOTE) only stands for the ConfigMap until a restart
+# a promotion in place (the segment server's PROMOTE) only stands for the ConfigMap until a restart
 rm -f "$REPLICATION_DIR/promoted"
 
 # Replica cluster (spec.replica): across a failover in the source, the archive follower asked for
@@ -33,7 +34,7 @@ if [ -f "$REPLICATION_DIR/reposition" ]; then
     ''|*[!0-9]*) echo "ignoring an invalid reposition request: $u" ;;
     *)
       if [ -n "$ctl" ]; then
-        perl "$SCRIPT_DIR/pitr-plan.pl" --reposition "$u" "$ctl"
+        "$FB_AGENT" reposition "$u" "$ctl"
         find "$SOURCE_DIR" -maxdepth 1 -name '*.journal-*' -exec rm -f {} +
         echo "$u" >> "$REPLICATION_DIR/repositioned"
         own firebird:firebird "$REPLICATION_DIR/repositioned"
@@ -85,7 +86,7 @@ first_archived() {
 sw="$DATA_DIR/.switchover.fdb"
 promote_token=$(pending "${PROMOTE_FILE:-/dev/null}" "$REPLICATION_DIR/.promoted")
 if [ -n "$promote_token" ] && [ ! -f "$sw" ] && [ -f "$DATABASE_PATH" ] && ! gstat -h "$DATABASE_PATH" | grep -q 'Attributes.*replica'; then
-  # promoted in place already (segment-server.pl PROMOTE): its journal continues where it is
+  # promoted in place already (the segment server's PROMOTE): its journal continues where it is
   echo "already promoted (in place); the journal continues after segment $(seq_of "$DATABASE_PATH")"
   echo "$promote_token" > "$REPLICATION_DIR/.promoted"
 fi
@@ -118,9 +119,9 @@ if [ -n "$promote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
   seq=$(cat "$REPLICATION_DIR/.promote-seq")
   echo "promoting this replica to primary; its journal continues after segment $seq"
   if [ -f "$DATABASE_PATH" ]; then mv "$DATABASE_PATH" "$sw"; fi
-  # an in-place promotion (segment-server.pl PROMOTE) cut short may have left it in full shutdown
+  # an in-place promotion (the segment server's PROMOTE) cut short may have left it in full shutdown
   gfix -online "$sw" 2>/dev/null || true
-  perl "$SCRIPT_DIR/set-repl-seq.pl" "$sw" "$seq"
+  "$FB_AGENT" set-repl-seq "$sw" "$seq"
   gfix -replica none "$sw"
   isql -q -i "$SCRIPT_DIR/enable-publication.sql" "$sw"
   wipe_replication_state
@@ -150,7 +151,7 @@ if [ -n "$demote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
   # its own last segment is where the new primary's journal continues
   seq=$(seq_of "$sw")
   guid=$(gstat -h "$sw" | sed -n 's/^[[:space:]]*Database GUID:[[:space:]]*\({[0-9A-F-]*}\).*/\1/p')
-  perl "$SCRIPT_DIR/replica-control.pl" none "$seq" "$seq" "$SOURCE_DIR/.control.tmp"
+  "$FB_AGENT" replica-control none "$seq" "$seq" "$SOURCE_DIR/.control.tmp"
   mv "$SOURCE_DIR/.control.tmp" "$SOURCE_DIR/$guid"
   own -R firebird:firebird "$DATA_DIR"
   mv "$sw" "$DATABASE_PATH"
@@ -249,7 +250,7 @@ if [ -f "$floor_file" ] && [ -f "$DATABASE_PATH" ] && is_primary && ! is_replica
           s=$(od -An -tu8 -j32 -N8 "$f" | tr -d ' ')
           if [ "${s:-0}" -le "$floor" ]; then rm -f "$f"; fi
         done
-        perl "$SCRIPT_DIR/set-repl-seq.pl" "$DATABASE_PATH" "$floor"
+        "$FB_AGENT" set-repl-seq "$DATABASE_PATH" "$floor"
         own firebird:firebird "$DATABASE_PATH"
       else
         rm -f "$floor_file"
@@ -326,7 +327,7 @@ esac
 # top of a seed that also receives them from the journal. The operator detaches the standby
 # before re-seeding it; a volume lost otherwise waits here until it does (re-seed annotation).
 while :; do
-  reply=$(perl "$SCRIPT_DIR/segment-request.pl" "$primary" SYNCTO 2>/dev/null || true)
+  reply=$("$FB_AGENT" request "$primary" SYNCTO 2>/dev/null || true)
   case "$reply" in
     "OK "*) syncto=${reply#OK }; syncto=${syncto%% *} ;;
     *) syncto="" ;;
@@ -343,7 +344,7 @@ until
   fetched=""
   for source in $(cat "$SEED_SOURCES_FILE" 2>/dev/null || true) "$primary"; do
     case "$source" in "$POD_NAME"|"$POD_NAME".*) continue ;; esac
-    if perl "$SCRIPT_DIR/fetch-seed.pl" "$source" "$work"; then fetched="$source"; break; fi
+    if "$FB_AGENT" fetch-seed "$source" "$work"; then fetched="$source"; break; fi
   done
   [ -n "$fetched" ]
 do
@@ -356,7 +357,7 @@ case "$kind" in
   replica)
     # a locked copy of a replica: already a read-only replica without publication
     nbackup -SEQ -F "$work"
-    perl "$SCRIPT_DIR/replica-control.pl" --adopt "$work.ctl" "$(seq_of "$work")" "$SOURCE_DIR/.control.tmp"
+    "$FB_AGENT" replica-control --adopt "$work.ctl" "$(seq_of "$work")" "$SOURCE_DIR/.control.tmp"
     ;;
   offline|live)
     [ "$kind" = live ] && nbackup -SEQ -F "$work"
@@ -388,7 +389,7 @@ case "$kind" in
     next_opt=""
     [ "$kind" = live ] && next_opt="--next $next"
     # shellcheck disable=SC2086 # next_opt and candidates are space-separated words
-    perl "$SCRIPT_DIR/replica-control.pl" $next_opt "$primary" "$seq" "$(seq_of "$work")" "$SOURCE_DIR/.control.tmp" $candidates
+    "$FB_AGENT" replica-control $next_opt "$primary" "$seq" "$(seq_of "$work")" "$SOURCE_DIR/.control.tmp" $candidates
     ;;
 esac
 

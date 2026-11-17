@@ -25,15 +25,6 @@ pub struct Retention {
     pub upload: bool,
 }
 
-/// What the Perl server behind the front is given, so that it neither prunes nor samples: ages
-/// no file reaches, and the sampler's own switch.
-pub const BACKEND_OFF: [(&str, &str); 4] = [
-    ("SEGMENT_RETENTION_SECONDS", "4000000000"),
-    ("SEGMENT_MAX_RETENTION_SECONDS", "4000000000"),
-    ("PRUNE_APPLIED", "false"),
-    ("RECOVERY_POINTS", "false"),
-];
-
 fn number(text: &str) -> Option<u64> {
     (!text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
         .then(|| text.parse().ok())

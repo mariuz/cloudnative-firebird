@@ -15,10 +15,10 @@ import {
   parseCustomQueries,
   renderCustomQueries,
 } from '../src/utils/custom-queries';
-import { UPGRADE_SCRIPTS } from '../src/utils/replication';
 import { buildPodMonitor, buildStatefulSet, statefulSetNeedsUpdate } from '../src/utils/resources';
 import { validateClusterSpec } from '../src/utils/validation';
 import { makeCluster, notFoundError } from './helpers/factories';
+import { agentBin } from './helpers/implementations';
 
 const QUERIES = `
 attachments:
@@ -137,8 +137,8 @@ good: { query: "SELECT 1 AS A FROM RDB$DATABASE", metrics: [ { a: { usage: GAUGE
     const sts = buildStatefulSet(withQueries());
     const exporter = container(sts, 'metrics-exporter')!;
     expect(exporter.image).toBe(container(sts, 'firebird')!.image);
-    expect(exporter.command).toEqual(['perl', '-e', UPGRADE_SCRIPTS['metrics-exporter.pl']]);
-    expect(exporter.command![2]).toContain('sub exit_when_stopped');
+    expect(exporter.command).toEqual(['/opt/fb-agent/fb-agent', 'metrics-exporter']);
+    expect(exporter.env).toContainEqual({ name: 'FB_AGENT', value: '/opt/fb-agent/fb-agent' });
     expect(exporter.ports).toEqual([{ name: 'custom-metrics', containerPort: 9187, protocol: 'TCP' }]);
     expect(exporter.env).toEqual(
       expect.arrayContaining([
@@ -147,7 +147,10 @@ good: { query: "SELECT 1 AS A FROM RDB$DATABASE", metrics: [ { a: { usage: GAUGE
         { name: 'QUERIES_FILE', value: '/custom-queries/queries' },
       ]),
     );
-    expect(exporter.volumeMounts).toEqual([{ name: 'custom-queries', mountPath: '/custom-queries', readOnly: true }]);
+    expect(exporter.volumeMounts).toEqual([
+      { name: 'custom-queries', mountPath: '/custom-queries', readOnly: true },
+      { name: 'fb-agent', mountPath: '/opt/fb-agent', readOnly: true },
+    ]);
     expect(sts.spec!.template.spec!.volumes).toContainEqual({
       name: 'custom-queries',
       secret: { secretName: 'test-cluster-custom-queries', optional: true, defaultMode: 0o440 },
@@ -267,8 +270,8 @@ describe('the custom queries Secret', () => {
   });
 });
 
-/** The exporter script against a stand-in isql: the replica mode query, two queries and a failing one */
-describe('the metrics exporter', { timeout: 30000 }, () => {
+/** The exporter (`fb-agent metrics-exporter`) against a stand-in isql: the replica mode query, two queries and a failing one */
+describe.runIf(agentBin)('the metrics exporter', { timeout: 30000 }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'metrics-exporter-'));
   const isql = join(dir, 'isql');
   writeFileSync(
@@ -309,7 +312,7 @@ esac
     const { queries: parsed } = parseCustomQueries(QUERIES + 'broken:\n  query: "SELECT X AS A FROM NOWHERE"\n  metrics:\n    - a: { usage: GAUGE }\n', 'S');
     writeFileSync(queries, renderCustomQueries(parsed));
     const port = await freePort();
-    const child: ChildProcess = spawn('perl', ['-e', UPGRADE_SCRIPTS['metrics-exporter.pl']], {
+    const child: ChildProcess = spawn(agentBin!, ['metrics-exporter'], {
       env: { ...process.env, DATABASE_PATH: '/db/test.fdb', QUERIES_FILE: queries, METRICS_PORT: String(port), ISQL: isql, FIREBIRD_PORT: String(await freePort()), ...env },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
