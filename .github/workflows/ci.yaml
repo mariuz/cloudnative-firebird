@@ -2533,8 +2533,11 @@ jobs:
           kubectl logs job/backup-snap-1-lock | grep -q 'locked for backup'
           kubectl logs job/backup-snap-1-unlock | grep -q 'unlocked'
           [ "$(backup_state snap-src-0)" = 0 ] || { echo "the source database is still in backup mode"; exit 1; }
-          [ -z "$(kubectl get firebirdbackup snap-1 -o jsonpath='{.metadata.finalizers}')" ]
-          kubectl get events --field-selector involvedObject.name=snap-1 -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}' | grep -qx BackupCompleted
+          # the operator writes the phase first, then the event, then drops the finalizer
+          timeout 30 bash -c "until [ -z \"\$(kubectl get firebirdbackup snap-1 -o jsonpath='{.metadata.finalizers}')\" ]; do sleep 1; done" \
+            || { echo "snap-1 kept its finalizer"; kubectl get firebirdbackup snap-1 -o yaml; exit 1; }
+          timeout 30 bash -c "until kubectl get events --field-selector involvedObject.name=snap-1 -o jsonpath='{range .items[*]}{.reason}{\"\\n\"}{end}' | grep -qx BackupCompleted; do sleep 1; done" \
+            || { echo "no BackupCompleted event for snap-1"; kubectl get events --field-selector involvedObject.name=snap-1; exit 1; }
           # a change after the snapshot: not in the clusters bootstrapped from it
           sql snap-src-0 "insert into snap_t values (3, 'after the snapshot'); commit;"
           # a schedule: the operator creates the backups (every minute here)
