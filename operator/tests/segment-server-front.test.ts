@@ -778,6 +778,8 @@ describe.skipIf(!agentBin)('the segment server (fb-agent segment-server)', () =>
       KUBERNETES_SERVICE_HOST: '127.0.0.1',
       KUBERNETES_SERVICE_PORT: '1',
     });
+    // printed after the listening line the start waits for
+    for (let i = 0; i < 50 && !agent.out().includes('the agent runs the isolation check\n'); i++) await new Promise((r) => setTimeout(r, 100));
     expect(agent.out()).toContain('the agent runs the isolation check\n');
     for (let i = 0; i < 100 && !existsSync(join(repl, 'self-fenced')); i++) await new Promise((r) => setTimeout(r, 100));
     expect(existsSync(join(repl, 'self-fenced'))).toBe(true);
