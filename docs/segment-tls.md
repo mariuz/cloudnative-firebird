@@ -8,7 +8,7 @@ and off safely, and what it does and does not protect.
 
 - [Why it is needed](#why-it-is-needed)
 - [Doesn't Firebird's SRP already encrypt this?](#doesnt-firebirds-srp-already-encrypt-this)
-- [Why a proxy sidecar](#why-a-proxy-sidecar)
+- [Why not TLS in the images (the proxy sidecar, until v0.171.0)](#why-not-tls-in-the-images-the-proxy-sidecar-until-v01710)
 - [Architecture](#architecture)
 - [Certificates](#certificates)
 - [Enabling and disabling](#enabling-and-disabling)
@@ -94,15 +94,12 @@ the SYSDBA password, so the password never crosses the network. But like SRP wit
 only authenticates the request. The data coming back stays readable, and segment TLS is what
 encrypts it.
 
-## Why a proxy sidecar
+## Why not TLS in the images (the proxy sidecar, until v0.171.0)
 
-> **Since v0.170.0** the instances run the Rust agent (docs/rust-agent-roadmap.md), which does
-> TLS itself: the segment server accepts mutual TLS on port 3051, and the puller and the
-> replication init connect over TLS, with the cluster's certificates mounted into their
-> containers. The `segment-tls` sidecar (`fb-agent segment-tls`, from the operator image) keeps
-> only its client side (`127.0.0.1:3052`, `SEGMENT_PROXY`), for the Lease holder and the Jobs'
-> programs. The rest of this section and the next describe the original design, with the Perl
-> scripts, which the protocol, the certificates, the switch and the checks below still follow.
+> **History.** Segment TLS started (v0.76.0) as a proxy sidecar beside the Perl scripts, for the
+> reasons below. The Rust agent (docs/rust-agent-roadmap.md) replaced both: since v0.171.0 every
+> process of the segment protocol is the agent, which does TLS itself, and there is no proxy. The
+> [Architecture](#architecture) section describes what runs now.
 
 The obvious approach, TLS inside the Perl segment server and its clients, is not possible with the
 official `firebirdsql/firebird` images. Alternatives were measured or ruled out:
@@ -126,62 +123,58 @@ official `firebirdsql/firebird` images. Alternatives were measured or ruled out:
 > a full shutdown or fencing, exactly when the segment server is needed. The TLS proxy is simpler,
 > moves the bytes unchanged at full speed, and does not depend on Firebird's protocol.
 
-The proxy (`operator/src/segment-tls.ts`, `dist/segment-tls.js` in the operator image) is about 150
-lines. It does not interpret the segment protocol. It relays bytes in both directions, so the Perl
-segment server and its clients keep their protocol, request signing and checks unchanged. The
-clients' only change is that they connect through it.
+The proxy (`operator/src/segment-tls.ts`, later `fb-agent segment-tls`; removed in v0.171.0) was
+about 150 lines. It did not interpret the segment protocol. It relayed bytes in both directions, so the Perl
+segment server and its clients kept their protocol, request signing and checks unchanged.
 
 ## Architecture
 
 ### Pods
 
-With segment TLS on, every instance pod gets a `segment-tls` container. It runs as a **native
-sidecar**: an init container with `restartPolicy: Always`, so it starts before the replication init
-container (seeding needs it) and keeps running beside Firebird. Each proxy has two sides:
+With segment TLS on, the cluster's certificates (`/etc/segment-tls`) and the switch state
+(`/etc/segment-tls-peers`) are mounted into the containers of the agent's processes, which do
+mutual TLS themselves (`operator/agent/fb-agent/src/tls.rs`):
 
-- **Server side** (`SERVER_LISTEN=0.0.0.0:3051`): accepts mutual TLS on the segment port and
-  forwards each connection to the segment server. The segment server now listens on
-  `127.0.0.1:3061` only (`SEGMENT_LISTEN`), so it cannot be reached from outside the pod at all.
-- **Client side** (`CLIENT_LISTEN=127.0.0.1:3052`): the pod's Perl clients (`SEGMENT_PROXY`)
-  connect here in plain text over the loopback, send one line `CONNECT <host> <port>`, then their
-  request as before. The proxy opens mutual TLS to that host and relays.
+- **The segment server** (`segment-server`, or `backup-files` without replication) accepts mutual
+  TLS on the segment port (`SEGMENT_TLS_LISTEN=0.0.0.0:3051`). Its plain listener is on
+  `127.0.0.1:3061` only (`SEGMENT_LISTEN`), for the pod's own clients: the Lease holder, and
+  `kubectl exec` checks.
+- **Its clients** (`SEGMENT_TLS=true`): the segment puller, the replication init container's
+  helpers (seed copies), the segment server's own requests to the other instances (the isolation
+  check), and the programs of the backup, restore, switchover, failover and synchronous standby
+  Jobs connect to an instance's segment port over mutual TLS.
 
 ```mermaid
 flowchart LR
   subgraph P["Primary pod repl-0"]
     direction TB
     PFB[(Firebird<br/>journal archive)]
-    PSS["segment-server.pl<br/>127.0.0.1:3061"]
-    PTLS["segment-tls proxy<br/>server :3051 (mTLS)<br/>client 127.0.0.1:3052"]
+    PSS["segment-server (fb-agent)<br/>:3051 mTLS<br/>127.0.0.1:3061 plain"]
+    PLH["lease-holder"]
     PFB --- PSS
-    PTLS -- "plain, loopback" --> PSS
+    PLH -- "plain, loopback" --> PSS
   end
 
   subgraph R["Replica pod repl-1"]
     direction TB
-    RPULL["segment-puller<br/>(SEGMENT_PROXY)"]
-    RTLS["segment-tls proxy<br/>client 127.0.0.1:3052<br/>server :3051 (mTLS)"]
-    RSS["segment-server.pl<br/>127.0.0.1:3061"]
-    RPULL -- "CONNECT repl-0… 3051<br/>plain, loopback" --> RTLS
-    RTLS -- "plain, loopback" --> RSS
+    RPULL["segment-puller (fb-agent)"]
+    RSS["segment-server (fb-agent)<br/>:3051 mTLS"]
   end
 
   subgraph J["Backup Job pod"]
     direction TB
-    JC["backup script<br/>(SEGMENT_PROXY)"]
-    JTLS["segment-tls proxy<br/>client side only"]
-    JC -- "CONNECT … 3051" --> JTLS
+    JC["fb-agent backup-file"]
   end
 
   OP["Operator<br/>(Node TLS client)"]
 
-  RTLS == "TLS 1.3, mutual,<br/>cluster CA" ==> PTLS
-  JTLS == "TLS 1.3" ==> PTLS
-  OP == "TLS 1.3" ==> PTLS
-  OP == "TLS 1.3" ==> RTLS
+  RPULL == "TLS 1.3, mutual,<br/>cluster CA" ==> PSS
+  JC == "TLS 1.3" ==> PSS
+  OP == "TLS 1.3" ==> PSS
+  OP == "TLS 1.3" ==> RSS
 ```
 
-Only the thick edges cross the pod network, and all of them are TLS. The thin edges stay on the
+Only the thick edges cross the pod network, and all of them are TLS. The thin edge stays on the
 pod's loopback interface.
 
 ### One request, end to end
@@ -192,34 +185,27 @@ A replica pulling the next journal segment from the primary:
 sequenceDiagram
   autonumber
   participant Pull as segment-puller (replica)
-  participant CP as segment-tls client side (replica)
-  participant SP as segment-tls server side (primary)
-  participant SS as segment-server.pl (primary)
+  participant SS as segment-server (primary)
 
-  Pull->>CP: TCP 127.0.0.1:3052
-  Pull->>CP: "CONNECT repl-0.repl-headless 3051"
-  CP->>SP: TLS 1.3 handshake, both sides present a cert from the cluster CA
-  Note over CP,SP: each side rejects a peer whose chain does not end at the cluster CA
-  CP-->>Pull: (relay established)
-  Pull->>CP: "SIG1 <time> <nonce> <hmac> GET <segment>"
-  CP->>SP: encrypted
-  SP->>SS: TCP 127.0.0.1:3061 (plain, loopback)
+  Pull->>SS: TCP repl-0.repl-headless:3051
+  Pull->>SS: TLS 1.3 handshake, both sides present a cert from the cluster CA
+  Note over Pull,SS: each side rejects a peer whose chain does not end at the cluster CA
+  Pull->>SS: "SIG1 <time> <nonce> <hmac> GET <segment>" (encrypted)
   SS->>SS: verify signature and nonce (unchanged)
-  SS-->>SP: "OK <size>" + segment bytes
-  SP-->>CP: encrypted
-  CP-->>Pull: segment bytes
+  SS-->>Pull: "OK <size>" + segment bytes (encrypted)
 ```
 
-The signed request (step 5) is the same as without TLS. TLS adds confidentiality, integrity of the
+The signed request is the same as without TLS. TLS adds confidentiality, integrity of the
 replies, and authentication of the *peer*. The signature still authenticates the *request*.
 
 ### The operator
 
-The operator does not run a proxy. It opens TLS itself (`operator/src/utils/replication-lag.ts`)
-with the cluster's certificate, which it reads from the Secret. It decides **per pod**: an instance
-is reached over TLS when its pod runs the `segment-tls` container, and in plain text otherwise. This
-keeps lag measurement, cut-off detection and the isolation check correct while a rolling update
-moves the instances from one mode to the other (see below).
+The operator opens TLS itself (`operator/src/utils/replication-lag.ts`) with the cluster's
+certificate, which it reads from the Secret. It decides **per pod**: an instance is reached over
+TLS when its pod mounts the certificates (the `segment-tls` volume; pods of before v0.171.0 also
+ran the proxy sidecar), and in plain text otherwise. This keeps lag measurement, cut-off detection
+and the isolation check correct while a rolling update moves the instances from one mode to the
+other (see below).
 
 ## Certificates
 
@@ -229,7 +215,7 @@ flowchart TB
   OPR -->|"create / renew<br/>(ownerReference: the cluster)"| SEC["Secret repl-segment-tls<br/>type kubernetes.io/tls<br/>ca.crt · ca.key · tls.crt · tls.key"]
   SEC -->|"volume: ca.crt, tls.crt, tls.key<br/>(never ca.key)"| PODS["instance pods and Job pods<br/>/etc/segment-tls"]
   SEC -->|"read, cached 15 s"| OPC[Operator TLS client]
-  PODS -->|"tls.crt mtime polled every 30 s<br/>→ setSecureContext, no restart"| PX[segment-tls proxies]
+  PODS -->|"tls.crt mtime checked on each connection<br/>→ reloaded, no restart"| PX[the agent's processes]
 ```
 
 - **One CA per cluster**, ECDSA P-256, valid for 10 years. A certificate from another cluster's CA
@@ -241,8 +227,8 @@ flowchart TB
 - **Renewal**: on every reconcile the operator checks the Secret. It replaces the certificate when
   it has 30 days or less left or its names no longer match, and the CA when it has a year or less
   left. A renewed certificate is signed by the same CA, so pods with the old and new certificate
-  accept each other while the kubelet propagates the update. The proxies notice the new files
-  within 30 seconds and use them for new connections without a restart.
+  accept each other while the kubelet propagates the update. The agent's processes notice the
+  new files on their next connection and use them without a restart.
 - **The CA's private key** stays in the Secret, which only the operator reads. Pods mount the three
   other keys through `items`. A compromised instance pod can therefore not mint certificates.
 - **The Secret is owned by the cluster** and is deleted with it. Turning segment TLS off keeps the
@@ -300,8 +286,8 @@ A cluster is moved only when it is idle: phase `Running`, every instance ready, 
 switchover, failover or fencing in progress, not hibernated or suspended, and on Kubernetes 1.29 or
 later. Only one cluster migrates at a time across the whole operator. The operator sets
 `enabled: true` and the annotation `in-progress` in one patch, then the usual switch follows (the
-instances restart one by one, the primary last, without replica lag). Once every instance runs the
-proxy, the annotation becomes `done`. Events record each step: `SegmentTLSMigrationStarted`,
+instances restart one by one, the primary last, without replica lag). Once every instance serves
+TLS, the annotation becomes `done`. Events record each step: `SegmentTLSMigrationStarted`,
 `SegmentTLSMigrated`, and `SegmentTLSMigrationSkipped`.
 
 To keep a cluster out of it, annotate it with `skip`:
@@ -339,14 +325,13 @@ unchanged: it is how a plain cluster becomes a TLS one.
 ### Requirements
 
 
-- **Kubernetes 1.29 or later.** Native sidecar containers (beta and on by default since 1.29) are
-  needed so the proxy runs before and beside the init containers.
+- Nothing about the Kubernetes version since v0.171.0: the proxy sidecar, which needed native
+  sidecar containers (1.29), is gone. The default for new clusters and the migration of existing
+  ones still follow the 1.29 rule (below).
 - The operator's ClusterRole needs `create` and `update` on Secrets. They are in
   `config/deploy/rbac.yaml` since v0.75.0. Apply it again when upgrading.
-- Instance and Job pods must be able to pull the **operator image**. The sidecar uses the image of
-  the running operator pod, or `OPERATOR_IMAGE` when set. The cluster spec has no
-  `imagePullSecrets` yet, so with a private registry the namespace's default ServiceAccount (or
-  the cluster's `serviceAccountName`) must carry the pull secret.
+- Instance and Job pods must be able to pull the **operator image**, which carries the agent's
+  binary (the `agent-install` init container copies it).
 
 ```yaml
 apiVersion: firebird.cloudnative-firebird.io/v1
@@ -366,19 +351,19 @@ with the default above the setting is not even needed.
 
 For an **existing cluster**, the change is a pod template change, and the normal rolling update
 applies: replicas one at a time, the primary last. Between the first replica restart and the primary
-restart, the cluster runs in **mixed mode**: some instances run the proxy, the others do not yet.
+restart, the cluster runs in **mixed mode**: some instances serve TLS, the others do not yet.
 Since v0.76.0 replication goes on through it (before, the restarted replicas could not pull from the
 plain primary and lagged until it restarted).
 
 The operator publishes the instances' modes in a ConfigMap, `<cluster>-segment-tls-peers`, mounted
-by every proxy:
+into every container with the certificates:
 
 | Key | Meaning |
 |---|---|
-| `plain-peers` | instance pods that serve in plain text: the client side of a proxy connects to them without TLS |
-| `accept-plain-until` | epoch milliseconds: until then, the server side of a proxy also accepts plain connections, from instances and Jobs that do not run the proxy |
+| `plain-peers` | instance pods that serve in plain text: a client connects to them without TLS |
+| `accept-plain-until` | epoch milliseconds: until then, a segment server also accepts plain connections, from instances that do not serve TLS yet |
 
-The server side tells the two apart by the first byte of a connection: a TLS handshake record
+The segment server tells the two apart by the first byte of a connection: a TLS handshake record
 starts with `0x16`, and a segment request starts with a letter. Plain connections still need a
 signed request, as before segment TLS.
 
@@ -392,10 +377,10 @@ sequenceDiagram
 
   Note over R1,P: all plain
   Op->>CM: plain-peers: repl-0 repl-1 repl-2, accept plain for 5 min
-  Op->>R1: restart with the proxy
+  Op->>R1: restart with TLS
   R1->>P: repl-0 is listed plain: pull in plain text (no lag)
   Op->>CM: plain-peers: repl-0 repl-2
-  Op->>R2: restart with the proxy
+  Op->>R2: restart with TLS
   R2->>P: pull in plain text
   Op->>CM: plain-peers: repl-0
   Op->>P: restart the primary last
@@ -408,17 +393,17 @@ sequenceDiagram
 How the operator fills it (on every reconcile, before the StatefulSet, so a restarted instance reads
 the current state when it starts):
 
-- **Switching on:** `plain-peers` lists the instance pods that do not run the proxy yet. While any
+- **Switching on:** `plain-peers` lists the instance pods that do not serve TLS yet. While any
   is listed, `accept-plain-until` is moved to 5 minutes ahead.
-- **Switching off:** `plain-peers` lists every instance. The proxies still running then talk to all
-  instances in plain text, as the restarted ones do, and accept plain connections. The ConfigMap is
-  deleted once no instance runs the proxy any more.
-- **After the switch** (on, every instance running the proxy): the list is empty and
-  `accept-plain-until` is no longer moved. Once it has passed, the proxies accept TLS only, and the
+- **Switching off:** `plain-peers` lists every instance. The instances still serving TLS then talk to
+  all instances in plain text, as the restarted ones do, and accept plain connections. The
+  ConfigMap is deleted once no instance serves TLS any more.
+- **After the switch** (on, every instance serving TLS): the list is empty and
+  `accept-plain-until` is no longer moved. Once it has passed, the segment servers accept TLS only, and the
   steady state is the same as without the ConfigMap.
 
 The 5-minute grace period covers the kubelet's delay in updating a mounted ConfigMap (up to about
-two minutes). A proxy may still see the primary as plain for that long after it restarted with TLS,
+two minutes). A client may still see the primary as plain for that long after it restarted with TLS,
 and its plain connections are accepted meanwhile.
 
 What to expect during the switch:
@@ -427,16 +412,15 @@ What to expect during the switch:
   Expect at most a few seconds of extra lag around each restart, as with any rolling update.
 - **The operator keeps measuring** every instance in the mode its pod runs, so lag, cut-off
   detection and the isolation check stay accurate.
-- **Jobs** (backups, restores, failover helpers) work during the switch as well: Jobs with the proxy
-  read the same ConfigMap, and Jobs without it are accepted by the proxies until the grace period
-  ends.
+- **Jobs** (backups, restores, failover helpers) work during the switch as well: their programs read the
+  same ConfigMap, and plain connections are accepted until the grace period ends.
 - **The traffic is plain until the switch is over.** Connections to or from an instance that does
-  not run the proxy are not encrypted, which is what the cluster had before. Once every instance
-  runs the proxy and the grace period has passed, plain connections are refused.
+  not serve TLS yet are not encrypted, which is what the cluster had before. Once every instance
+  serves TLS and the grace period has passed, plain connections are refused.
 - **Synchronous replication** behaves as in any rolling update (`synchronous.detachForUpdates`).
 
 Never edit the ConfigMap by hand: the operator rewrites it, and listing an instance that serves TLS
-as plain makes the proxies connect to it in plain text, which it refuses once the grace period is
+as plain makes the clients connect to it in plain text, which it refuses once the grace period is
 over.
 
 ## Verifying it
@@ -445,23 +429,22 @@ over.
 # the Secret, created by the operator
 kubectl get secret repl-segment-tls -o jsonpath='{.type}{"\n"}'          # kubernetes.io/tls
 
-# every instance runs the proxy
+# every instance mounts the certificates
 kubectl get pods -l firebird.cloudnative-firebird.io/cluster=repl \
-  -o jsonpath='{range .items[*]}{.metadata.name} {.spec.initContainers[0].name}{"\n"}{end}'
+  -o jsonpath='{range .items[*]}{.metadata.name} {.spec.volumes[?(@.name=="segment-tls")].name}{"\n"}{end}'
 
-kubectl logs repl-0 -c segment-tls      # client proxy on 127.0.0.1:3052
 kubectl logs repl-0 -c segment-server   # listening on 127.0.0.1:3061; accepts mutual TLS itself on 0.0.0.0:3051
 
-# a signed request through the proxy is answered ...
+# a signed request over TLS is answered ...
 kubectl exec repl-1 -c segment-server -- sh -c '$FB_AGENT request repl-0.repl-headless PING'
 # ... the same request in plain text is not
-kubectl exec repl-1 -c segment-server -- sh -c 'env -u SEGMENT_PROXY $FB_AGENT request repl-0.repl-headless PING'
+kubectl exec repl-1 -c segment-server -- sh -c 'SEGMENT_TLS= $FB_AGENT request repl-0.repl-headless PING'
 
 # replicas keep up (0 = caught up)
 kubectl get firebirdcluster repl -o jsonpath='{.status.replicationStatus.replicas}'
 ```
 
-The kind CI runs these checks, plus a backup Job through the proxy, on every pull request.
+The kind CI runs these checks, plus a backup Job over TLS, on every pull request.
 
 ## Security properties and limits
 
@@ -480,8 +463,8 @@ What segment TLS guarantees:
 
 What it does not cover:
 
-- **Loopback traffic inside a pod** (a client ↔ the proxy, a local client ↔ the segment server's
-  plain listener) is plain. It
+- **Loopback traffic inside a pod** (the Lease holder ↔ the segment server's plain listener) is
+  plain. It
   never leaves the pod's network namespace.
 - **Files at rest** (journal archive, backups on the volume) are not encrypted by this feature. Use
   encrypted storage classes and Firebird database encryption for that.
@@ -497,20 +480,20 @@ What it does not cover:
   1.29, or with `segmentTLS.enabled: false`, ship segments in plain text. There is no setting that
   forbids it cluster-wide.
 
-Resource cost: the proxy requests 10m CPU and 32 MiB of memory per pod. TLS 1.3 with AES-GCM runs at
-several hundred MB/s per core, so the segment stream, not the cipher, sets the pace.
+Resource cost: no container of its own since v0.171.0; TLS 1.3 with AES-GCM runs at several
+hundred MB/s per core, so the segment stream, not the cipher, sets the pace.
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 |---|---|
-| Pods stay in `Init` with the `segment-tls` container waiting | Kubernetes older than 1.29 (no native sidecars), or the operator image cannot be pulled: check `kubectl describe pod` events; set `OPERATOR_IMAGE` to a pullable image, or add the pull secret to the pods' ServiceAccount |
+| Pods stay in `Init` with the `agent-install` container waiting | the operator image cannot be pulled: check `kubectl describe pod` events; set `OPERATOR_IMAGE` to a pullable image, or add the pull secret to the pods' ServiceAccount |
 | Pods stay in `ContainerCreating` with `FailedMount: secret "<cluster>-segment-tls" not found` | the operator could not create it: check the operator log for a 403 and apply `config/deploy/rbac.yaml` (Secrets `create`, `update`) |
-| Replica lag grows while switching | check `kubectl get configmap <cluster>-segment-tls-peers -o yaml`: the instances without the proxy must be listed in `plain-peers` and `accept-plain-until` must be in the future; the operator log shows why it could not write it |
-| Plain requests are still answered after enabling | expected for 5 minutes after the last instance restarted with the proxy (`accept-plain-until`) |
-| Lag stays high after the rolling update | `kubectl logs <replica> -c segment-tls` for handshake errors; check that every pod runs the proxy and mounts the same Secret |
+| Replica lag grows while switching | check `kubectl get configmap <cluster>-segment-tls-peers -o yaml`: the instances without the certificates must be listed in `plain-peers` and `accept-plain-until` must be in the future; the operator log shows why it could not write it |
+| Plain requests are still answered after enabling | expected for 5 minutes after the last instance restarted with TLS (`accept-plain-until`) |
+| Lag stays high after the rolling update | `kubectl logs <replica> -c segment-puller` for handshake errors; check that every pod mounts the same Secret |
 | A backup Job fails during the switch | it reached an instance in the other mode: run it again once the rolling update is done |
-| `ERR expected CONNECT <host> <port>` in a client log | a client spoke to the proxy's client side without the `CONNECT` line: a custom script not using `segment_open` (`segment-auth.pl`) |
+| `segment TLS: no certificates in SEGMENT_TLS_DIR` from a client | `SEGMENT_TLS=true` in a container without the certificates mounted: a custom container; mount the `segment-tls` volume or unset `SEGMENT_TLS` for a local plain request |
 
 ## Reference
 
@@ -521,8 +504,8 @@ several hundred MB/s per core, so the segment stream, not the cipher, sets the p
 | Switch state | ConfigMap `<cluster>-segment-tls-peers` (`plain-peers`, `accept-plain-until`), mounted at `/etc/segment-tls-peers`, written by the operator only while switching |
 | Secret | `<cluster>-segment-tls`, type `kubernetes.io/tls`, keys `ca.crt`, `ca.key`, `tls.crt`, `tls.key` |
 | Mount | `/etc/segment-tls` (`ca.crt`, `tls.crt`, `tls.key`), read-only |
-| Container | `segment-tls`, operator image, `/app/fb-agent segment-tls` (client side only since v0.170.0), uid 65532, read-only root, no capabilities |
-| Ports | 3051 TLS (pod network), 3052 client side (loopback), 3061 segment server (loopback) |
-| Environment | proxy: `SEGMENT_TLS_DIR`, `CLIENT_LISTEN`; the agent's processes: `SEGMENT_TLS_DIR`, `SEGMENT_TLS_PEERS_DIR`, `SEGMENT_TLS_LISTEN`, `SEGMENT_PROXY`, `SEGMENT_LISTEN` |
+| Containers | none of its own since v0.171.0 (the `segment-tls` proxy sidecar before) |
+| Ports | 3051 TLS (pod network), 3061 segment server in plain text (loopback) |
+| Environment | `SEGMENT_TLS_DIR`, `SEGMENT_TLS_PEERS_DIR`; the segment server `SEGMENT_TLS_LISTEN`, `SEGMENT_LISTEN`; the clients `SEGMENT_TLS=true` |
 | Validity | CA 10 years (renewed with 1 year left), certificate 1 year (renewed with 30 days left) |
-| Source | `operator/agent/fb-agent/src/tls.rs` (the agent's TLS and proxy), `operator/src/utils/segment-tls-pods.ts` (pod wiring), `operator/src/utils/segment-tls-client.ts` (Secret, operator client) |
+| Source | `operator/agent/fb-agent/src/tls.rs` (the agent's TLS), `operator/src/utils/segment-tls-pods.ts` (pod wiring), `operator/src/utils/segment-tls-client.ts` (Secret, operator client) |

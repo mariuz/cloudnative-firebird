@@ -60,9 +60,9 @@ describe('the segment TLS default', () => {
     await new FirebirdClusterController(kubeConfig).reconcile(cluster);
     expect(specPatches(api)).toEqual([{ spec: { segmentTLS: { enabled: true } } }]);
     expect(cluster.spec.segmentTLS).toEqual({ enabled: true });
-    // the StatefulSet created in the same reconcile runs the proxy
+    // the StatefulSet created in the same reconcile serves over TLS: the certificates mounted
     const sts = api('createNamespacedStatefulSet').mock.calls[0][0].body;
-    expect(sts.spec.template.spec.initContainers[0].name).toBe('segment-tls');
+    expect(sts.spec.template.spec.volumes.map((v: { name: string }) => v.name)).toContain('segment-tls');
     const reasons = api('createNamespacedEvent').mock.calls.map((c) => c[0].body.reason);
     expect(reasons).toContain('SegmentTLSDefaulted');
   });

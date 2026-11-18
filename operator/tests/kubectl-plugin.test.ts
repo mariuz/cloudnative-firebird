@@ -485,7 +485,7 @@ describe('kubectl firebird', () => {
   });
 
   it('writes a report of the cluster, listing what it could not collect', async () => {
-    pods[0].spec = { initContainers: [{ name: 'segment-tls' }], containers: [{ name: 'firebird' }] };
+    pods[0].spec = { initContainers: [{ name: 'lease-holder' }], containers: [{ name: 'firebird' }] };
     pods[0].spec.containers[0].env = [{ name: 'ISC_PASSWORD', value: 'masterkey' }, { name: 'ISC_USER', value: 'SYSDBA' }];
     api.listPods.mockImplementation((ns: string) =>
       Promise.resolve(ns === 'cloudnative-firebird-system' ? [{ metadata: { name: 'op-1' }, spec: { containers: [{ name: 'operator' }] } }] : pods),
@@ -504,7 +504,7 @@ describe('kubectl firebird', () => {
     expect(dirs).toEqual([dir, `${dir}/logs`]);
     expect([...files.keys()].map((k) => k.slice(dir.length + 1)).sort()).toEqual([
       'backups.yaml', 'cluster.yaml', 'databases.yaml', 'errors.txt', 'events.txt',
-      'logs/db-0-firebird.log', 'logs/db-0-segment-tls.log', 'operator.log', 'pods.yaml', 'scheduled-backups.yaml',
+      'logs/db-0-firebird.log', 'logs/db-0-lease-holder.log', 'operator.log', 'pods.yaml', 'scheduled-backups.yaml',
       'services.yaml', 'statefulset.yaml', 'status.txt', 'versions.txt',
     ]);
     // what was running: the plugin, the operator, Kubernetes, the images

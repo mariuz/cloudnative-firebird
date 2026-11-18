@@ -4,7 +4,7 @@
 //! of the current primary; the puller idles on the primary itself.
 //!
 //! Environment: SOURCE_DIR, STATE_FILE, PRIMARY_FILE (required), REPLICATION_DIR, POD_NAME,
-//! ISC_PASSWORD, SEGMENT_PORT, SEGMENT_PROXY, POLL_SECONDS (5), FIREBIRD_PORT (3050).
+//! ISC_PASSWORD, SEGMENT_PORT, SEGMENT_TLS, POLL_SECONDS (5), FIREBIRD_PORT (3050).
 
 use crate::client::{now, open, var};
 use crate::server::segment_name;

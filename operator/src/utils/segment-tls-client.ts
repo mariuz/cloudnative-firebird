@@ -3,7 +3,7 @@ import { API_GROUP, FirebirdCluster, RESOURCE_KIND } from '../types';
 import { certificateNamesMatch, createTlsCertificates, daysUntilExpiry } from './certificates';
 import { SegmentTlsMaterial, SegmentTlsResolver } from './replication-lag';
 import { instancePods, instancePodSelector } from './resources';
-import { SEGMENT_TLS_CONTAINER, segmentTlsDnsNames, segmentTlsEnabled, segmentTlsPeersName, segmentTlsSecretName } from './segment-tls-pods';
+import { podHasSegmentTls, segmentTlsDnsNames, segmentTlsEnabled, segmentTlsPeersName, segmentTlsSecretName } from './segment-tls-pods';
 
 /**
  * The operator's side of segment TLS (segment-tls-pods.ts): the cluster's CA and certificate in
@@ -28,9 +28,9 @@ function isNotFound(err: unknown): boolean {
   return e?.code === 404 || e?.statusCode === 404 || e?.response?.statusCode === 404;
 }
 
-/** Whether the instance pod runs the segment TLS proxy */
-export function hasSegmentTlsProxy(pod: V1Pod | undefined): boolean {
-  return (pod?.spec?.initContainers ?? []).some((c) => c.name === SEGMENT_TLS_CONTAINER);
+/** Whether the instance pod serves its segments over TLS (its certificates are mounted) */
+export function hasSegmentTls(pod: V1Pod | undefined): boolean {
+  return podHasSegmentTls(pod?.spec);
 }
 
 /** The instance a segment server address names (<pod>.<cluster>-headless.<namespace>.svc) */
@@ -77,7 +77,7 @@ export function createSegmentTlsResolver(core: CoreV1Api, ttlMs = 15_000, now = 
     const { pod } = await cached(pods, `${instance.namespace}/${instance.pod}`, async () => ({
       pod: await read(() => core.readNamespacedPod({ name: instance.pod, namespace: instance.namespace })),
     }));
-    if (!hasSegmentTlsProxy(pod)) return undefined;
+    if (!hasSegmentTls(pod)) return undefined;
     const name = `${instance.cluster}-segment-tls`;
     const { secret } = await cached(secrets, `${instance.namespace}/${name}`, async () => ({
       secret: await read(() => core.readNamespacedSecret({ name, namespace: instance.namespace })),
@@ -172,7 +172,7 @@ export async function reconcileSegmentTlsPeers(core: CoreV1Api, cluster: Firebir
   }
   if (!enabled && !existing) return;
   const pods = instancePods((await core.listNamespacedPod({ namespace, labelSelector: instancePodSelector(cluster.metadata.name) })).items, cluster.metadata.name);
-  if (!enabled && !pods.some(hasSegmentTlsProxy)) {
+  if (!enabled && !pods.some(hasSegmentTls)) {
     try {
       await core.deleteNamespacedConfigMap({ name, namespace });
     } catch (err) {
@@ -181,7 +181,7 @@ export async function reconcileSegmentTlsPeers(core: CoreV1Api, cluster: Firebir
     return;
   }
   const plain = pods
-    .filter((p) => !enabled || !hasSegmentTlsProxy(p))
+    .filter((p) => !enabled || !hasSegmentTls(p))
     .map((p) => p.metadata?.name ?? '')
     .filter(Boolean)
     .sort();

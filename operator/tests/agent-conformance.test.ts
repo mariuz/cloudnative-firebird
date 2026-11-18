@@ -40,7 +40,7 @@ describe.skipIf(!agentBin)('SIG1 conformance: TypeScript and Rust', () => {
     return { status: r.status, lines: r.stdout.split('\n').filter((l) => l !== ''), stderr: r.stderr };
   };
   const agent = (port: number, secret: string, ...request: string[]) =>
-    run(agentBin!, ['request', '127.0.0.1', ...request], { ISC_PASSWORD: secret, SEGMENT_PORT: String(port), SEGMENT_PROXY: '' });
+    run(agentBin!, ['request', '127.0.0.1', ...request], { ISC_PASSWORD: secret, SEGMENT_PORT: String(port), SEGMENT_TLS: '' });
   const nodeClient = async (port: number, secret: string, request: string) => {
     // the real client (the unit tests' setup replaces it)
     const { segmentRequest } = await vi.importActual<typeof import('../src/utils/replication-lag')>('../src/utils/replication-lag');
@@ -124,38 +124,21 @@ describe.skipIf(!agentBin)('SIG1 conformance: TypeScript and Rust', () => {
     }
   });
 
-  it('the Rust client goes through the segment TLS proxy (CONNECT <host> <port>)', async () => {
-    const firstLines: string[] = [];
-    const proxy = createServer((client) => {
-      let head = Buffer.alloc(0);
-      const onData = (d: Buffer) => {
-        head = Buffer.concat([head, d]);
-        const nl = head.indexOf(10);
-        if (nl < 0) return;
-        client.off('data', onData);
-        firstLines.push(head.subarray(0, nl).toString());
-        const upstream = new Socket();
-        upstream.connect(server.port, '127.0.0.1', () => {
-          upstream.write(head.subarray(nl + 1));
-          client.pipe(upstream);
-          upstream.pipe(client);
-        });
-      };
-      client.on('data', onData);
+  it('the Rust client: plain text without SEGMENT_TLS, never plain text with it (v0.171.0: no proxy)', async () => {
+    let connections = 0;
+    const counter = createServer((socket) => {
+      connections++;
+      socket.destroy();
     });
-    servers.push(proxy);
-    const proxyPort = await new Promise<number>((resolve) => proxy.listen(0, '127.0.0.1', () => resolve((proxy.address() as { port: number }).port)));
-    const env = { ISC_PASSWORD: 'tok', SEGMENT_PORT: '3051', SEGMENT_PROXY: `127.0.0.1:${proxyPort}` };
-    // not spawnSync: the proxy runs in this process
-    const lines = (command: string, args: string[]) =>
-      new Promise<string[]>((resolve, reject) => {
-        const child = spawn(command, args, { env: { ...process.env, ...env } });
-        let out = '';
-        child.stdout.on('data', (d) => (out += d.toString()));
-        child.once('error', reject);
-        child.once('exit', () => resolve(out.split('\n').filter((l) => l !== '')));
-      });
-    expect(await lines(agentBin!, ['request', 'db-1.db-headless', 'PING'])).toEqual(['OK']);
-    expect(firstLines).toEqual(['CONNECT db-1.db-headless 3051']);
+    servers.push(counter);
+    const port = await new Promise<number>((resolve) => counter.listen(0, '127.0.0.1', () => resolve((counter.address() as { port: number }).port)));
+    // a SEGMENT_PROXY left over from before is not read: the request goes to the server itself
+    const plain = run(agentBin!, ['request', '127.0.0.1', 'PING'], { ISC_PASSWORD: 'tok', SEGMENT_PORT: String(server.port), SEGMENT_PROXY: `127.0.0.1:${port}` });
+    expect(plain.lines).toEqual(['OK']);
+    // segment TLS without the certificates: refused before connecting, nothing sent in plain text
+    const refused = run(agentBin!, ['request', '127.0.0.1', 'PING'], { ISC_PASSWORD: 'tok', SEGMENT_PORT: String(port), SEGMENT_TLS: 'true', SEGMENT_TLS_DIR: '' });
+    expect(refused.status).not.toBe(0);
+    expect(refused.stderr).toContain('segment TLS: no certificates in SEGMENT_TLS_DIR');
+    expect(connections).toBe(0);
   });
 });

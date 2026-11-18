@@ -3,7 +3,7 @@
 Status: **Phases 0, 1 and 2 done** (v0.154.0), **Phase 3 started** (v0.155.0: the segment server's
 front, and pullers that wait instead of polling; v0.156.0: the database's state from a
 persistent Firebird attachment; v0.157.0: the other requests about an instance's state;
-v0.158.0: the backup files, also for instances without replication; v0.159.0: the seeds; v0.160.0: the fence, nbackup and synchronous replication; v0.161.0: the in-place promotion; v0.162.0: the pruning and the recovery-point sampler; v0.163.0: the isolation check; v0.164.0: the segment TLS proxy; v0.165.0: TLS end to end in the agent's server and puller; v0.166.0: no Perl server behind the agent's; v0.167.0: the replication init container's helpers; v0.168.0: the primary Lease holder; v0.169.0: the custom metrics exporter and the Jobs' programs), **done** (v0.170.0: the agent on every cluster, the Perl scripts deleted). Results below. It answers
+v0.158.0: the backup files, also for instances without replication; v0.159.0: the seeds; v0.160.0: the fence, nbackup and synchronous replication; v0.161.0: the in-place promotion; v0.162.0: the pruning and the recovery-point sampler; v0.163.0: the isolation check; v0.164.0: the segment TLS proxy; v0.165.0: TLS end to end in the agent's server and puller; v0.166.0: no Perl server behind the agent's; v0.167.0: the replication init container's helpers; v0.168.0: the primary Lease holder; v0.169.0: the custom metrics exporter and the Jobs' programs), **done** (v0.170.0: the agent on every cluster, the Perl scripts deleted; v0.171.0: no segment TLS proxy). Results below. It answers
 the question of whether a Rust core should replace the Perl scripts and the parts critical for
 performance.
 
@@ -313,7 +313,12 @@ ConfigMap keeps it under its former name `init-instance-agent.sh` too, for the p
 clusters that opted in, until they have restarted. The tests that compared the Perl scripts
 with the agent check the agent alone.
 
-Left (TODO.md): the Lease holder and the Jobs' programs could do their TLS themselves, so the
-segment TLS proxy sidecar would go, and the Node holder and proxy of the operator image, which
-no pod runs any more, can be deleted.
+Since v0.171.0 the Jobs' programs do their TLS themselves too, as the segment server, the
+puller and the replication init do, and the segment TLS proxy sidecar is gone (the Lease holder
+asks its own pod's segment server on localhost, in plain text). The Node Lease holder and proxy of
+the operator image, which no pod ran any more, are deleted, and with them the agent's
+`segment-tls` command.
+
+Left (TODO.md): the former name of the init script, and the Kubernetes 1.29 rule that segment
+TLS's default still follows.
 

@@ -1,35 +1,29 @@
 import { V1Container, V1EnvVar, V1PodSpec, V1Volume } from '@kubernetes/client-node';
 import { FirebirdCluster } from '../types';
 import { SEGMENT_PORT } from './replication';
-import { operatorImage } from './operator-image';
-import { AGENT_IMAGE_PATH } from './agent';
 
 /**
  * Segment TLS (spec.segmentTLS): the segment servers (replication sidecar, or the backup file
  * server without replication) and every client of theirs talk mutual TLS with the cluster's own
  * CA (the <cluster>-segment-tls Secret, managed by the operator).
  *
- * In the instance pods the agent's processes do their TLS themselves, with the cluster's
- * certificates mounted into their containers: the segment server accepts mutual TLS on the
- * segment port, and the puller and the replication init connect over TLS. The segment-tls proxy
- * (`fb-agent segment-tls`, from the operator image) runs as a native sidecar (an init container
- * that keeps running, Kubernetes 1.29+) with its client side only (SEGMENT_PROXY), for the pod's
- * other clients (the Lease holder) and the Jobs' programs.
+ * Every process of it is the agent (utils/agent.ts), which does its TLS itself, with the cluster's
+ * certificates mounted into its container: the segment server accepts mutual TLS on the segment
+ * port (and plain text on localhost, for the pod's own clients such as the Lease holder), and the
+ * puller, the replication init and the Jobs' programs connect over TLS (SEGMENT_TLS). Since
+ * v0.171.0 there is no proxy sidecar.
  */
 
-export const SEGMENT_TLS_CONTAINER = 'segment-tls';
 export const SEGMENT_TLS_VOLUME = 'segment-tls';
 export const SEGMENT_TLS_DIR = '/etc/segment-tls';
 export const SEGMENT_TLS_PEERS_VOLUME = 'segment-tls-peers';
 export const SEGMENT_TLS_PEERS_DIR = '/etc/segment-tls-peers';
-/** Where the segment server listens behind the proxy */
+/** Where the segment server listens in plain text, for the pod's own clients */
 export const SEGMENT_SERVER_LOCAL_PORT = 3061;
-/** The client side of the proxy, for the pod's clients without their own TLS */
-export const SEGMENT_PROXY_PORT = 3052;
 /** Containers running a segment server */
 const SEGMENT_SERVERS = ['segment-server', 'backup-files'];
-/** Containers of an instance whose process is the agent with its own TLS */
-const AGENT_TLS_CONTAINERS = [...SEGMENT_SERVERS, 'segment-puller', 'replication-init'];
+/** Containers of an instance whose process is a client of the other instances' segment servers */
+const CLIENTS = ['segment-puller', 'replication-init'];
 
 export function segmentTlsEnabled(cluster: FirebirdCluster): boolean {
   return cluster.spec.segmentTLS?.enabled === true;
@@ -39,7 +33,7 @@ export function segmentTlsSecretName(cluster: FirebirdCluster): string {
   return `${cluster.metadata.name}-segment-tls`;
 }
 
-/** The instances still serving in plain text while segment TLS is switched (segment-tls.ts) */
+/** The instances still serving in plain text while segment TLS is switched (the agent's tls.rs) */
 export function segmentTlsPeersName(cluster: FirebirdCluster): string {
   return `${cluster.metadata.name}-segment-tls-peers`;
 }
@@ -49,43 +43,6 @@ export function segmentTlsDnsNames(cluster: FirebirdCluster): string[] {
   const headless = `${cluster.metadata.name}-headless`;
   const namespace = cluster.metadata.namespace ?? 'default';
   return [`*.${headless}`, `*.${headless}.${namespace}.svc`, `*.${headless}.${namespace}.svc.cluster.local`];
-}
-
-function sidecar(): V1Container {
-  const env: V1EnvVar[] = [
-    { name: 'SEGMENT_TLS_DIR', value: SEGMENT_TLS_DIR },
-    { name: 'SEGMENT_TLS_PEERS_DIR', value: SEGMENT_TLS_PEERS_DIR },
-    { name: 'CLIENT_LISTEN', value: `127.0.0.1:${SEGMENT_PROXY_PORT}` },
-  ];
-  return {
-    name: SEGMENT_TLS_CONTAINER,
-    image: operatorImage(),
-    command: [AGENT_IMAGE_PATH, 'segment-tls'],
-    // native sidecar: started before the next init container, stopped after the main containers
-    restartPolicy: 'Always',
-    env,
-    // the next init container (seeding) starts once the client side accepts connections
-    startupProbe: {
-      exec: {
-        command: [AGENT_IMAGE_PATH, 'tcp', '127.0.0.1', String(SEGMENT_PROXY_PORT)],
-      },
-      periodSeconds: 1,
-      failureThreshold: 60,
-    },
-    resources: { requests: { cpu: '10m', memory: '8Mi' } },
-    securityContext: {
-      runAsNonRoot: true,
-      runAsUser: 65532,
-      runAsGroup: 65532,
-      allowPrivilegeEscalation: false,
-      readOnlyRootFilesystem: true,
-      capabilities: { drop: ['ALL'] },
-    },
-    volumeMounts: [
-      { name: SEGMENT_TLS_VOLUME, mountPath: SEGMENT_TLS_DIR, readOnly: true },
-      { name: SEGMENT_TLS_PEERS_VOLUME, mountPath: SEGMENT_TLS_PEERS_DIR, readOnly: true },
-    ],
-  };
 }
 
 function volumes(cluster: FirebirdCluster): V1Volume[] {
@@ -109,16 +66,24 @@ const withEnv = (c: V1Container, env: V1EnvVar[]): V1Container => ({
 });
 
 /**
- * The pod spec with segment TLS: the proxy sidecar (server side too for instance pods), the
- * certificate volume, SEGMENT_PROXY for every container, and the segment server on localhost
+ * Whether the instance pod serves its segments over TLS: its certificates are mounted (with the
+ * proxy sidecar of before v0.171.0, or in the agent's own containers since)
+ */
+export function podHasSegmentTls(spec: V1PodSpec | undefined): boolean {
+  return (spec?.volumes ?? []).some((v) => v.name === SEGMENT_TLS_VOLUME);
+}
+
+/**
+ * The pod spec with segment TLS: the certificates in the containers of the agent's processes
+ * (SEGMENT_TLS for its clients), and in an instance pod the segment server's TLS port with a
+ * plain listener on localhost
  */
 export function withSegmentTls<T extends V1PodSpec>(cluster: FirebirdCluster, spec: T, instance: boolean): T {
   if (!segmentTlsEnabled(cluster)) return spec;
-  const proxy: V1EnvVar = { name: 'SEGMENT_PROXY', value: `127.0.0.1:${SEGMENT_PROXY_PORT}` };
-  // an instance's agent does its own TLS: the certificates and the operator's peers in its containers
-  const ownTls = instance;
-  const certificates = (c: V1Container): V1Container => ({
+  const client: V1EnvVar = { name: 'SEGMENT_TLS', value: 'true' };
+  const certificates = (c: V1Container, env: V1EnvVar[]): V1Container => ({
     ...withEnv(c, [
+      ...env,
       { name: 'SEGMENT_TLS_DIR', value: SEGMENT_TLS_DIR },
       { name: 'SEGMENT_TLS_PEERS_DIR', value: SEGMENT_TLS_PEERS_DIR },
     ]),
@@ -129,22 +94,21 @@ export function withSegmentTls<T extends V1PodSpec>(cluster: FirebirdCluster, sp
     ],
   });
   const container = (c: V1Container): V1Container => {
-    if (!SEGMENT_SERVERS.includes(c.name)) {
-      const client = withEnv(c, [proxy]);
-      return ownTls && AGENT_TLS_CONTAINERS.includes(c.name) ? certificates(client) : client;
-    }
-    const local: V1EnvVar = { name: 'SEGMENT_LISTEN', value: `127.0.0.1:${SEGMENT_SERVER_LOCAL_PORT}` };
-    // the agent's front keeps the segment port and accepts mutual TLS on it itself; the plain
-    // listener is for the pod's own clients, as behind the proxy
-    if (ownTls) return certificates(withEnv(c, [proxy, local, { name: 'SEGMENT_TLS_LISTEN', value: `0.0.0.0:${SEGMENT_PORT}` }]));
-    // the proxy owns the segment port
-    const { ports, ...rest } = c;
-    const others = (ports ?? []).filter((p) => p.containerPort !== SEGMENT_PORT);
-    return withEnv({ ...rest, ...(others.length ? { ports: others } : {}) }, [proxy, local]);
+    // a Job's programs: clients of the instances (a native sidecar of a Job is none of them)
+    if (!instance) return c.restartPolicy === 'Always' ? c : certificates(c, [client]);
+    if (CLIENTS.includes(c.name)) return certificates(c, [client]);
+    if (!SEGMENT_SERVERS.includes(c.name)) return c;
+    // mutual TLS on the segment port; plain text on localhost for the pod's own clients (the
+    // Lease holder); its own requests to the other instances (the isolation check) over TLS
+    return certificates(c, [
+      client,
+      { name: 'SEGMENT_LISTEN', value: `127.0.0.1:${SEGMENT_SERVER_LOCAL_PORT}` },
+      { name: 'SEGMENT_TLS_LISTEN', value: `0.0.0.0:${SEGMENT_PORT}` },
+    ]);
   };
   return {
     ...spec,
-    initContainers: [sidecar(), ...(spec.initContainers ?? []).map(container)],
+    ...(spec.initContainers ? { initContainers: spec.initContainers.map(container) } : {}),
     containers: spec.containers.map(container),
     volumes: [...(spec.volumes ?? []), ...volumes(cluster)],
   };

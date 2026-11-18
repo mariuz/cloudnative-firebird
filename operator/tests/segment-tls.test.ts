@@ -1,208 +1,197 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { spawn, ChildProcess } from 'child_process';
-import { mkdtempSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { createServer, Server, Socket } from 'net';
+import { createServer } from 'net';
 import { createTlsCertificates } from '../src/utils/certificates';
-import { parsePeers, peerName, SegmentTlsFiles, SegmentTlsPeers, startClient, startServer } from '../src/segment-tls';
 import { agentBin } from './helpers/implementations';
 
-const certs = (caName: string): SegmentTlsFiles => {
+/**
+ * Segment TLS between the agent's processes (spec.segmentTLS, agent/fb-agent/src/tls.rs): the
+ * segment server accepts mutual TLS on its port (SEGMENT_TLS_LISTEN) and plain text on localhost
+ * (SEGMENT_LISTEN), and a client (`fb-agent request`, as the puller, the replication init and the
+ * Jobs' programs connect) makes TLS itself with SEGMENT_TLS=true. Since v0.171.0 there is no proxy
+ * between them.
+ *
+ * Needs the fb-agent binary (FB_AGENT_BIN, or a build in agent/target); the "Rust agent" CI job
+ * runs this file with it.
+ */
+
+/** The cluster's certificates in a directory, as the Secret is mounted (SEGMENT_TLS_DIR) */
+const certificates = (root: string, name: string, caName: string): string => {
   const c = createTlsCertificates({ caName, dnsNames: ['*.db-headless'], clientAuth: true });
-  return { ca: c.caCert, cert: c.tlsCert, key: c.tlsKey };
+  const dir = join(root, name);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'ca.crt'), c.caCert);
+  writeFileSync(join(dir, 'tls.key'), c.tlsKey);
+  // last: the files are read again when tls.crt changes
+  writeFileSync(join(dir, 'tls.crt'), c.tlsCert);
+  return dir;
 };
 
-const listen = (server: Server): Promise<number> =>
-  new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve((server.address() as { port: number }).port)));
+/** What the operator publishes while a cluster switches (SEGMENT_TLS_PEERS_DIR) */
+const peers = (root: string, name: string, data: { plainPeers?: string; acceptPlainUntil?: number }): string => {
+  const dir = join(root, name);
+  mkdirSync(dir, { recursive: true });
+  if (data.plainPeers !== undefined) writeFileSync(join(dir, 'plain-peers'), data.plainPeers);
+  if (data.acceptPlainUntil !== undefined) writeFileSync(join(dir, 'accept-plain-until'), String(data.acceptPlainUntil));
+  return dir;
+};
 
-/** One exchange as a plain client does it: lines out, everything until the server closes back */
-const exchange = (port: number, text: string): Promise<string> =>
-  new Promise((resolve, reject) => {
-    const socket = new Socket();
-    let data = '';
-    socket.on('data', (c) => (data += c.toString()));
-    socket.once('error', reject);
-    socket.once('close', () => resolve(data));
-    socket.connect(port, '127.0.0.1', () => socket.write(text));
-  });
-
-describe('segment TLS proxy', () => {
-  const servers: Server[] = [];
-  afterEach(() => servers.splice(0).forEach((s) => s.close()));
-
-  /** A segment server stand-in: answers "OK <first line>" (and what followed it) and closes */
-  async function segmentServer(): Promise<{ port: number; seen: string[] }> {
-    const seen: string[] = [];
-    const server = createServer((s) => {
-      let data = '';
-      s.on('data', (c) => {
-        data += c.toString();
-        if (data.includes('\n')) {
-          seen.push(data);
-          s.end(`OK ${data.split('\n')[0]}\n`);
-        }
-      });
+const freePort = (): Promise<number> =>
+  new Promise((resolve) => {
+    const probe = createServer();
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address() as { port: number };
+      probe.close(() => resolve(port));
     });
-    servers.push(server);
-    return { port: await listen(server), seen };
-  }
-
-  async function pair(serverFiles: SegmentTlsFiles, clientFiles: SegmentTlsFiles) {
-    const target = await segmentServer();
-    const tlsServer = await startServer(() => serverFiles, 0, { host: '127.0.0.1', port: target.port }, '127.0.0.1');
-    servers.push(tlsServer);
-    const client = await startClient(() => clientFiles, 0);
-    servers.push(client);
-    return {
-      target,
-      tlsPort: (tlsServer.address() as { port: number }).port,
-      clientPort: (client.address() as { port: number }).port,
-    };
-  }
-
-  it('relays a request over mutual TLS between the client and server sides', async () => {
-    const files = certs('cluster db CA');
-    const p = await pair(files, files);
-    const reply = await exchange(p.clientPort, `CONNECT 127.0.0.1 ${p.tlsPort}\nSIG1 1 2 3 PING\n`);
-    expect(reply).toBe('OK SIG1 1 2 3 PING\n');
-    // the segment server saw the request as sent, without the CONNECT line
-    expect(p.target.seen).toEqual(['SIG1 1 2 3 PING\n']);
   });
 
-  it('carries data sent after the request line (STORE) and a second request', async () => {
-    const files = certs('cluster db CA');
-    const p = await pair(files, files);
-    expect(await exchange(p.clientPort, `CONNECT 127.0.0.1 ${p.tlsPort}\nSTORE x.nbk 5\nhello`)).toBe('OK STORE x.nbk 5\n');
-    expect(p.target.seen[0]).toMatch(/^STORE x\.nbk 5\n/);
-    expect(await exchange(p.clientPort, `CONNECT 127.0.0.1 ${p.tlsPort}\nLIST\n`)).toBe('OK LIST\n');
-  });
-
-  it('accepts plain connections only while the operator allows them (switching segment TLS)', async () => {
-    const files = certs('cluster db CA');
-    const target = await segmentServer();
-    let peers: SegmentTlsPeers = { plain: new Set(), acceptPlainUntil: 2_000 };
-    let clock = 1_000;
-    const tlsServer = await startServer(() => files, 0, { host: '127.0.0.1', port: target.port }, '127.0.0.1', () => peers, () => clock);
-    servers.push(tlsServer);
-    const tlsPort = (tlsServer.address() as { port: number }).port;
-    // an instance or Job without the proxy yet: plain text, forwarded as it is
-    expect(await exchange(tlsPort, 'SIG1 1 2 3 PING\n')).toBe('OK SIG1 1 2 3 PING\n');
-    // TLS on the same port meanwhile
-    const client = await startClient(() => files, 0);
-    servers.push(client);
-    const clientPort = (client.address() as { port: number }).port;
-    expect(await exchange(clientPort, `CONNECT 127.0.0.1 ${tlsPort}\nLIST\n`)).toBe('OK LIST\n');
-    // the switch is over: TLS only
-    clock = 2_000;
-    expect(await exchange(tlsPort, 'SIG1 1 2 3 PING\n').catch(() => '')).toBe('');
-    peers = { plain: new Set(), acceptPlainUntil: 0 };
-    expect(await exchange(clientPort, `CONNECT 127.0.0.1 ${tlsPort}\nLIST\n`)).toBe('OK LIST\n');
-    expect(target.seen).toEqual(['SIG1 1 2 3 PING\n', 'LIST\n', 'LIST\n']);
-    // every connection was closed on both ends
-    await new Promise((r) => setTimeout(r, 50));
-    const open = await new Promise<number>((r) => tlsServer.getConnections((_e, n) => r(n)));
-    expect(open).toBe(0);
-  });
-
-  it('connects in plain text to the instances the operator lists as plain, and only to those', async () => {
-    const files = certs('cluster db CA');
-    const target = await segmentServer();
-    const peers: SegmentTlsPeers = { plain: new Set(['localhost']), acceptPlainUntil: 0 };
-    const client = await startClient(() => files, 0, '127.0.0.1', () => peers);
-    servers.push(client);
-    const clientPort = (client.address() as { port: number }).port;
-    // "localhost" is listed: plain, straight to the segment server
-    expect(await exchange(clientPort, `CONNECT localhost ${target.port}\nPING\n`)).toBe('OK PING\n');
-    // 127.0.0.1 is not: TLS, which a plain segment server does not answer with OK
-    expect(await exchange(clientPort, `CONNECT 127.0.0.1 ${target.port}\nPING\n`).catch(() => '')).not.toMatch(/^OK PING/);
-  });
-
-  it('reads the peers the operator publishes, ignoring anything that is not a pod name', () => {
-    expect(parsePeers('db-0\ndb-2\n', '1700000000000')).toEqual({ plain: new Set(['db-0', 'db-2']), acceptPlainUntil: 1700000000000 });
-    expect(parsePeers(undefined, undefined)).toEqual({ plain: new Set(), acceptPlainUntil: 0 });
-    expect(parsePeers('db-0 ../x DB-1', 'soon')).toEqual({ plain: new Set(['db-0']), acceptPlainUntil: 0 });
-    expect(peerName('db-1.db-headless.prod.svc')).toBe('db-1');
-  });
-
-  it('refuses plain connections and peers of another cluster', async () => {
-    const files = certs('cluster db CA');
-    const p = await pair(files, files);
-    // a plain client on the TLS port gets a TLS alert at most, never the segment server's answer
-    expect(await exchange(p.tlsPort, 'PING\n').catch(() => '')).not.toMatch(/OK/);
-    expect(p.target.seen).toEqual([]);
-    // a client whose certificate another CA signed
-    const other = certs('cluster other CA');
-    const stranger = await startClient(() => other, 0);
-    servers.push(stranger);
-    const port = (stranger.address() as { port: number }).port;
-    expect(await exchange(port, `CONNECT 127.0.0.1 ${p.tlsPort}\nPING\n`).catch(() => '')).toBe('');
-    expect(p.target.seen).toEqual([]);
-  });
-
-  it('answers a malformed first line without connecting anywhere', async () => {
-    const files = certs('cluster db CA');
-    const client = await startClient(() => files, 0);
-    servers.push(client);
-    expect(await exchange((client.address() as { port: number }).port, 'PING\n')).toBe('ERR expected CONNECT <host> <port>\n');
-  });
-});
-
-/** A port no other server listens on */
-const freePort = async (): Promise<number> => {
-  const probe = createServer();
-  const port = await listen(probe);
-  await new Promise((resolve) => probe.close(resolve));
-  return port;
-};
-
-describe.runIf(agentBin)('segment TLS with the agent\'s segment server and client', () => {
+describe.runIf(agentBin)('segment TLS between the agent\'s segment server and its clients', { timeout: 30_000 }, () => {
   const children: ChildProcess[] = [];
-  const servers: Server[] = [];
+  const dirs: string[] = [];
   afterEach(() => {
-    children.splice(0).forEach((c) => c.kill());
-    servers.splice(0).forEach((s) => s.close());
+    children.splice(0).forEach((c) => c.kill('SIGKILL'));
+    dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true }));
   });
+  const root = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'segment-tls-'));
+    dirs.push(dir);
+    return dir;
+  };
 
-  it('serves signed requests through both proxies, the server on localhost only', { timeout: 20_000 }, async () => {
-    const data = mkdtempSync(join(tmpdir(), 'fb-data-'));
+  /** A files-only segment server: TLS on `tls`, plain on localhost `plain` */
+  async function server(at: string, tlsDir: string, peersDir?: string) {
+    const data = join(at, 'data');
+    mkdirSync(data, { recursive: true });
     writeFileSync(join(data, 'old.fdb'), 'x');
-    const [inner, outer] = [await freePort(), await freePort()];
-    const server = spawn(agentBin!, ['segment-server'], {
+    const [plain, tls] = [await freePort(), await freePort()];
+    const child = spawn(agentBin!, ['segment-server'], {
       env: {
         PATH: process.env.PATH,
         FILES_ONLY: 'true',
         DATABASE_PATH: join(data, 'mydb.fdb'),
         ISC_PASSWORD: 'tok',
-        SEGMENT_PORT: String(outer),
-        SEGMENT_LISTEN: `127.0.0.1:${inner}`,
+        SEGMENT_LISTEN: `127.0.0.1:${plain}`,
+        SEGMENT_TLS_LISTEN: `127.0.0.1:${tls}`,
+        SEGMENT_TLS_DIR: tlsDir,
+        ...(peersDir ? { SEGMENT_TLS_PEERS_DIR: peersDir } : {}),
       },
     });
-    children.push(server);
-    const files = certs('cluster db CA');
-    servers.push(await startServer(() => files, outer, { host: '127.0.0.1', port: inner }, '127.0.0.1'));
-    const client = await startClient(() => files, 0);
-    servers.push(client);
-    const proxy = `127.0.0.1:${(client.address() as { port: number }).port}`;
-    const request = (...args: string[]) =>
-      new Promise<string>((resolve) => {
-        const c = spawn(agentBin!, ['request', '127.0.0.1', ...args], {
-          env: { PATH: process.env.PATH, ISC_PASSWORD: 'tok', SEGMENT_PORT: String(outer), SEGMENT_PROXY: proxy },
+    children.push(child);
+    let out = '';
+    child.stdout!.on('data', (d) => (out += d));
+    child.stderr!.on('data', (d) => (out += d));
+    for (let i = 0; i < 100 && !out.includes('accepts mutual TLS itself'); i++) await new Promise((r) => setTimeout(r, 50));
+    expect(out).toContain(`segment TLS: the segment server accepts mutual TLS itself on 127.0.0.1:${tls}`);
+    return { plain, tls };
+  }
+
+  /** `fb-agent request <host> <words>`: what it prints (stdout and stderr), and its exit status */
+  const request = (host: string, port: number, env: Record<string, string>, ...words: string[]) =>
+    new Promise<{ out: string; code: number | null }>((resolve) => {
+      const c = spawn(agentBin!, ['request', host, ...words], {
+        env: { PATH: process.env.PATH, ISC_PASSWORD: 'tok', SEGMENT_PORT: String(port), ...env },
+      });
+      let out = '';
+      c.stdout.on('data', (d) => (out += d));
+      c.stderr.on('data', (d) => (out += d));
+      c.on('close', (code) => resolve({ out: out.trim(), code }));
+    });
+
+  it('answers a signed request over mutual TLS, plain text on localhost only', async () => {
+    const at = root();
+    const files = certificates(at, 'tls', 'cluster db CA');
+    const { plain, tls } = await server(at, files);
+    const client = { SEGMENT_TLS: 'true', SEGMENT_TLS_DIR: files };
+    expect(await request('127.0.0.1', tls, client, 'EXISTS', 'old.fdb')).toEqual({ out: 'OK yes', code: 0 });
+    expect((await request('127.0.0.1', tls, client, 'EXISTS', 'new.fdb')).out).toBe('OK no');
+    // the pod's own clients (the Lease holder) on the plain listener
+    expect((await request('127.0.0.1', plain, {}, 'EXISTS', 'old.fdb')).out).toBe('OK yes');
+    // plain text on the TLS port: refused (no switch in progress)
+    expect((await request('127.0.0.1', tls, {}, 'EXISTS', 'old.fdb')).out).not.toMatch(/^OK/);
+    // TLS to the plain listener: no handshake, no reply
+    expect((await request('127.0.0.1', plain, client, 'EXISTS', 'old.fdb')).code).not.toBe(0);
+  });
+
+  it('carries a large upload and a large download unchanged (the backup files)', async () => {
+    const at = root();
+    const files = certificates(at, 'tls', 'cluster db CA');
+    const { tls } = await server(at, files);
+    const work = join(at, 'work');
+    mkdirSync(work);
+    const big = Buffer.alloc(5 * 1024 * 1024 + 7);
+    for (let i = 0; i < big.length; i++) big[i] = (i * 31 + 7) & 0xff;
+    writeFileSync(join(work, 'up.nbk'), big);
+    const backupFile = (...args: string[]) =>
+      new Promise<{ out: string; code: number | null }>((resolve) => {
+        const c = spawn(agentBin!, ['backup-file', ...args], {
+          env: { PATH: process.env.PATH, ISC_PASSWORD: 'tok', FIREBIRD_HOST: '127.0.0.1', SEGMENT_PORT: String(tls), SEGMENT_TLS: 'true', SEGMENT_TLS_DIR: files },
         });
         let out = '';
         c.stdout.on('data', (d) => (out += d));
         c.stderr.on('data', (d) => (out += d));
-        c.on('close', () => resolve(out.trim()));
+        c.on('close', (code) => resolve({ out: out.trim(), code }));
       });
-    let reply = '';
-    for (let i = 0; i < 50 && !reply.startsWith('OK'); i++) {
-      reply = await request('EXISTS', 'old.fdb');
-      if (!reply.startsWith('OK')) await new Promise((r) => setTimeout(r, 100));
-    }
-    // signed (the PING probe and the request both went through the proxies)
-    expect(reply).toBe('OK yes');
-    expect(await request('EXISTS', 'new.fdb')).toBe('OK no');
-    // only the TLS proxy listens on the segment port: the server itself is on localhost:inner
-    expect(await exchange(outer, 'tok EXISTS old.fdb\n').catch(() => '')).not.toMatch(/OK/);
+    expect(await backupFile('put', join(work, 'up.nbk'), 'up.nbk')).toEqual({ out: `copied ${join(work, 'up.nbk')} (${big.length} bytes) to up.nbk on 127.0.0.1`, code: 0 });
+    expect(readFileSync(join(at, 'data', 'up.nbk')).equals(big)).toBe(true);
+    expect(await backupFile('get', 'up.nbk', join(work, 'down.nbk'))).toEqual({ out: `copied up.nbk (${big.length} bytes) from 127.0.0.1`, code: 0 });
+    expect(readFileSync(join(work, 'down.nbk')).equals(big)).toBe(true);
+  });
+
+  it('accepts plain connections on its TLS port only until the operator\'s accept-plain-until', async () => {
+    const at = root();
+    const files = certificates(at, 'tls', 'cluster db CA');
+    const switching = peers(at, 'peers', { plainPeers: '', acceptPlainUntil: Date.now() + 60_000 });
+    const { tls } = await server(at, files, switching);
+    expect((await request('127.0.0.1', tls, {}, 'EXISTS', 'old.fdb')).out).toBe('OK yes');
+    // the grace period is over: read again for every connection
+    writeFileSync(join(switching, 'accept-plain-until'), String(Date.now() - 1));
+    expect((await request('127.0.0.1', tls, {}, 'EXISTS', 'old.fdb')).out).not.toMatch(/^OK/);
+    // TLS all along
+    expect((await request('127.0.0.1', tls, { SEGMENT_TLS: 'true', SEGMENT_TLS_DIR: files }, 'EXISTS', 'old.fdb')).out).toBe('OK yes');
+  });
+
+  it('connects in plain text to the instances the operator lists as plain, and only to those', async () => {
+    const at = root();
+    const files = certificates(at, 'tls', 'cluster db CA');
+    const { plain } = await server(at, files);
+    // "localhost" stands for an instance not restarted with TLS yet
+    const listed = peers(at, 'listed', { plainPeers: 'localhost\n' });
+    const env = { SEGMENT_TLS: 'true', SEGMENT_TLS_DIR: files, SEGMENT_TLS_PEERS_DIR: listed };
+    expect((await request('localhost', plain, env, 'EXISTS', 'old.fdb')).out).toBe('OK yes');
+    // not listed: TLS, which a plain server does not answer
+    const others = peers(at, 'others', { plainPeers: 'db-0\n' });
+    const tlsOnly = await request('localhost', plain, { ...env, SEGMENT_TLS_PEERS_DIR: others }, 'EXISTS', 'old.fdb');
+    expect(tlsOnly.code).not.toBe(0);
+    expect(tlsOnly.out).not.toMatch(/^OK/);
+  });
+
+  it('refuses a peer of another cluster, both ways, and never falls back to plain text', async () => {
+    const at = root();
+    const files = certificates(at, 'tls', 'cluster db CA');
+    const stranger = certificates(at, 'stranger', 'cluster other CA');
+    const { tls } = await server(at, files);
+    const refused = await request('127.0.0.1', tls, { SEGMENT_TLS: 'true', SEGMENT_TLS_DIR: stranger }, 'EXISTS', 'old.fdb');
+    expect(refused.code).not.toBe(0);
+    expect(refused.out).toContain('is not an instance of this cluster (the TLS handshake failed)');
+    // without its certificates a client sends nothing
+    const none = await request('127.0.0.1', tls, { SEGMENT_TLS: 'true', SEGMENT_TLS_DIR: '' }, 'EXISTS', 'old.fdb');
+    expect(none.code).not.toBe(0);
+    expect(none.out).toContain('segment TLS: no certificates in SEGMENT_TLS_DIR');
+  });
+
+  it('takes renewed certificates without a restart', async () => {
+    const at = root();
+    const files = certificates(at, 'tls', 'cluster db CA');
+    const renewed = certificates(at, 'renewed', 'cluster db CA, renewed');
+    const { tls } = await server(at, files);
+    const client = { SEGMENT_TLS: 'true', SEGMENT_TLS_DIR: renewed };
+    expect((await request('127.0.0.1', tls, client, 'EXISTS', 'old.fdb')).code).not.toBe(0);
+    // the Secret's new files reach the mounted directory
+    await new Promise((r) => setTimeout(r, 20));
+    for (const name of ['ca.crt', 'tls.key', 'tls.crt']) writeFileSync(join(files, name), readFileSync(join(renewed, name)));
+    expect((await request('127.0.0.1', tls, client, 'EXISTS', 'old.fdb')).out).toBe('OK yes');
   });
 });

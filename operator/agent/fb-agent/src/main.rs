@@ -3,8 +3,8 @@
 //!
 //!   fb-agent version
 //!   fb-agent request <host> <request...>   one request to a segment server, the reply on stdout
-//!                                          (as segment-request.pl); ISC_PASSWORD, SEGMENT_PORT,
-//!                                          SEGMENT_PROXY (the segment TLS proxy's client side)
+//!                                          ISC_PASSWORD, SEGMENT_PORT, SEGMENT_TLS (with
+//!                                          SEGMENT_TLS_DIR: mutual TLS)
 //!   fb-agent serve                         answers PING to signed requests, on SEGMENT_LISTEN
 //!                                          (host:port) or SEGMENT_PORT (0: a free port);
 //!                                          ISC_PASSWORD, AUTH_WINDOW_SECONDS
@@ -16,7 +16,6 @@
 //!   fb-agent backup-file | fetch-segments | pitr-plan | cut-segment | switchover | failover |
 //!            sync-standby                  the Jobs' programs (jobs.rs)
 //!   fb-agent segment-server                the segment server (server.rs)
-//!                                          for what it does not answer
 
 mod background;
 mod backups;
@@ -112,7 +111,6 @@ fn main() -> ExitCode {
         ["serve"] => serve(),
         ["puller"] => puller::run(),
         ["isolation-check"] => isolation::command().map_err(io::Error::other),
-        ["segment-tls"] => tls::run(),
         ["lease-holder"] => lease::run(),
         ["metrics-exporter"] => metrics::run(),
         // the Jobs' programs: their own messages and exit status (jobs.rs)
@@ -123,18 +121,13 @@ fn main() -> ExitCode {
         ["switchover"] => return job(jobs::switchover()),
         ["failover"] => return job(jobs::failover()),
         ["sync-standby"] => return job(jobs::sync_standby()),
-        // for probes: whether something listens there
-        ["tcp", host, port] => port
-            .parse::<u16>()
-            .map_err(io::Error::other)
-            .and_then(|port| TcpStream::connect((*host, port)).map(|_| ())),
         ["fetch-seed", host, target] => init::fetch_seed(host, target),
         ["replica-control", arguments @ ..] => init::replica_control(arguments),
         ["set-repl-seq", database, sequence] => init::set_sequence(database, sequence),
         ["reposition", sequence, control] => init::reposition(sequence, control),
         ["segment-server"] => server::run(),
         _ => {
-            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | segment-tls | lease-holder | metrics-exporter | backup-file ... | fetch-segments | pitr-plan ... | cut-segment <file> <length> | switchover | failover | sync-standby | tcp <host> <port> | segment-server");
+            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | lease-holder | metrics-exporter | backup-file ... | fetch-segments | pitr-plan ... | cut-segment <file> <length> | switchover | failover | sync-standby | segment-server");
             return ExitCode::from(2);
         }
     };

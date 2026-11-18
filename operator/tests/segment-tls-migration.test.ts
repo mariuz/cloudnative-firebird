@@ -13,9 +13,10 @@ const idle = (annotation?: string, overrides: Partial<FirebirdCluster['spec']> =
   cluster.status = { phase: 'Running', readyInstances: 3 };
   return cluster;
 };
-const pod = (name: string, proxy: boolean, ready = true): V1Pod => ({
+/** an instance pod; `tls`: its certificates are mounted (it serves its segments over TLS) */
+const pod = (name: string, tls: boolean, ready = true): V1Pod => ({
   metadata: { name },
-  spec: { initContainers: proxy ? [{ name: 'segment-tls' }] : [], containers: [] },
+  spec: { containers: [], volumes: tls ? [{ name: 'segment-tls', secret: { secretName: 'test-cluster-segment-tls' } }] : [] },
   status: { phase: 'Running', conditions: [{ type: 'Ready', status: ready ? 'True' : 'False' }] },
 });
 
@@ -61,7 +62,7 @@ describe('moving existing clusters to segment TLS', () => {
     expect(migrationStep(idle('pinned'), 'pinned', true, [], [idle('pinned')]).action).toBe('start');
   });
 
-  it('finishes once every instance runs the proxy, and steps back when the owner turns it off again', () => {
+  it('finishes once every instance serves over TLS, and steps back when the owner turns it off again', () => {
     const migrating = idle('in-progress', { segmentTLS: { enabled: true } });
     const pods = [pod('test-cluster-0', false), pod('test-cluster-1', true), pod('test-cluster-2', true)];
     // continues even with the setting off: it was started

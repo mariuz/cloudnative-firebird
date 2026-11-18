@@ -67,7 +67,7 @@ describe.skipIf(!agentBin)('the replication init helpers of fb-agent', () => {
   /** the working directory */
   const dirs = () => ({ agent: join(root, 'agent') });
   const run = (command: string, args: string[], env: Record<string, string> = {}) => {
-    const done = spawnSync(command, args, { env: { ...process.env, ISC_PASSWORD: 'tok', SEGMENT_PROXY: '', ...env } });
+    const done = spawnSync(command, args, { env: { ...process.env, ISC_PASSWORD: 'tok', SEGMENT_TLS: '', ...env } });
     return { status: done.status, out: done.stdout.toString(), err: done.stderr.toString() };
   };
   /** runs the agent's command in its directory (`{}` in an argument) */

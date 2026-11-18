@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { AGENT_ANNOTATION, agentErrors } from '../src/utils/agent';
-import { V1PodSpec } from '@kubernetes/client-node';
 import { buildConfigMap, buildStatefulSet, statefulSetNeedsUpdate } from '../src/utils/resources';
 import { AGENT_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { buildFailoverJob } from '../src/utils/switchover';
@@ -64,11 +63,11 @@ describe('the Rust agent in the instance pods', () => {
     const puller = pod(cluster).containers.find((c) => c.name === 'segment-puller')!;
     expect(puller.command).toEqual(['/opt/fb-agent/fb-agent', 'puller']);
     // the installer comes after the native sidecars, which stay first, and before the replication init
-    expect(pod(cluster).initContainers!.map((c) => c.name)).toEqual(['segment-tls', 'lease-holder', 'agent-install', 'security-db-init', 'replication-init']);
+    expect(pod(cluster).initContainers!.map((c) => c.name)).toEqual(['lease-holder', 'agent-install', 'security-db-init', 'replication-init']);
     const server = pod(cluster).containers.find((c) => c.name === 'segment-server')!;
     expect(server.command).toEqual(['/opt/fb-agent/fb-agent', 'segment-server']);
     expect(server.env).toContainEqual({ name: 'SEGMENT_LISTEN', value: '127.0.0.1:3061' });
-    expect(puller.env).toContainEqual({ name: 'SEGMENT_PROXY', value: '127.0.0.1:3052' });
+    expect(puller.env).toContainEqual({ name: 'SEGMENT_TLS', value: 'true' });
   });
 
   it('runs the replication init with the agent\'s helpers', () => {
@@ -101,7 +100,7 @@ describe('the Rust agent in the instance pods', () => {
     // with segment TLS the init has the certificates: its seed is fetched over TLS made by the agent
     const tls = pod(makeCluster({ replication: { enabled: true }, segmentTLS: { enabled: true } })).initContainers!.find((c) => c.name === 'replication-init')!;
     expect(tls.env).toContainEqual({ name: 'SEGMENT_TLS_DIR', value: '/etc/segment-tls' });
-    expect(tls.env).toContainEqual({ name: 'SEGMENT_PROXY', value: '127.0.0.1:3052' });
+    expect(tls.env).toContainEqual({ name: 'SEGMENT_TLS', value: 'true' });
     expect(tls.volumeMounts).toContainEqual({ name: 'segment-tls', mountPath: '/etc/segment-tls', readOnly: true });
   });
 
@@ -143,20 +142,13 @@ describe('the Rust agent in the instance pods', () => {
     expect(Object.keys(buildConfigMap(makeCluster())!.data!).sort()).toEqual(['pitr-restore.sh']);
   });
 
-  it('runs the segment TLS proxy from the agent, in the instance pods and in the Jobs', () => {
+  it('does segment TLS in the agent\'s own processes, with no proxy sidecar (v0.171.0)', () => {
     const cluster = makeCluster({ instances: 3, replication: { enabled: true }, segmentTLS: { enabled: true } });
-    const proxy = (spec: V1PodSpec) => spec.initContainers!.find((c) => c.name === 'segment-tls')!;
-    const agent = proxy(pod(cluster));
-    expect(agent.command).toEqual(['/app/fb-agent', 'segment-tls']);
-    expect(agent.startupProbe!.exec!.command).toEqual(['/app/fb-agent', 'tcp', '127.0.0.1', '3052']);
-    expect(agent.resources).toEqual({ requests: { cpu: '10m', memory: '8Mi' } });
-    expect(agent.image).toMatch(/cloudnative-firebird/);
-    // the agent's own processes do their TLS themselves: the segment server on the segment port,
-    // the puller to the primary; the proxy keeps its client side for the pod's other clients
     const spec = pod(cluster);
-    const env = (name: string) => Object.fromEntries((spec.containers.find((c) => c.name === name)!.env ?? []).map((e) => [e.name, e.value]));
-    expect(agent.env!.map((e) => e.name)).toEqual(['SEGMENT_TLS_DIR', 'SEGMENT_TLS_PEERS_DIR', 'CLIENT_LISTEN']);
-    expect(agent.ports).toBeUndefined();
+    const all = [...spec.initContainers!, ...spec.containers];
+    expect(all.map((c) => c.name)).not.toContain('segment-tls');
+    expect(all.flatMap((c) => (c.env ?? []).map((e) => e.name))).not.toContain('SEGMENT_PROXY');
+    const env = (name: string) => Object.fromEntries((all.find((c) => c.name === name)!.env ?? []).map((e) => [e.name, e.value]));
     const server = spec.containers.find((c) => c.name === 'segment-server')!;
     expect(server.ports).toContainEqual(expect.objectContaining({ containerPort: 3051 }));
     expect(env('segment-server')).toMatchObject({
@@ -164,29 +156,33 @@ describe('the Rust agent in the instance pods', () => {
       SEGMENT_LISTEN: '127.0.0.1:3061',
       SEGMENT_TLS_DIR: '/etc/segment-tls',
       SEGMENT_TLS_PEERS_DIR: '/etc/segment-tls-peers',
-      SEGMENT_PROXY: '127.0.0.1:3052',
+      SEGMENT_TLS: 'true',
     });
-    expect(env('segment-puller')).toMatchObject({ SEGMENT_TLS_DIR: '/etc/segment-tls', SEGMENT_PROXY: '127.0.0.1:3052' });
-    for (const name of ['segment-server', 'segment-puller']) {
-      expect(spec.containers.find((c) => c.name === name)!.volumeMounts).toEqual(
+    for (const name of ['segment-puller', 'replication-init']) {
+      expect(env(name)).toMatchObject({ SEGMENT_TLS_DIR: '/etc/segment-tls', SEGMENT_TLS_PEERS_DIR: '/etc/segment-tls-peers', SEGMENT_TLS: 'true' });
+    }
+    for (const name of ['segment-server', 'segment-puller', 'replication-init']) {
+      expect(all.find((c) => c.name === name)!.volumeMounts).toEqual(
         expect.arrayContaining([
           { name: 'segment-tls', mountPath: '/etc/segment-tls', readOnly: true },
           { name: 'segment-tls-peers', mountPath: '/etc/segment-tls-peers', readOnly: true },
         ]),
       );
     }
-    // the database container goes through the proxy
+    // the database container is no client of the segment servers: no certificates
     expect(env('firebird').SEGMENT_TLS_DIR).toBeUndefined();
-    expect(env('firebird').SEGMENT_PROXY).toBe('127.0.0.1:3052');
+    expect(env('firebird').SEGMENT_TLS).toBeUndefined();
     // without replication: the backup file server, the same way
     const single = pod(makeCluster({ segmentTLS: { enabled: true } }));
     const files = single.containers.find((c) => c.name === 'backup-files')!;
     expect(files.env).toContainEqual({ name: 'SEGMENT_TLS_LISTEN', value: '0.0.0.0:3051' });
-    expect(proxy(single).env!.map((e) => e.name)).not.toContain('SERVER_LISTEN');
-    // the Jobs' proxy, client side only
-    const job = proxy(buildFailoverJob(cluster, ['test-cluster-1']).spec!.template.spec!);
-    expect(job.command).toEqual(['/app/fb-agent', 'segment-tls']);
-    expect(job.env!.map((e) => e.name)).toEqual(['SEGMENT_TLS_DIR', 'SEGMENT_TLS_PEERS_DIR', 'CLIENT_LISTEN']);
+    expect(single.initContainers!.map((c) => c.name)).not.toContain('segment-tls');
+    // a Job's programs: the certificates in its own containers, the agent installed first
+    const job = buildFailoverJob(cluster, ['test-cluster-1']).spec!.template.spec!;
+    expect(job.initContainers!.map((c) => c.name)).not.toContain('segment-tls');
+    expect(job.initContainers![0].name).toBe('agent-install');
+    const failover = job.containers.find((c) => c.command?.includes('failover'))!;
+    expect(Object.fromEntries((failover.env ?? []).map((e) => [e.name, e.value]))).toMatchObject({ SEGMENT_TLS_DIR: '/etc/segment-tls', SEGMENT_TLS: 'true' });
   });
 
   it('accepts the annotation\'s values of before v0.170.0 only', () => {
