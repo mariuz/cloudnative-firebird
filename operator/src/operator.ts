@@ -3,7 +3,7 @@ import { WebhookServer } from './utils/webhook';
 import { apiLookups, createAdmissionValidator } from './utils/admission';
 import { CoreV1Api, KubeConfig, Watch } from '@kubernetes/client-node';
 import { discoverOperatorImage } from './utils/operator-image';
-import { discoverServerVersion, nativeSidecarsSupported, segmentTlsDefault, segmentTlsRequired } from './utils/segment-tls-default';
+import { discoverServerVersion, segmentTlsDefault, segmentTlsRequired } from './utils/segment-tls-default';
 import { primaryLeaseDefault } from './utils/primary-lease';
 import { primaryLeaseMigrationMode } from './utils/primary-lease-migration';
 import { setSegmentTlsResolver } from './utils/replication-lag';
@@ -184,15 +184,12 @@ export class Operator {
   async start(): Promise<void> {
     logger.info('Starting cloudnative-firebird operator');
     this.healthServer.start();
-    // segment TLS: the proxy image for instance pods and Jobs, and TLS per instance for the
+    // the image of the agent's installer and the Lease holder, and TLS per instance for the
     // operator's own segment server requests
-    logger.info({ image: await discoverOperatorImage(this.kubeConfig) }, 'Segment TLS proxy image');
+    logger.info({ image: await discoverOperatorImage(this.kubeConfig) }, 'Operator image for the instance pods and Jobs');
     const kubernetes = await discoverServerVersion(this.kubeConfig);
     logger.info({ kubernetes, segmentTlsDefault: segmentTlsDefault(), segmentTlsRequired: segmentTlsRequired() }, 'Segment TLS default for new clusters');
     logger.info({ kubernetes, primaryLeaseDefault: primaryLeaseDefault(), primaryLeaseMigrate: primaryLeaseMigrationMode() }, 'Primary Lease default for new clusters with automatic failover');
-    if (segmentTlsRequired() && nativeSidecarsSupported() !== true) {
-      logger.warn('SEGMENT_TLS_REQUIRED is set, but the API server does not support native sidecars (Kubernetes 1.29 or later): new clusters cannot start');
-    }
     setSegmentTlsResolver(createSegmentTlsResolver(this.kubeConfig.makeApiClient(CoreV1Api)));
     // several replicas: only the one holding the Lease reconciles; all serve the webhook
     const namespace = process.env.OPERATOR_NAMESPACE;

@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.171.0/cloudnative-firebird-0.171.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.172.0/cloudnative-firebird-0.172.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.171.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.172.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.171.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.172.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -577,12 +577,13 @@ Full guide with diagrams, the reasons for it, switching an existing cluster and 
 ```yaml
 spec:
   segmentTLS:
-    enabled: true   # the default for new clusters on Kubernetes 1.29 or later
+    enabled: true   # the default for new clusters
 ```
 
-Since v0.77.0 this is the default for **new** clusters on Kubernetes 1.29 or later: the operator
-writes `segmentTLS.enabled` into a new cluster's spec on its first reconcile (`true` there, `false`
-on older Kubernetes) and records a `SegmentTLSDefaulted` event. Clusters created by an earlier
+Since v0.77.0 this is the default for **new** clusters (since v0.172.0 on any Kubernetes version;
+before, from 1.29 only, for the proxy sidecar it needed then): the operator writes
+`segmentTLS.enabled` into a new cluster's spec on its first reconcile (`true`) and records a
+`SegmentTLSDefaulted` event. Clusters created by an earlier
 version are pinned to `false`, so an upgrade changes nothing for them; set `enabled: true` to move
 one over. A cluster recreated over the StatefulSet a deleted cluster of its name left (orphan
 propagation) is not taken for an old one: since v0.143.0 it keeps what that StatefulSet runs, here
@@ -741,7 +742,10 @@ other instances are read-only replicas:
   v0.170.0 restarts the instances of every cluster, primary last. On a cluster that did not run
   the agent, until an instance has restarted, a container of it that restarts on its own (a
   crash, an OOM kill) finds no Perl script to run and fails until the rolling update reaches
-  it; clusters that ran it keep the init script under its former name meanwhile.
+  it. Clusters that ran it keep the init script under its former name until v0.172.0, which
+  drops it: upgrading from v0.169.0 or earlier straight to v0.172.0 or later, a pod that opted
+  in and re-runs its init container in place (a node restart) before the rolling update
+  replaces it fails the same way until then.
 - **Complete segments only** (since v0.155.0, with or without the agent): a journal segment is
   offered to the replicas once its file in the archive is complete. Firebird archives a segment
   with a plain copy; one fetched during that copy would have been too short for the replica,

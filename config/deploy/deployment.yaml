@@ -39,7 +39,7 @@ spec:
         - name: operator
           # the release image of this version (.github/workflows/release.yaml): a checkout deploys its
           # own version, and an upgrade applies the new version's manifests (README, Upgrading the operator)
-          image: ghcr.io/mariuz/cloudnative-firebird:0.171.0
+          image: ghcr.io/mariuz/cloudnative-firebird:0.172.0
           imagePullPolicy: IfNotPresent
           ports:
             # /healthz, /readyz and the Prometheus /metrics
@@ -59,7 +59,7 @@ spec:
             # the admission webhook (config/deploy/webhook.yaml); "false" turns it off
             - name: WEBHOOK_ENABLED
               value: "true"
-            # segment TLS for new clusters (docs/segment-tls.md): auto = on from Kubernetes 1.29
+            # segment TLS for new clusters (docs/segment-tls.md): auto = on (any Kubernetes version)
             - name: SEGMENT_TLS_DEFAULT
               value: auto
             # move clusters pinned to plain segment shipping on upgrade over to segment TLS, one at

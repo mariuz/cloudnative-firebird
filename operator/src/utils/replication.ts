@@ -65,14 +65,6 @@ export const JOB_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
   ['pitr-restore.sh'].map((name) => [name, readScript(name)]),
 );
 
-/**
- * The replication init's script under the name the pods that opted into the agent (v0.152.0 to
- * v0.169.0) run, until the rolling update has replaced them: the same script. Not part of the pod
- * template hash.
- */
-export const AGENT_INIT_SCRIPT = 'init-instance-agent.sh';
-export const AGENT_SCRIPTS: Readonly<Record<string, string>> = { [AGENT_INIT_SCRIPT]: REPLICATION_SCRIPTS['init-instance.sh'] };
-
 /** Returns true when journal replication is configured for the cluster */
 export function replicationEnabled(cluster: FirebirdCluster): boolean {
   return Boolean(cluster.spec.replication?.enabled);

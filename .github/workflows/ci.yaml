@@ -362,7 +362,7 @@ jobs:
 
       - name: Verify segment TLS is on by default for new clusters
         run: |
-          # kind runs Kubernetes 1.29 or later: the operator defaults new clusters to segment TLS
+          # the operator defaults new clusters to segment TLS (on any Kubernetes version since v0.172.0)
           kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --tail=-1 \
             | grep 'Segment TLS default for new clusters' | tee /dev/stderr | grep -q '"segmentTlsDefault":true'
           timeout 60 bash -c 'until [ -n "$(kubectl get firebirdcluster test-cluster -o jsonpath={.spec.segmentTLS.enabled})" ]; do sleep 2; done'

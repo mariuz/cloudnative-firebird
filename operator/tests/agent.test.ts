@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { AGENT_ANNOTATION, agentErrors } from '../src/utils/agent';
 import { buildConfigMap, buildStatefulSet, statefulSetNeedsUpdate } from '../src/utils/resources';
-import { AGENT_SCRIPTS, REPLICATION_SCRIPTS } from '../src/utils/replication';
+import { REPLICATION_SCRIPTS } from '../src/utils/replication';
 import { buildFailoverJob } from '../src/utils/switchover';
 import { validateClusterSpec } from '../src/utils/validation';
 import { FirebirdCluster } from '../src/types';
@@ -92,11 +92,8 @@ describe('the Rust agent in the instance pods', () => {
       '"$FB_AGENT" set-repl-seq',
       '"$FB_AGENT" version',
     ]);
-    // the same script under the name the pods that opted in before v0.170.0 run, until they are
-    // replaced; not in the hash that restarts the instances
-    const data = buildConfigMap(makeCluster({ replication: { enabled: true } }))!.data!;
-    expect(data['init-instance-agent.sh']).toBe(script);
-    expect(AGENT_SCRIPTS['init-instance-agent.sh']).toBe(script);
+    // the former name of the script (pods that opted into the agent before v0.170.0) is gone (v0.172.0)
+    expect(buildConfigMap(makeCluster({ replication: { enabled: true } }))!.data!['init-instance-agent.sh']).toBeUndefined();
     // with segment TLS the init has the certificates: its seed is fetched over TLS made by the agent
     const tls = pod(makeCluster({ replication: { enabled: true }, segmentTLS: { enabled: true } })).initContainers!.find((c) => c.name === 'replication-init')!;
     expect(tls.env).toContainEqual({ name: 'SEGMENT_TLS_DIR', value: '/etc/segment-tls' });

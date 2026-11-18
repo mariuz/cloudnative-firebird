@@ -246,14 +246,13 @@ only issues the certificate from it.
 
 ### The default
 
-Since v0.77.0 new clusters get segment TLS **on by default** when the API server is Kubernetes 1.29
-or later. The operator writes the default into the cluster's spec on its first reconcile, before
+Since v0.77.0 new clusters get segment TLS **on by default**: since v0.172.0 on any Kubernetes
+version (until then from 1.29 only, which the proxy sidecar needed). The operator writes the default into the cluster's spec on its first reconcile, before
 it creates any pod, and records a `SegmentTLSDefaulted` event:
 
 | Cluster | `spec.segmentTLS.enabled` written |
 |---|---|
-| new, Kubernetes 1.29 or later | `true` |
-| new, older Kubernetes, or a version the operator could not read | `false` |
+| new | `true` |
 | existing (it already has a StatefulSet: created by an earlier operator version) | `false`: an upgrade never changes how an existing cluster ships its segments |
 | a value set by you, `true` or `false` | left as it is |
 
@@ -262,9 +261,7 @@ changes or Kubernetes is upgraded. To move an existing cluster over, set `enable
 is described below and does not stall replication).
 
 The operator's `SEGMENT_TLS_DEFAULT` environment variable (`config/deploy/deployment.yaml`) changes
-the default for new clusters: `auto` (the default: on from Kubernetes 1.29), `true` or `false`.
-Admission warns when a cluster asks for segment TLS on a Kubernetes version without native sidecars,
-where its pods would not start.
+the default for new clusters: `auto` (the default) or `true` (on), or `false`.
 
 GitOps tools see the written field as set by a controller. Put `segmentTLS.enabled` in your
 manifests to keep the decision in Git.
@@ -283,8 +280,8 @@ owner's `enabled: false`. The operator's `SEGMENT_TLS_MIGRATE` setting decides w
 | `all` | every cluster with `enabled: false`, including those pinned by v0.77.0 and v0.78.0 (before the annotation) and those whose owners chose `false` |
 
 A cluster is moved only when it is idle: phase `Running`, every instance ready, no rolling update,
-switchover, failover or fencing in progress, not hibernated or suspended, and on Kubernetes 1.29 or
-later. Only one cluster migrates at a time across the whole operator. The operator sets
+switchover, failover or fencing in progress, not hibernated or suspended (any Kubernetes version since
+v0.172.0). Only one cluster migrates at a time across the whole operator. The operator sets
 `enabled: true` and the annotation `in-progress` in one patch, then the usual switch follows (the
 instances restart one by one, the primary last, without replica lag). Once every instance serves
 TLS, the annotation becomes `done`. Events record each step: `SegmentTLSMigrationStarted`,
@@ -325,9 +322,9 @@ unchanged: it is how a plain cluster becomes a TLS one.
 ### Requirements
 
 
-- Nothing about the Kubernetes version since v0.171.0: the proxy sidecar, which needed native
-  sidecar containers (1.29), is gone. The default for new clusters and the migration of existing
-  ones still follow the 1.29 rule (below).
+- Nothing about the Kubernetes version: the proxy sidecar, which needed native sidecar containers
+  (1.29), is gone since v0.171.0, and since v0.172.0 the default for new clusters and the migration
+  of existing ones apply on any version.
 - The operator's ClusterRole needs `create` and `update` on Secrets. They are in
   `config/deploy/rbac.yaml` since v0.75.0. Apply it again when upgrading.
 - Instance and Job pods must be able to pull the **operator image**, which carries the agent's
@@ -476,8 +473,8 @@ What it does not cover:
 - **No certificate revocation.** Rotating the CA means deleting `ca.crt` and `ca.key` from the
   Secret. The operator then issues a new CA and certificate, and pods pick them up within about a
   minute. During that time some connections fail until both ends have the new files.
-- **Plain mode is still possible**: clusters created before v0.77.0, or on Kubernetes older than
-  1.29, or with `segmentTLS.enabled: false`, ship segments in plain text. There is no setting that
+- **Plain mode is still possible**: clusters created before v0.77.0, or before v0.172.0 on
+  Kubernetes older than 1.29, or with `segmentTLS.enabled: false`, ship segments in plain text. There is no setting that
   forbids it cluster-wide.
 
 Resource cost: no container of its own since v0.171.0; TLS 1.3 with AES-GCM runs at several
@@ -499,7 +496,7 @@ hundred MB/s per core, so the segment stream, not the cipher, sets the pace.
 
 | Item | Value |
 |---|---|
-| Spec | `spec.segmentTLS.enabled` (boolean; written on a new cluster's first reconcile: `true` from Kubernetes 1.29, `false` for clusters that existed before v0.77.0) |
+| Spec | `spec.segmentTLS.enabled` (boolean; written on a new cluster's first reconcile: `true`, `false` for clusters that existed before v0.77.0) |
 | Operator setting | `SEGMENT_TLS_DEFAULT`: `auto` (default), `true`, `false` |
 | Switch state | ConfigMap `<cluster>-segment-tls-peers` (`plain-peers`, `accept-plain-until`), mounted at `/etc/segment-tls-peers`, written by the operator only while switching |
 | Secret | `<cluster>-segment-tls`, type `kubernetes.io/tls`, keys `ca.crt`, `ca.key`, `tls.crt`, `tls.key` |
