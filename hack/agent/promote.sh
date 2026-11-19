@@ -50,7 +50,7 @@ database = $DB
 {
     journal_directory = /data/j
     journal_archive_directory = /data/a
-    journal_archive_command = "test ! -f \$(archivepathname) && cp \$(pathname) \$(archivepathname)"
+    journal_archive_command = "test ! -f \$(archivepathname) && cp \$(pathname) \$(archivepathname).tmp && mv \$(archivepathname).tmp \$(archivepathname)"
     journal_archive_timeout = 2
     journal_source_directory = /data/s
     apply_idle_timeout = 2
