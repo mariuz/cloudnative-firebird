@@ -1,4 +1,4 @@
-import { nativeSidecarsSupported, segmentTlsRequired } from './segment-tls-default';
+import { segmentTlsRequired } from './segment-tls-default';
 import { CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Secret } from '@kubernetes/client-node';
 import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdRole, FirebirdUser, RESOURCE_PLURAL } from '../types';
 import { databaseClusterError, validateDatabaseSpec } from './databases';
@@ -161,9 +161,6 @@ export function createAdmissionValidator(lookups: AdmissionLookups): AdmissionVa
                 warnings,
               };
             }
-          }
-          if (cluster.spec.segmentTLS?.enabled === true && nativeSidecarsSupported() === false) {
-            warnings.push('segmentTLS needs Kubernetes 1.29 or later (native sidecar containers): the instance pods will not start on this cluster');
           }
           if (clone && request.operation === 'CREATE') {
             const sourceNamespace = clone.namespace ?? namespace;

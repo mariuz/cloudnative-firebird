@@ -38,18 +38,22 @@ afterEach(() => {
 });
 
 describe('the segment TLS default', () => {
-  it('follows the Kubernetes version (native sidecars from 1.29) unless the operator is told otherwise', () => {
+  it('is on unless the operator is told otherwise, on any Kubernetes version (since v0.172.0)', () => {
     expect(parseServerVersion('1', '29+')).toEqual({ major: 1, minor: 29 });
     expect(parseServerVersion('1', '')).toBeUndefined();
+    // the version still decides native sidecars (the primary Lease), not segment TLS
     setServerVersion(undefined);
     expect(nativeSidecarsSupported()).toBeUndefined();
-    expect(segmentTlsDefault({})).toBe(false);
+    expect(segmentTlsDefault({})).toBe(true);
     setServerVersion({ major: 1, minor: 28 });
-    expect(segmentTlsDefault({})).toBe(false);
-    expect(segmentTlsDefault({ SEGMENT_TLS_DEFAULT: 'true' })).toBe(true);
-    setServerVersion({ major: 1, minor: 31 });
+    expect(nativeSidecarsSupported()).toBe(false);
     expect(segmentTlsDefault({})).toBe(true);
     expect(segmentTlsDefault({ SEGMENT_TLS_DEFAULT: 'auto' })).toBe(true);
+    expect(segmentTlsDefault({ SEGMENT_TLS_DEFAULT: 'true' })).toBe(true);
+    expect(segmentTlsDefault({ SEGMENT_TLS_DEFAULT: ' False ' })).toBe(false);
+    setServerVersion({ major: 1, minor: 31 });
+    expect(nativeSidecarsSupported()).toBe(true);
+    expect(segmentTlsDefault({})).toBe(true);
     expect(segmentTlsDefault({ SEGMENT_TLS_DEFAULT: 'false' })).toBe(false);
   });
 
@@ -92,7 +96,7 @@ describe('the segment TLS default', () => {
     expect(specPatches(api)).toEqual([]);
   });
 
-  it('warns at admission when segment TLS is on and Kubernetes has no native sidecars', async () => {
+  it('no longer warns at admission about Kubernetes before 1.29 (no native sidecar for segment TLS)', async () => {
     const validate = createAdmissionValidator({ secret: async () => undefined, cluster: async () => undefined } as never);
     const request = (enabled: boolean) => ({
       uid: '1',
@@ -102,10 +106,9 @@ describe('the segment TLS default', () => {
       object: makeCluster({ segmentTLS: { enabled } }),
     });
     setServerVersion({ major: 1, minor: 28 });
-    expect((await validate(request(true) as never)).warnings ?? []).toContainEqual(expect.stringMatching(/Kubernetes 1\.29/));
-    expect((await validate(request(false) as never)).warnings ?? []).not.toContainEqual(expect.stringMatching(/Kubernetes 1\.29/));
-    setServerVersion({ major: 1, minor: 30 });
-    expect((await validate(request(true) as never)).warnings ?? []).not.toContainEqual(expect.stringMatching(/Kubernetes 1\.29/));
+    const result = await validate(request(true) as never);
+    expect(result.warnings ?? []).not.toContainEqual(expect.stringMatching(/Kubernetes 1\.29/));
+    expect(result.denied).toBeUndefined();
   });
 
   describe('with SEGMENT_TLS_REQUIRED', () => {

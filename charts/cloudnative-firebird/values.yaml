@@ -24,7 +24,7 @@ webhook:
 
 # segment TLS (docs/segment-tls.md)
 segmentTLS:
-  # for new clusters: auto (on from Kubernetes 1.29), "true", "false"
+  # for new clusters: auto (on; until v0.171.0 on from Kubernetes 1.29 only), "true", "false"
   default: auto
   # move clusters pinned to plain segment shipping over at an upgrade: "pinned", "all", or empty
   migrate: ""

@@ -2,16 +2,16 @@ import { KubeConfig, VersionApi } from '@kubernetes/client-node';
 import { logger } from './logger';
 
 /**
- * The default of spec.segmentTLS.enabled for new clusters. Segment TLS runs its proxy as a native
- * sidecar (segment-tls-pods.ts), which Kubernetes enables by default from 1.29, so the default
- * follows the API server's version unless the operator is told otherwise:
+ * The default of spec.segmentTLS.enabled for new clusters:
  *
- * - SEGMENT_TLS_DEFAULT=auto (default): on when the API server is Kubernetes 1.29 or later
- * - SEGMENT_TLS_DEFAULT=true / false: always on / off
+ * - SEGMENT_TLS_DEFAULT=auto (default) or true: on
+ * - SEGMENT_TLS_DEFAULT=false: off
+ *
+ * Until v0.171.0 auto meant on from Kubernetes 1.29 only: segment TLS ran a proxy as a native
+ * sidecar. The agent does its TLS itself since, on any version (segment-tls-pods.ts).
  *
  * SEGMENT_TLS_REQUIRED=true refuses plain segment shipping altogether: admission denies a cluster
- * created with `enabled: false` or switched to it, new clusters default to true whatever the
- * version, and an existing plain cluster (pinned on upgrade, or chosen before the setting) gets
+ * created with `enabled: false` or switched to it, new clusters default to true, and an existing plain cluster (pinned on upgrade, or chosen before the setting) gets
  * a SegmentTLS condition, a warning event and firebird_cluster_segment_tls 0 until it is moved
  * (SEGMENT_TLS_MIGRATE, or its owner). The operator never restarts a cluster for it.
  *
@@ -21,7 +21,7 @@ import { logger } from './logger';
  * setting or upgrading Kubernetes later leaves every existing cluster as it is.
  */
 
-/** Kubernetes version that enables native sidecar containers by default */
+/** Kubernetes version that enables native sidecar containers by default (the primary Lease holder) */
 export const NATIVE_SIDECAR_MINOR = 29;
 
 let serverVersion: { major: number; minor: number } | undefined;
@@ -44,13 +44,13 @@ export function nativeSidecarsSupported(): boolean | undefined {
   return serverVersion.major > 1 || (serverVersion.major === 1 && serverVersion.minor >= NATIVE_SIDECAR_MINOR);
 }
 
-/** Reads the API server's version at startup (for the default and the admission warning) */
+/** Reads the API server's version at startup (for the primary Lease's default) */
 export async function discoverServerVersion(kubeConfig: KubeConfig): Promise<{ major: number; minor: number } | undefined> {
   try {
     const info = await kubeConfig.makeApiClient(VersionApi).getCode();
     serverVersion = parseServerVersion(info.major, info.minor);
   } catch (err) {
-    logger.warn({ err }, 'Could not read the Kubernetes version; segment TLS is off by default for new clusters');
+    logger.warn({ err }, 'Could not read the Kubernetes version; the primary Lease is off by default for new clusters');
   }
   return serverVersion;
 }
@@ -63,8 +63,5 @@ export function segmentTlsRequired(env = process.env): boolean {
 /** The default for a new cluster's spec.segmentTLS.enabled */
 export function segmentTlsDefault(env = process.env): boolean {
   if (segmentTlsRequired(env)) return true;
-  const setting = (env.SEGMENT_TLS_DEFAULT ?? 'auto').trim().toLowerCase();
-  if (setting === 'true') return true;
-  if (setting === 'false') return false;
-  return nativeSidecarsSupported() === true;
+  return (env.SEGMENT_TLS_DEFAULT ?? 'auto').trim().toLowerCase() !== 'false';
 }

@@ -993,7 +993,6 @@ describe('buildConfigMap (replication)', () => {
     expect(Object.keys(cm?.data ?? {}).sort()).toEqual([
       'demote',
       'enable-publication.sql',
-      'init-instance-agent.sh',
       'init-instance.sh',
       'peer-addresses',
       'pitr-restore.sh',
@@ -1003,8 +1002,6 @@ describe('buildConfigMap (replication)', () => {
       'reseed',
       'seed-sources',
     ]);
-    // the init script under its name of before v0.170.0, for pods that opted into the agent then
-    expect(cm?.data?.['init-instance-agent.sh']).toBe(cm?.data?.['init-instance.sh']);
   });
 
   it('lists ready replicas as seed sources, one host per line', () => {

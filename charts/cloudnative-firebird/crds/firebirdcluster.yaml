@@ -436,11 +436,10 @@ spec:
                   description: >
                     Mutual TLS for the segment servers (journal segments, seed copies, backup files)
                     and their clients, with a CA the operator manages for the cluster
-                    (<cluster>-segment-tls Secret), through a proxy sidecar from the operator image.
-                    Needs native sidecars (Kubernetes 1.29 or later). Switching it restarts the
-                    instances. Written by the operator on a new cluster's first reconcile when unset:
-                    true from Kubernetes 1.29 (operator setting SEGMENT_TLS_DEFAULT), false for
-                    clusters created by an earlier version.
+                    (<cluster>-segment-tls Secret), done by the agent in the instance pods and Jobs.
+                    Switching it restarts the instances. Written by the operator on a new cluster's
+                    first reconcile when unset: true (operator setting SEGMENT_TLS_DEFAULT), false
+                    for clusters created by an earlier version.
                   type: object
                   properties:
                     enabled:

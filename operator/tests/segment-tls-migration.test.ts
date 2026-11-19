@@ -29,24 +29,22 @@ describe('moving existing clusters to segment TLS', () => {
   });
 
   it('starts only with the setting, on clusters the operator pinned (or all of them), never against the owner', () => {
-    expect(migrationStep(idle('pinned'), 'off', true)).toEqual({ action: 'none', reason: 'off' });
-    expect(migrationStep(idle('pinned'), 'pinned', true)).toEqual({ action: 'start' });
+    expect(migrationStep(idle('pinned'), 'off')).toEqual({ action: 'none', reason: 'off' });
+    expect(migrationStep(idle('pinned'), 'pinned')).toEqual({ action: 'start' });
     // false chosen by the owner, or pinned before the annotation existed: only with "all"
-    expect(migrationStep(idle(), 'pinned', true).action).toBe('none');
-    expect(migrationStep(idle(), 'all', true)).toEqual({ action: 'start' });
+    expect(migrationStep(idle(), 'pinned').action).toBe('none');
+    expect(migrationStep(idle(), 'all')).toEqual({ action: 'start' });
     // opted out, already done, or not off
-    expect(migrationStep(idle('skip'), 'all', true).action).toBe('none');
-    expect(migrationStep(idle('done'), 'all', true).action).toBe('none');
-    expect(migrationStep(idle('pinned', { segmentTLS: { enabled: true } }), 'all', true).action).toBe('none');
+    expect(migrationStep(idle('skip'), 'all').action).toBe('none');
+    expect(migrationStep(idle('done'), 'all').action).toBe('none');
+    expect(migrationStep(idle('pinned', { segmentTLS: { enabled: true } }), 'all').action).toBe('none');
   });
 
-  it('waits for native sidecars, an idle cluster, and no other cluster migrating', () => {
-    expect(migrationStep(idle('pinned'), 'pinned', false).reason).toMatch(/native sidecars/);
-    expect(migrationStep(idle('pinned'), 'pinned', undefined).action).toBe('none');
+  it('waits for an idle cluster and no other cluster migrating, on any Kubernetes version', () => {
     const busy = (status: FirebirdCluster['status']) => {
       const c = idle('pinned');
       c.status = { ...c.status, ...status };
-      return migrationStep(c, 'pinned', true).action;
+      return migrationStep(c, 'pinned').action;
     };
     expect(busy({ phase: 'Updating' })).toBe('none');
     expect(busy({ readyInstances: 2 })).toBe('none');
@@ -54,24 +52,24 @@ describe('moving existing clusters to segment TLS', () => {
     expect(busy({ switchover: { kind: 'failover', phase: 'Promoting' } as never })).toBe('none');
     expect(busy({ switchover: { kind: 'failover', phase: 'Completed' } as never })).toBe('start');
     expect(busy({ fencedInstances: ['test-cluster-1'] })).toBe('none');
-    expect(migrationStep(idle('pinned', { hibernated: true }), 'pinned', true).action).toBe('none');
+    expect(migrationStep(idle('pinned', { hibernated: true }), 'pinned').action).toBe('none');
     const other = idle('in-progress');
     other.metadata.name = 'other';
-    expect(migrationStep(idle('pinned'), 'pinned', true, [], [other])).toEqual({ action: 'none', reason: 'default/other is migrating' });
+    expect(migrationStep(idle('pinned'), 'pinned', [], [other])).toEqual({ action: 'none', reason: 'default/other is migrating' });
     // itself in the list does not count
-    expect(migrationStep(idle('pinned'), 'pinned', true, [], [idle('pinned')]).action).toBe('start');
+    expect(migrationStep(idle('pinned'), 'pinned', [], [idle('pinned')]).action).toBe('start');
   });
 
   it('finishes once every instance serves over TLS, and steps back when the owner turns it off again', () => {
     const migrating = idle('in-progress', { segmentTLS: { enabled: true } });
     const pods = [pod('test-cluster-0', false), pod('test-cluster-1', true), pod('test-cluster-2', true)];
     // continues even with the setting off: it was started
-    expect(migrationStep(migrating, 'off', true, pods).action).toBe('none');
+    expect(migrationStep(migrating, 'off', pods).action).toBe('none');
     pods[0] = pod('test-cluster-0', true, false);
-    expect(migrationStep(migrating, 'off', true, pods).action).toBe('none');
+    expect(migrationStep(migrating, 'off', pods).action).toBe('none');
     pods[0] = pod('test-cluster-0', true);
-    expect(migrationStep(migrating, 'off', true, pods)).toEqual({ action: 'finish' });
-    expect(migrationStep(idle('in-progress', { segmentTLS: { enabled: false } }), 'all', true, pods)).toEqual({ action: 'abandon' });
+    expect(migrationStep(migrating, 'off', pods)).toEqual({ action: 'finish' });
+    expect(migrationStep(idle('in-progress', { segmentTLS: { enabled: false } }), 'all', pods)).toEqual({ action: 'abandon' });
   });
 
   describe('in the controller', () => {

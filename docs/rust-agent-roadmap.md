@@ -319,6 +319,7 @@ asks its own pod's segment server on localhost, in plain text). The Node Lease h
 the operator image, which no pod ran any more, are deleted, and with them the agent's
 `segment-tls` command.
 
-Left (TODO.md): the former name of the init script, and the Kubernetes 1.29 rule that segment
-TLS's default still follows.
+Since v0.172.0 the init script's former name is gone from the ConfigMap, and segment TLS is
+the default for new clusters on any Kubernetes version (it followed the 1.29 rule of native
+sidecars, which only the proxy needed). Nothing of the roadmap is left.
 

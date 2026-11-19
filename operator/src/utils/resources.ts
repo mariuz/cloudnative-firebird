@@ -39,7 +39,6 @@ import { PENDING_DROPS_DIR, pendingDropsConfigMapName, pendingDropsInitScript } 
 import {
   PRIMARY_KEY,
   REPLICATION_SCRIPTS,
-  AGENT_SCRIPTS,
   JOB_SCRIPTS,
   RESEED_KEY,
   PROMOTE_KEY,
@@ -1186,8 +1185,7 @@ export function buildConfigMap(
   }
 
   if (replicationEnabled(cluster)) {
-    // with the init script under its name of before v0.170.0, outside the pod template's hash
-    Object.assign(data, replicationConfigData(cluster), AGENT_SCRIPTS);
+    Object.assign(data, replicationConfigData(cluster));
     // Read by the replica seeding step and the segment puller on every poll, so it follows
     // the operator's view of the current primary without restarting pods
     data[PRIMARY_KEY] = instanceHost(cluster, options?.primaryPod ?? `${name}-0`);

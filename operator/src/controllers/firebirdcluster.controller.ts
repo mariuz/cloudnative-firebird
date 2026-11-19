@@ -4035,7 +4035,7 @@ export class FirebirdClusterController {
   private async reconcileSegmentTlsMigration(cluster: FirebirdCluster, log: Logger): Promise<void> {
     const mode = migrationMode();
     const inProgress = migrationInProgress(cluster);
-    if (!inProgress && notMigrating(cluster, mode, nativeSidecarsSupported())) return;
+    if (!inProgress && notMigrating(cluster, mode)) return;
     const { name, namespace = 'default' } = cluster.metadata;
     const pods = inProgress
       ? instancePods((await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items, name)
@@ -4044,7 +4044,7 @@ export class FirebirdClusterController {
       ? []
       : ((await this.customApi.listClusterCustomObject({ group: API_GROUP, version: API_VERSION, plural: RESOURCE_PLURAL })) as { items?: FirebirdCluster[] })
           .items ?? [];
-    const step = migrationStep(cluster, mode, nativeSidecarsSupported(), pods, others);
+    const step = migrationStep(cluster, mode, pods, others);
     if (step.action === 'none') {
       if (step.reason && !inProgress) log.debug({ reason: step.reason }, 'Segment TLS migration waits');
       return;

@@ -18,7 +18,7 @@ import { reconciliationPaused } from './suspension';
  * - anything else (default): none.
  *
  * The annotation records the migration: "in-progress" while the instances restart, "done" once they
- * all run the proxy, "skip" when an owner opts the cluster out (or turned segment TLS off again
+ * all serve TLS, "skip" when an owner opts the cluster out (or turned segment TLS off again
  * during its migration). A cluster is switched only when it is idle: running, every instance
  * ready, no rolling update, switchover or fencing, and no other cluster migrating.
  */
@@ -47,15 +47,15 @@ export function migrationInProgress(cluster: FirebirdCluster): boolean {
 
 /**
  * Why the cluster cannot be switched now, or undefined when it is a candidate (the operator's
- * setting, the owner's choice, the Kubernetes version and the cluster's state; not the others)
+ * setting, the owner's choice and the cluster's state; not the others). Any Kubernetes version
+ * since v0.171.0 (no native sidecar for segment TLS).
  */
-export function notMigrating(cluster: FirebirdCluster, mode: MigrationMode, nativeSidecars: boolean | undefined): string | undefined {
+export function notMigrating(cluster: FirebirdCluster, mode: MigrationMode): string | undefined {
   if (mode === 'off') return 'off';
   if (cluster.spec.segmentTLS?.enabled !== false) return 'segment TLS is not off';
   const marked = annotation(cluster);
   if (marked === 'skip' || marked === 'done') return `annotation ${marked}`;
   if (mode === 'pinned' && marked !== 'pinned') return 'not pinned by the operator';
-  if (nativeSidecars !== true) return 'Kubernetes without native sidecars (1.29 or later)';
   if (cluster.spec.hibernated || reconciliationPaused(cluster)) return 'hibernated or paused';
   const status = cluster.status ?? {};
   if (status.phase !== 'Running') return `phase ${status.phase ?? 'unknown'}`;
@@ -73,7 +73,6 @@ export function notMigrating(cluster: FirebirdCluster, mode: MigrationMode, nati
 export function migrationStep(
   cluster: FirebirdCluster,
   mode: MigrationMode,
-  nativeSidecars: boolean | undefined,
   pods: V1Pod[] = [],
   others: FirebirdCluster[] = [],
 ): MigrationStep {
@@ -85,7 +84,7 @@ export function migrationStep(
       pods.every((p) => podHasSegmentTls(p.spec) && isPodReady(p));
     return switched ? { action: 'finish' } : { action: 'none', reason: 'instances restarting' };
   }
-  const reason = notMigrating(cluster, mode, nativeSidecars);
+  const reason = notMigrating(cluster, mode);
   if (reason) return { action: 'none', reason };
   const busy = others.find((o) => key(o) !== key(cluster) && migrationInProgress(o));
   if (busy) return { action: 'none', reason: `${key(busy)} is migrating` };
