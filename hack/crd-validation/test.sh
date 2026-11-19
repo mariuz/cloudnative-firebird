@@ -57,10 +57,13 @@ else
 fi
 
 # the printer columns (kubectl get): the primary with the phase, the image and last backup with -o wide
-header=$($KUBECTL get firebirdcluster crd-validation-cluster -o wide | head -n 1)
+# (the output read whole first: with pipefail, head leaving early would fail kubectl with SIGPIPE)
+wide=$($KUBECTL get firebirdcluster crd-validation-cluster -o wide)
+header=$(head -n 1 <<<"$wide")
 for col in INSTANCES READY PHASE PRIMARY IMAGE 'LAST BACKUP'; do
   grep -q "$col" <<<"$header" || { echo "FAIL printer columns: $col missing from: $header"; failed=1; }
 done
-$KUBECTL get firebirdcluster crd-validation-cluster | head -n 1 | grep -q PRIMARY && echo "ok   printer columns" || { echo "FAIL printer columns: PRIMARY not shown by default"; failed=1; }
+plain=$($KUBECTL get firebirdcluster crd-validation-cluster)
+head -n 1 <<<"$plain" | grep -q PRIMARY && echo "ok   printer columns" || { echo "FAIL printer columns: PRIMARY not shown by default: $(head -n 1 <<<"$plain")"; failed=1; }
 
 exit $failed
