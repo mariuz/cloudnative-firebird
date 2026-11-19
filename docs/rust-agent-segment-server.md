@@ -99,7 +99,8 @@ step does not change.
 
 ### Complete segments only
 
-Firebird archives a segment by running `journal_archive_command`, a plain `cp`. A listing made
+Firebird archives a segment by running `journal_archive_command`, a plain `cp` until v0.173.0
+(since, a copy to `<segment>.tmp` and a rename). A listing made
 during that copy saw the file, and a GET then sent what was there. Firebird's replica skips a
 segment file shorter than the length in its header ("Skipping file ... as being too small"), and
 the puller had recorded it as fetched: the replica would have waited for that segment for ever.

@@ -110,7 +110,9 @@ export function buildReplicationConf(cluster: FirebirdCluster, databasePath: str
     '{',
     `    journal_directory = ${dirs.journal}`,
     `    journal_archive_directory = ${dirs.archive}`,
-    '    journal_archive_command = "test ! -f $(archivepathname) && cp $(pathname) $(archivepathname)"',
+    // copied under a temporary name and renamed once complete (one rename, same directory), so the
+    // archive never holds a segment being copied; the agent prunes a copy left unfinished
+    '    journal_archive_command = "test ! -f $(archivepathname) && cp $(pathname) $(archivepathname).tmp && mv $(archivepathname).tmp $(archivepathname)"',
     `    journal_archive_timeout = ${archiveTimeout}`,
     `    journal_source_directory = ${dirs.source}`,
     '    apply_idle_timeout = 5',

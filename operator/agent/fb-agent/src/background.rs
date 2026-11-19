@@ -31,6 +31,12 @@ fn number(text: &str) -> Option<u64> {
         .flatten()
 }
 
+/// The archive command's copy in progress: `<segment>.tmp`, renamed to the segment once complete
+/// (journal_archive_command in operator/src/utils/replication.ts)
+pub const ARCHIVE_COPY_SUFFIX: &str = ".tmp";
+/// After how long an unfinished copy is pruned
+const UNFINISHED_COPY_SECONDS: i64 = 3600;
+
 fn age(path: &Path, now: u64) -> Option<i64> {
     let modified = fs::metadata(path).and_then(|m| m.modified()).ok()?;
     Some(now as i64 - modified.duration_since(UNIX_EPOCH).ok()?.as_secs() as i64)
@@ -71,6 +77,19 @@ pub fn prune(files: &Files, retention: &Retention, now: u64) {
     }
     let Ok(entries) = fs::read_dir(&files.archive) else { return };
     for path in entries.filter_map(|entry| Some(entry.ok()?.path())) {
+        // a copy the archive command left unfinished (the instance stopped during it): Firebird
+        // copies that segment again, so one older than an hour is no one's
+        let unfinished = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(ARCHIVE_COPY_SUFFIX))
+            .is_some_and(segment_name);
+        if unfinished {
+            if path.is_file() && age(&path, now).is_some_and(|age| age >= UNFINISHED_COPY_SECONDS) {
+                let _ = fs::remove_file(&path);
+            }
+            continue;
+        }
         let named = path.file_name().and_then(|n| n.to_str()).is_some_and(segment_name);
         if !named || !path.is_file() {
             continue;
@@ -254,6 +273,24 @@ mod tests {
         fs::write(files.base.join("uploaded-floor"), "9\n").unwrap();
         prune(&files, &uploading, now);
         assert_eq!(left(&files), [6], "uploaded further than applied: up to the floor less one");
+        // unfinished copies of the archive command: one of an hour goes, a recent one stays
+        let copy = |sequence: u64, age: u64| {
+            let path = files.archive.join(format!("mydb.fdb.journal-{sequence:09}.tmp"));
+            fs::write(&path, b"part").unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(now - age))
+                .unwrap();
+            path
+        };
+        let (old, recent) = (copy(7, 3600), copy(8, 60));
+        prune(&files, &day, now);
+        assert!(!old.exists(), "an unfinished copy of an hour is pruned");
+        assert!(recent.exists(), "a copy that may still be running stays");
+        assert_eq!(left(&files), [6], "the copies are not segments");
+        fs::remove_file(recent).unwrap();
         // no replica: the segments after the bootstrap seed are kept up to the maximum age
         fs::remove_file(files.base.join("retain-floor")).unwrap();
         archive(&files, now);

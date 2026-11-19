@@ -1,4 +1,6 @@
-import { readFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { spawnSync } from 'child_process';
 import { join } from 'path';
 import { describe, it, expect } from 'vitest';
 import { V1CronJob } from '@kubernetes/client-node';
@@ -1035,6 +1037,30 @@ describe('buildConfigMap (replication)', () => {
     expect(conf).toContain('journal_archive_directory = /var/lib/firebird/data/replication/archive');
     expect(conf).toContain('journal_source_directory = /var/lib/firebird/data/replication/source');
     expect(conf).toContain('journal_archive_timeout = 10');
+  });
+
+  it('archives a segment under a temporary name and renames it once complete', () => {
+    const conf = buildConfigMap(makeCluster({ replication: { enabled: true } }))!.data!['replication.conf'];
+    const command = /journal_archive_command = "(.*)"/.exec(conf)![1];
+    // run as Firebird runs it (through the shell), with its macros filled in
+    const dir = mkdtempSync(join(tmpdir(), 'archive-command-'));
+    try {
+      writeFileSync(join(dir, 'segment'), 'segment bytes');
+      mkdirSync(join(dir, 'archive'));
+      const target = join(dir, 'archive', 'db.fdb.journal-000000007');
+      const run = () =>
+        spawnSync('sh', ['-c', command.split('$(pathname)').join(join(dir, 'segment')).split('$(archivepathname)').join(target)]).status;
+      expect(run()).toBe(0);
+      expect(readFileSync(target, 'utf8')).toBe('segment bytes');
+      expect(readdirSync(join(dir, 'archive'))).toEqual(['db.fdb.journal-000000007']);
+      // an archived segment is never overwritten
+      writeFileSync(join(dir, 'segment'), 'other bytes');
+      expect(run()).not.toBe(0);
+      expect(readFileSync(target, 'utf8')).toBe('segment bytes');
+      expect(readdirSync(join(dir, 'archive'))).toEqual(['db.fdb.journal-000000007']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
