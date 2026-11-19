@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { metrics, MetricsRegistry, recordClusterMetrics, recordReconcile } from '../src/utils/metrics';
-import { FirebirdCluster } from '../src/types';
+import { metrics, MetricsRegistry, recordBackupOutcome, recordClusterMetrics, recordReconcile } from '../src/utils/metrics';
+import { FirebirdBackup, FirebirdCluster } from '../src/types';
 
 describe('MetricsRegistry', () => {
   it('renders gauges and counters in the Prometheus text format', () => {
@@ -100,5 +100,51 @@ describe('cluster metrics', () => {
     });
     expect(lines().filter((l) => l.startsWith('firebird_replication_'))).toEqual([]);
     expect(lines()).toContain('firebird_cluster_ready{namespace="prod",cluster="db"} 0');
+  });
+
+  it('exports the phase, one series for the current one', () => {
+    recordClusterMetrics(cluster, { phase: 'Running', readyInstances: 3 });
+    expect(lines().filter((l) => l.startsWith('firebird_cluster_phase'))).toEqual(['firebird_cluster_phase{namespace="prod",cluster="db",phase="Running"} 1']);
+    recordClusterMetrics(cluster, { phase: 'Hibernated', readyInstances: 0 });
+    expect(lines().filter((l) => l.startsWith('firebird_cluster_phase'))).toEqual(['firebird_cluster_phase{namespace="prod",cluster="db",phase="Hibernated"} 1']);
+  });
+});
+
+describe('backup metrics', () => {
+  const backup = (name: string, status: FirebirdBackup['status'], created = '2026-11-01T00:00:00Z'): FirebirdBackup => ({
+    apiVersion: 'firebird.cloudnative-firebird.io/v1',
+    kind: 'FirebirdBackup',
+    metadata: { name, namespace: 'prod', creationTimestamp: created as unknown as Date },
+    spec: { clusterName: 'db' },
+    status,
+  });
+  const at = (iso: string) => Math.floor(Date.parse(iso) / 1000);
+  const value = (name: string) =>
+    metrics
+      .render()
+      .split('\n')
+      .find((l) => l.startsWith(`${name}{namespace="prod",cluster="db"} `))
+      ?.split(' ')[1];
+
+  beforeEach(() => metrics.remove({ namespace: 'prod', cluster: 'db' }));
+
+  it('keeps the latest success and failure of a cluster, from the backups\' status', () => {
+    recordBackupOutcome(backup('b1', { phase: 'Completed', startTime: '2026-11-02T00:00:00Z', completionTime: '2026-11-02T00:10:00Z' }));
+    expect(value('firebird_backup_last_success_timestamp_seconds')).toBe(String(at('2026-11-02T00:10:00Z')));
+    // an older backup reconciled later (after an operator restart) does not move it back
+    recordBackupOutcome(backup('b0', { phase: 'Completed', completionTime: '2026-11-01T00:10:00Z' }));
+    expect(value('firebird_backup_last_success_timestamp_seconds')).toBe(String(at('2026-11-02T00:10:00Z')));
+    // a failure: its start, or its creation when it never started
+    recordBackupOutcome(backup('b2', { phase: 'Failed', startTime: '2026-11-03T00:00:00Z', error: 'Job failed' }));
+    expect(value('firebird_backup_last_failure_timestamp_seconds')).toBe(String(at('2026-11-03T00:00:00Z')));
+    recordBackupOutcome(backup('b3', { phase: 'Failed', error: 'invalid' }, '2026-11-04T00:00:00Z'));
+    expect(value('firebird_backup_last_failure_timestamp_seconds')).toBe(String(at('2026-11-04T00:00:00Z')));
+    // nothing for a backup still running, or one without any time
+    recordBackupOutcome(backup('b4', { phase: 'Running', startTime: '2026-11-05T00:00:00Z' }));
+    recordBackupOutcome(backup('b5', { phase: 'Completed' }, 'not a date'));
+    expect(value('firebird_backup_last_success_timestamp_seconds')).toBe(String(at('2026-11-02T00:10:00Z')));
+    // the status being written counts, not the copy's
+    recordBackupOutcome(backup('b6', { phase: 'Running' }), { phase: 'Completed', completionTime: '2026-11-06T00:00:00Z' });
+    expect(value('firebird_backup_last_success_timestamp_seconds')).toBe(String(at('2026-11-06T00:00:00Z')));
   });
 });

@@ -1,0 +1,150 @@
+# promtool test rules config/monitoring/firebird.rules.test.yaml (the Unit Tests job): each alert
+# of firebird.rules.yaml fires on the series it is about, and not on the ones it leaves alone.
+rule_files:
+  - firebird.rules.yaml
+evaluation_interval: 1m
+
+tests:
+  # a lagging replica: warning past 5 minutes behind, held for 10
+  - interval: 1m
+    input_series:
+      - series: 'firebird_replication_lag_seconds{namespace="db",cluster="sales",pod="sales-1"}'
+        values: '0 0 400x20'
+      - series: 'firebird_replication_lag_seconds{namespace="db",cluster="sales",pod="sales-2"}'
+        values: '0x22'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: FirebirdReplicaLagging
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: FirebirdReplicaLagging
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: db
+              cluster: sales
+              pod: sales-1
+            exp_annotations:
+              summary: "Replica sales-1 of db/sales is behind"
+              description: "The oldest journal segment the replica has not applied was archived 400s ago. Lag-aware routing takes it out of the -replica Service past readOnlyRouting.maxLagSeconds."
+      - eval_time: 15m
+        alertname: FirebirdReplicaLaggingCritical
+        exp_alerts: []
+
+  # instances not ready: alerted for a running cluster, not for a hibernated one
+  - interval: 1m
+    input_series:
+      - series: 'firebird_cluster_instances{namespace="db",cluster="sales"}'
+        values: '3x30'
+      - series: 'firebird_cluster_ready_instances{namespace="db",cluster="sales"}'
+        values: '2x30'
+      - series: 'firebird_cluster_phase{namespace="db",cluster="sales",phase="Updating"}'
+        values: '1x30'
+      - series: 'firebird_cluster_instances{namespace="db",cluster="asleep"}'
+        values: '3x30'
+      - series: 'firebird_cluster_ready_instances{namespace="db",cluster="asleep"}'
+        values: '0x30'
+      - series: 'firebird_cluster_phase{namespace="db",cluster="asleep",phase="Hibernated"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: FirebirdInstancesNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: db
+              cluster: sales
+            exp_annotations:
+              summary: "db/sales has instances that are not ready"
+              description: "Fewer instances are ready than spec.instances asks for, for 15 minutes (a rolling update restarts one at a time and takes less)."
+
+  # a cluster that does not reach Running: alerted after 30 minutes, a hibernated one never
+  - interval: 1m
+    input_series:
+      - series: 'firebird_cluster_ready{namespace="db",cluster="stuck"}'
+        values: '0x40'
+      - series: 'firebird_cluster_phase{namespace="db",cluster="stuck",phase="Creating"}'
+        values: '1x40'
+      - series: 'firebird_cluster_ready{namespace="db",cluster="asleep"}'
+        values: '0x40'
+      - series: 'firebird_cluster_phase{namespace="db",cluster="asleep",phase="Hibernated"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: FirebirdClusterNotRunning
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: FirebirdClusterNotRunning
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: db
+              cluster: stuck
+            exp_annotations:
+              summary: "Cluster db/stuck has not been Running for 30 minutes"
+              description: "The cluster is neither Running nor hibernated or paused: a creation, update or upgrade that does not finish, or a Degraded cluster."
+
+  # backups: a failure after the last success, a failure with no success at all, and a success
+  # after a failure (no alert)
+  - interval: 1m
+    input_series:
+      - series: 'firebird_backup_last_success_timestamp_seconds{namespace="db",cluster="a"}'
+        values: '100x5'
+      - series: 'firebird_backup_last_failure_timestamp_seconds{namespace="db",cluster="a"}'
+        values: '200x5'
+      - series: 'firebird_backup_last_failure_timestamp_seconds{namespace="db",cluster="b"}'
+        values: '50x5'
+      - series: 'firebird_backup_last_success_timestamp_seconds{namespace="db",cluster="c"}'
+        values: '300x5'
+      - series: 'firebird_backup_last_failure_timestamp_seconds{namespace="db",cluster="c"}'
+        values: '200x5'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: FirebirdBackupFailed
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: db
+              cluster: a
+            exp_annotations:
+              summary: "The last backup of db/a failed"
+              description: "A backup failed after the last one that succeeded (or none succeeded): kubectl firebird backups shows it, and its Job's logs say why."
+          - exp_labels:
+              severity: warning
+              namespace: db
+              cluster: b
+            exp_annotations:
+              summary: "The last backup of db/b failed"
+              description: "A backup failed after the last one that succeeded (or none succeeded): kubectl firebird backups shows it, and its Job's logs say why."
+      - eval_time: 2m
+        alertname: FirebirdBackupTooOld
+        exp_alerts: []
+
+  # a failover; the operator gone
+  - interval: 1m
+    input_series:
+      - series: 'firebird_promotions_total{namespace="db",cluster="sales",kind="failover",mode="in_place"}'
+        values: '0 0 1 1 1'
+      - series: 'firebird_promotions_total{namespace="db",cluster="sales",kind="switchover",mode="in_place"}'
+        values: '0 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: FirebirdFailover
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: db
+              cluster: sales
+              kind: failover
+              mode: in_place
+            exp_annotations:
+              summary: "db/sales failed over to a replica"
+              description: "The operator promoted a replica because the primary was lost: find out why it was (the FailoverStarted and FailoverCompleted events, the old primary's pod)."
+      - eval_time: 10m
+        alertname: FirebirdOperatorDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "The cloudnative-firebird operator is not scraped"
+              description: "No operator pod has reported metrics for 5 minutes: clusters are not reconciled, and failover, backups and replication lag measurement are stopped."

@@ -44,6 +44,14 @@ jobs:
       - name: Run unit tests
         run: npm test -- --coverage
 
+      # the alerting rules (config/monitoring): valid, and each alert fires on the series it is
+      # about and not on the ones it leaves alone (promtool, from the Prometheus image)
+      - name: Alerting rules
+        working-directory: config/monitoring
+        run: |
+          docker run --rm -v "$PWD:/rules:ro" -w /rules --entrypoint promtool prom/prometheus:v3.0.0 check rules firebird.rules.yaml
+          docker run --rm -v "$PWD:/rules:ro" -w /rules --entrypoint promtool prom/prometheus:v3.0.0 test rules firebird.rules.test.yaml
+
       - name: Verify the Helm chart renders the deploy manifests
         working-directory: .
         run: hack/release/chart.sh check
@@ -604,6 +612,8 @@ jobs:
           grep -q '^firebird_replication_lag_seconds{namespace="default",cluster="repl",pod="repl-1"} 0$' /tmp/metrics.txt
           grep -q '^firebird_cluster_ready_instances{namespace="default",cluster="repl"} 2$' /tmp/metrics.txt
           grep -q '^firebird_operator_reconciles_total{namespace="default",cluster="repl",result="success"}' /tmp/metrics.txt
+          # the phase, which the alerting rules use (config/monitoring/firebird.rules.yaml)
+          grep -q '^firebird_cluster_phase{namespace="default",cluster="repl",phase="Running"} 1$' /tmp/metrics.txt
 
           # ... and tells the primary which archived segments the replica still needs
           timeout 120 bash -c 'until [ -n "$(kubectl get firebirdcluster repl -o jsonpath={.status.replicationStatus.segmentRetention.floorSequence})" ]; do sleep 5; done' \
@@ -821,6 +831,13 @@ jobs:
           if kubectl exec repl-0 -c firebird -- ls -a $DB_DIR | grep -q '^\.verify-'; then echo "scratch database left behind"; exit 1; fi
           wait_phase firebirdbackup repl-physical Completed backup-repl-physical
           kubectl get firebirdbackups
+          # the completed backups are on the operator's /metrics, as the time of the last success
+          # (FirebirdBackupTooOld and FirebirdBackupFailed alert on them)
+          OP=$(kubectl get lease cloudnative-firebird-operator -n cloudnative-firebird-system -o jsonpath={.spec.holderIdentity})
+          success=$(kubectl get --raw "/api/v1/namespaces/cloudnative-firebird-system/pods/$OP:8080/proxy/metrics" |
+            sed -n 's/^firebird_backup_last_success_timestamp_seconds{namespace="default",cluster="repl"} //p')
+          completed=$(date -d "$(kubectl get firebirdbackup repl-physical -o jsonpath={.status.completionTime})" +%s)
+          [ -n "$success" ] && [ "$success" -ge "$completed" ] || { echo "last backup success on /metrics: '$success', repl-physical completed at $completed"; exit 1; }
 
           kubectl apply -f - <<'EOF'
           apiVersion: firebird.cloudnative-firebird.io/v1

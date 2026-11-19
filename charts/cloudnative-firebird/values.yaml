@@ -80,3 +80,10 @@ podDisruptionBudget:
 podMonitor:
   enabled: false
   interval: 30s
+
+# the alerting rules (config/monitoring/firebird.rules.yaml) as a PrometheusRule (monitoring.coreos.com
+# CRDs); on the operator's metrics, so enable podMonitor too
+prometheusRule:
+  enabled: false
+  # extra labels, for the Prometheus ruleSelector (e.g. release: prometheus)
+  labels: {}

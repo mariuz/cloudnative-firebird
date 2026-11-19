@@ -1,3 +1,4 @@
+import { recordBackupOutcome } from '../utils/metrics';
 import { withInheritedMetadata } from '../utils/pod-settings';
 import { clusterStoppedReason } from '../utils/major-upgrade';
 import { replicaClusterFollowing } from '../utils/replica-cluster';
@@ -261,6 +262,8 @@ export class FirebirdBackupController {
 
     if (backup.status?.phase === 'Completed' || backup.status?.phase === 'Failed') {
       log.debug({ phase: backup.status.phase }, 'FirebirdBackup is already in terminal state');
+      // the cluster's backup metrics, again after an operator restart
+      recordBackupOutcome(backup);
       // a volume snapshot backup finished without releasing its finalizer (interrupted)
       if (backup.metadata.finalizers?.includes(SNAPSHOT_FINALIZER)) await this.ensureSnapshotFinalizer(backup, false);
       return;
@@ -898,8 +901,9 @@ export class FirebirdBackupController {
     await replaceStatus(this.customApi, plural, object, merged);
   }
 
-  private updateBackupStatus(backup: FirebirdBackup, status: NonNullable<FirebirdBackup['status']>): Promise<void> {
-    return this.patchStatus('firebirdbackups', backup, status);
+  private async updateBackupStatus(backup: FirebirdBackup, status: NonNullable<FirebirdBackup['status']>): Promise<void> {
+    await this.patchStatus('firebirdbackups', backup, status);
+    recordBackupOutcome(backup, { ...(backup.status ?? {}), ...status });
   }
 
   private updateRestoreStatus(restore: FirebirdRestore, status: NonNullable<FirebirdRestore['status']>): Promise<void> {
