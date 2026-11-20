@@ -83,7 +83,10 @@ for image in "${images[@]}"; do
   done
 
   # the server stopped: it cannot tell; back: it attaches again
-  x 'pkill -x firebird; for i in $(seq 1 20); do pgrep -x firebird >/dev/null || break; sleep 0.5; done'
+  # stopped for sure: a server still closing its attachments after SIGTERM answers as online
+  x 'pkill -x firebird; for i in $(seq 1 20); do pgrep -x firebird >/dev/null || break; sleep 0.5; done
+     pkill -9 -x firebird; for i in $(seq 1 20); do pgrep -x firebird >/dev/null || break; sleep 0.5; done
+     ! pgrep -x firebird >/dev/null' || { echo "FAILED: the server did not stop"; failed=1; }
   same "the server stopped" "ERR cannot read the state of /data/db.fdb"
   x 'start_firebird; sleep 3' >/dev/null 2>&1
   for _ in $(seq 1 20); do x 'front' 2>/dev/null | grep -q '^OK online' && break; sleep 1; done
