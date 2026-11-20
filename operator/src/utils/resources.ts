@@ -1235,7 +1235,24 @@ export function buildConfigMap(
  * Checks if a ConfigMap needs updating.
  */
 export function configMapNeedsUpdate(existing: V1ConfigMap, desired: V1ConfigMap): boolean {
-  return JSON.stringify(existing.data ?? {}) !== JSON.stringify(desired.data ?? {});
+  const have = existing.data ?? {};
+  const want = desired.data ?? {};
+  const keys = new Set([...Object.keys(have), ...Object.keys(want)]);
+  return [...keys].some((key) => have[key] !== want[key]);
+}
+
+/**
+ * The merge patch that makes the cluster ConfigMap's data the desired one: its keys, and the keys
+ * the operator no longer writes set to null, which removes them (the Perl scripts and the former
+ * init script name of clusters created before v0.170.0, init.sql once bootstrap.initSql is unset)
+ */
+export function configMapPatch(existing: V1ConfigMap, desired: V1ConfigMap): V1ConfigMap {
+  const want = desired.data ?? {};
+  const gone = Object.keys(existing.data ?? {}).filter((key) => !(key in want));
+  return {
+    ...desired,
+    data: { ...want, ...Object.fromEntries(gone.map((key) => [key, null])) } as unknown as Record<string, string>,
+  };
 }
 
 /**

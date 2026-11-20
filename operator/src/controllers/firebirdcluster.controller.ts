@@ -182,6 +182,7 @@ import {
   buildStatefulSet,
   autoSweepCronJobNeedsUpdate,
   configMapNeedsUpdate,
+  configMapPatch,
   cronJobNeedsUpdate,
   diagnosticsCronJobNeedsUpdate,
   networkPolicyNeedsUpdate,
@@ -2821,7 +2822,7 @@ export class FirebirdClusterController {
           await this.batchApi.patchNamespacedCronJob({
             name: cronJobName,
             namespace,
-            body: withoutOwners(desired),
+            body: withoutOwners(configMapPatch(existing, desired)),
           }, MERGE_PATCH);
         } else {
           log.debug('Journal archive CronJob up to date, skipping');
@@ -2869,7 +2870,7 @@ export class FirebirdClusterController {
           await this.batchApi.patchNamespacedCronJob({
             name: backupName,
             namespace,
-            body: withoutOwners(desired),
+            body: withoutOwners(configMapPatch(existing, desired)),
           }, MERGE_PATCH);
         } else {
           log.debug('Backup CronJob up to date, skipping');
@@ -3059,7 +3060,7 @@ export class FirebirdClusterController {
           await this.policyApi.patchNamespacedPodDisruptionBudget({
             name: pdbName,
             namespace,
-            body: withoutOwners(desired),
+            body: withoutOwners(configMapPatch(existing, desired)),
           }, MERGE_PATCH);
         } else {
           log.debug('PodDisruptionBudget up to date, skipping');
@@ -3112,7 +3113,7 @@ export class FirebirdClusterController {
           await this.coreApi.patchNamespacedConfigMap({
             name: configName,
             namespace,
-            body: withoutOwners(desired),
+            body: withoutOwners(configMapPatch(existing, desired)),
           }, MERGE_PATCH);
         } else {
           log.debug('ConfigMap is up to date, skipping');
@@ -3154,7 +3155,7 @@ export class FirebirdClusterController {
           await this.batchApi.patchNamespacedCronJob({
             name: sweepName,
             namespace,
-            body: withoutOwners(desired),
+            body: withoutOwners(configMapPatch(existing, desired)),
           }, MERGE_PATCH);
         } else {
           log.debug('AutoSweep CronJob up to date, skipping');
@@ -3724,7 +3725,7 @@ export class FirebirdClusterController {
           await this.batchApi.patchNamespacedCronJob({
             name: cronJobName,
             namespace,
-            body: withoutOwners(desired),
+            body: withoutOwners(configMapPatch(existing, desired)),
           }, MERGE_PATCH);
         } else {
           log.debug('Diagnostics CronJob is up to date, skipping');
@@ -3765,7 +3766,7 @@ export class FirebirdClusterController {
           await this.coreApi.patchNamespacedConfigMap({
             name: cmName,
             namespace,
-            body: withoutOwners(desired),
+            body: withoutOwners(configMapPatch(existing, desired)),
           }, MERGE_PATCH);
         } else {
           log.debug('Grafana Dashboard ConfigMap is up to date, skipping');

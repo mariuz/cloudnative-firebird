@@ -3674,12 +3674,21 @@ jobs:
           kubectl get events -n cloudnative-firebird-system || true
 
   operator-upgrade:
-    # the documented upgrade path (README, Upgrading the operator) on every change: the latest
-    # release's install manifest and image, a replicated cluster with data on it, then this
-    # build's CRDs and manifests; the cluster must come through with its data and its replication
-    name: Operator upgrade (from the latest release)
+    # the documented upgrade path (README, Upgrading the operator) on every change: a release's
+    # install manifest and image, a replicated cluster with data on it, then this build's CRDs and
+    # manifests; the cluster must come through with its data and its replication. From the latest
+    # release, and from v0.169.0, the last one before the agent became the default (v0.170.0):
+    # its clusters ran the Perl scripts and the segment TLS proxy, or opted into the agent
+    name: Operator upgrade (from ${{ matrix.from.name }})
     runs-on: ubuntu-latest
     needs: unit-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        from:
+          - { name: the latest release, tag: latest, agent: "" }
+          - { name: "v0.169.0, the Perl scripts", tag: v0.169.0, agent: "" }
+          - { name: "v0.169.0, opted into the agent", tag: v0.169.0, agent: rust }
     steps:
       - uses: actions/checkout@v4
 
@@ -3713,7 +3722,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           NS=cloudnative-firebird-system
-          tag=$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name)
+          tag="${{ matrix.from.tag }}"
+          [ "$tag" = latest ] && tag=$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name)
           echo "upgrading from $tag"
           echo "$tag" > /tmp/from-tag
           curl -fsSL -o /tmp/from.yaml "https://github.com/${{ github.repository }}/releases/download/$tag/cloudnative-firebird.yaml"
@@ -3746,6 +3756,10 @@ jobs:
               failover:
                 enabled: true
           EOF
+          # the opt-in of v0.152.0 to v0.169.0 (accepted and ignored since v0.170.0)
+          if [ -n "${{ matrix.from.agent }}" ]; then
+            kubectl annotate firebirdcluster repl firebird.cloudnative-firebird.io/agent=${{ matrix.from.agent }}
+          fi
           for p in repl-0 repl-1 repl-2; do
             timeout 300 bash -c "until kubectl get pod $p >/dev/null 2>&1; do sleep 3; done"
             kubectl wait pod/$p --for=condition=Ready --timeout=300s
@@ -3827,7 +3841,28 @@ jobs:
           if echo "$logs" | grep -E '"msg":"(Reconciliation failed|Failed to update cluster status)"'; then
             echo "the upgraded operator reported reconcile/status errors"; exit 1
           fi
-          echo "upgraded from $(cat /tmp/from-tag) to this build: data and replication intact"
+          # whatever it started from, the instances run this version's agent: the binary installed,
+          # no segment TLS proxy sidecar (v0.171.0), no Perl in any container (v0.170.0)
+          for p in repl-0 repl-1 repl-2; do
+            init=$(kubectl get pod $p -o jsonpath='{.spec.initContainers[*].name}')
+            echo "$init" | grep -qw agent-install || { echo "$p has no agent-install: $init"; exit 1; }
+            if echo "$init" | grep -qw segment-tls; then echo "$p still runs the segment TLS proxy"; exit 1; fi
+            [ "$(kubectl get pod $p -o jsonpath='{.spec.initContainers[?(@.name=="replication-init")].command}')" = '["sh","/etc/firebird-operator/init-instance.sh"]' ]
+            for c in $(kubectl get pod $p -o jsonpath='{.spec.containers[*].name}'); do
+              if kubectl exec $p -c $c -- sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null' | tr '\0' ' ' | grep -qw perl; then echo "$p/$c runs Perl"; exit 1; fi
+            done
+          done
+          # the cluster ConfigMap holds only what this version writes: no Perl scripts, no former
+          # init script name (v0.172.0), whatever an earlier version left in it
+          leftovers=$(kubectl get configmap repl-config -o json | jq -r '.data | keys[]' | grep -E '\.pl$|^init-instance-agent\.sh$' || true)
+          [ -z "$leftovers" ] || { echo "left in the cluster ConfigMap: $leftovers"; exit 1; }
+          # and it is not written again on every reconcile once it is current
+          # (a reconcile every 10 s here: about six in the minute)
+          sleep 65
+          writes=$(kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --since=60s --tail=-1 | grep -c '"cluster":"repl".*"msg":"Updating cluster ConfigMap"' || true)
+          echo "ConfigMap writes in the last minute: $writes"
+          [ "$writes" -le 1 ] || { echo "the cluster ConfigMap is written on every reconcile"; exit 1; }
+          echo "upgraded from $(cat /tmp/from-tag)${{ matrix.from.agent && ' (agent opt-in)' || '' }} to this build: data and replication intact"
 
       - name: Show resources on failure
         if: failure()
