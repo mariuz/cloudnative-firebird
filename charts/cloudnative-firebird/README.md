@@ -30,3 +30,4 @@ cluster, in the namespace of your choice.
 | `serviceAccount.annotations`, `podAnnotations`, `priorityClassName`, `nodeSelector`, `tolerations`, `affinity` | none; the replicas prefer different nodes | Scheduling |
 | `podDisruptionBudget.enabled`, `podDisruptionBudget.maxUnavailable` | `true`, `1` | Keeps one replica through node drains |
 | `podMonitor.enabled`, `podMonitor.interval` | `false`, `30s` | Scrape `/metrics` with the Prometheus Operator |
+| `prometheusRule.enabled`, `prometheusRule.labels` | `false`, `{}` | The alerting rules (`files/firebird.rules.yaml`, from `config/monitoring`) as a `PrometheusRule`; the labels for your Prometheus' `ruleSelector` |

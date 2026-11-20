@@ -4,7 +4,7 @@
  * the operator's own measurement from the segment servers (utils/replication-lag.ts), so it needs
  * no exporter sidecar.
  */
-import { FirebirdCluster, FirebirdClusterStatus } from '../types';
+import { FirebirdBackup, FirebirdCluster, FirebirdClusterStatus } from '../types';
 
 type Labels = Record<string, string>;
 
@@ -37,6 +37,14 @@ export class MetricsRegistry {
 
   set(name: string, help: string, labels: Labels, value: number): void {
     this.family(name, 'gauge', help).series.set(render(labels), { labels, value });
+  }
+
+  /** A gauge that only grows: keeps the larger of its value and `value` */
+  max(name: string, help: string, labels: Labels, value: number): void {
+    const f = this.family(name, 'gauge', help);
+    const key = render(labels);
+    const current = f.series.get(key)?.value;
+    if (current === undefined || value > current) f.series.set(key, { labels, value });
   }
 
   inc(name: string, help: string, labels: Labels, by = 1): void {
@@ -92,9 +100,12 @@ export function recordClusterMetrics(cluster: FirebirdCluster, status: Partial<F
       'firebird_replication_applied_sequence',
       'firebird_replication_ahead_of_primary',
       'firebird_replication_last_archived_sequence',
+      'firebird_cluster_phase',
     ],
     base,
   );
+  // one series, the current phase (alerts leave hibernated and paused clusters alone)
+  if (status.phase) metrics.set('firebird_cluster_phase', 'The cluster phase (1 for the current one)', { ...base, phase: status.phase }, 1);
   metrics.set('firebird_cluster_instances', 'Instances requested by spec.instances', base, cluster.spec.instances);
   metrics.set('firebird_cluster_ready_instances', 'Instances whose pod is ready', base, status.readyInstances ?? 0);
   metrics.set('firebird_cluster_fenced_instances', 'Instances fenced by the fencedInstances annotation', base, status.fencedInstances?.length ?? 0);
@@ -153,5 +164,28 @@ export function recordPromotion(cluster: FirebirdCluster, kind: 'switchover' | '
       base,
       rounds - 1,
     );
+  }
+}
+
+/**
+ * Records a finished backup of a cluster: the time of its last successful backup (its completion
+ * time) and of its last failed one (when it started, or was created if it never started). Taken
+ * from the backup's status, so the reconciles of the backups after an operator restart give the
+ * same values (no counter to reset); alerts compare the two (config/monitoring/prometheusrule.yaml).
+ */
+export function recordBackupOutcome(backup: FirebirdBackup, status: FirebirdBackup['status'] = backup.status): void {
+  const phase = status?.phase;
+  if (phase !== 'Completed' && phase !== 'Failed') return;
+  const at = Date.parse(
+    (phase === 'Completed' ? status?.completionTime : undefined) ??
+      status?.startTime ??
+      String(backup.metadata.creationTimestamp ?? ''),
+  );
+  if (!Number.isFinite(at)) return;
+  const labels = { namespace: backup.metadata.namespace ?? 'default', cluster: backup.spec.clusterName };
+  if (phase === 'Completed') {
+    metrics.max('firebird_backup_last_success_timestamp_seconds', 'Completion time of the cluster\'s last successful backup (Unix seconds)', labels, Math.floor(at / 1000));
+  } else {
+    metrics.max('firebird_backup_last_failure_timestamp_seconds', 'Start time of the cluster\'s last failed backup (Unix seconds)', labels, Math.floor(at / 1000));
   }
 }

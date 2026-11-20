@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.173.0/cloudnative-firebird-0.173.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.174.0/cloudnative-firebird-0.174.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.173.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.174.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -237,7 +237,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.173.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.174.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -859,32 +859,51 @@ alerting on it needs no exporter sidecar:
 | `firebird_promotions_total` | `namespace`, `cluster`, `kind`, `mode` | Promotions of a new primary by `kind` (`switchover`, `failover`) and `mode` (`in_place`, or `offline`: the target restarted to be promoted) (counter, v0.149.0) |
 | `firebird_promotion_header_retries_total` | `namespace`, `cluster` | Header rounds in-place promotions repeated because the server went online without the replication sequence written (counter, `PromotionHeaderRetried` warnings; ISSUES.md issue 10; v0.149.0) |
 | `firebird_operator_reconciles_total` | `namespace`, `cluster`, `result` | Reconciles by result (`success`, `error`) |
+| `firebird_cluster_phase` | `namespace`, `cluster`, `phase` | 1 for the cluster's current phase (one series: `Running`, `Hibernated`, `Paused`, `Degraded` and the others), v0.174.0 |
+| `firebird_backup_last_success_timestamp_seconds` | `namespace`, `cluster` | When the cluster's last successful backup completed (Unix seconds), from the backups' status, v0.174.0 |
+| `firebird_backup_last_failure_timestamp_seconds` | `namespace`, `cluster` | When the cluster's last failed backup started (or was created), v0.174.0 |
 
 A replica that cannot be measured has no lag series (alert on `absent()` or on
 `firebird_cluster_ready_instances`); the series of a deleted cluster are dropped.
 `config/deploy/podmonitor.yaml` scrapes the operator with the Prometheus Operator, and the
 generated Grafana dashboard has ready-instance and replication-lag panels, and since v0.150.0 one
 for replicas ahead of the primary's journal (and their re-seeds) and one for promotions by kind and
-mode with the repeated header rounds. For example:
+mode with the repeated header rounds.
 
-```yaml
-- alert: FirebirdReplicaLagging
-  expr: firebird_replication_lag_seconds > 60
-  for: 5m
-# a replica that skipped the primary's segments (the operator re-seeds it); several re-seeds a day
-# mean the primary's journal keeps restarting below its replicas (ISSUES.md issue 10)
-- alert: FirebirdReplicaAheadOfPrimary
-  expr: firebird_replication_ahead_of_primary == 1
-  for: 10m
-- alert: FirebirdReplicasReseededAheadOfPrimary
-  expr: increase(firebird_replication_ahead_reseeds_total[1d]) > 2
-# in-place promotions that fall back to the offline promotion (a restart of the target), or whose
-# header needed another round: the in-place promotion is not working as it should here
-- alert: FirebirdPromotionsOffline
-  expr: increase(firebird_promotions_total{mode="offline"}[1d]) > 0
-- alert: FirebirdPromotionHeaderRetried
-  expr: increase(firebird_promotion_header_retries_total[7d]) > 0
-```
+#### Alerting rules
+
+Since v0.174.0 the operator ships alerting rules on these metrics:
+[config/monitoring/firebird.rules.yaml](config/monitoring/firebird.rules.yaml), a Prometheus rule
+file. Load it into Prometheus as it is, apply `config/deploy/prometheusrule.yaml` (the same groups as
+a `PrometheusRule`) with the Prometheus Operator, or set the chart's `prometheusRule.enabled`
+(`prometheusRule.labels` for your Prometheus' `ruleSelector`); scrape the operator first
+(`podMonitor.enabled`). The thresholds are starting points: copy the file and adjust them.
+
+| Alert | Severity | When |
+|---|---|---|
+| `FirebirdOperatorDown` | critical | no operator pod scraped for 5 minutes |
+| `FirebirdOperatorNoLeader` | critical | no operator replica holds the leader Lease for 5 minutes |
+| `FirebirdReconcileErrors` | warning | more than half of a cluster's reconciles fail for 15 minutes |
+| `FirebirdClusterDegraded` | warning | the cluster is `Degraded` for 10 minutes |
+| `FirebirdClusterNotRunning` | warning | not `Running` for 30 minutes (hibernated and paused clusters aside) |
+| `FirebirdInstancesNotReady` | warning | fewer ready instances than `spec.instances` for 15 minutes (hibernated and paused aside) |
+| `FirebirdInstancesFenced` | info | fenced instances for an hour |
+| `FirebirdSegmentTlsOff` | info | segments shipped in plain text (`segmentTLS.enabled: false`) for an hour |
+| `FirebirdReplicaLagging` | warning | a replica more than 5 minutes behind for 10 minutes |
+| `FirebirdReplicaLaggingCritical` | critical | a replica more than 30 minutes behind for 10 minutes |
+| `FirebirdReplicaAheadOfPrimary` | warning | a replica no longer following the primary's journal for 10 minutes |
+| `FirebirdReplicasReseededAheadOfPrimary` | warning | more than two such re-seeds a day (ISSUES.md issue 10) |
+| `FirebirdPrimaryLeaseStale` | critical | the primary Lease not renewed for over a minute, for 2 minutes |
+| `FirebirdFailover` | warning | a failover in the last 10 minutes |
+| `FirebirdPromotionsOffline` | info | an in-place promotion fell back to a restart of its target in the last day |
+| `FirebirdPromotionHeaderRetried` | info | a promotion wrote its header again in the last week |
+| `FirebirdBackupFailed` | warning | the cluster's last backup failed (later than its last success, or none succeeded) |
+| `FirebirdBackupTooOld` | warning | no backup of the cluster succeeded in 26 hours (for clusters backed up daily) |
+
+The backup alerts use the times of each cluster's last successful and last failed backup, which
+the operator takes from the backups' status (so they are back after an operator restart); a
+cluster that was never backed up has neither. `promtool test rules` checks the rules in the CI
+(`config/monitoring/firebird.rules.test.yaml`).
 
 ### Custom Metrics Queries
 

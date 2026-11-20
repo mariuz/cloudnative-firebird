@@ -1,0 +1,205 @@
+# Alerting rules for cloudnative-firebird (Prometheus rule file format), on the operator's
+# metrics (README "Operator Metrics"): scrape the operator first (config/deploy/podmonitor.yaml
+# or the chart's podMonitor.enabled). Load this file into Prometheus as it is, or apply
+# config/deploy/prometheusrule.yaml (the same groups) with the Prometheus Operator; the chart's
+# prometheusRule.enabled does that too. Thresholds are starting points: copy and adjust.
+#
+# Tested by config/monitoring/firebird.rules.test.yaml (promtool test rules, in the CI).
+groups:
+  - name: cloudnative-firebird.operator
+    rules:
+      - alert: FirebirdOperatorDown
+        expr: absent(cloudnative_firebird_operator_leader)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: The cloudnative-firebird operator is not scraped
+          description: >-
+            No operator pod has reported metrics for 5 minutes: clusters are not reconciled, and
+            failover, backups and replication lag measurement are stopped.
+      - alert: FirebirdOperatorNoLeader
+        expr: max(cloudnative_firebird_operator_leader) < 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: No cloudnative-firebird operator replica holds the leader Lease
+          description: >-
+            The operator runs but none of its replicas reconciles: check the operator's logs and
+            its Lease in its namespace.
+      - alert: FirebirdReconcileErrors
+        expr: >-
+          sum by (namespace, cluster) (increase(firebird_operator_reconciles_total{result="error"}[15m]))
+          > 0.5 * sum by (namespace, cluster) (increase(firebird_operator_reconciles_total[15m]))
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Most reconciles of {{ $labels.namespace }}/{{ $labels.cluster }} fail"
+          description: >-
+            More than half of the cluster's reconciles failed for 15 minutes: see the operator's log
+            and the cluster's Degraded condition and events.
+
+  - name: cloudnative-firebird.clusters
+    rules:
+      - alert: FirebirdClusterDegraded
+        expr: firebird_cluster_phase{phase="Degraded"} == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cluster {{ $labels.namespace }}/{{ $labels.cluster }} is Degraded"
+          description: >-
+            The cluster has been Degraded for 10 minutes: kubectl describe firebirdcluster shows
+            the reason in its conditions and events.
+      - alert: FirebirdClusterNotRunning
+        expr: >-
+          firebird_cluster_ready == 0
+          unless on (namespace, cluster) firebird_cluster_phase{phase=~"Hibernated|Paused"} == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cluster {{ $labels.namespace }}/{{ $labels.cluster }} has not been Running for 30 minutes"
+          description: >-
+            The cluster is neither Running nor hibernated or paused: a creation, update or
+            upgrade that does not finish, or a Degraded cluster.
+      - alert: FirebirdInstancesNotReady
+        expr: >-
+          firebird_cluster_ready_instances < firebird_cluster_instances
+          unless on (namespace, cluster) firebird_cluster_phase{phase=~"Hibernated|Paused"} == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.cluster }} has instances that are not ready"
+          description: >-
+            Fewer instances are ready than spec.instances asks for, for 15 minutes (a rolling
+            update restarts one at a time and takes less).
+      - alert: FirebirdInstancesFenced
+        expr: firebird_cluster_fenced_instances > 0
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.cluster }} has had fenced instances for an hour"
+          description: >-
+            {{ $value }} instance(s) are fenced (the fencedInstances annotation: their database is
+            shut down). Fencing is deliberate; lift it once the maintenance is over.
+      - alert: FirebirdSegmentTlsOff
+        expr: firebird_cluster_segment_tls == 0
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.cluster }} ships its journal segments in plain text"
+          description: >-
+            spec.segmentTLS.enabled is false: segments, seed copies and backup files cross the
+            pod network unencrypted. Set it to true, or let SEGMENT_TLS_MIGRATE move the cluster
+            (docs/segment-tls.md).
+
+  - name: cloudnative-firebird.replication
+    rules:
+      - alert: FirebirdReplicaLagging
+        expr: firebird_replication_lag_seconds > 300
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replica {{ $labels.pod }} of {{ $labels.namespace }}/{{ $labels.cluster }} is behind"
+          description: >-
+            The oldest journal segment the replica has not applied was archived {{ $value }}s ago.
+            Lag-aware routing takes it out of the -replica Service past readOnlyRouting.maxLagSeconds.
+      - alert: FirebirdReplicaLaggingCritical
+        expr: firebird_replication_lag_seconds > 1800
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Replica {{ $labels.pod }} of {{ $labels.namespace }}/{{ $labels.cluster }} is more than 30 minutes behind"
+          description: >-
+            A failover to it would lose nothing (it applies what is archived), but it would take
+            that long to catch up; re-seed it if it does not move (the reseed annotation).
+      - alert: FirebirdReplicaAheadOfPrimary
+        expr: firebird_replication_ahead_of_primary == 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replica {{ $labels.pod }} of {{ $labels.namespace }}/{{ $labels.cluster }} no longer follows the primary"
+          description: >-
+            The replica applied a later segment than the primary last archived: it skips the
+            primary's segments. The operator re-seeds it (JournalBehindReplicas event).
+      - alert: FirebirdReplicasReseededAheadOfPrimary
+        expr: increase(firebird_replication_ahead_reseeds_total[1d]) > 2
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replicas of {{ $labels.namespace }}/{{ $labels.cluster }} keep being re-seeded"
+          description: >-
+            More than two re-seeds a day of replicas ahead of the primary: the primary's journal
+            keeps restarting below its replicas (ISSUES.md issue 10).
+      - alert: FirebirdPrimaryLeaseStale
+        expr: firebird_cluster_primary_lease_age_seconds > 60
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The primary of {{ $labels.namespace }}/{{ $labels.cluster }} has not renewed its Lease"
+          description: >-
+            The primary Lease was last renewed {{ $value }}s ago (failover.primaryLease): the
+            primary has fenced itself, or its lease-holder cannot reach the API server. Automatic
+            failover promotes a replica once the Lease has expired.
+      - alert: FirebirdFailover
+        expr: increase(firebird_promotions_total{kind="failover"}[10m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.namespace }}/{{ $labels.cluster }} failed over to a replica"
+          description: >-
+            The operator promoted a replica because the primary was lost: find out why it was
+            (the FailoverStarted and FailoverCompleted events, the old primary's pod).
+      - alert: FirebirdPromotionsOffline
+        expr: increase(firebird_promotions_total{mode="offline"}[1d]) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: "A promotion in {{ $labels.namespace }}/{{ $labels.cluster }} restarted its target"
+          description: >-
+            An in-place promotion fell back to the offline one (a restart of the new primary):
+            it is not working as it should here.
+      - alert: FirebirdPromotionHeaderRetried
+        expr: increase(firebird_promotion_header_retries_total[7d]) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: "A promotion in {{ $labels.namespace }}/{{ $labels.cluster }} wrote its header again"
+          description: >-
+            The server went online without the replication sequence written and the header was
+            written in another round (ISSUES.md issue 10).
+
+  - name: cloudnative-firebird.backups
+    rules:
+      - alert: FirebirdBackupFailed
+        expr: >-
+          firebird_backup_last_failure_timestamp_seconds > firebird_backup_last_success_timestamp_seconds
+          or (firebird_backup_last_failure_timestamp_seconds
+              unless on (namespace, cluster) firebird_backup_last_success_timestamp_seconds)
+        labels:
+          severity: warning
+        annotations:
+          summary: "The last backup of {{ $labels.namespace }}/{{ $labels.cluster }} failed"
+          description: >-
+            A backup failed after the last one that succeeded (or none succeeded): kubectl
+            firebird backups shows it, and its Job's logs say why.
+      - alert: FirebirdBackupTooOld
+        expr: time() - firebird_backup_last_success_timestamp_seconds > 26 * 3600
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No backup of {{ $labels.namespace }}/{{ $labels.cluster }} succeeded in 26 hours"
+          description: >-
+            The last successful backup completed {{ $value | humanizeDuration }} ago. Raise the
+            threshold for clusters backed up less often than daily.

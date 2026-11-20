@@ -3,6 +3,32 @@
 Open work, roughly in priority order. Firebird-level problems found while building the operator
 are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
+## Roadmap
+
+Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, most valuable first:
+
+- [ ] **Declarative databases on replicated clusters**: `FirebirdDatabase` works on clusters
+  without replication only, so a replicated cluster has its one database. Firebird's
+  `replication.conf` takes one section per database; each needs its own journal, archive, seed,
+  segment serving and promotion. The largest item, and the main functional gap.
+- [x] **Alerting rules** (v0.174.0): `config/monitoring/firebird.rules.yaml` (operator, cluster,
+  replication and backup alerts), a `PrometheusRule` in `config/deploy` and the chart
+  (`prometheusRule.enabled`), tested with `promtool test rules` in the CI; the operator exports
+  the cluster's phase and the times of its last successful and failed backups for them.
+- [ ] **Upgrade CI from older releases**: the CI upgrades from the latest release only, while
+  v0.170.0 to v0.173.0 each changed what an upgrade does (the Perl scripts, the segment TLS proxy,
+  the init script's former name). A track upgrading from v0.169.0 straight to `main` would cover the
+  documented windows and catch the next ones.
+- [ ] **The metrics exporter over the agent's own connection**: it starts an `isql` per query on
+  every scrape; the agent already keeps a Firebird connection (STATE, seeds). Typed values at a
+  fraction of the cost; the values' formatting changes, so opt-in at first.
+- [ ] **Object stores other than S3**: backups, the journal archive and replica clusters speak
+  S3 (and S3-compatible endpoints: MinIO, GCS interoperability). Native Azure Blob and GCS, as
+  CloudNativePG's Barman Cloud has.
+- [ ] **A CloudNativePG sweep**: the last stopped at `a11083b` (2026-11-10).
+- [ ] **Firebird 6 readiness**: when Firebird 6 is released, run the "Firebird formats" workflow
+  against it and move the default image once it is stable (below).
+
 ## Replication
 
 - [ ] **File the publication deadlock upstream** ([ISSUES.md](ISSUES.md) issue 1): the report,
