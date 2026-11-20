@@ -19,6 +19,8 @@ function readBack(sts: V1StatefulSet): V1StatefulSet {
     c.resources ??= {};
     c.terminationMessagePath ??= '/dev/termination-log';
     c.imagePullPolicy ??= 'IfNotPresent';
+    c.terminationMessagePolicy ??= 'File';
+    for (const port of c.ports ?? []) port.protocol ??= 'TCP';
     for (const e of c.env ?? []) if (e.valueFrom?.fieldRef) e.valueFrom.fieldRef.apiVersion ??= 'v1';
     for (const probe of [c.livenessProbe, c.readinessProbe, c.startupProbe]) {
       if (!probe) continue;
@@ -29,6 +31,13 @@ function readBack(sts: V1StatefulSet): V1StatefulSet {
       probe.failureThreshold ??= 3;
     }
   }
+  for (const v of pod.volumes ?? []) {
+    if (v.secret) v.secret.defaultMode ??= 420;
+    if (v.configMap) v.configMap.defaultMode ??= 420;
+    if (v.projected) v.projected.defaultMode ??= 420;
+  }
+  pod.restartPolicy ??= 'Always';
+  pod.dnsPolicy ??= 'ClusterFirst';
   // the client's key order: the reverse of the operator's, to tell the two apart in any case
   const reversed = JSON.parse(JSON.stringify(stored, (_k, v: unknown) =>
     v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).reverse()) : v));
@@ -61,5 +70,12 @@ describe('the StatefulSet read back from the API server', () => {
     expect(statefulSetUpdateReason(before, buildStatefulSet(makeCluster({ env: [{ name: 'A', value: 'b' }] })))).toBe('env');
     expect(statefulSetUpdateReason(before, buildStatefulSet(makeCluster({ securityContext: { readOnlyRootFilesystem: true } }))))
       .toBe('container securityContext');
+  });
+
+  it('needs an update for what changes only the sidecars and the volumes: segment TLS', () => {
+    const plain = makeCluster({ instances: 3, replication: { enabled: true } });
+    const tls = makeCluster({ instances: 3, replication: { enabled: true }, segmentTLS: { enabled: true } });
+    expect(statefulSetUpdateReason(readBack(buildStatefulSet(plain)), buildStatefulSet(tls))).toMatch(/^container |^volumes$/);
+    expect(statefulSetUpdateReason(readBack(buildStatefulSet(tls)), buildStatefulSet(plain))).toMatch(/^container |^volumes$/);
   });
 });

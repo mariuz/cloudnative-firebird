@@ -767,6 +767,28 @@ export function statefulSetUpdateReason(
     return 'terminationGracePeriodSeconds';
   }
 
+  // every container and volume, by what the operator sets in them (the API server adds defaults:
+  // a port's protocol, a volume's defaultMode, a field reference's apiVersion; quantities by
+  // value): e.g. segment TLS changes only the sidecars' variables and mounts and the volumes
+  const withoutResources = (c: V1Container) => ({ ...c, resources: undefined });
+  for (const kind of ['initContainers', 'containers'] as const) {
+    const existingContainers = existingPodSpec[kind] ?? [];
+    for (const [i, wanted] of (desiredPodSpec[kind] ?? []).entries()) {
+      const current = existingContainers[i];
+      if (!setFieldsMatch(quantitiesByValue(withoutResources(wanted)), quantitiesByValue(withoutResources(current)))) {
+        return `container ${wanted.name}`;
+      }
+      if (canonicalJson(resourcesByValue(current.resources)) !== canonicalJson(resourcesByValue(wanted.resources))) {
+        return `container ${wanted.name} resources`;
+      }
+    }
+  }
+  if (names(existingPodSpec.volumes) !== names(desiredPodSpec.volumes)) return 'volumes';
+  const existingVolumes = existingPodSpec.volumes ?? [];
+  for (const [i, wanted] of (desiredPodSpec.volumes ?? []).entries()) {
+    if (!setFieldsMatch(quantitiesByValue(wanted), quantitiesByValue(existingVolumes[i]))) return `volume ${wanted.name}`;
+  }
+
   return undefined;
 }
 
