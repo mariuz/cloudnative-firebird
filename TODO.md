@@ -15,10 +15,10 @@ Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, 
   replication and backup alerts), a `PrometheusRule` in `config/deploy` and the chart
   (`prometheusRule.enabled`), tested with `promtool test rules` in the CI; the operator exports
   the cluster's phase and the times of its last successful and failed backups for them.
-- [ ] **Upgrade CI from older releases**: the CI upgrades from the latest release only, while
-  v0.170.0 to v0.173.0 each changed what an upgrade does (the Perl scripts, the segment TLS proxy,
-  the init script's former name). A track upgrading from v0.169.0 straight to `main` would cover the
-  documented windows and catch the next ones.
+- [x] **Upgrade CI from older releases** (v0.175.0): the "Operator upgrade" job also starts from
+  v0.169.0, with and without the agent opt-in, and checks the agent, no Perl, no proxy and a clean
+  cluster ConfigMap after the upgrade. Its first run found that a merge patch never removed keys
+  from the ConfigMap, and that the ConfigMap was written on every reconcile: both fixed.
 - [ ] **The metrics exporter over the agent's own connection**: it starts an `isql` per query on
   every scrape; the agent already keeps a Firebird connection (STATE, seeds). Typed values at a
   fraction of the cost; the values' formatting changes, so opt-in at first.

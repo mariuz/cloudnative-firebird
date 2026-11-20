@@ -15,6 +15,7 @@ import {
   podDisruptionBudgetNeedsUpdate,
   buildConfigMap,
   configMapNeedsUpdate,
+  configMapPatch,
   buildAutoSweepCronJob,
   autoSweepCronJobNeedsUpdate,
   buildNetworkPolicy,
@@ -604,6 +605,21 @@ describe('buildConfigMap & configMapNeedsUpdate', () => {
     const cm2 = buildConfigMap(makeCluster({ config: { settings: { A: '2' } } }));
     expect(configMapNeedsUpdate(cm1!, cm1!)).toBe(false);
     expect(configMapNeedsUpdate(cm1!, cm2!)).toBe(true);
+  });
+
+  it('removes the keys it no longer writes, and compares regardless of order', () => {
+    const desired = buildConfigMap(makeCluster({ replication: { enabled: true } }))!;
+    // a cluster of before v0.170.0: the Perl scripts and the former init script name
+    const old = { ...desired, data: { 'segment-server.pl': 'perl', ...desired.data, 'init-instance-agent.sh': 'sh' } };
+    expect(configMapNeedsUpdate(old, desired)).toBe(true);
+    const patch = configMapPatch(old, desired).data as Record<string, string | null>;
+    expect(patch['segment-server.pl']).toBeNull();
+    expect(patch['init-instance-agent.sh']).toBeNull();
+    expect(Object.entries(patch).filter(([, v]) => v !== null)).toEqual(Object.entries(desired.data!));
+    // the same keys in another order: nothing to write
+    const reordered = { ...desired, data: Object.fromEntries(Object.entries(desired.data!).reverse()) };
+    expect(configMapNeedsUpdate(reordered, desired)).toBe(false);
+    expect(Object.values(configMapPatch(reordered, desired).data!)).not.toContain(null);
   });
 });
 
