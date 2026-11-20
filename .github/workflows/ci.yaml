@@ -3862,6 +3862,11 @@ jobs:
           writes=$(kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --since=60s --tail=-1 | grep -c '"cluster":"repl".*"msg":"Updating cluster ConfigMap"' || true)
           echo "ConfigMap writes in the last minute: $writes"
           [ "$writes" -le 1 ] || { echo "the cluster ConfigMap is written on every reconcile"; exit 1; }
+          # nor the StatefulSet (the log names the field that differed)
+          updates=$(kubectl logs -n cloudnative-firebird-system -l app.kubernetes.io/name=cloudnative-firebird --since=60s --tail=-1 | grep '"cluster":"repl".*"msg":"Updating StatefulSet"' || true)
+          echo "StatefulSet updates in the last minute: $(printf '%s' "$updates" | grep -c . || true)"
+          printf '%s\n' "$updates" | grep -o '"reason":"[^"]*"' | sort | uniq -c || true
+          [ "$(printf '%s' "$updates" | grep -c . || true)" -le 1 ] || { echo "the StatefulSet is updated on every reconcile"; exit 1; }
           echo "upgraded from $(cat /tmp/from-tag)${{ matrix.from.agent && ' (agent opt-in)' || '' }} to this build: data and replication intact"
 
       - name: Show resources on failure

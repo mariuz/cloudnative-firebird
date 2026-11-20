@@ -644,102 +644,152 @@ export function buildReplicaService(cluster: FirebirdCluster): V1Service {
  * Checks if two StatefulSet specs are semantically equal
  * (ignoring server-set fields like resourceVersion).
  */
-export function statefulSetNeedsUpdate(
+export function statefulSetNeedsUpdate(existing: V1StatefulSet, desired: V1StatefulSet): boolean {
+  return statefulSetUpdateReason(existing, desired) !== undefined;
+}
+
+/** Container resources with their quantities by value (the API server writes them in canonical form) */
+function resourcesByValue(resources: V1Container['resources']): unknown {
+  const byValue = (list?: Record<string, string>) =>
+    Object.fromEntries(Object.entries(list ?? {}).map(([k, v]) => [k, parseQuantity(String(v)) ?? v]));
+  return { limits: byValue(resources?.limits), requests: byValue(resources?.requests), claims: resources?.claims ?? [] };
+}
+
+/**
+ * The first difference that needs the StatefulSet updated (logged with the update), undefined
+ * when it is current. The existing StatefulSet is as the client reads it from the API server:
+ * its objects' keys in the client's order (alphabetical), the server's defaults filled in (empty
+ * resources, a field reference's apiVersion, probe timings): objects are compared whatever their
+ * key order, and only what the operator sets where the server adds defaults.
+ */
+export function statefulSetUpdateReason(
   existing: V1StatefulSet,
   desired: V1StatefulSet,
-): boolean {
+): string | undefined {
   const existingSpec = existing.spec;
   const desiredSpec = desired.spec;
 
-  if (!existingSpec || !desiredSpec) return true;
+  if (!existingSpec || !desiredSpec) return 'spec';
 
-  if (existingSpec.replicas !== desiredSpec.replicas) return true;
+  if (existingSpec.replicas !== desiredSpec.replicas) return 'replicas';
   if ((existingSpec.updateStrategy?.type ?? 'RollingUpdate') !== (desiredSpec.updateStrategy?.type ?? 'RollingUpdate')) {
-    return true;
+    return 'updateStrategy';
   }
   // Only operator-set annotations are compared; others (e.g. kubectl restartedAt) are kept
   const existingAnnotations = existingSpec.template?.metadata?.annotations ?? {};
   const desiredAnnotations = desiredSpec.template?.metadata?.annotations ?? {};
-  if (Object.entries(desiredAnnotations).some(([key, value]) => existingAnnotations[key] !== value)) {
-    return true;
-  }
+  const annotation = Object.entries(desiredAnnotations).find(([key, value]) => existingAnnotations[key] !== value);
+  if (annotation) return `template annotation ${annotation[0]}`;
 
   const existingPodSpec = existingSpec.template?.spec;
   const desiredPodSpec = desiredSpec.template?.spec;
-  if (!existingPodSpec || !desiredPodSpec) return true;
+  if (!existingPodSpec || !desiredPodSpec) return 'template.spec';
 
-  if ((existingPodSpec.serviceAccountName ?? 'default') !== (desiredPodSpec.serviceAccountName ?? 'default')) return true;
-  if ((existingPodSpec.priorityClassName ?? '') !== (desiredPodSpec.priorityClassName ?? '')) return true;
-  if ((existingPodSpec.schedulerName ?? 'default-scheduler') !== (desiredPodSpec.schedulerName ?? 'default-scheduler')) return true;
-  if (canonicalJson(existingPodSpec.imagePullSecrets ?? []) !== canonicalJson(desiredPodSpec.imagePullSecrets ?? [])) return true;
+  if ((existingPodSpec.serviceAccountName ?? 'default') !== (desiredPodSpec.serviceAccountName ?? 'default')) return 'serviceAccountName';
+  if ((existingPodSpec.priorityClassName ?? '') !== (desiredPodSpec.priorityClassName ?? '')) return 'priorityClassName';
+  if ((existingPodSpec.schedulerName ?? 'default-scheduler') !== (desiredPodSpec.schedulerName ?? 'default-scheduler')) return 'schedulerName';
+  if (canonicalJson(existingPodSpec.imagePullSecrets ?? []) !== canonicalJson(desiredPodSpec.imagePullSecrets ?? [])) return 'imagePullSecrets';
   // the API server defaults the pull policy, so it is compared where the cluster sets one
   const pullPolicies = (spec: V1PodSpec) => [...(spec.initContainers ?? []), ...(spec.containers ?? [])].map((c) => c.imagePullPolicy);
   const existingPolicies = pullPolicies(existingPodSpec);
-  if (pullPolicies(desiredPodSpec).some((policy, i) => policy !== undefined && existingPolicies[i] !== policy)) return true;
+  if (pullPolicies(desiredPodSpec).some((policy, i) => policy !== undefined && existingPolicies[i] !== policy)) return 'imagePullPolicy';
   // labels the operator or inheritedMetadata adds (others, and inherited ones removed since, are kept)
   const existingLabels = existingSpec.template?.metadata?.labels ?? {};
-  if (Object.entries(desiredSpec.template?.metadata?.labels ?? {}).some(([key, value]) => existingLabels[key] !== value)) return true;
-  if (JSON.stringify(existingPodSpec.securityContext ?? {}) !== JSON.stringify(desiredPodSpec.securityContext ?? {})) return true;
+  const label = Object.entries(desiredSpec.template?.metadata?.labels ?? {}).find(([key, value]) => existingLabels[key] !== value);
+  if (label) return `template label ${label[0]}`;
+  if (canonicalJson(existingPodSpec.securityContext ?? {}) !== canonicalJson(desiredPodSpec.securityContext ?? {})) return 'securityContext';
   const securityContexts = (spec: V1PodSpec) =>
-    JSON.stringify([...(spec.initContainers ?? []), ...(spec.containers ?? [])].map((c) => c.securityContext ?? {}));
-  if (securityContexts(existingPodSpec) !== securityContexts(desiredPodSpec)) return true;
+    canonicalJson([...(spec.initContainers ?? []), ...(spec.containers ?? [])].map((c) => c.securityContext ?? {}));
+  if (securityContexts(existingPodSpec) !== securityContexts(desiredPodSpec)) return 'container securityContext';
   // scheduling: the API server returns objects with its own key order
-  if (canonicalJson(existingPodSpec.nodeSelector) !== canonicalJson(desiredPodSpec.nodeSelector)) return true;
-  if (canonicalJson(existingPodSpec.affinity) !== canonicalJson(desiredPodSpec.affinity)) return true;
-  if (canonicalJson(existingPodSpec.tolerations) !== canonicalJson(desiredPodSpec.tolerations)) return true;
-  if (canonicalJson(existingPodSpec.topologySpreadConstraints) !== canonicalJson(desiredPodSpec.topologySpreadConstraints)) return true;
+  if (canonicalJson(existingPodSpec.nodeSelector) !== canonicalJson(desiredPodSpec.nodeSelector)) return 'nodeSelector';
+  if (canonicalJson(existingPodSpec.affinity) !== canonicalJson(desiredPodSpec.affinity)) return 'affinity';
+  if (canonicalJson(existingPodSpec.tolerations) !== canonicalJson(desiredPodSpec.tolerations)) return 'tolerations';
+  if (canonicalJson(existingPodSpec.topologySpreadConstraints) !== canonicalJson(desiredPodSpec.topologySpreadConstraints)) {
+    return 'topologySpreadConstraints';
+  }
 
   const names = (list?: Array<{ name: string }>) => (list ?? []).map((c) => c.name).join(',');
-  if (names(existingPodSpec.containers) !== names(desiredPodSpec.containers)) return true;
-  if (names(existingPodSpec.initContainers) !== names(desiredPodSpec.initContainers)) return true;
+  if (names(existingPodSpec.containers) !== names(desiredPodSpec.containers)) return 'containers';
+  if (names(existingPodSpec.initContainers) !== names(desiredPodSpec.initContainers)) return 'initContainers';
 
   const existingContainer = existingPodSpec.containers?.[0];
   const desiredContainer = desiredPodSpec.containers?.[0];
 
-  if (!existingContainer || !desiredContainer) return true;
-  if (existingContainer.image !== desiredContainer.image) return true;
-  if (JSON.stringify(existingContainer.resources) !== JSON.stringify(desiredContainer.resources)) return true;
-  if (JSON.stringify(existingContainer.env) !== JSON.stringify(desiredContainer.env)) return true;
-  if (canonicalJson(existingContainer.envFrom ?? []) !== canonicalJson(desiredContainer.envFrom ?? [])) return true;
+  if (!existingContainer || !desiredContainer) return 'containers';
+  if (existingContainer.image !== desiredContainer.image) return 'image';
+  // unset resources are read back as empty ones
+  if (canonicalJson(resourcesByValue(existingContainer.resources)) !== canonicalJson(resourcesByValue(desiredContainer.resources))) {
+    return 'resources';
+  }
+  // what each variable sets (the API server defaults a field reference's apiVersion)
+  if (!setFieldsMatch(desiredContainer.env ?? [], existingContainer.env ?? [])) return 'env';
+  if (canonicalJson(existingContainer.envFrom ?? []) !== canonicalJson(desiredContainer.envFrom ?? [])) return 'envFrom';
   // spec.projectedVolumeTemplate: its sources (the API server defaults the mode when unset)
   const projected = (spec: V1PodSpec) => spec.volumes?.find((v) => v.name === PROJECTED_VOLUME)?.projected;
   const existingProjected = projected(existingPodSpec);
   const desiredProjected = projected(desiredPodSpec);
-  if (!existingProjected !== !desiredProjected) return true;
+  if (!existingProjected !== !desiredProjected) return 'projectedVolumeTemplate';
   if (existingProjected && desiredProjected) {
     // what the spec sets must match: the API server adds defaults (a token's expirationSeconds,
     // a field reference's apiVersion)
-    if (!setFieldsMatch(desiredProjected.sources ?? [], existingProjected.sources ?? [])) return true;
-    if (desiredProjected.defaultMode !== undefined && existingProjected.defaultMode !== desiredProjected.defaultMode) return true;
+    if (!setFieldsMatch(desiredProjected.sources ?? [], existingProjected.sources ?? [])) return 'projectedVolumeTemplate';
+    if (desiredProjected.defaultMode !== undefined && existingProjected.defaultMode !== desiredProjected.defaultMode) {
+      return 'projectedVolumeTemplate';
+    }
   }
   // the temporary volume (its kind and size; the API server defaults a claim template's fields)
   const temp = (spec: V1PodSpec) => spec.volumes?.find((v) => v.name === TEMP_VOLUME);
   const existingTemp = temp(existingPodSpec);
   const desiredTemp = temp(desiredPodSpec);
-  if (!existingTemp !== !desiredTemp) return true;
+  if (!existingTemp !== !desiredTemp) return 'temporary volume';
   if (existingTemp && desiredTemp) {
-    if (!existingTemp.emptyDir !== !desiredTemp.emptyDir) return true;
+    if (!existingTemp.emptyDir !== !desiredTemp.emptyDir) return 'temporary volume';
     // quantities by value: the API server writes them in canonical form (2048Mi as 2Gi)
-    if (!setFieldsMatch(quantitiesByValue(desiredTemp.emptyDir ?? {}), quantitiesByValue(existingTemp.emptyDir ?? {}))) return true;
-    if (!setFieldsMatch(quantitiesByValue(desiredTemp.ephemeral ?? {}), quantitiesByValue(existingTemp.ephemeral ?? {}))) return true;
+    if (!setFieldsMatch(quantitiesByValue(desiredTemp.emptyDir ?? {}), quantitiesByValue(existingTemp.emptyDir ?? {}))) return 'temporary volume';
+    if (!setFieldsMatch(quantitiesByValue(desiredTemp.ephemeral ?? {}), quantitiesByValue(existingTemp.ephemeral ?? {}))) return 'temporary volume';
   }
   // the API server defaults other probe fields, so the command and the fields the operator sets are compared
   if (
     JSON.stringify(existingContainer.readinessProbe?.exec?.command) !==
     JSON.stringify(desiredContainer.readinessProbe?.exec?.command)
   ) {
-    return true;
+    return 'readinessProbe';
   }
   for (const probe of ['livenessProbe', 'readinessProbe', 'startupProbe'] as const) {
     const wanted = desiredContainer[probe];
     const current = existingContainer[probe];
-    if (!wanted !== !current) return true;
-    if (wanted && current && PROBE_TIMINGS.some((field) => wanted[field] !== undefined && current[field] !== wanted[field])) return true;
+    if (!wanted !== !current) return probe;
+    if (wanted && current && PROBE_TIMINGS.some((field) => wanted[field] !== undefined && current[field] !== wanted[field])) return probe;
   }
-  if (canonicalJson(existingContainer.lifecycle?.preStop ?? null) !== canonicalJson(desiredContainer.lifecycle?.preStop ?? null)) return true;
-  if ((existingPodSpec.terminationGracePeriodSeconds ?? 30) !== (desiredPodSpec.terminationGracePeriodSeconds ?? 30)) return true;
+  if (canonicalJson(existingContainer.lifecycle?.preStop ?? null) !== canonicalJson(desiredContainer.lifecycle?.preStop ?? null)) return 'preStop';
+  if ((existingPodSpec.terminationGracePeriodSeconds ?? 30) !== (desiredPodSpec.terminationGracePeriodSeconds ?? 30)) {
+    return 'terminationGracePeriodSeconds';
+  }
 
-  return false;
+  // every container and volume, by what the operator sets in them (the API server adds defaults:
+  // a port's protocol, a volume's defaultMode, a field reference's apiVersion; quantities by
+  // value): e.g. segment TLS changes only the sidecars' variables and mounts and the volumes
+  const withoutResources = (c: V1Container) => ({ ...c, resources: undefined });
+  for (const kind of ['initContainers', 'containers'] as const) {
+    const existingContainers = existingPodSpec[kind] ?? [];
+    for (const [i, wanted] of (desiredPodSpec[kind] ?? []).entries()) {
+      const current = existingContainers[i];
+      if (!setFieldsMatch(quantitiesByValue(withoutResources(wanted)), quantitiesByValue(withoutResources(current)))) {
+        return `container ${wanted.name}`;
+      }
+      if (canonicalJson(resourcesByValue(current.resources)) !== canonicalJson(resourcesByValue(wanted.resources))) {
+        return `container ${wanted.name} resources`;
+      }
+    }
+  }
+  if (names(existingPodSpec.volumes) !== names(desiredPodSpec.volumes)) return 'volumes';
+  const existingVolumes = existingPodSpec.volumes ?? [];
+  for (const [i, wanted] of (desiredPodSpec.volumes ?? []).entries()) {
+    if (!setFieldsMatch(quantitiesByValue(wanted), quantitiesByValue(existingVolumes[i]))) return `volume ${wanted.name}`;
+  }
+
+  return undefined;
 }
 
 /** Probe fields the operator sets (the API server defaults the others) */

@@ -191,7 +191,7 @@ import {
   primaryServiceSelector,
   readOnlyRoutingEnabled,
   replicaServiceSelector,
-  statefulSetNeedsUpdate,
+  statefulSetUpdateReason,
   statefulSetPatchBody,
   withTemplateHash,
   withHibernation,
@@ -2326,8 +2326,9 @@ export class FirebirdClusterController {
     }
 
     let current = existing;
-    if (statefulSetNeedsUpdate(existing, desired)) {
-      log.info('Updating StatefulSet');
+    const reason = statefulSetUpdateReason(existing, desired);
+    if (reason) {
+      log.info({ reason }, 'Updating StatefulSet');
       // volumeClaimTemplates are immutable; storage growth is handled by PVC expansion
       if (desired.spec && existing.spec?.volumeClaimTemplates) {
         desired.spec.volumeClaimTemplates = existing.spec.volumeClaimTemplates;
