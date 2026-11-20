@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The retention of the archive, from the environment segment-server.pl reads.
+#[derive(Clone)]
 pub struct Retention {
     /// SEGMENT_RETENTION_SECONDS (a day): the age a segment is kept for at least
     pub keep: u64,

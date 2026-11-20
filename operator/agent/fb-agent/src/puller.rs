@@ -3,10 +3,14 @@
 //! The primary host is re-read from PRIMARY_FILE on every poll, so it follows the operator's view
 //! of the current primary; the puller idles on the primary itself.
 //!
-//! Environment: SOURCE_DIR, STATE_FILE, PRIMARY_FILE (required), REPLICATION_DIR, POD_NAME,
+//! With REPLICATED_DATABASES_FILE (databases.rs) it follows every declarative database too, each in
+//! a loop of its own that asks with `DB <file>` and fetches into that database's source directory.
+//!
+//! Environment: SOURCE_DIR, STATE_FILE, PRIMARY_FILE (required), REPLICATED_DATABASES_FILE, REPLICATION_DIR, POD_NAME,
 //! ISC_PASSWORD, SEGMENT_PORT, SEGMENT_TLS, POLL_SECONDS (5), FIREBIRD_PORT (3050).
 
 use crate::client::{now, open, var};
+use crate::databases::{self, request_about};
 use crate::server::segment_name;
 use std::fs::{self, File};
 use std::io::{self, BufRead, Read, Write};
@@ -42,6 +46,8 @@ fn other(message: String) -> io::Error {
 }
 
 struct Puller {
+    /// The declarative database it follows (`DB <file>` in its requests); None: the cluster database
+    database: Option<String>,
     source: PathBuf,
     state: PathBuf,
     primary_file: PathBuf,
@@ -51,6 +57,11 @@ struct Puller {
 }
 
 impl Puller {
+    /// The request about the database this puller follows.
+    fn about(&self, request: &str) -> String {
+        request_about(self.database.as_deref(), request)
+    }
+
     fn flag(&self, name: &str) -> Option<PathBuf> {
         self.base.as_ref().map(|base| base.join(name))
     }
@@ -58,7 +69,10 @@ impl Puller {
     /// The replicas the primary replicates to synchronously ("h1,h2" or "none"); None when it cannot tell.
     fn sync_target(&self, primary: &str) -> Option<String> {
         let mut line = String::new();
-        open(primary, "SYNCTO", Some(REQUEST_TIMEOUT)).ok()?.read_line(&mut line).ok()?;
+        open(primary, &self.about("SYNCTO"), Some(REQUEST_TIMEOUT))
+            .ok()?
+            .read_line(&mut line)
+            .ok()?;
         line.strip_prefix("OK ")?.split_whitespace().next().map(str::to_string)
     }
 
@@ -83,7 +97,7 @@ impl Puller {
         }
         let mut last = slurp(&self.state);
         let mut segments = Vec::new();
-        for line in open(&primary, "LIST", Some(REQUEST_TIMEOUT))?.lines() {
+        for line in open(&primary, &self.about("LIST"), Some(REQUEST_TIMEOUT))?.lines() {
             let line = line?;
             let line = line.trim_end_matches('\r');
             if line == "." {
@@ -156,13 +170,14 @@ impl Puller {
             format!("WAIT {seconds} {last}")
         };
         let mut line = String::new();
-        let asked = open(primary, &request, Some(Duration::from_secs(seconds + 10))).and_then(|mut reply| reply.read_line(&mut line));
+        let asked =
+            open(primary, &self.about(&request), Some(Duration::from_secs(seconds + 10))).and_then(|mut reply| reply.read_line(&mut line));
         asked.is_ok() && line.starts_with("OK")
     }
 
     /// GET: the segment into a temporary name, then renamed (an atomic hand-off to the replica).
     fn fetch(&self, primary: &str, name: &str) -> io::Result<()> {
-        let mut reply = open(primary, &format!("GET {name}"), Some(REQUEST_TIMEOUT))?;
+        let mut reply = open(primary, &self.about(&format!("GET {name}")), Some(REQUEST_TIMEOUT))?;
         let mut header = String::new();
         reply.read_line(&mut header)?;
         let size: u64 = header
@@ -199,10 +214,11 @@ fn required(name: &str) -> io::Result<PathBuf> {
 pub fn run() -> io::Result<()> {
     let base = var("REPLICATION_DIR");
     let puller = Puller {
+        database: None,
         source: required("SOURCE_DIR")?,
         state: required("STATE_FILE")?,
         primary_file: required("PRIMARY_FILE")?,
-        base: (!base.is_empty()).then(|| PathBuf::from(base)),
+        base: (!base.is_empty()).then(|| PathBuf::from(&base)),
         pod: var("POD_NAME"),
     };
     let interval: u64 = var("POLL_SECONDS").parse().unwrap_or(5);
@@ -212,23 +228,68 @@ pub fn run() -> io::Result<()> {
     for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         signal_hook::flag::register(signal, Arc::clone(&stopping))?;
     }
+    // the declarative databases (databases.rs): one loop each, in its own tree, beside the
+    // cluster database's
+    let others: Vec<Puller> = databases::from_environment()
+        .into_iter()
+        .map(|other| Puller {
+            database: Some(other.file),
+            source: other.source,
+            state: other.state_file,
+            primary_file: puller.primary_file.clone(),
+            base: Some(other.base),
+            pod: puller.pod.clone(),
+        })
+        .collect();
+    let threads: Vec<_> = others
+        .into_iter()
+        .map(|other| {
+            let stopping = Arc::clone(&stopping);
+            thread::spawn(move || {
+                // the tree of a database added since the instance started
+                let _ = fs::create_dir_all(&other.source);
+                follow(&other, interval, &stopping)
+            })
+        })
+        .collect();
+    follow(&puller, interval, &stopping);
+    for thread in threads {
+        let _ = thread.join();
+    }
+    println!("stopping: the Firebird server has stopped");
+    Ok(())
+}
+
+/// One database's pulls, until the pod's Firebird server has stopped after a signal.
+fn follow(puller: &Puller, interval: u64, stopping: &AtomicBool) {
     let stopped = || stopping.load(Ordering::Relaxed) && firebird_stopped();
+    let name = puller.database.as_deref().map(|file| format!(" ({file})")).unwrap_or_default();
     println!(
-        "segment puller: source={} primary-file={}",
+        "segment puller{name}: source={} primary-file={}",
         puller.source.display(),
         puller.primary_file.display()
     );
     // the primary that did not answer WAIT (a Perl segment server), and the polls since: it is
     // asked again now and then, as it may have been restarted with the fb-agent server
     let mut no_wait: Option<(String, u32)> = None;
+    // the last failure, printed once until it changes (a primary of an earlier version refuses
+    // the requests about a declarative database until it is updated)
+    let mut failure = String::new();
     loop {
         if stopped() {
             break;
         }
         let asked = match puller.pull_once() {
-            Ok(asked) => asked,
+            Ok(asked) => {
+                failure.clear();
+                asked
+            }
             Err(err) => {
-                println!("pull failed: {err}");
+                let text = err.to_string();
+                if text != failure || puller.database.is_none() {
+                    println!("pull failed{name}: {text}");
+                }
+                failure = text;
                 None
             }
         };
@@ -267,8 +328,6 @@ pub fn run() -> io::Result<()> {
             thread::sleep(Duration::from_secs(1));
         }
     }
-    println!("stopping: the Firebird server has stopped");
-    Ok(())
 }
 
 #[cfg(test)]

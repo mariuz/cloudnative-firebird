@@ -9,6 +9,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// The files of an instance, as segment-server.pl names them.
+#[derive(Clone)]
 pub struct Files {
     pub database: PathBuf,
     pub archive: PathBuf,

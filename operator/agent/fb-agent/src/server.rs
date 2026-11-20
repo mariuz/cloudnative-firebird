@@ -26,6 +26,11 @@
 //!   SYNC, STANDBY on|off <segment>, FENCE [<reason>], REJOIN, NBACKUP <level> <file>
 //!                           -> the changes of what the instance does (role.rs).
 //!   PROMOTE <archived>|none -> the in-place promotion (promote.rs).
+//!   DB <file> <request>     -> the request about the declarative database <file>
+//!                              (REPLICATED_DATABASES_FILE, databases.rs): its own archive, files,
+//!                              seeds, promotion and STATE; "ERR unknown database <file>" for one
+//!                              not served. PING, VERSION, the backup files, ISOLATION, PRIMARYSEEN,
+//!                              FENCE and REJOIN are the instance's and take no selector.
 //!
 //! Beside the requests (background.rs): the archive is pruned and, with RECOVERY_POINTS, the
 //! journal sampled, by threads of the agent; so is the isolation check (isolation.rs), with
@@ -42,13 +47,14 @@
 //! that address (tls.rs), instead of behind the segment TLS proxy: the same requests, and plain
 //! text only while the operator allows it (SEGMENT_TLS_PEERS_DIR).
 //!
-//! Environment: ARCHIVE_DIR, REPLICATION_DIR, SOURCE_DIR, PRIMARY_FILE, POD_NAME, ISC_PASSWORD, SEGMENT_LISTEN (host:port) or
+//! Environment: ARCHIVE_DIR, REPLICATION_DIR, SOURCE_DIR, PRIMARY_FILE, POD_NAME, ISC_PASSWORD, REPLICATED_DATABASES_FILE, SEGMENT_LISTEN (host:port) or
 //! SEGMENT_PORT, AUTH_WINDOW_SECONDS; for STATE:
 //! DATABASE_PATH, ISC_USER (SYSDBA), FIREBIRD_PORT (3050), LOCAL_QUERY_TIMEOUT_SECONDS (10).
 
 use crate::background::{self, Retention};
 use crate::backups;
 use crate::client::{now, var};
+use crate::databases;
 use crate::promote::{self, Limits};
 use crate::role::{self, Answer};
 use crate::seed::{self, Seeds};
@@ -57,6 +63,7 @@ use crate::state::{Probe, State};
 use crate::status::Files;
 use crate::tls::{self, Material, Stream};
 use sig1::Verifier;
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -126,33 +133,43 @@ struct Newest {
     name: Option<String>,
 }
 
-struct Front {
+/// One database the server serves: the cluster database, or one of the declarative databases
+/// (databases.rs) that a request names with `DB <file>`
+struct Served {
     archive: PathBuf,
-    /// REPLICATION_DIR/last-contact: when an authenticated request was last answered, which the
-    /// isolation check reads (a primary nothing reaches fences itself)
-    contact: Option<PathBuf>,
-    contacted: Mutex<u64>,
     /// What the requests that wait share: the newest servable segment, looked up when the archive
     /// directory changes
     newest: Mutex<Newest>,
-    verifier: Mutex<Verifier>,
-    /// The backup files only (FILES_ONLY): no instance beside this server
-    files_only: bool,
-    /// The local server's state, with REPLICATION_DIR/self-fenced: who shut the database down
+    /// The local server's state of this database
     state: Option<Probe>,
-    self_fenced: Option<PathBuf>,
     /// The instance's files, for the requests answered from them
     files: Option<Files>,
-    /// Whether the journal's requests are served (not with FILES_ONLY)
-    journal: bool,
     /// For the seeds: the local server's database and whether a live copy is allowed
     seeds: Option<Seeds>,
     /// The in-place promotion's limits; None with FILES_ONLY
     promotion: Option<Limits>,
     /// The puller's position (STATE_FILE, or REPLICATION_DIR/.last-pulled)
     state_file: PathBuf,
+}
+
+struct Front {
+    /// REPLICATION_DIR/last-contact: when an authenticated request was last answered, which the
+    /// isolation check reads (a primary nothing reaches fences itself)
+    contact: Option<PathBuf>,
+    contacted: Mutex<u64>,
+    verifier: Mutex<Verifier>,
+    /// The backup files only (FILES_ONLY): no instance beside this server
+    files_only: bool,
+    /// REPLICATION_DIR/self-fenced: who shut the database down
+    self_fenced: Option<PathBuf>,
+    /// Whether the journal's requests are served (not with FILES_ONLY)
+    journal: bool,
     /// The data directory, where the backup files are
     data: Option<PathBuf>,
+    /// The cluster database
+    cluster: Served,
+    /// The declarative databases, by file name (REPLICATED_DATABASES_FILE)
+    others: BTreeMap<String, Served>,
 }
 
 impl Front {
@@ -165,26 +182,6 @@ impl Front {
         }
         *last = at;
         let _ = fs::write(path, format!("{at}\n"));
-    }
-
-    /// The newest servable segment. The archive is read at most once per WAIT_STEP whatever the
-    /// number of pullers waiting, and only when the directory changed since, or while its newest
-    /// file is being copied.
-    fn newest(&self) -> Option<String> {
-        let mut newest = self.newest.lock().unwrap_or_else(|p| p.into_inner());
-        if newest.looked.elapsed() >= WAIT_STEP {
-            newest.looked = Instant::now();
-            let changed = fs::metadata(&self.archive).and_then(|m| m.modified()).ok();
-            // a directory changed in the last seconds is read again: its time may be coarse
-            let recent = changed.is_none_or(|at| at.elapsed().map_or(true, |age| age < Duration::from_secs(3)));
-            if newest.copying || recent || changed != newest.changed {
-                let names = segment_names(&self.archive);
-                newest.name = names.iter().rev().find(|name| servable(&self.archive, name)).cloned();
-                newest.copying = names.last() != newest.name.as_ref();
-                newest.changed = changed;
-            }
-        }
-        newest.name.clone()
     }
 
     /// One connection: its request and the reply.
@@ -209,15 +206,29 @@ impl Front {
             Ok(request) => request,
             Err(denied) => return writeln!(reader.get_mut(), "ERR unauthorized ({denied})").map(|()| None),
         };
-        let argument = request.argument.as_deref();
-        let database = self
-            .seeds
-            .as_ref()
-            .map(|seeds| seeds.database.path.as_str())
-            .unwrap_or("the database");
+        // DB <file> <request>: about that database; without it, about the cluster database
+        let joined = match &request.argument {
+            Some(argument) => format!("{} {argument}", request.command),
+            None => request.command.clone(),
+        };
+        let (selector, rest) = databases::selected(&joined);
+        let s = match selector {
+            None => &self.cluster,
+            Some(file) => match self.others.get(file) {
+                Some(served) => served,
+                None => return Ok(Some(Left(format!("ERR unknown database {file}")))),
+            },
+        };
+        // what concerns the instance, not one database, takes no selector
+        let wide = selector.is_none();
+        let (command, argument) = match rest.split_once(' ') {
+            Some((command, argument)) => (command, Some(argument)),
+            None => (rest, None),
+        };
+        let database = s.seeds.as_ref().map(|seeds| seeds.database.path.as_str()).unwrap_or("the database");
         // an argument that is refused, or a request this server does not have
         let refused = || {
-            let files = matches!(request.command.as_str(), "FILE" | "STORE" | "REMOVE" | "FILES" | "EXISTS");
+            let files = matches!(command, "FILE" | "STORE" | "REMOVE" | "FILES" | "EXISTS");
             Ok(Some(Left(if self.files_only && !files {
                 "ERR not available without replication".into()
             } else {
@@ -225,24 +236,24 @@ impl Front {
             })))
         };
         let failed = |refusal: String| Ok(Some(Left(refusal)));
-        match (request.command.as_str(), argument) {
-            ("PING", _) => {
+        match (command, argument) {
+            ("PING", _) if wide => {
                 self.contacted();
                 writeln!(reader.get_mut(), "OK")
             }
             ("LIST", _) if self.journal => {
                 self.contacted();
                 let mut reply = String::new();
-                for name in segments(&self.archive) {
+                for name in segments(&s.archive) {
                     reply.push_str(&name);
                     reply.push('\n');
                 }
                 reply.push_str(".\n");
                 reader.get_mut().write_all(reply.as_bytes())
             }
-            ("GET", Some(name)) if self.journal && segment_name(name) && self.archive.join(name).is_file() => {
+            ("GET", Some(name)) if self.journal && segment_name(name) && s.archive.join(name).is_file() => {
                 self.contacted();
-                let Ok(mut file) = File::open(self.archive.join(name)) else {
+                let Ok(mut file) = File::open(s.archive.join(name)) else {
                     return writeln!(reader.get_mut(), "ERR cannot read").map(|()| None);
                 };
                 writeln!(reader.get_mut(), "OK {}", file.metadata()?.len())?;
@@ -255,10 +266,10 @@ impl Front {
             }
             ("WAIT", Some(argument)) if self.journal => {
                 self.contacted();
-                self.wait(reader.get_mut(), argument)
+                s.wait(reader.get_mut(), argument)
             }
             // the Lease holder's, from this pod: no contact from outside
-            ("STATE", _) if self.state.is_some() => match self.state.as_ref().and_then(Probe::state) {
+            ("STATE", _) if s.state.is_some() => match s.state.as_ref().and_then(Probe::state) {
                 Some(State::Online) => writeln!(reader.get_mut(), "OK online"),
                 Some(State::Shutdown) => {
                     // a fence leaves its marker: the Lease holder's says "lease" (it lifts its own),
@@ -275,27 +286,25 @@ impl Front {
                 // not told, by the attachment nor by fbsvcmgr
                 None => return failed(format!("ERR cannot read the state of {database}")),
             },
-            (command @ ("TXNS" | "PLAN"), Some(argument)) if self.seeds.is_some() => {
+            (command @ ("TXNS" | "PLAN"), Some(argument)) if s.seeds.is_some() => {
                 self.contacted();
-                match seed::transactions(&self.archive, command, argument) {
+                match seed::transactions(&s.archive, command, argument) {
                     Some(reply) => reader.get_mut().write_all(reply.as_bytes()),
                     None => return refused(),
                 }
             }
-            (command @ ("SYNC" | "STANDBY" | "FENCE" | "REJOIN" | "NBACKUP"), _) if self.seeds.is_some() && self.files.is_some() => {
+            (command @ ("SYNC" | "STANDBY" | "FENCE" | "REJOIN" | "NBACKUP"), _)
+                if (wide || !matches!(command, "FENCE" | "REJOIN")) && s.seeds.is_some() && s.files.is_some() =>
+            {
                 // the Lease holder's requests come from this pod: no contact from outside
                 if !matches!(command, "FENCE" | "REJOIN") {
                     self.contacted();
                 }
-                match self.change(command, argument) {
+                match self.change(s, command, argument) {
                     Some(Answer::Reply(reply)) => reader.get_mut().write_all(reply.as_bytes()),
                     // undone: what could not be done
                     Some(Answer::Forward) => {
-                        let base = self
-                            .files
-                            .as_ref()
-                            .map(|files| files.base.display().to_string())
-                            .unwrap_or_default();
+                        let base = s.files.as_ref().map(|files| files.base.display().to_string()).unwrap_or_default();
                         return failed(match (command, argument) {
                             ("SYNC", _) => format!("ERR cannot write {base}/sync.conf"),
                             ("STANDBY", Some("on")) => format!("ERR cannot write {base}/sync-standby"),
@@ -309,15 +318,15 @@ impl Front {
                 }
             }
             ("PROMOTE", Some(argument))
-                if self.promotion.is_some()
-                    && self.seeds.is_some()
-                    && self.files.is_some()
+                if s.promotion.is_some()
+                    && s.seeds.is_some()
+                    && s.files.is_some()
                     && (argument == "none" || (!argument.is_empty() && argument.bytes().all(|b| b.is_ascii_digit()))) =>
             {
                 self.contacted();
-                let (limits, files) = (self.promotion.as_ref().expect("checked"), self.files.as_ref().expect("checked"));
-                let database = &self.seeds.as_ref().expect("checked").database;
-                let state = || self.state.as_ref().and_then(Probe::state);
+                let (limits, files) = (s.promotion.as_ref().expect("checked"), s.files.as_ref().expect("checked"));
+                let database = &s.seeds.as_ref().expect("checked").database;
+                let state = || s.state.as_ref().and_then(Probe::state);
                 match argument.parse::<u64>().ok().map(Some).or((argument == "none").then_some(None)) {
                     Some(archived) => match promote::promote(files, database, limits, &state, archived, now(), reader.get_mut()) {
                         Answer::Reply(_) => Ok(()),
@@ -327,9 +336,9 @@ impl Front {
                     None => return refused(),
                 }
             }
-            ("SEED", _) if self.seeds.is_some() && self.files.is_some() => {
+            ("SEED", _) if s.seeds.is_some() && s.files.is_some() => {
                 self.contacted();
-                let (seeds, files) = (self.seeds.as_ref().expect("checked"), self.files.as_ref().expect("checked"));
+                let (seeds, files) = (s.seeds.as_ref().expect("checked"), s.files.as_ref().expect("checked"));
                 match seed::seed(seeds, files, reader.get_mut()) {
                     Some(done) => done,
                     // the local server gave no answer, nor did isql: no seed is served from a
@@ -337,7 +346,7 @@ impl Front {
                     None => return failed("ERR no answer from the local server".into()),
                 }
             }
-            (command @ ("FILE" | "STORE" | "REMOVE" | "FILES" | "EXISTS"), _) if self.data.is_some() => {
+            (command @ ("FILE" | "STORE" | "REMOVE" | "FILES" | "EXISTS"), _) if wide && self.data.is_some() => {
                 let data = self.data.as_deref().expect("checked by the guard");
                 self.contacted();
                 match self.backup_files(data, command, argument, reader) {
@@ -362,37 +371,39 @@ impl Front {
                     }
                 }
             }
-            ("VERSION", _) if self.state.is_some() => {
+            ("VERSION", _) if wide && s.state.is_some() => {
                 self.contacted();
-                match self.state.as_ref().and_then(Probe::version) {
+                match s.state.as_ref().and_then(Probe::version) {
                     Some(version) => writeln!(reader.get_mut(), "OK {version}"),
                     // not told, by the attachment nor by isql
                     None => return failed("ERR cannot read the engine version".into()),
                 }
             }
-            (command, _) if self.files.is_some() => match self.files.as_ref().and_then(|files| from_files(files, command, argument)) {
-                Some(reply) => {
-                    self.contacted();
-                    reader.get_mut().write_all(reply.as_bytes())
+            (command, _) if (wide || !matches!(command, "ISOLATION" | "PRIMARYSEEN")) && s.files.is_some() => {
+                match s.files.as_ref().and_then(|files| from_files(files, command, argument)) {
+                    Some(reply) => {
+                        self.contacted();
+                        reader.get_mut().write_all(reply.as_bytes())
+                    }
+                    // not one of this server's requests
+                    None => return refused(),
                 }
-                // not one of this server's requests
-                None => return refused(),
-            },
+            }
             _ => return refused(),
         }
         .map(|()| None)
     }
 
     /// SYNC, STANDBY, FENCE, REJOIN and NBACKUP. None: an argument that is refused.
-    fn change(&self, command: &str, argument: Option<&str>) -> Option<Answer> {
-        let (files, database) = (self.files.as_ref()?, &self.seeds.as_ref()?.database);
+    fn change(&self, s: &Served, command: &str, argument: Option<&str>) -> Option<Answer> {
+        let (files, database) = (s.files.as_ref()?, &s.seeds.as_ref()?.database);
         match (command, argument) {
             ("SYNC", Some(hosts)) => role::sync(files, database, hosts),
             ("STANDBY", Some("on")) => Some(role::standby_on(files, now())),
             ("STANDBY", Some(argument)) => {
                 let segment = argument.strip_prefix("off ")?;
                 let digits = !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit());
-                digits.then(|| role::standby_off(files, &self.state_file, segment))
+                digits.then(|| role::standby_off(files, &s.state_file, segment))
             }
             ("FENCE", reason) => Some(role::fence(files, database, reason, now())),
             ("REJOIN", _) => Some(role::rejoin(files, database)),
@@ -424,6 +435,28 @@ impl Front {
             _ => return None,
         };
         Some(reader.get_mut().write_all(reply.as_bytes()))
+    }
+}
+
+impl Served {
+    /// The newest servable segment. The archive is read at most once per WAIT_STEP whatever the
+    /// number of pullers waiting, and only when the directory changed since, or while its newest
+    /// file is being copied.
+    fn newest(&self) -> Option<String> {
+        let mut newest = self.newest.lock().unwrap_or_else(|p| p.into_inner());
+        if newest.looked.elapsed() >= WAIT_STEP {
+            newest.looked = Instant::now();
+            let changed = fs::metadata(&self.archive).and_then(|m| m.modified()).ok();
+            // a directory changed in the last seconds is read again: its time may be coarse
+            let recent = changed.is_none_or(|at| at.elapsed().map_or(true, |age| age < Duration::from_secs(3)));
+            if newest.copying || recent || changed != newest.changed {
+                let names = segment_names(&self.archive);
+                newest.name = names.iter().rev().find(|name| servable(&self.archive, name)).cloned();
+                newest.copying = names.last() != newest.name.as_ref();
+                newest.changed = changed;
+            }
+        }
+        newest.name.clone()
     }
 
     fn wait(&self, client: &mut impl Write, argument: &str) -> io::Result<()> {
@@ -524,47 +557,91 @@ pub fn run() -> io::Result<()> {
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(&base).join(".last-pulled"));
+    let limits = |journal: Option<PathBuf>, state_file: &Path| Limits {
+        shutdown_attempts: var("PROMOTE_SHUTDOWN_ATTEMPTS").parse().ok().filter(|n| *n > 0).unwrap_or(5),
+        shutdown_pause: Duration::from_secs(var("PROMOTE_SHUTDOWN_PAUSE").parse().unwrap_or(3)),
+        header_attempts: var("PROMOTE_HEADER_ATTEMPTS").parse().ok().filter(|n| *n > 0).unwrap_or(3),
+        close_timeout: var("PROMOTE_CLOSE_TIMEOUT_SECONDS").parse().ok().filter(|n| *n > 0).unwrap_or(30),
+        journal,
+        publication_script: Path::new(&var("SCRIPT_DIR")).join("enable-publication.sql"),
+        state_file: state_file.to_path_buf(),
+    };
+    // one database the server serves: its file, archive, source, tree and puller's position
+    let served =
+        |database: Option<Database>, archive: PathBuf, source: String, tree: &str, journal: Option<PathBuf>, state_file: PathBuf| Served {
+            newest: Mutex::new(Newest {
+                looked: Instant::now() - WAIT_STEP,
+                changed: None,
+                copying: true,
+                name: None,
+            }),
+            state: database.clone().filter(|_| !files_only).map(|database| {
+                Probe::start(
+                    database.path.clone(),
+                    database.port,
+                    database.user.clone(),
+                    database.password.clone(),
+                    database.query_limit,
+                )
+                .with_tools(database)
+            }),
+            promotion: (!files_only).then(|| limits(journal, &state_file)),
+            files: (!files_only
+                && [
+                    database.as_ref().map(|d| d.path.clone()).unwrap_or_default(),
+                    source.clone(),
+                    tree.to_string(),
+                    var("PRIMARY_FILE"),
+                ]
+                .iter()
+                .all(|value| !value.is_empty()))
+            .then(|| Files {
+                database: PathBuf::from(&database.as_ref().expect("checked").path),
+                archive: archive.clone(),
+                source: PathBuf::from(&source),
+                base: PathBuf::from(tree),
+                primary_file: PathBuf::from(var("PRIMARY_FILE")),
+                pod: var("POD_NAME"),
+            }),
+            seeds: database.filter(|_| !files_only).map(|database| Seeds {
+                database,
+                allow_live: var("ALLOW_LIVE_SEED") == "true",
+            }),
+            archive,
+            state_file,
+        };
+    let others: BTreeMap<String, Served> = if files_only {
+        BTreeMap::new()
+    } else {
+        databases::from_environment()
+            .into_iter()
+            .map(|other| {
+                let database = database.clone().map(|cluster| Database {
+                    path: other.path.display().to_string(),
+                    ..cluster
+                });
+                let entry = served(
+                    database,
+                    other.archive.clone(),
+                    other.source.display().to_string(),
+                    &other.base.display().to_string(),
+                    Some(other.journal.clone()),
+                    other.state_file.clone(),
+                );
+                (other.file, entry)
+            })
+            .collect()
+    };
     let front = Arc::new(Front {
-        archive: PathBuf::from(archive),
         contact: (!base.is_empty()).then(|| Path::new(&base).join("last-contact")),
         contacted: Mutex::new(0),
-        newest: Mutex::new(Newest {
-            looked: Instant::now() - WAIT_STEP,
-            changed: None,
-            copying: true,
-            name: None,
-        }),
         verifier: Mutex::new(Verifier::new(
             var("ISC_PASSWORD").as_bytes(),
             var("AUTH_WINDOW_SECONDS").parse().unwrap_or(300),
         )),
         files_only,
-        state: database.clone().filter(|_| !files_only).map(|database| {
-            Probe::start(
-                database.path.clone(),
-                database.port,
-                database.user.clone(),
-                database.password.clone(),
-                database.query_limit,
-            )
-            .with_tools(database)
-        }),
         self_fenced: (!base.is_empty()).then(|| Path::new(&base).join("self-fenced")),
         journal: !files_only,
-        promotion: (!files_only).then(|| Limits {
-            shutdown_attempts: var("PROMOTE_SHUTDOWN_ATTEMPTS").parse().ok().filter(|n| *n > 0).unwrap_or(5),
-            shutdown_pause: Duration::from_secs(var("PROMOTE_SHUTDOWN_PAUSE").parse().unwrap_or(3)),
-            header_attempts: var("PROMOTE_HEADER_ATTEMPTS").parse().ok().filter(|n| *n > 0).unwrap_or(3),
-            close_timeout: var("PROMOTE_CLOSE_TIMEOUT_SECONDS").parse().ok().filter(|n| *n > 0).unwrap_or(30),
-            journal: Some(var("JOURNAL_DIR")).filter(|dir| !dir.is_empty()).map(PathBuf::from),
-            publication_script: Path::new(&var("SCRIPT_DIR")).join("enable-publication.sql"),
-            state_file: state_file.clone(),
-        }),
-        state_file: state_file.clone(),
-        seeds: database.filter(|_| !files_only).map(|database| Seeds {
-            database,
-            allow_live: var("ALLOW_LIVE_SEED") == "true",
-        }),
         // the database's directory ("." for a bare file name, as the Perl server's)
         data: Some(var("DATABASE_PATH"))
             .filter(|path| !path.is_empty())
@@ -572,18 +649,15 @@ pub fn run() -> io::Result<()> {
                 Some((dir, _)) if !dir.is_empty() => PathBuf::from(dir),
                 _ => PathBuf::from("."),
             }),
-        files: (!files_only
-            && [var("DATABASE_PATH"), var("SOURCE_DIR"), base.clone(), var("PRIMARY_FILE")]
-                .iter()
-                .all(|value| !value.is_empty()))
-        .then(|| Files {
-            database: PathBuf::from(var("DATABASE_PATH")),
-            archive: PathBuf::from(var("ARCHIVE_DIR")),
-            source: PathBuf::from(var("SOURCE_DIR")),
-            base: PathBuf::from(&base),
-            primary_file: PathBuf::from(var("PRIMARY_FILE")),
-            pod: var("POD_NAME"),
-        }),
+        cluster: served(
+            database,
+            PathBuf::from(archive),
+            var("SOURCE_DIR"),
+            &base,
+            Some(var("JOURNAL_DIR")).filter(|dir| !dir.is_empty()).map(PathBuf::from),
+            state_file.clone(),
+        ),
+        others,
     });
     println!(
         "{} (fb-agent {}) listening on {}, serving {}",
@@ -593,11 +667,14 @@ pub fn run() -> io::Result<()> {
         if files_only {
             front.data.as_deref().unwrap_or(Path::new("")).display()
         } else {
-            front.archive.display()
+            front.cluster.archive.display()
         },
     );
+    for file in front.others.keys() {
+        println!("segment server: also serving {file} (DB {file})");
+    }
     // the pruning and the recovery-point sampler, in threads
-    let background = !files_only && front.files.is_some();
+    let background = !files_only && front.cluster.files.is_some();
     if background {
         if var("ISOLATION_TIMEOUT_SECONDS").parse::<u64>().is_ok_and(|seconds| seconds > 0) {
             println!("the agent runs the isolation check");
@@ -630,9 +707,28 @@ pub fn run() -> io::Result<()> {
                 primary_file: PathBuf::from(var("PRIMARY_FILE")),
                 pod: var("POD_NAME"),
             },
-            retention,
+            retention.clone(),
             journal,
         );
+        // the same for every declarative database, in its own tree
+        for served in front.others.values() {
+            let Some(files) = served.files.clone() else { continue };
+            let journal = served
+                .promotion
+                .as_ref()
+                .and_then(|limits| limits.journal.clone())
+                .filter(|_| var("RECOVERY_POINTS") == "true");
+            // nothing uploads their segments yet (the journal archive upload is the cluster
+            // database's): the retention alone decides
+            background::start(
+                files,
+                Retention {
+                    upload: false,
+                    ..retention.clone()
+                },
+                journal,
+            );
+        }
     }
     thread::spawn(move || loop {
         if stopping.load(Ordering::Relaxed) && crate::puller::firebird_stopped() {
@@ -726,26 +822,19 @@ mod tests {
             ["db.fdb.journal-000000001", "db.fdb.journal-000000003", "db.fdb.journal-000000004"]
         );
         // WAIT: the newest that can be served, also while a newer file is being copied
-        let front = Front {
+        let front = Served {
             archive: dir.clone(),
-            contact: None,
-            contacted: Mutex::new(0),
             newest: Mutex::new(Newest {
                 looked: Instant::now() - WAIT_STEP,
                 changed: None,
                 copying: true,
                 name: None,
             }),
-            verifier: Mutex::new(Verifier::new(b"", 300)),
-            files_only: false,
             state: None,
-            self_fenced: None,
             files: None,
-            journal: true,
             seeds: None,
             promotion: None,
             state_file: PathBuf::new(),
-            data: None,
         };
         assert_eq!(front.newest().as_deref(), Some("db.fdb.journal-000000004"));
         fs::write(dir.join("db.fdb.journal-000000006"), segment(1000, 400)).unwrap();
