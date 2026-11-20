@@ -11,6 +11,7 @@ Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, 
   without replication only, so a replicated cluster has its one database. Firebird's
   `replication.conf` takes one section per database; each needs its own journal, archive, seed,
   segment serving and promotion. The largest item, and the main functional gap.
+  Design and phases: [docs/multi-database-replication.md](docs/multi-database-replication.md).
 - [x] **Alerting rules** (v0.174.0): `config/monitoring/firebird.rules.yaml` (operator, cluster,
   replication and backup alerts), a `PrometheusRule` in `config/deploy` and the chart
   (`prometheusRule.enabled`), tested with `promtool test rules` in the CI; the operator exports
