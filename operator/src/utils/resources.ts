@@ -39,6 +39,9 @@ import { PENDING_DROPS_DIR, pendingDropsConfigMapName, pendingDropsInitScript } 
 import {
   PRIMARY_KEY,
   REPLICATION_SCRIPTS,
+  REPLICATED_DATABASES_KEY,
+  replicatedDatabaseFiles,
+  replicatedDatabasesEnabled,
   JOB_SCRIPTS,
   RESEED_KEY,
   PROMOTE_KEY,
@@ -1236,6 +1239,10 @@ export function buildConfigMap(
 
   if (replicationEnabled(cluster)) {
     Object.assign(data, replicationConfigData(cluster));
+    // the declarative databases the instances replicate (the agent's REPLICATED_DATABASES_FILE)
+    if (replicatedDatabasesEnabled(cluster)) {
+      data[REPLICATED_DATABASES_KEY] = replicatedDatabaseFiles(cluster).map((file) => `${file}\n`).join('');
+    }
     // Read by the replica seeding step and the segment puller on every poll, so it follows
     // the operator's view of the current primary without restarting pods
     data[PRIMARY_KEY] = instanceHost(cluster, options?.primaryPod ?? `${name}-0`);

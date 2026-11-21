@@ -1154,6 +1154,96 @@ jobs:
           [ "$(kubectl exec repl-0 -c firebird -- bash -c "echo \"select count(*) from rdb\\\$roles where rdb\\\$role_name = 'REPORTING';\" | isql -q localhost:$DB" | awk '$1 ~ /^[0-9]+$/ { print $1 }')" = 0 ]
           echo "role applied, updated and dropped"
 
+      - name: Verify declarative databases on a replicated cluster (experimental)
+        if: matrix.track.id == 'core'
+        run: |
+          # docs/multi-database-replication.md, phase 2: a cluster of its own (the switchover and
+          # failover steps cover the cluster database only until phase 3)
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: multi
+            namespace: default
+            annotations:
+              firebird.cloudnative-firebird.io/replicated-databases: experimental
+          spec:
+            instances: 3
+            storage:
+              size: 1Gi
+            bootstrap:
+              initSql: "CREATE TABLE app (id INTEGER PRIMARY KEY); COMMIT;"
+            replication:
+              enabled: true
+              archiveTimeoutSeconds: 3
+          EOF
+          for p in multi-0 multi-1 multi-2; do
+            timeout 300 bash -c "until kubectl get pod $p >/dev/null 2>&1; do sleep 3; done"
+            kubectl wait pod/$p --for=condition=Ready --timeout=300s
+          done
+          timeout 180 bash -c 'until [ "$(kubectl get firebirdcluster multi -o jsonpath={.status.phase})" = Running ]; do sleep 3; done'
+          primary=$(kubectl get firebirdcluster multi -o jsonpath={.status.replicationStatus.primaryPod})
+          replicas=$(for p in multi-0 multi-1 multi-2; do [ "$p" = "$primary" ] || echo "$p"; done)
+          echo "primary: $primary"
+          # no declarative database yet: an empty list, read by the agent
+          [ "$(kubectl get configmap multi-config -o jsonpath='{.data.replicated-databases}')" = "" ]
+          revision=$(kubectl get statefulset multi -o jsonpath={.status.updateRevision})
+
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdDatabase
+          metadata:
+            name: sales
+            namespace: default
+          spec:
+            clusterName: multi
+            initSql: "CREATE TABLE s (id INTEGER PRIMARY KEY); COMMIT;"
+          EOF
+          # created once, on the primary
+          timeout 300 bash -c 'until [ "$(kubectl get firebirddatabase sales -o jsonpath={.status.phase})" = Ready ]; do sleep 3; done' \
+            || { kubectl get firebirddatabase sales -o yaml; kubectl logs job/database-sales || true; exit 1; }
+          [ "$(kubectl get firebirddatabase sales -o jsonpath='{.status.instances[*].name}')" = "$primary" ]
+          kubectl get firebirddatabase sales -o jsonpath='{.status.message}'; echo
+          # the cluster lists it: replication.conf, the agent's list, and a roll of the instances
+          timeout 120 bash -c 'until [ "$(kubectl get firebirdcluster multi -o jsonpath={.status.replicatedDatabases[*]})" = sales.fdb ]; do sleep 3; done'
+          [ "$(kubectl get configmap multi-config -o jsonpath='{.data.replicated-databases}')" = "sales.fdb" ]
+          kubectl get configmap multi-config -o jsonpath='{.data.replication\.conf}' | grep -qx 'database = /var/lib/firebird/data/sales.fdb'
+          timeout 120 bash -c "until [ \"\$(kubectl get statefulset multi -o jsonpath={.status.updateRevision})\" != '$revision' ]; do sleep 3; done"
+          timeout 900 bash -c 'until [ "$(kubectl get statefulset multi -o jsonpath={.status.updatedReplicas}/{.status.readyReplicas})" = 3/3 ]; do sleep 5; done' \
+            || { kubectl get pods -l firebird.cloudnative-firebird.io/cluster=multi; exit 1; }
+          echo "rolled onto the template with sales.fdb"
+          [ "$(kubectl get firebirdcluster multi -o jsonpath={.status.replicationStatus.primaryPod})" = "$primary" ]
+
+          # its rows reach every replica, which holds it as a read-only replica; the cluster
+          # database still replicates beside it
+          S=/var/lib/firebird/data/sales.fdb
+          D=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$3\" | isql -q localhost:$2" 2>&1; }
+          count() { sql "$1" "$2" "select count(*) from $3;" | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          wait_count() {
+            for n in $(seq 1 60); do [ "$(count "$1" "$2" "$3")" = "$4" ] && return 0; sleep 5; done
+            echo "$1: $(count "$1" "$2" "$3") rows in $3, expected $4"
+            kubectl logs "$1" -c segment-puller | tail -30; kubectl logs "$1" -c replication-init | tail -30
+            return 1
+          }
+          for i in $(seq 1 10); do sql "$primary" $S "insert into s values ($i); commit;" >/dev/null; done
+          for i in $(seq 1 5); do sql "$primary" $D "insert into app values ($i); commit;" >/dev/null; done
+          for pod in $replicas; do
+            wait_count "$pod" $S s 10
+            wait_count "$pod" $D app 5
+            kubectl exec "$pod" -c firebird -- gstat -h $S | grep -q 'Attributes.*replica'
+            # its own tree: its source, with the replica control file named after the database
+            kubectl exec "$pod" -c segment-server -- sh -c 'ls /var/lib/firebird/data/replication/databases/sales.fdb/source' | grep -q '^{'
+          done
+          echo "sales.fdb replicated to $(echo $replicas)"
+          # the primary serves it with "DB sales.fdb", and publishes it
+          kubectl exec "$primary" -c segment-server -- sh -c '$FB_AGENT request 127.0.0.1 DB sales.fdb LIST' | grep -q '^sales\.fdb\.journal-'
+          [ "$(sql "$primary" $S 'SET LIST ON; SELECT RDB$ACTIVE_FLAG AS A FROM RDB$PUBLICATIONS;' | awk '$1 == "A" { print $2 }')" = 1 ]
+
+          kubectl delete firebirddatabase sales --wait=true
+          kubectl delete firebirdcluster multi --wait=true
+          kubectl delete pvc -l firebird.cloudnative-firebird.io/cluster=multi --wait=false || true
+
       - name: Verify re-seeding a replica
         if: matrix.track.id == 'core'
         run: |

@@ -2,7 +2,7 @@ import { INIT_SQL_DIR, INIT_SQL_VOLUME, initSqlVolume } from './init-sql';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { V1Container, V1EnvVar, V1VolumeMount } from '@kubernetes/client-node';
-import { FirebirdCluster } from '../types';
+import { API_GROUP, FirebirdCluster } from '../types';
 import { AGENT_PATH } from './agent';
 
 /**
@@ -82,6 +82,43 @@ export function replicationDirectories(cluster: FirebirdCluster, dataDir: string
   };
 }
 
+/**
+ * Declarative databases on replicated clusters (docs/multi-database-replication.md, phase 2):
+ * experimental, only on clusters annotated `firebird.cloudnative-firebird.io/replicated-databases:
+ * experimental` until promotion covers them (phase 3)
+ */
+export const REPLICATED_DATABASES_ANNOTATION = `${API_GROUP}/replicated-databases`;
+/** ConfigMap key listing them, one file name per line (the agent's REPLICATED_DATABASES_FILE) */
+export const REPLICATED_DATABASES_KEY = 'replicated-databases';
+/** How many one cluster replicates beside its database (the agent's limit too) */
+export const MAX_REPLICATED_DATABASES = 16;
+
+/** Whether the cluster may replicate declarative databases (replication, the annotation, no replica cluster) */
+export function replicatedDatabasesEnabled(cluster: FirebirdCluster): boolean {
+  return (
+    cluster.spec.replication?.enabled === true &&
+    cluster.metadata.annotations?.[REPLICATED_DATABASES_ANNOTATION] === 'experimental' &&
+    cluster.spec.replica?.enabled !== true
+  );
+}
+
+/** The declarative databases the instances replicate (status.replicatedDatabases), by file name */
+export function replicatedDatabaseFiles(cluster: FirebirdCluster): string[] {
+  return replicatedDatabasesEnabled(cluster) ? [...(cluster.status?.replicatedDatabases ?? [])].sort() : [];
+}
+
+/** A declarative database's tree, under the replication directory (the agent's databases.rs) */
+export function replicatedDatabaseDirectories(cluster: FirebirdCluster, dataDir: string, file: string) {
+  const base = `${replicationDirectories(cluster, dataDir).base}/databases/${file}`;
+  return {
+    base,
+    journal: `${base}/journal`,
+    archive: `${base}/archive`,
+    source: `${base}/source`,
+    state: `${base}/.last-pulled`,
+  };
+}
+
 /** Hours unapplied segments are kept at most (maxSegmentRetentionHours, never below segmentRetentionHours) */
 export function maxSegmentRetentionHours(cluster: FirebirdCluster): number {
   const replication = cluster.spec.replication;
@@ -99,14 +136,11 @@ export function instanceHost(cluster: FirebirdCluster, podName: string): string 
  * (journal_source_directory) only while the database is in replica mode.
  */
 export function buildReplicationConf(cluster: FirebirdCluster, databasePath: string, dataDir: string): string {
-  const dirs = replicationDirectories(cluster, dataDir);
   const archiveTimeout = cluster.spec.replication?.archiveTimeoutSeconds ?? 10;
-  return [
-    'database',
-    '{',
-    '}',
-    '',
-    `database = ${databasePath}`,
+  // one section per database, each with its own journal, archive and source (a declarative
+  // database's in its tree)
+  const section = (path: string, dirs: { base: string; journal: string; archive: string; source: string }) => [
+    `database = ${path}`,
     '{',
     `    journal_directory = ${dirs.journal}`,
     `    journal_archive_directory = ${dirs.archive}`,
@@ -123,6 +157,16 @@ export function buildReplicationConf(cluster: FirebirdCluster, databasePath: str
     `    include ${dirs.base}/sync.conf`,
     '}',
     '',
+  ];
+  return [
+    'database',
+    '{',
+    '}',
+    '',
+    ...section(databasePath, replicationDirectories(cluster, dataDir)),
+    ...replicatedDatabaseFiles(cluster).flatMap((file) =>
+      section(`${dataDir}/${file}`, replicatedDatabaseDirectories(cluster, dataDir, file)),
+    ),
   ].join('\n');
 }
 
@@ -171,6 +215,10 @@ function replicationEnv(
     // recovery points within a segment, for point-in-time recovery from the journal archive
     ...(cluster.spec.replication?.journalArchiveS3 ? [{ name: 'RECOVERY_POINTS', value: 'true' }] : []),
     ...isolationCheckEnv(cluster),
+    // only with the annotation, so the instance pods of other clusters do not change
+    ...(replicatedDatabasesEnabled(cluster)
+      ? [{ name: 'REPLICATED_DATABASES_FILE', value: `${OPERATOR_CONFIG_DIR}/${REPLICATED_DATABASES_KEY}` }]
+      : []),
   ];
 }
 
@@ -235,7 +283,10 @@ export function buildReplicationContainers(
     initContainer: {
       name: 'replication-init',
       image: options.image,
-      command: ['sh', `${OPERATOR_CONFIG_DIR}/init-instance.sh`],
+      // the declarative databases after the cluster database's (init-databases.sh), with the annotation
+      command: replicatedDatabasesEnabled(cluster)
+        ? ['sh', '-c', `sh ${OPERATOR_CONFIG_DIR}/init-instance.sh && sh ${OPERATOR_CONFIG_DIR}/init-databases.sh`]
+        : ['sh', `${OPERATOR_CONFIG_DIR}/init-instance.sh`],
       // bootstrap.initSql and initSqlRefs, run when it creates the database (utils/init-sql.ts)
       env: initSqlVolume(cluster) ? [...env, { name: 'INIT_SQL_DIR', value: INIT_SQL_DIR }] : env,
       volumeMounts: [

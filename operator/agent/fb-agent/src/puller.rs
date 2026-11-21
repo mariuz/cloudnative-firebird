@@ -16,10 +16,11 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -48,6 +49,9 @@ fn other(message: String) -> io::Error {
 struct Puller {
     /// The declarative database it follows (`DB <file>` in its requests); None: the cluster database
     database: Option<String>,
+    /// A declarative database's file: while a replica has none, it is seeded from here
+    /// (init-databases.sh <file>), as the replication init would at the next start
+    database_path: Option<PathBuf>,
     source: PathBuf,
     state: PathBuf,
     primary_file: PathBuf,
@@ -197,6 +201,32 @@ impl Puller {
     }
 }
 
+/// How often a replica seeds a declarative database it does not have
+const SEED_RETRY: Duration = Duration::from_secs(60);
+
+impl Puller {
+    /// Whether the primary is another instance (the ConfigMap's primary file names one)
+    fn replica(&self) -> bool {
+        let primary = slurp(&self.primary_file);
+        !primary.is_empty() && !names(&primary, &self.pod) && !self.flag("promoted").is_some_and(|p| p.exists())
+    }
+}
+
+/// Seeds the declarative database `file` on this replica: init-databases.sh for it alone, with
+/// the environment of the replication init (the puller's), from SCRIPT_DIR
+fn seed(file: &str) {
+    let script = Path::new(&var("SCRIPT_DIR")).join("init-databases.sh");
+    if !script.is_file() {
+        return;
+    }
+    println!("seeding {file}, which this replica does not have");
+    match Command::new("sh").arg(&script).arg(file).status() {
+        Ok(status) if status.success() => {}
+        Ok(status) => println!("seeding {file}: init-databases.sh ended with {status}"),
+        Err(err) => println!("seeding {file}: {err}"),
+    }
+}
+
 /// The pod's Firebird server no longer accepts connections.
 pub fn firebird_stopped() -> bool {
     let port: u16 = var("FIREBIRD_PORT").parse().unwrap_or(3050);
@@ -215,6 +245,7 @@ pub fn run() -> io::Result<()> {
     let base = var("REPLICATION_DIR");
     let puller = Puller {
         database: None,
+        database_path: None,
         source: required("SOURCE_DIR")?,
         state: required("STATE_FILE")?,
         primary_file: required("PRIMARY_FILE")?,
@@ -234,6 +265,7 @@ pub fn run() -> io::Result<()> {
         .into_iter()
         .map(|other| Puller {
             database: Some(other.file),
+            database_path: Some(other.path),
             source: other.source,
             state: other.state_file,
             primary_file: puller.primary_file.clone(),
@@ -275,9 +307,18 @@ fn follow(puller: &Puller, interval: u64, stopping: &AtomicBool) {
     // the last failure, printed once until it changes (a primary of an earlier version refuses
     // the requests about a declarative database until it is updated)
     let mut failure = String::new();
+    // the last seeding of a declarative database this replica does not have yet
+    let mut seeded_at: Option<Instant> = None;
     loop {
         if stopped() {
             break;
+        }
+        if let (Some(file), Some(path)) = (&puller.database, &puller.database_path) {
+            let due = seeded_at.is_none_or(|at| at.elapsed() >= SEED_RETRY);
+            if due && !path.exists() && puller.replica() {
+                seeded_at = Some(Instant::now());
+                seed(file);
+            }
         }
         let asked = match puller.pull_once() {
             Ok(asked) => {

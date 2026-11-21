@@ -51,6 +51,22 @@ describe('FirebirdDatabase spec', () => {
     expect(() => validateDatabaseSpec(makeDatabase({ clusterName: '' }))).toThrow(/clusterName/);
   });
 
+  it('accepts a replicated cluster with the replicated-databases annotation, up to 16 databases', () => {
+    const cluster = makeCluster({ replication: { enabled: true } });
+    cluster.metadata.annotations = { 'firebird.cloudnative-firebird.io/replicated-databases': 'experimental' };
+    expect(databaseClusterError(makeDatabase(), cluster, [])).toBeUndefined();
+    const others = Array.from({ length: 16 }, (_, i) =>
+      makeDatabase({}, { name: `other${i}`, creationTimestamp: '2026-10-01T00:00:00Z' }),
+    );
+    expect(databaseClusterError(makeDatabase(), cluster, others)).toMatch(/replicates 16 databases/);
+    expect(databaseClusterError(makeDatabase(), cluster, others.slice(1))).toBeUndefined();
+    // the hint, and not on a replica cluster
+    expect(databaseClusterError(makeDatabase(), makeCluster({ replication: { enabled: true } }), [])).toMatch(/replicated-databases=experimental/);
+    const replica = makeCluster({ replication: { enabled: true }, replica: { enabled: true, source: 'other' } as never });
+    replica.metadata.annotations = cluster.metadata.annotations;
+    expect(databaseClusterError(makeDatabase(), replica, [])).toMatch(/lost at a failover/);
+  });
+
   it('refuses replicated clusters, the cluster database and a file another resource manages', () => {
     expect(databaseClusterError(makeDatabase(), makeCluster(), [])).toBeUndefined();
     expect(databaseClusterError(makeDatabase(), makeCluster({ replication: { enabled: true } }), [])).toMatch(/lost at a failover/);
@@ -187,6 +203,48 @@ describe('FirebirdDatabaseController', () => {
     const conflict = setup({ others: [older] });
     await conflict.controller.reconcileDatabase(makeDatabase({ databaseName: 'first.fdb' }));
     expect(conflict.status()).toMatchObject({ phase: 'Failed', message: 'first.fdb is managed by FirebirdDatabase first' });
+  });
+
+  describe('on a replicated cluster with the replicated-databases annotation', () => {
+    const annotated = (status?: FirebirdCluster['status']): FirebirdCluster => ({
+      ...makeCluster({ instances: 2, replication: { enabled: true } }),
+      metadata: { name: 'db', namespace: 'default', uid: 'c-uid', annotations: { 'firebird.cloudnative-firebird.io/replicated-databases': 'experimental' } },
+      ...(status ? { status } : {}),
+    });
+
+    it('creates it on the primary only', async () => {
+      const { controller, created, status } = setup({ cluster: annotated({ replicationStatus: { primaryPod: 'db-1' } }) });
+      await controller.reconcileDatabase(makeDatabase());
+      expect(created()).toHaveLength(1);
+      expect(envOf(created()[0]).HOSTS).toBe('db-1.db-headless');
+      expect(status()).toMatchObject({ phase: 'Creating' });
+    });
+
+    it('is Ready once created there, and never created again on another instance', async () => {
+      const { controller, created, status } = setup({ cluster: annotated({ replicationStatus: { primaryPod: 'db-0' } }) });
+      await controller.reconcileDatabase(makeDatabase({}, {}, { instances: [{ name: 'db-1', volume: 'vol-db-1' }] }));
+      expect(created()).toHaveLength(0);
+      expect(status()).toMatchObject({ phase: 'Ready', message: expect.stringContaining('replicated to the other instances') });
+    });
+
+    it('waits for a primary', async () => {
+      const { controller, created, status } = setup({ cluster: annotated() });
+      await controller.reconcileDatabase(makeDatabase());
+      expect(created()).toHaveLength(0);
+      expect(status()).toMatchObject({ phase: 'Pending', message: 'waiting for the cluster to have a primary' });
+    });
+
+    it('drops it on the primary only', async () => {
+      const deleting = makeDatabase(
+        { reclaimPolicy: 'delete' },
+        { deletionTimestamp: '2026-10-11T11:59:00Z', finalizers: [DATABASE_FINALIZER] },
+        { instances: [{ name: 'db-1', volume: 'vol-db-1' }] },
+      );
+      const { controller, created } = setup({ cluster: annotated({ replicationStatus: { primaryPod: 'db-1' } }) });
+      await controller.reconcileDatabase(deleting);
+      expect(created()).toHaveLength(1);
+      expect(envOf(created()[0]).HOSTS).toBe('db-1.db-headless');
+    });
   });
 
   it('backs off after a failed Job, then retries', async () => {

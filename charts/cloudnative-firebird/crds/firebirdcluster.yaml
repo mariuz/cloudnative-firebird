@@ -1430,6 +1430,11 @@ spec:
                   type: array
                   items:
                     type: string
+                replicatedDatabases:
+                  description: The declarative databases replicated beside the cluster database (the replicated-databases annotation, docs/multi-database-replication.md)
+                  type: array
+                  items:
+                    type: string
                 nodeMaintenance:
                   description: A node maintenance window is in progress (the PodDisruptionBudget is removed)
                   type: boolean
