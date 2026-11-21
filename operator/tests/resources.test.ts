@@ -1011,6 +1011,7 @@ describe('buildConfigMap (replication)', () => {
     expect(Object.keys(cm?.data ?? {}).sort()).toEqual([
       'demote',
       'enable-publication.sql',
+      'init-databases.sh',
       'init-instance.sh',
       'peer-addresses',
       'pitr-restore.sh',

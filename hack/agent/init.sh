@@ -5,6 +5,10 @@
 #   - a primary's first start: the database created offline, publication, the bootstrap seed
 #   - a replica's first start: the seed fetched from the primary's segment server, turned into
 #     a read-only replica, and its control file
+#   - the declarative databases (init-databases.sh): on the primary, one created beside the
+#     cluster database publishes and gets its bootstrap seed in its own tree, one not created is
+#     left to its FirebirdDatabase; on a replica, the first is seeded from the primary's segment
+#     server with "DB <file>", the second is not seeded and the init goes on
 #   - the journal floor: the replication sequence written into the header of a real database
 #     (the on-disk structures of Firebird 4 and 5, and of 6), read back with gstat
 #
@@ -28,7 +32,7 @@ cleanup() {
   rmdir "$work" 2>/dev/null || true
 }
 trap cleanup EXIT
-cp "$src/enable-publication.sql" "$src/init-instance.sh" "$work/"
+cp "$src/enable-publication.sql" "$src/init-instance.sh" "$src/init-databases.sh" "$work/"
 cp "$agent" "$work/fb-agent"
 cat > "$work/env.sh" <<'ENV'
 export ISC_USER=SYSDBA ISC_PASSWORD=masterkey PATH=/opt/firebird/bin:$PATH SCRIPT_DIR=/w SEGMENT_PORT=3051
@@ -40,6 +44,9 @@ instance() {
 }
 # init: the replication init container, as the instance pods run it
 init() { FB_AGENT=/w/fb-agent sh /w/init-instance.sh 2>&1; }
+# initdb <list>: the declarative databases' init, after the cluster database's
+initdb() { REPLICATED_DATABASES_FILE=$1 SEED_ATTEMPTS=1 FB_AGENT=/w/fb-agent sh /w/init-databases.sh 2>&1; }
+published() { echo 'SET LIST ON; SELECT RDB$ACTIVE_FLAG AS A FROM RDB$PUBLICATIONS;' | isql -q "$1" | awk '$1 == "A" { print $2 }'; }
 rows() { echo "SET HEADING OFF; SELECT COUNT(*) FROM T;" | isql -q "$1" 2>&1 | tr -d ' \n'; }
 sequence() { gstat -h "$1" | sed -n 's/^[[:space:]]*Replication sequence:[[:space:]]*\([0-9]*\).*/\1/p'; }
 ENV
@@ -73,13 +80,24 @@ for image in "${images[@]}"; do
   is "the init says whose helpers it has" "instance /data/p db-0; init | grep -c '^replication init with the helpers of fb-agent [0-9]'" "1"
   is "the init runs no Perl" "grep -v '^ *#' /w/init-instance.sh | grep -cw perl" "0"
 
+  # the declarative databases on the primary, before its server starts: app.fdb created beside
+  # the cluster database (as its FirebirdDatabase would), sales.fdb not created
+  x 'printf "app.fdb\nsales.fdb\n" > /data/p/replicated-databases
+     echo "CREATE DATABASE '\''/data/p/app.fdb'\''; CREATE TABLE A (N INT); COMMIT; INSERT INTO A VALUES (7); COMMIT;" | isql -q'
+  is "the primary's init enables app.fdb's publication" "instance /data/p db-0; initdb /data/p/replicated-databases | grep -c 'existing primary database now publishes'" "1"
+  is "its bootstrap seed is in its own tree (compared before anything attaches to it)" "cmp /data/p/app.fdb /data/p/repl/databases/app.fdb/bootstrap-seed.fdb && echo same" "same"
+  is "app.fdb publishes" "published /data/p/app.fdb" "1"
+  is "the cluster database's seed is where it was" "ls /data/p/repl/bootstrap-seed.fdb >/dev/null && echo there" "there"
+  is "sales.fdb is left to its FirebirdDatabase" "instance /data/p db-0; initdb /data/p/replicated-databases | grep -c '^not created here: its FirebirdDatabase creates it on the primary'" "1"
+  is "and is not created" "[ -e /data/p/sales.fdb ] && echo there || echo absent" "absent"
+
   # rows in the primary, a fresh offline seed of it, then its server and its segment server
   x 'instance /data/p db-0
      echo "CREATE TABLE T (N INT); COMMIT; INSERT INTO T VALUES (1); INSERT INTO T VALUES (2); COMMIT;" | isql -q $DATABASE_PATH
      cp $DATABASE_PATH $REPLICATION_DIR/bootstrap-seed.fdb; chown -R firebird:firebird /data/p
      su -s /bin/sh firebird -c "/opt/firebird/bin/firebird" >/dev/null 2>&1 &
      sleep 3
-     su -s /bin/sh firebird -c ". /w/env.sh; instance /data/p db-0; /w/fb-agent segment-server > /data/server.log 2>&1" &'
+     su -s /bin/sh firebird -c ". /w/env.sh; instance /data/p db-0; REPLICATED_DATABASES_FILE=/data/p/replicated-databases /w/fb-agent segment-server > /data/server.log 2>&1" &'
   for _ in $(seq 1 40); do x '/w/fb-agent request 127.0.0.1 PING' 2>/dev/null | grep -q '^OK' && break; sleep 1; done
 
   # a replica's first start: seeded from that primary
@@ -94,6 +112,18 @@ for image in "${images[@]}"; do
   is "the init fetched the seed itself" "instance /data/r2 db-2; echo 127.0.0.1 > \$PRIMARY_FILE; init | grep -c '^fetched offline seed copy (.* bytes) from 127.0.0.1'" "1"
   # a seed source that is refused is passed over
   is "a source that does not answer is passed over" "instance /data/r3 db-3; echo 127.0.0.1 > \$PRIMARY_FILE; echo no-such-instance.invalid > \$SEED_SOURCES_FILE; init" "seeded replica from 127.0.0.1 (offline seed)"
+
+  # the declarative databases on a replica: app.fdb seeded from the primary ("DB app.fdb SEED"),
+  # sales.fdb, which the primary does not have, not seeded: the init goes on
+  x "printf 'app.fdb\nsales.fdb\n' > /data/r/replicated-databases"
+  is "a replica's init seeds app.fdb from the primary" "instance /data/r db-1; initdb /data/r/replicated-databases | grep -c '^seeded replica from 127.0.0.1 (offline seed)'" "1"
+  is "app.fdb is a read-only replica" "gstat -h /data/r/app.fdb | grep -c 'Attributes.*replica'" "1"
+  is "with app.fdb's rows" "echo 'SET HEADING OFF; SELECT COUNT(*) FROM A;' | isql -q /data/r/app.fdb | tr -d ' \n'" "1"
+  is "its control file is in its own source" "ls /data/r/repl/databases/app.fdb/source | grep -c '^{[0-9A-F-]*}\$'" "1"
+  is "the cluster database's source keeps its one control file" "ls /data/r/repl/source | grep -c '^{[0-9A-F-]*}\$'" "1"
+  is "sales.fdb is not seeded, and the init goes on" "instance /data/r db-1; initdb /data/r/replicated-databases | grep -c '^no seed source has it yet: not seeded now'" "1"
+  is "nothing is left of sales.fdb's work files" "ls -A /data/r/repl/databases/sales.fdb | grep -c '^\.init'" "0"
+  is "the replica's cluster database is untouched" "rows /data/r/db.fdb" "2"
 
   # the journal floor: the header of a real database, read back by gstat
   x "cp /data/q/db.fdb /data/floor.fdb"

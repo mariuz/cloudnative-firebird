@@ -63,7 +63,11 @@ fn read_control(path: &str) -> io::Result<Vec<u8>> {
 /// SEED from `host`: the database to `target`, the replica control file (when the source sent
 /// one) to `target`.ctl and the seed kind (replica | offline | live) to `target`.kind.
 pub fn fetch_seed(host: &str, target: &str) -> io::Result<()> {
-    let mut reply = client::open(host, "SEED", Some(Duration::from_secs(900)))?;
+    let mut reply = client::open(
+        host,
+        &crate::databases::request_for_environment("SEED"),
+        Some(Duration::from_secs(900)),
+    )?;
     let mut header = String::new();
     reply.read_line(&mut header)?;
     let refused = || other(format!("{host}: {}", header.trim_end()));
@@ -103,7 +107,11 @@ pub fn fetch_seed(host: &str, target: &str) -> io::Result<()> {
 /// One request to the primary's segment server: its lines up to "."; None when the server does
 /// not know the command.
 fn ask(host: &str, request: &str) -> io::Result<Option<Vec<String>>> {
-    let reply = client::open(host, request, Some(Duration::from_secs(300)))?;
+    let reply = client::open(
+        host,
+        &crate::databases::request_for_environment(request),
+        Some(Duration::from_secs(300)),
+    )?;
     let mut lines = Vec::new();
     for line in reply.lines() {
         let line = line?;

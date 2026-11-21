@@ -114,6 +114,14 @@ pub fn selected(request: &str) -> (Option<&str>, &str) {
     }
 }
 
+/// The request about the database SEGMENT_DATABASE names (the replication init of a declarative
+/// database sets it for its helpers: fetch-seed, replica-control, request); unset, the cluster
+/// database's request as it is.
+pub fn request_for_environment(request: &str) -> String {
+    let file = crate::client::var("SEGMENT_DATABASE");
+    request_about(Some(file.as_str()).filter(|file| !file.is_empty()), request)
+}
+
 /// The request about `database` (None: the cluster database), as a client sends it.
 pub fn request_about(database: Option<&str>, request: &str) -> String {
     match database {
