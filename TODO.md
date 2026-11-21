@@ -15,8 +15,9 @@ Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, 
   Phase 1a (the agent serves and pulls several databases, `DB <file>`): v0.177.0.
   Phase 1b (the replication init of each database, `init-databases.sh`): v0.178.0.
   Phase 2a (the operator creates and replicates them, behind the `replicated-databases:
-  experimental` annotation): v0.179.0. Next: phase 2b (dropping on every instance, lag per
-  database), then phase 3 (promotion).
+  experimental` annotation): v0.179.0.
+  Phase 2b (removal from every instance, the lag per database): v0.180.0. Next: phase 3
+  (switchover and failover over every database).
 - [x] **Alerting rules** (v0.174.0): `config/monitoring/firebird.rules.yaml` (operator, cluster,
   replication and backup alerts), a `PrometheusRule` in `config/deploy` and the chart
   (`prometheusRule.enabled`), tested with `promtool test rules` in the CI; the operator exports

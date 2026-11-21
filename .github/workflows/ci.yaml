@@ -1197,6 +1197,7 @@ jobs:
             namespace: default
           spec:
             clusterName: multi
+            reclaimPolicy: delete
             initSql: "CREATE TABLE s (id INTEGER PRIMARY KEY); COMMIT;"
           EOF
           # created once, on the primary
@@ -1244,8 +1245,28 @@ jobs:
           published=$(sql "$primary" $S 'SET LIST ON; SELECT RDB\$ACTIVE_FLAG AS A FROM RDB\$PUBLICATIONS;')
           [ "$(echo "$published" | awk '$1 == "A" { print $2 }')" = 1 ] || { echo "publication: $published"; exit 1; }
           echo "the primary serves sales.fdb's segments and publishes it"
+          # its lag, per replica, in the status (phase 2b)
+          timeout 120 bash -c 'until [ "$(kubectl get firebirdcluster multi -o jsonpath="{.status.replicationStatus.replicas[*].databases[?(@.database==\"sales.fdb\")].lagSegments}")" = "0 0" ]; do sleep 5; done' \
+            || { kubectl get firebirdcluster multi -o jsonpath='{.status.replicationStatus}'; echo; exit 1; }
+          echo "sales.fdb's lag is measured on both replicas"
 
-          kubectl delete firebirddatabase sales --wait=true
+          # deleted (reclaimPolicy delete): dropped on the primary, no longer listed, and after the
+          # roll gone from the replicas too
+          revision=$(kubectl get statefulset multi -o jsonpath={.status.updateRevision})
+          # the finalizer drops it on the primary, which may hold it until its own restart: the
+          # delete returns once the roll and the drop are done
+          kubectl delete firebirddatabase sales --wait=true --timeout=900s \
+            || { kubectl get firebirddatabase sales -o yaml; kubectl get events --field-selector involvedObject.name=sales; exit 1; }
+          timeout 120 bash -c 'until [ -z "$(kubectl get firebirdcluster multi -o jsonpath={.status.replicatedDatabases})" ]; do sleep 3; done'
+          timeout 120 bash -c "until [ \"\$(kubectl get statefulset multi -o jsonpath={.status.updateRevision})\" != '$revision' ]; do sleep 3; done"
+          timeout 900 bash -c 'until [ "$(kubectl get statefulset multi -o jsonpath={.status.updatedReplicas}/{.status.readyReplicas})" = 3/3 ]; do sleep 5; done'
+          for pod in multi-0 multi-1 multi-2; do
+            kubectl exec "$pod" -c firebird -- sh -c "[ ! -e $S ] && [ ! -e /var/lib/firebird/data/replication/databases/sales.fdb ]" \
+              || { echo "$pod still has sales.fdb"; kubectl logs "$pod" -c replication-init | tail -20; exit 1; }
+          done
+          wait_count "$(kubectl get firebirdcluster multi -o jsonpath={.status.replicationStatus.primaryPod})" $D app 5
+          echo "sales.fdb is gone from every instance; the cluster database stays"
+
           kubectl delete firebirdcluster multi --wait=true
           kubectl delete pvc -l firebird.cloudnative-firebird.io/cluster=multi --wait=false || true
 

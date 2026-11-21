@@ -116,6 +116,16 @@ export function recordClusterMetrics(cluster: FirebirdCluster, status: Partial<F
     metrics.set('firebird_replication_last_archived_sequence', 'Last journal segment archived on the primary', base, repl.lastArchivedSequence);
   }
   for (const r of repl?.replicas ?? []) {
+    // the declarative databases' lag: the same gauges with a database label (the cluster
+    // database's series have none)
+    for (const d of r.databases ?? []) {
+      if (d.lagSeconds === undefined) continue;
+      const labels = { ...base, pod: r.name, database: d.database };
+      metrics.set('firebird_replication_lag_seconds', 'Age of the oldest archived journal segment the replica has not applied', labels, d.lagSeconds);
+      metrics.set('firebird_replication_lag_segments', 'Archived journal segments the replica has not applied', labels, d.lagSegments ?? 0);
+      metrics.set('firebird_replication_pending_segments', 'Segments received by the replica but not applied yet', labels, d.pendingSegments ?? 0);
+      metrics.set('firebird_replication_applied_sequence', 'Journal segment applied by the replica', labels, d.appliedSequence ?? 0);
+    }
     if (r.lagSeconds === undefined) continue;
     const labels = { ...base, pod: r.name };
     metrics.set('firebird_replication_lag_seconds', 'Age of the oldest archived journal segment the replica has not applied', labels, r.lagSeconds);

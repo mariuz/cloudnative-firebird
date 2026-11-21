@@ -220,6 +220,7 @@ import {
   isolationCheckTimeoutSeconds,
   replicationEnabled,
   MAX_REPLICATED_DATABASES,
+  replicatedDatabaseFiles,
   replicatedDatabasesEnabled,
 } from '../utils/replication';
 import { planVolumeExpansion } from '../utils/storage';
@@ -234,6 +235,7 @@ import {
   FirebirdClusterStatus,
   FirebirdUser,
   FirebirdDatabase,
+  DatabaseLagStatus,
   DEFAULT_FIREBIRD_IMAGE,
   ImageCheckStatus,
   MajorUpgradeStatus,
@@ -2734,6 +2736,28 @@ export class FirebirdClusterController {
           podName,
           log,
         );
+      }
+    }
+    // the declarative databases (status.replicatedDatabases), measured the same way: the primary's
+    // archive of each, and each replica's position in it
+    for (const file of replicatedDatabaseFiles(cluster)) {
+      let archivedDb;
+      try {
+        archivedDb = parseArchived(await this.segmentClient(host(primaryPod), SEGMENT_PORT, `${token} DB ${file} ARCHIVED`));
+      } catch (err) {
+        log.debug({ err, database: file }, 'Could not list the archived segments of a replicated database');
+        continue;
+      }
+      for (const entry of replicas) {
+        if (entry.error) continue;
+        let lag: DatabaseLagStatus;
+        try {
+          const position = parsePosition(await this.segmentClient(host(entry.name), SEGMENT_PORT, `${token} DB ${file} POSITION`));
+          lag = { database: file, appliedSequence: position.sequence, pendingSegments: position.pending, ...computeLag(archivedDb, position.sequence) };
+        } catch (err) {
+          lag = { database: file, error: err instanceof Error ? err.message : String(err) };
+        }
+        (entry.databases ??= []).push(lag);
       }
     }
     let behind = journalBehind(archived, replicas);

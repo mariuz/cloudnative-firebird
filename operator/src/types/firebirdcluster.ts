@@ -748,6 +748,23 @@ export interface ReplicaLagStatus {
   aheadOfPrimary?: boolean;
   /** Why the position could not be measured */
   error?: string;
+  /**
+   * The declarative databases it replicates beside the cluster database (status.replicatedDatabases),
+   * measured as the cluster database is (`DB <file> ARCHIVED` and `DB <file> POSITION`)
+   */
+  databases?: DatabaseLagStatus[];
+}
+
+/** A replica's lag in one declarative database */
+export interface DatabaseLagStatus {
+  /** The database file */
+  database: string;
+  appliedSequence?: number;
+  pendingSegments?: number;
+  lagSegments?: number;
+  lagSeconds?: number;
+  /** Why it could not be measured (e.g. the replica has no copy yet) */
+  error?: string;
 }
 
 /**
