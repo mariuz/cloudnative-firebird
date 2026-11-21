@@ -117,7 +117,7 @@ jobs:
             npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts tests/isolation-check.test.ts tests/segment-tls.test.ts tests/init-helpers-conformance.test.ts tests/lease-holder-conformance.test.ts tests/metrics-exporter-conformance.test.ts tests/jobs-conformance.test.ts tests/switchover.test.ts tests/sync-scripts.test.ts tests/replication-scripts.test.ts 2>&1 | tee /tmp/conformance.txt
           # none skipped: every test of these files runs the static binary, or the protocol and
           # files it shares with the operator (colour codes stripped: the runner's output has them)
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +145 passed \(145\)'
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +147 passed \(147\)'
 
       # the declarative databases beside the cluster database (docs/multi-database-replication.md):
       # "DB <file>" requests to a segment server with three archives, and one puller following all
@@ -1250,6 +1250,30 @@ jobs:
             || { kubectl get firebirdcluster multi -o jsonpath='{.status.replicationStatus}'; echo; exit 1; }
           echo "sales.fdb's lag is measured on both replicas"
 
+          # a planned switchover moves sales.fdb with the cluster database (phase 3): promoted on
+          # the target, the old primary demoted to a replica of it, every instance following it
+          target=$(echo "$replicas" | head -1)
+          kubectl annotate --overwrite firebirdcluster multi firebird.cloudnative-firebird.io/targetPrimary="$target"
+          timeout 600 bash -c "until [ \"\$(kubectl get firebirdcluster multi -o jsonpath={.status.switchover.phase})\" = Completed ]; do
+              [ \"\$(kubectl get firebirdcluster multi -o jsonpath={.status.switchover.phase})\" = Failed ] && exit 1; sleep 3; done" \
+            || { kubectl get firebirdcluster multi -o jsonpath='{.status.switchover}'; echo; kubectl logs job/multi-switchover || true; exit 1; }
+          kubectl get firebirdcluster multi -o jsonpath='{.status.switchover}'; echo
+          [ "$(kubectl get firebirdcluster multi -o jsonpath={.status.replicationStatus.primaryPod})" = "$target" ]
+          timeout 600 bash -c 'until [ "$(kubectl get firebirdcluster multi -o jsonpath={.status.phase}/{.status.readyInstances})" = "Running/3" ]; do sleep 5; done'
+          old=$primary
+          primary=$target
+          replicas=$(for p in multi-0 multi-1 multi-2; do [ "$p" = "$primary" ] || echo "$p"; done)
+          kubectl exec "$old" -c firebird -- gstat -h $S | grep -q 'Attributes.*replica' || { echo "$old: sales.fdb is not a replica"; exit 1; }
+          published=$(sql "$primary" $S 'SET LIST ON; SELECT RDB\$ACTIVE_FLAG AS A FROM RDB\$PUBLICATIONS;')
+          [ "$(echo "$published" | awk '$1 == "A" { print $2 }')" = 1 ] || { echo "publication on $primary: $published"; exit 1; }
+          for i in $(seq 11 15); do sql "$primary" $S "insert into s values ($i); commit;" >/dev/null; done
+          for i in $(seq 6 8); do sql "$primary" $D "insert into app values ($i); commit;" >/dev/null; done
+          for pod in $replicas; do
+            wait_count "$pod" $S s 15
+            wait_count "$pod" $D app 8
+          done
+          echo "switchover to $primary: sales.fdb promoted with the cluster database, $old demoted, both follow it"
+
           # deleted (reclaimPolicy delete): dropped on the primary, no longer listed, and after the
           # roll gone from the replicas too
           revision=$(kubectl get statefulset multi -o jsonpath={.status.updateRevision})
@@ -1264,7 +1288,7 @@ jobs:
             kubectl exec "$pod" -c firebird -- sh -c "[ ! -e $S ] && [ ! -e /var/lib/firebird/data/replication/databases/sales.fdb ]" \
               || { echo "$pod still has sales.fdb"; kubectl logs "$pod" -c replication-init | tail -20; exit 1; }
           done
-          wait_count "$(kubectl get firebirdcluster multi -o jsonpath={.status.replicationStatus.primaryPod})" $D app 5
+          wait_count "$(kubectl get firebirdcluster multi -o jsonpath={.status.replicationStatus.primaryPod})" $D app 8
           echo "sales.fdb is gone from every instance; the cluster database stays"
 
           kubectl delete firebirdcluster multi --wait=true

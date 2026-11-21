@@ -522,6 +522,59 @@ describe.runIf(agentBin)('switchover with Firebird 6', () => {
     }
   });
 
+  it('stops, waits for and promotes the declarative databases with the cluster database', async () => {
+    const run = async (salesPromote: string) => {
+      const dir = mkdtempSync(join(tmpdir(), 'fb-swd-'));
+      const fbsvcmgr = join(dir, 'fbsvcmgr');
+      // writes stopped on every database (prp_shutdown_mode), each read back at its own sequence
+      writeFileSync(
+        fbsvcmgr,
+        '#!/bin/sh\necho "$*" >> "$(dirname "$0")/calls"\ncase "$*" in *action_properties*) exit 0 ;; esac\n' +
+          'case "$*" in *sales.fdb*) seq=8 ;; *) seq=53 ;; esac\necho "Attributes force write"\necho "Replication sequence: $seq"\n',
+      );
+      chmodSync(fbsvcmgr, 0o755);
+      const requests: string[] = [];
+      const server = fakeSegmentServer((request, sock) => {
+        requests.push(request);
+        if (request === 'POSITION') sock.end('OK 53 0 0\n');
+        else if (request === 'DB sales.fdb POSITION') sock.end('OK 8 0 0\n');
+        else if (request.startsWith('PROMOTE ')) sock.end('OK 53 1\n');
+        else if (request === 'DB sales.fdb PROMOTE none') sock.end(`${salesPromote}\n`);
+        else sock.end('ERR unknown\n');
+      }, 'tok');
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const code = await new Promise<number | null>((resolve) => {
+        const child = spawn(...agent(['switchover']), {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            OLD_PRIMARY: '127.0.0.1',
+            TARGET: '127.0.0.1',
+            DATABASE_PATH: '/var/lib/firebird/data/mydb.fdb',
+            DATABASES: 'sales.fdb',
+            ISC_PASSWORD: 'tok',
+            SEGMENT_PORT: String((server.address() as { port: number }).port),
+            TIMEOUT_SECONDS: '10',
+            PROMOTE_IN_PLACE: 'true',
+            ARCHIVED: '50',
+            RESULT_FILE: join(dir, 'result'),
+          },
+        });
+        child.on('exit', resolve);
+      });
+      server.close();
+      const calls = readFileSync(join(dir, 'calls'), 'utf8');
+      return { code, requests, calls, result: readFileSync(join(dir, 'result'), 'utf8') };
+    };
+    const promoted = await run('OK 8 1');
+    expect(promoted).toMatchObject({ code: 0, result: 'inplace 53 1' });
+    expect(promoted.requests).toEqual(['POSITION', 'DB sales.fdb POSITION', 'PROMOTE 50', 'DB sales.fdb PROMOTE none']);
+    const shutdowns = promoted.calls.split('\n').filter((c) => c.includes('action_properties'));
+    expect(shutdowns).toEqual([expect.stringContaining('/var/lib/firebird/data/mydb.fdb'), expect.stringContaining('/var/lib/firebird/data/sales.fdb')]);
+    // a declarative database not promoted in place: the target is restarted, and promoted offline
+    expect(await run('ERR cannot shut down')).toMatchObject({ code: 0, result: 'restart sales.fdb: ERR cannot shut down' });
+  });
+
   it('promotes the target in place and reports it, or reports why not', async () => {
     const run = async (promoteReply: string) => {
       const dir = mkdtempSync(join(tmpdir(), 'fb-swp-'));

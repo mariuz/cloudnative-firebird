@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.180.0/cloudnative-firebird-0.180.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.181.0/cloudnative-firebird-0.181.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.180.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.181.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -240,7 +240,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.180.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.181.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -2315,9 +2315,18 @@ keeps it. Each replica's lag in each of these databases is in
 `status.replicationStatus.replicas[].databases`, and in the lag gauges with a `database` label.
 The cluster database's series keep no `database` label (since v0.180.0).
 
-Not yet covered, so a test cluster only: a switchover or failover does not promote these databases
-(phase 3), and backups, point-in-time recovery and snapshots cover the cluster database alone
-(phase 4).
+A switchover or failover moves them with the cluster database (since v0.181.0):
+
+- the switchover stops writes on every database of the old primary and waits for each replica to
+  apply each database's last segment. It then promotes the target in place, database by database;
+  one that cannot be promoted in place has the target restarted, and its init promotes it offline;
+- the failover election ranks the replicas by the cluster database's position, then by their
+  least position among these databases, so one still being seeded ranks below one that has them all;
+- `FENCE` and `REJOIN` (the Lease holder, the isolation check, fencing) take every database of the
+  instance down and back.
+
+Not yet covered, so a test cluster only (the annotation stays required until then): backups,
+point-in-time recovery and snapshots cover the cluster database alone (phase 4).
 - The cluster's own database.
 - A file another `FirebirdDatabase` of the same cluster manages (the older resource keeps it).
 - The security database's name.

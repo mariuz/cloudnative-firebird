@@ -57,6 +57,37 @@ describe.skipIf(!agentBin)('the Jobs\' programs of fb-agent', { timeout: 60_000 
     return { agent: { ...r, out: r.out.split(at).join('DIR'), err: r.err.split(at).join('DIR'), files: files(at) } };
   };
 
+  it('failover: with declarative databases, ranks by the cluster database, then the least of them', async () => {
+    // 127.0.0.1 and .2 tie on the cluster database; .2 is further in its least declarative
+    // database; .3 is ahead on the cluster database but has no copy of sales.fdb yet
+    const answers: Record<string, Record<string, string>> = {
+      '127.0.0.1': { POSITION: 'OK 42 0 0', 'DB app.fdb POSITION': 'OK 9 0 0', 'DB sales.fdb POSITION': 'OK 5 0 0' },
+      '127.0.0.2': { POSITION: 'OK 42 0 0', 'DB app.fdb POSITION': 'OK 9 0 0', 'DB sales.fdb POSITION': 'OK 6 0 0' },
+      '127.0.0.3': { POSITION: 'OK 41 0 0', 'DB app.fdb POSITION': 'OK 9 0 0', 'DB sales.fdb POSITION': 'ERR no replica control file' },
+    };
+    const port = await serve('127.0.0.1', 0, (r, sock) => sock.end(`${answers['127.0.0.1'][r] ?? 'ERR'}\n`));
+    for (const host of ['127.0.0.2', '127.0.0.3']) await serve(host, port, (r, sock) => sock.end(`${answers[host][r] ?? 'ERR'}\n`));
+    const env = {
+      CANDIDATES: '127.0.0.1 127.0.0.2 127.0.0.3',
+      DATABASES: 'app.fdb sales.fdb',
+      SEGMENT_PORT: String(port),
+      SETTLE_SECONDS: '3',
+      RESULT_FILE: '{}/result',
+    };
+    const result = (r: { agent: { files: Record<string, string> } }) => Buffer.from(r.agent.files.result, 'hex').toString();
+    expect(result(await both('failover', [], env))).toBe(
+      'target=127.0.0.2 sequence=42 positions=127.0.0.1:42,127.0.0.2:42,127.0.0.3:41 databases=127.0.0.1:5,127.0.0.2:6,127.0.0.3:none',
+    );
+    // the cluster database decides first: .3 ahead there wins without sales.fdb
+    answers['127.0.0.3'].POSITION = 'OK 43 0 0';
+    expect(result(await both('failover', [], env))).toMatch(/^target=127\.0\.0\.3 sequence=43 /);
+    // a tie on everything keeps the listed order; without DATABASES, no databases= field
+    answers['127.0.0.3'].POSITION = 'OK 41 0 0';
+    answers['127.0.0.2']['DB sales.fdb POSITION'] = 'OK 5 0 0';
+    expect(result(await both('failover', [], env))).toMatch(/^target=127\.0\.0\.1 sequence=42 /);
+    expect(result(await both('failover', [], { ...env, DATABASES: '' }))).toBe('target=127.0.0.1 sequence=42 positions=127.0.0.1:42,127.0.0.2:42,127.0.0.3:41');
+  });
+
   it('failover: picks the candidate furthest ahead, ties in the listed order', async () => {
     // three replicas on 127.0.0.1-3, one port: positions as the replicas answer them
     const answers: Record<string, string | null> = { '127.0.0.1': 'OK 40 0 0', '127.0.0.2': 'OK 42 7 0', '127.0.0.3': 'OK 42 0 0' };

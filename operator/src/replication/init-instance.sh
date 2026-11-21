@@ -108,7 +108,10 @@ if [ -n "$promote_token" ] && { [ -f "$DATABASE_PATH" ] || [ -f "$sw" ]; }; then
     # and after every segment the journal archive may hold (the directive's third field): Firebird 4
     # and 5 segment names carry no GUID, so a lower sequence would reuse names of the old primary's
     # uploaded segments
-    archived=$(awk -v p="$POD_NAME" '$1 == p { print $3 }' "${PROMOTE_FILE:-/dev/null}" 2>/dev/null || true)
+    # (the cluster database's: a declarative database's segments are not uploaded, so its own
+    # position is where its journal continues)
+    archived=""
+    [ "${DECLARATIVE:-}" = true ] || archived=$(awk -v p="$POD_NAME" '$1 == p { print $3 }' "${PROMOTE_FILE:-/dev/null}" 2>/dev/null || true)
     case "$archived" in
       ''|*[!0-9]*) ;;
       *) if [ "$archived" -gt "$seq" ]; then

@@ -143,7 +143,8 @@ released. Phase 2 is reachable only through the cluster annotation
    replicas, dropping, and lag status and metrics per database. This phase is behind the annotation.
    The kind CI creates a second database on a three-instance cluster and checks rows replicated to
    both replicas.
-3. **Promotion.** Switchover (Job and in-place), failover ranking and synchronous replication over
+3. **Promotion.** *(v0.181.0, with fencing over every database. The annotation stays required
+   until phase 4: a restore would lose these databases until backups cover them.)* Switchover (Job and in-place), failover ranking and synchronous replication over
    every database. The admission webhook accepts `FirebirdDatabase` on replicated clusters from
    here. The kind CI repeats its switchover and failover checks with two databases.
 4. **Backups.** The journal archive upload per database, PITR's and physical backups'

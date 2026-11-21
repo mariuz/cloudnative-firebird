@@ -405,11 +405,30 @@ impl Front {
                 let digits = !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit());
                 digits.then(|| role::standby_off(files, &s.state_file, segment))
             }
-            ("FENCE", reason) => Some(role::fence(files, database, reason, now())),
-            ("REJOIN", _) => Some(role::rejoin(files, database)),
+            // the instance's: every database it serves is fenced and brought back, the cluster
+            // database's answer is the reply (a declarative database that cannot be changed makes it an error)
+            ("FENCE", reason) => Some(self.every(role::fence(files, database, reason, now()), |f, d| role::fence(f, d, reason, now()))),
+            ("REJOIN", _) => Some(self.every(role::rejoin(files, database), role::rejoin)),
             ("NBACKUP", Some(argument)) => role::nbackup(files, database, self.data.as_deref()?, argument),
             _ => None,
         }
+    }
+
+    /// The answer of the cluster database's change, done on every declarative database too: an
+    /// error where one of them could not be changed.
+    fn every(&self, answer: Answer, change: impl Fn(&Files, &Database) -> Answer) -> Answer {
+        if let Answer::Forward = answer {
+            return answer;
+        }
+        for served in self.others.values() {
+            let (Some(files), Some(seeds)) = (&served.files, &served.seeds) else {
+                continue;
+            };
+            if let Answer::Forward = change(files, &seeds.database) {
+                return Answer::Forward;
+            }
+        }
+        answer
     }
 
     /// The backup file requests. None: nothing was sent or read, and the request is refused.
