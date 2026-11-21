@@ -1238,7 +1238,8 @@ jobs:
           echo "sales.fdb replicated to $(echo $replicas)"
           # the primary serves it with "DB sales.fdb", and publishes it
           listed=$(kubectl exec "$primary" -c segment-server -- sh -c '$FB_AGENT request 127.0.0.1 DB sales.fdb LIST' 2>&1)
-          echo "$listed" | grep -q '^sales\.fdb\.journal-' || { echo "DB sales.fdb LIST: $listed"; exit 1; }
+          # (Firebird 6 names its segments after the database and its GUID: sales.fdb_<GUID>.journal-N)
+          echo "$listed" | grep -Eq '^sales\.fdb(_[0-9A-F-]+)?\.journal-[0-9]+$' || { echo "DB sales.fdb LIST: $listed"; exit 1; }
           # (the remote shell expands $ in double quotes: escaped)
           published=$(sql "$primary" $S 'SET LIST ON; SELECT RDB\$ACTIVE_FLAG AS A FROM RDB\$PUBLICATIONS;')
           [ "$(echo "$published" | awk '$1 == "A" { print $2 }')" = 1 ] || { echo "publication: $published"; exit 1; }
