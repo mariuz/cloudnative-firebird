@@ -770,7 +770,9 @@ export class FirebirdBackupController {
     if (spec.restoreType && spec.restoreType !== type) {
       throw new ValidationError(`restoreType ${spec.restoreType} does not match the ${type} backup ${spec.backupName}`);
     }
-    return { type, path: backup.status.backupFileName, s3: backup.spec.s3 };
+    // a FirebirdDatabase's backup: its own journal archive for a point-in-time recovery
+    const file = backup.spec.database ? backup.status.databasePath?.split('/').pop() : undefined;
+    return { type, path: backup.status.backupFileName, s3: backup.spec.s3, ...(file ? { database: file } : {}) };
   }
 
   /**

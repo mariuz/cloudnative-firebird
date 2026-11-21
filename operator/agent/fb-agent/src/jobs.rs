@@ -235,7 +235,8 @@ pub fn fetch_segments() -> Done {
     let host = required("FIREBIRD_HOST")?;
     let out = required("OUT_DIR")?;
     let (skip, listed_file) = (var("SKIP_FILE"), var("LISTED_FILE"));
-    let request = |line: &str| open(&host, line, 60);
+    // with SEGMENT_DATABASE, a declarative database's archive (DB <file> LIST, GET, ...)
+    let request = |line: &str| open(&host, &crate::databases::request_for_environment(line), 60);
 
     if var("REPORT") == "true" {
         let max = if listed_file.is_empty() {

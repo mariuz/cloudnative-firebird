@@ -18,8 +18,10 @@ Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, 
   experimental` annotation): v0.179.0.
   Phase 2b (removal from every instance, the lag per database): v0.180.0.
   Phase 3 (switchover, failover and fencing over every database): v0.181.0.
-  Phase 4a (physical backups of a FirebirdDatabase, on a replica too): v0.182.0. Next: phase 4b
-  (the journal archive upload and point-in-time recovery per database), then the annotation goes.
+  Phase 4a (physical backups of a FirebirdDatabase, on a replica too): v0.182.0.
+  Phase 4b (the journal archive upload and point-in-time recovery per database): v0.183.0.
+  Left before the annotation goes: an end-to-end kind test of the archive and its point-in-time
+  recovery, and a decision on volume snapshots and replica clusters (refuse, or cover).
 - [x] **Alerting rules** (v0.174.0): `config/monitoring/firebird.rules.yaml` (operator, cluster,
   replication and backup alerts), a `PrometheusRule` in `config/deploy` and the chart
   (`prometheusRule.enabled`), tested with `promtool test rules` in the CI; the operator exports

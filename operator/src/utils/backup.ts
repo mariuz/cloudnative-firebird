@@ -36,6 +36,7 @@ import {
   OPERATOR_CONFIG_DIR,
   PRIMARY_KEY,
   replicationDirectories,
+  replicatedDatabaseFiles,
   replicationEnabled,
   SEGMENT_PORT,
 } from './replication';
@@ -79,6 +80,11 @@ export interface BackupSource {
   /** Further nbackup files (levels 1, 2) applied on top of `path` by a physical restore */
   incrementalPaths?: string[];
   s3?: S3BackupConfiguration;
+  /**
+   * The declarative database the backup is of (a FirebirdBackup's spec.database): its point-in-time
+   * recovery replays its own journal archive, journals/<file>/
+   */
+  database?: string;
 }
 
 /** Prefix for S3 object keys, with a trailing slash when set */
@@ -822,6 +828,7 @@ function pointInTimePodSpec(restore: FirebirdRestore, cluster: FirebirdCluster, 
   return replayPodSpec(cluster, {
     chain: source.s3 ? { s3: source.s3, keys: paths } : undefined,
     journalS3: pointInTimeJournalS3(restore, cluster)!,
+    ...(source.database ? { journalPrefix: `journals/${source.database}/` } : {}),
     target: restore.spec.pointInTime!,
     command: `set -eu; . ${OPERATOR_CONFIG_DIR}/pitr-restore.sh; ${physicalRestoreScript([nbk])}`,
     env: [
@@ -844,6 +851,8 @@ function replayPodSpec(
   options: {
     chain?: { s3: S3BackupConfiguration; keys: string[] };
     journalS3: S3BackupConfiguration;
+    /** The archive under it (journals/, a declarative database's journals/<file>/) */
+    journalPrefix?: string;
     target: PointInTimeRecovery;
     command: string;
     env: V1EnvVar[];
@@ -854,7 +863,7 @@ function replayPodSpec(
   },
 ): V1PodSpec {
   const { chain, journalS3, target } = options;
-  const journals = s3Uri(journalS3, 'journals/');
+  const journals = s3Uri(journalS3, options.journalPrefix ?? 'journals/');
   const fail = 'fail() { echo "$1" > /work/fetcher.failed; echo "$1" >&2; exit 1; }; ';
   const initContainers: V1Container[] = chain
     ? [
@@ -1067,14 +1076,23 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
 
   const labels = journalArchiveLabels(cluster);
   const journals = s3Uri(s3, 'journals/');
+  // the declarative databases' segments, each under journals/<file>/ (their own archive and
+  // lineage; docs/multi-database-replication.md, phase 4b): listed, fetched and uploaded in loops
+  // after the cluster database's, in ${WORK_DIR}/db/<file>/
+  const databases = replicatedDatabaseFiles(cluster);
+  const databasesEnv: V1EnvVar[] = databases.length ? [{ name: 'DATABASES', value: databases.join(' ') }] : [];
+  const perDatabase = (body: string) => (databases.length ? `; for f in $DATABASES; do d=${WORK_DIR}/db/$f; mkdir -p $d; ${body}; done` : '');
   const upload: V1Container = {
     name: 'upload',
     image: s3ClientImage(s3),
     command: ['/bin/sh', '-c'],
     // no --delete: the primary prunes segments locally after segmentRetentionHours, while
     // the object store keeps the full history for point-in-time recovery
-    args: [`set -eu; ${awsCommand(s3)} s3 sync${s3TransferArgs(s3, 'upload')} ${WORK_DIR}/segments/ ${shellQuote(journals)}`],
-    env: s3ClientEnv(s3),
+    args: [
+      `set -eu; ${awsCommand(s3)} s3 sync${s3TransferArgs(s3, 'upload')} ${WORK_DIR}/segments/ ${shellQuote(journals)}` +
+        perDatabase(`[ ! -d $d/segments ] || ${awsCommand(s3)} s3 sync${s3TransferArgs(s3, 'upload')} $d/segments/ ${shellQuote(journals)}"$f/"`),
+    ],
+    env: [...s3ClientEnv(s3), ...databasesEnv],
     volumeMounts: [workMount, ...s3ClientMounts(s3)],
   };
   const report: V1Container = {
@@ -1104,9 +1122,10 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
         // an empty or missing prefix lists nothing (and exits non-zero)
         args: [
           `${awsCommand(s3)} s3 ls ${shellQuote(journals)} > ${WORK_DIR}/listing || true; ` +
-            `awk '{ print $4 }' ${WORK_DIR}/listing > ${WORK_DIR}/uploaded`,
+            `awk '{ print $4 }' ${WORK_DIR}/listing > ${WORK_DIR}/uploaded` +
+            perDatabase(`{ ${awsCommand(s3)} s3 ls ${shellQuote(journals)}"$f/" > $d/listing || true; }; awk '{ print $4 }' $d/listing > $d/uploaded`),
         ],
-        env: s3ClientEnv(s3),
+        env: [...s3ClientEnv(s3), ...databasesEnv],
         volumeMounts: [workMount],
       },
       {
@@ -1125,6 +1144,28 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
         ],
         volumeMounts: [workMount, { name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }],
       },
+      // each declarative database's segments, asked for with DB <file> (SEGMENT_DATABASE)
+      ...(databases.length
+        ? [
+            {
+              name: 'fetch-database-segments',
+              image: clusterImage(cluster),
+              command: ['/bin/sh', '-c'],
+              args: [
+                `set -eu${perDatabase(
+                  `SEGMENT_DATABASE=$f OUT_DIR=$d/segments SKIP_FILE=$d/uploaded LISTED_FILE=$d/listed-max RESULT_FILE=$d/result ${AGENT_PATH} fetch-segments`,
+                )}`,
+              ],
+              env: [
+                ...superuserClientEnv(cluster),
+                { name: 'FIREBIRD_HOST', value: instanceHost(cluster, primaryPod ?? `${name}-0`) },
+                { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
+                ...databasesEnv,
+              ],
+              volumeMounts: [workMount, { name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }],
+            },
+          ]
+        : []),
       // without pruneAppliedSegments nothing waits for the report: the upload ends the Job
       ...(reportUploads ? [upload] : []),
     ],

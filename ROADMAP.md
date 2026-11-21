@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.182.0):** every item below is done; open work is in [TODO.md](TODO.md).
+> **Status note (v0.183.0):** every item below is done; open work is in [TODO.md](TODO.md).
 > Journal replication (still experimental, see TODO.md) works against the official
 > `firebirdsql/firebird` image (Firebird 4, 5 and the 6 snapshot). It covers replica re-seeding,
 > lag metrics, planned switchover, automatic failover with a primary Lease, and rolling updates with
@@ -190,6 +190,11 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `WAIT <seconds> [<segment>]` answers as soon as a segment after the given one is archived. The Rust puller sends it between two pulls instead of sleeping, so a segment is fetched when it appears. Measured with `hack/bench/puller.sh` (removed in v0.170.0) (three replicas on one archive, a 16 MB segment every 2 s, poll 5 s): 0.08 s from the archive to the replica (median, 0.16 s at most) against 2.4 s (5 s at most) for a polling puller. A Perl segment server answers `ERR bad request`; the puller then polls as before and asks again about once a minute. The archive timeout before it (`archiveTimeoutSeconds`) is unchanged.
   - Ten pullers waiting cost the front 0.07 s of CPU in ten seconds on an archive of 5,000 segments: the archive is looked at once for all of them, and read again only when its directory changed.
   - `tests/segment-server-front.test.ts` gives the same requests to the Perl server alone and to the front: listings, downloads, refusals, forwarded requests with uploads and downloads, the contact time the isolation check reads, stopping. The kind CI runs the replicated cluster behind the front, with segment TLS.
+- [x] **Declarative databases on replicated clusters, phase 4b: their journal archive and point-in-time recovery** *(v0.183.0)*
+  - The journal archive Job archives each replicated declarative database beside the cluster database. It lists `journals/<file>/` in the bucket, and the new `fetch-database-segments` container fetches that database's new segments, lineage markers and recovery points from the primary with `SEGMENT_DATABASE=<file>`. `fb-agent fetch-segments` then asks `DB <file> LIST`, `GET` and so on. The upload container syncs them to `journals/<file>/`. Without declarative databases the Job is as before.
+  - A `FirebirdRestore` with `pointInTime` from a `FirebirdBackup` of a `FirebirdDatabase` (`spec.database`, a physical backup) replays that database's archive, `journals/<file>/`. A backup taken on a replica brings that database's position.
+  - The pruning of a declarative database's archive still follows the retention alone (not `pruneAppliedSegments`).
+  - Tests: the archive Job's containers with and without declarative databases, the restore's prefix, and `fetch-segments` with `SEGMENT_DATABASE` against a segment server (conformance 148). The annotation stays required: volume snapshots and replica clusters do not cover these databases, and the archive and its point-in-time recovery have no kind test yet.
 - [x] **Declarative databases on replicated clusters, phase 4a: physical backups of a FirebirdDatabase** *(v0.182.0)*
   - `spec.database` on a `FirebirdBackup` or `FirebirdScheduledBackup` now takes physical backups (nbackup) as well as logical ones, on any cluster. On the primary the backup goes through its server (`action_nbak` on the database's file). On a replica (`target: prefer-standby`, to S3) the backup Job sets `SEGMENT_DATABASE`, and `fb-agent backup-file nbackup` asks the replica's segment server `DB <file> NBACKUP`. The copy and its removal stay the instance's backup files. The admission rule and the CRDs' CEL rule refuse only a volume snapshot of a `FirebirdDatabase`, which covers the whole volume.
   - The kind CI takes a logical and a physical backup of `sales.fdb` on the replicated `multi` cluster after its switchover. Both complete with the database's path and a file on the new primary.
