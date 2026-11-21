@@ -119,6 +119,13 @@ jobs:
           # files it shares with the operator (colour codes stripped: the runner's output has them)
           sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +144 passed \(144\)'
 
+      # the declarative databases beside the cluster database (docs/multi-database-replication.md):
+      # "DB <file>" requests to a segment server with three archives, and one puller following all
+      # three, on segment files alone
+      - name: Declarative databases in the segment server and the puller
+        working-directory: .
+        run: FB_AGENT_BIN="$PWD/operator/agent/target/x86_64-unknown-linux-musl/release/fb-agent" hack/agent/databases.sh
+
       # STATE from the segment server's service attachment in every state of the database, on
       # real servers (docs/rust-agent-segment-server.md)
       - name: Database state against Firebird 4 and 5

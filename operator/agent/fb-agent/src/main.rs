@@ -20,6 +20,7 @@
 mod background;
 mod backups;
 mod client;
+mod databases;
 mod init;
 mod isolation;
 mod jobs;
