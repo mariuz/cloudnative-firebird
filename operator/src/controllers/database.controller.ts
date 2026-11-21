@@ -157,7 +157,26 @@ export class FirebirdDatabaseController {
       }
     }
 
-    const instances = await this.instances(cluster);
+    const all = await this.instances(cluster);
+    // a replicated cluster (the replicated-databases annotation): created once, on the primary;
+    // the other instances replicate it from there (status.replicatedDatabases of the cluster)
+    const replicated = cluster.spec.replication?.enabled === true;
+    if (replicated && created.length > 0) {
+      await this.updateStatus(database, {
+        ...status,
+        instances: created,
+        jobName: undefined,
+        phase: 'Ready',
+        message: `created on the primary ${created.map((c) => c.name).join(', ')}; replicated to the other instances`,
+      });
+      return;
+    }
+    const primary = cluster.status?.replicationStatus?.primaryPod;
+    if (replicated && !primary) {
+      await this.updateStatus(database, { ...status, jobName: undefined, phase: 'Pending', message: 'waiting for the cluster to have a primary' });
+      return;
+    }
+    const instances = replicated ? all.filter((i) => i.name === primary) : all;
     status.instances = created.filter((c) => instances.some((i) => i.name === c.name));
     const has = (i: Instance) => created.some((c) => c.name === i.name && c.volume === i.volume);
     const missing = instances.filter((i) => !has(i));
@@ -229,7 +248,10 @@ export class FirebirdDatabaseController {
       log.info({ instances: targets.map((t) => t.name) }, 'Database dropped');
     }
 
-    const instances = await this.instances(cluster);
+    // a replicated cluster: dropped on the primary (the replicas' copies stay until phase 2b of
+    // docs/multi-database-replication.md removes them)
+    const primary = cluster.status?.replicationStatus?.primaryPod;
+    const instances = (await this.instances(cluster)).filter((i) => !cluster.spec.replication?.enabled || i.name === primary);
     const dropped = (i: Instance) => droppedFrom.some((d) => d.name === i.name && d.volume === i.volume);
     // every ready instance: a database created there after the status was written is dropped too
     const targets = instances.filter((i) => i.ready && i.volume && !dropped(i));

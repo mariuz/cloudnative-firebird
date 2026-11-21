@@ -10,13 +10,22 @@
 # that finds no seed of it yet starts without it. SEGMENT_DATABASE=<file>: the helpers ask the
 # other instances about that database ("DB <file>"). A database whose init fails is reported and
 # left for the next start: the instance starts with the others.
+#
+#   init-databases.sh [<file>]      only that database (the segment puller seeds one a replica
+#                                   does not have yet, every minute, with the same environment)
+#
+# The seed sources are asked once (SEED_ATTEMPTS, 1): the puller tries again while the instance
+# runs, so a replica restarted before its primary has a seed of the database does not wait.
 set -u
 [ -n "${REPLICATED_DATABASES_FILE:-}" ] || exit 0
+only=${1:-}
+export SEED_ATTEMPTS="${SEED_ATTEMPTS:-1}"
 here=$(cd "$(dirname "$0")" && pwd)
 data=$(dirname "$DATABASE_PATH")
 base=$REPLICATION_DIR
 own() { [ "$(id -u)" -ne 0 ] || chown "$@"; }
 for file in $("$FB_AGENT" databases); do
+  [ -z "$only" ] || [ "$file" = "$only" ] || continue
   tree="$base/databases/$file"
   mkdir -p "$tree"
   own firebird:firebird "$base/databases" "$tree"

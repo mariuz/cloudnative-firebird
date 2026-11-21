@@ -136,7 +136,9 @@ released. Phase 2 is reachable only through the cluster annotation
    `Files` map, the puller loop per database and the replication init per database, all driven by
    `replicated-databases`. With an empty list the agent behaves as today; the conformance tests
    prove it, and new ones cover two databases. No operator change.
-2. **Operator: create, replicate, drop.** `replication.conf` sections, the `replicated-databases`
+2. **Operator: create, replicate, drop.** *(2a, create and replicate: v0.179.0. A replica
+   restarted before its primary had a seed is seeded by its puller once a minute. 2b, dropping on
+   every instance and the lag per database: next)* `replication.conf` sections, the `replicated-databases`
    key, the `FirebirdDatabase` Job against the primary with publication, the roll, seeding of the
    replicas, dropping, and lag status and metrics per database. This phase is behind the annotation.
    The kind CI creates a second database on a three-instance cluster and checks rows replicated to

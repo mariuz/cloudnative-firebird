@@ -97,6 +97,8 @@ import {
 import { backupSummary } from '../utils/backup-status';
 import { ScaleDownHold, scaleDownHold } from '../utils/scaling';
 import { FirebirdBackup } from '../types';
+import { managedDatabaseName } from '../utils/databases';
+import { databaseName } from '../utils/resources';
 import {
   catalogKind,
   catalogPlural,
@@ -217,6 +219,8 @@ import {
   instanceHost,
   isolationCheckTimeoutSeconds,
   replicationEnabled,
+  MAX_REPLICATED_DATABASES,
+  replicatedDatabasesEnabled,
 } from '../utils/replication';
 import { planVolumeExpansion } from '../utils/storage';
 import { validateClusterSpec } from '../utils/validation';
@@ -229,6 +233,7 @@ import {
   FirebirdClusterCondition,
   FirebirdClusterStatus,
   FirebirdUser,
+  FirebirdDatabase,
   DEFAULT_FIREBIRD_IMAGE,
   ImageCheckStatus,
   MajorUpgradeStatus,
@@ -462,6 +467,9 @@ export class FirebirdClusterController {
       const seedSourcePods = instances.seedSources.filter(
         (pod) => !(pod in reseed.requests) && !(pod in switchover.promote) && !(pod in switchover.demote),
       );
+      // the declarative databases the instances replicate (the replicated-databases annotation):
+      // before the ConfigMap and the StatefulSet, which both follow them
+      await this.resolveReplicatedDatabases(cluster, log);
       await this.reconcileConfigMap(cluster, primaryPod, seedSourcePods, reseed.requests, log, switchover, instances.peerAddresses);
       // the ConfigMap lists the requests before the pods restart into their init containers
       for (const pod of [...new Set([...reseed.restart, ...switchover.restart])]) {
@@ -3086,6 +3094,39 @@ export class FirebirdClusterController {
   }
 
   /** Reconcile custom firebird.conf settings or init.sql script ConfigMap */
+  /**
+   * status.replicatedDatabases: with the replicated-databases annotation, the files of the
+   * cluster's FirebirdDatabases created on the primary and not being deleted (at most
+   * MAX_REPLICATED_DATABASES); none without it. Recorded with the reconcile's status write; the
+   * ConfigMap and the pod template follow it, so a change rolls the instances.
+   */
+  private async resolveReplicatedDatabases(cluster: FirebirdCluster, log: Logger): Promise<void> {
+    const { name, namespace = 'default' } = cluster.metadata;
+    let files: string[] = [];
+    if (replicatedDatabasesEnabled(cluster)) {
+      const list = (await this.customApi.listNamespacedCustomObject({
+        group: API_GROUP,
+        version: API_VERSION,
+        namespace,
+        plural: 'firebirddatabases',
+      })) as { items?: FirebirdDatabase[] };
+      files = [
+        ...new Set(
+          (list.items ?? [])
+            .filter((d) => d.spec?.clusterName === name && !d.metadata?.deletionTimestamp && (d.status?.instances?.length ?? 0) > 0)
+            .map((d) => managedDatabaseName(d))
+            .filter((file) => file !== databaseName(cluster)),
+        ),
+      ]
+        .sort()
+        .slice(0, MAX_REPLICATED_DATABASES);
+    }
+    const current = cluster.status?.replicatedDatabases ?? [];
+    if (JSON.stringify(current) === JSON.stringify(files)) return;
+    log.info({ from: current, to: files }, 'Replicated databases changed: the instances roll');
+    Object.assign((cluster.status ??= {}), { replicatedDatabases: files.length > 0 ? files : undefined });
+  }
+
   private async reconcileConfigMap(
     cluster: FirebirdCluster,
     primaryPod: string,

@@ -13,7 +13,10 @@ Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, 
   segment serving and promotion. The largest item, and the main functional gap.
   Design and phases: [docs/multi-database-replication.md](docs/multi-database-replication.md).
   Phase 1a (the agent serves and pulls several databases, `DB <file>`): v0.177.0.
-  Phase 1b (the replication init of each database, `init-databases.sh`): v0.178.0. Next: phase 2.
+  Phase 1b (the replication init of each database, `init-databases.sh`): v0.178.0.
+  Phase 2a (the operator creates and replicates them, behind the `replicated-databases:
+  experimental` annotation): v0.179.0. Next: phase 2b (dropping on every instance, lag per
+  database), then phase 3 (promotion).
 - [x] **Alerting rules** (v0.174.0): `config/monitoring/firebird.rules.yaml` (operator, cluster,
   replication and backup alerts), a `PrometheusRule` in `config/deploy` and the chart
   (`prometheusRule.enabled`), tested with `promtool test rules` in the CI; the operator exports
