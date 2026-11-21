@@ -85,8 +85,8 @@ for image in "${images[@]}"; do
   x 'printf "app.fdb\nsales.fdb\n" > /data/p/replicated-databases
      echo "CREATE DATABASE '\''/data/p/app.fdb'\''; CREATE TABLE A (N INT); COMMIT; INSERT INTO A VALUES (7); COMMIT;" | isql -q'
   is "the primary's init enables app.fdb's publication" "instance /data/p db-0; initdb /data/p/replicated-databases | grep -c 'existing primary database now publishes'" "1"
+  is "its bootstrap seed is in its own tree (compared before anything attaches to it)" "cmp /data/p/app.fdb /data/p/repl/databases/app.fdb/bootstrap-seed.fdb && echo same" "same"
   is "app.fdb publishes" "published /data/p/app.fdb" "1"
-  is "its bootstrap seed is in its own tree" "cmp /data/p/app.fdb /data/p/repl/databases/app.fdb/bootstrap-seed.fdb && echo same" "same"
   is "the cluster database's seed is where it was" "ls /data/p/repl/bootstrap-seed.fdb >/dev/null && echo there" "there"
   is "sales.fdb is left to its FirebirdDatabase" "instance /data/p db-0; initdb /data/p/replicated-databases | grep -c '^not created here: its FirebirdDatabase creates it on the primary'" "1"
   is "and is not created" "[ -e /data/p/sales.fdb ] && echo there || echo absent" "absent"
