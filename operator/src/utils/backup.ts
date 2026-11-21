@@ -404,7 +404,13 @@ export function buildBackupPodSpec(
                 // the chains, for retention in the upload container (no Firebird client there)
                 (options.retention?.policy ? `; ${nbackupHistoryScript(`${WORK_DIR}/history`)}` : ''),
             ],
-            env: [...env, { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) }],
+            env: [
+              ...env,
+              { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
+              // a FirebirdDatabase's nbackup on a replica: its segment server is asked about that
+              // database (DB <file> NBACKUP); the copy and its removal are the instance's files
+              ...(options.replica && options.databaseFile ? [{ name: 'SEGMENT_DATABASE', value: options.databaseFile }] : []),
+            ],
             volumeMounts: [workMount, configMount],
           }
         : {

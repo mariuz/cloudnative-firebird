@@ -464,14 +464,14 @@ export function validateS3Encryption(path: string, s3: S3BackupConfiguration): v
   }
 }
 
-/** spec.database: the name of a FirebirdDatabase, for logical backups only */
+/** spec.database: the name of a FirebirdDatabase, for logical and physical backups */
 function validateBackupDatabase(field: string, type?: string, database?: string): void {
   if (database === undefined) return;
   if (!/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(database) || database.length > 253) {
     throw new ValidationError(`${field}.database "${database}" must be the name of a FirebirdDatabase`);
   }
-  if (type !== undefined && type !== 'logical') {
-    throw new ValidationError(`${field}.database: only logical backups are taken of a FirebirdDatabase (physical backups and volume snapshots cover the cluster database or the whole volume)`);
+  if (type === 'volumeSnapshot') {
+    throw new ValidationError(`${field}.database: a volume snapshot covers the whole volume, not one FirebirdDatabase (take a logical or physical backup of it)`);
   }
 }
 

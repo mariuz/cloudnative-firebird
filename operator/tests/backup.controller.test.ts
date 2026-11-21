@@ -172,10 +172,18 @@ describe('FirebirdBackupController', () => {
         expect(batchApi.createNamespacedJob).not.toHaveBeenCalled();
       });
 
-      it('refuses physical backups and volume snapshots of a database', async () => {
+      it("takes a physical backup of the database's file, and refuses a volume snapshot of it", async () => {
+        objects['firebirddatabases/sales'] = sales();
+        await controller.reconcileBackup(makeBackup({ spec: { clusterName: 'test-cluster', type: 'physical', database: 'sales' } }));
+        const pod = batchApi.createNamespacedJob.mock.calls[0][0].body.spec.template.spec;
+        // server-side (no S3): fbsvcmgr's nbackup on the primary, in the Job's container
+        const env = pod.containers[0].env as Array<{ name: string; value?: string }>;
+        expect(env.find((e) => e.name === 'DATABASE_PATH')?.value).toBe('/var/lib/firebird/data/sales-2026.fdb');
+        // on the primary through its server: no segment server request about the database
+        expect(env.find((e) => e.name === 'SEGMENT_DATABASE')).toBeUndefined();
         await expect(
-          controller.reconcileBackup(makeBackup({ spec: { clusterName: 'test-cluster', type: 'physical', database: 'sales' } })),
-        ).rejects.toThrow('only logical backups');
+          controller.reconcileBackup(makeBackup({ spec: { clusterName: 'test-cluster', type: 'volumeSnapshot', database: 'sales' } })),
+        ).rejects.toThrow('a volume snapshot covers the whole volume');
       });
     });
 

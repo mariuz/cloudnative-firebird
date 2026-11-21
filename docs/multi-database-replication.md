@@ -147,7 +147,8 @@ released. Phase 2 is reachable only through the cluster annotation
    until phase 4: a restore would lose these databases until backups cover them.)* Switchover (Job and in-place), failover ranking and synchronous replication over
    every database. The admission webhook accepts `FirebirdDatabase` on replicated clusters from
    here. The kind CI repeats its switchover and failover checks with two databases.
-4. **Backups.** The journal archive upload per database, PITR's and physical backups'
+4. **Backups.** *(4a, physical backups of a FirebirdDatabase, on a replica with `DB <file>
+   NBACKUP`: v0.182.0; 4b, the journal archive upload and point-in-time recovery: next)* The journal archive upload per database, PITR's and physical backups'
    `spec.database`, and volume snapshots of every database. Replica clusters follow.
 
 ## Open questions

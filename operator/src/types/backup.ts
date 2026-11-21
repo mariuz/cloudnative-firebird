@@ -40,7 +40,8 @@ export interface FirebirdBackupSpec {
   verify?: boolean;
   /**
    * A FirebirdDatabase of the cluster (its name) to back up instead of the cluster database.
-   * Logical backups only; restore it with a FirebirdRestore (into a new database file).
+   * Logical and physical backups (since v0.182.0: also of a replicated one, on its replicas with
+   * prefer-standby); restore it with a FirebirdRestore (into a new database file).
    */
   database?: string;
 }
@@ -259,7 +260,8 @@ export interface FirebirdScheduledBackupSpec {
   verify?: boolean;
   /**
    * A FirebirdDatabase of the cluster (its name) to back up instead of the cluster database.
-   * Logical backups only; restore it with a FirebirdRestore (into a new database file).
+   * Logical and physical backups (since v0.182.0: also of a replicated one, on its replicas with
+   * prefer-standby); restore it with a FirebirdRestore (into a new database file).
    */
   database?: string;
 }
