@@ -2,7 +2,7 @@ import { clusterImage } from './image-catalog';
 import { V1Job } from '@kubernetes/client-node';
 import { API_GROUP, FirebirdCluster } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, superuserClientEnv, jobPodSpec } from './resources';
-import { OPERATOR_CONFIG_DIR, SEGMENT_PORT, contactTimeoutSeconds, instanceHost, isolationCheckTimeoutSeconds } from './replication';
+import { OPERATOR_CONFIG_DIR, SEGMENT_PORT, contactTimeoutSeconds, instanceHost, isolationCheckTimeoutSeconds, replicatedDatabaseFiles } from './replication';
 import { AGENT_PATH } from './agent';
 
 /**
@@ -81,6 +81,8 @@ export function buildSwitchoverJob(
                 // segment the journal archive may hold
                 { name: 'PROMOTE_IN_PLACE', value: 'true' },
                 { name: 'ARCHIVED', value: options.archived !== undefined ? String(options.archived) : 'none' },
+                // the declarative databases, stopped, waited for and promoted with it
+                ...declarativeDatabasesEnv(cluster),
               ],
               volumeMounts: [{ name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }],
             },
@@ -159,6 +161,15 @@ export function primaryCutOff(options: {
   return `ready but cut off: the operator cannot reach it, and no replica has reached it for ${threshold}s or more (${ages})`;
 }
 
+/**
+ * DATABASES for the switchover, promotion and failover Jobs: the replicated declarative databases
+ * (docs/multi-database-replication.md, phase 3); none, and no variable, without them
+ */
+function declarativeDatabasesEnv(cluster: FirebirdCluster): Array<{ name: string; value: string }> {
+  const files = replicatedDatabaseFiles(cluster);
+  return files.length > 0 ? [{ name: 'DATABASES', value: files.join(' ') }] : [];
+}
+
 export function promoteJobName(cluster: FirebirdCluster): string {
   return `${cluster.metadata.name}-promote`;
 }
@@ -198,16 +209,22 @@ export function buildPromoteJob(cluster: FirebirdCluster, target: string, archiv
               name: 'promote',
               image: clusterImage(cluster),
               // the reply is the termination message; the Job succeeds once it has one
+              // then each declarative database (DATABASES): one not promoted in place makes the
+              // reply an error, and the target is restarted (its init promotes it offline)
               command: [
                 'sh',
                 '-c',
-                `reply=$(${AGENT_PATH} request "$TARGET" ${request}); echo "$reply"; ` +
-                  '{ printf "%s" "$reply" > /dev/termination-log; } 2>/dev/null; [ -n "$reply" ]',
+                `reply=$(${AGENT_PATH} request "$TARGET" ${request}); ` +
+                  'case "$reply" in "OK "*) for f in ${DATABASES:-}; do ' +
+                  `r=$(${AGENT_PATH} request "$TARGET" DB "$f" PROMOTE none); ` +
+                  'case "$r" in "OK "*) echo "$f promoted in place: $r" ;; *) reply="ERR $f: $r"; break ;; esac; done ;; esac; ' +
+                  'echo "$reply"; { printf "%s" "$reply" > /dev/termination-log; } 2>/dev/null; [ -n "$reply" ]',
               ],
               env: [
                 ...superuserClientEnv(cluster),
                 { name: 'TARGET', value: instanceHost(cluster, target) },
                 { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
+                ...declarativeDatabasesEnv(cluster),
               ],
               volumeMounts: [{ name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }],
             },
@@ -259,6 +276,8 @@ export function buildFailoverJob(cluster: FirebirdCluster, candidates: string[])
                 { name: 'CANDIDATES', value: candidates.map((p) => instanceHost(cluster, p)).join(' ') },
                 { name: 'SEGMENT_PORT', value: String(SEGMENT_PORT) },
                 { name: 'SETTLE_SECONDS', value: String(FAILOVER_SETTLE_SECONDS) },
+                // ranked by them after the cluster database
+                ...declarativeDatabasesEnv(cluster),
               ],
               volumeMounts: [{ name: 'cluster-config', mountPath: OPERATOR_CONFIG_DIR, readOnly: true }],
             },

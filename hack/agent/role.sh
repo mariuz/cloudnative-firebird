@@ -1,5 +1,6 @@
 #!/bin/bash
-# Checks the agent's FENCE, REJOIN, NBACKUP and isolation check (docs/rust-agent-segment-server.md, step 5)
+# Checks the agent's FENCE, REJOIN, NBACKUP and isolation check (docs/rust-agent-segment-server.md, step 5),
+# FENCE and REJOIN over a declarative database too (docs/multi-database-replication.md, phase 3)
 # against real Firebird servers. The segment server does the full shutdown, the online and the
 # nbackup through its own service attachments. Here fbsvcmgr is wrapped so that every call is
 # recorded: none of its requests may need it.
@@ -39,6 +40,8 @@ front() { SEGMENT_PORT=3051 /w/fb-agent request 127.0.0.1 "$@" 2>&1; }
 calls() { cat /data/fbsvcmgr.calls 2>/dev/null | wc -l; }
 rows() { echo "SET HEADING OFF; SELECT COUNT(*) FROM T;" | isql -q "$1" 2>&1 | tr -d ' \n'; }
 shut() { gstat -h /data/db.fdb 2>&1 | grep -ci "shutdown"; }
+# a declarative database beside it (REPLICATED_DATABASES_FILE): fenced and brought back with it
+appshut() { gstat -h /data/app.fdb 2>&1 | grep -ci "shutdown"; }
 ENV
 
 status=0
@@ -48,11 +51,12 @@ for image in "${images[@]}"; do
   docker run -d --name "$NAME" -v "$work:/w" --entrypoint bash "$image" -c '. /w/env.sh
     grep -q "^AuthServer = Srp, Legacy_Auth" /opt/firebird/firebird.conf ||
       printf "AuthServer = Srp, Legacy_Auth\nUserManager = Srp, Legacy_UserManager\nWireCrypt = Enabled\n" >> /opt/firebird/firebird.conf
-    mkdir -p /data/a /data/s /data/repl /data/out && echo $POD_NAME > /data/primary && chown -R firebird:firebird /data
+    mkdir -p /data/a /data/s /data/repl/databases/app.fdb /data/out && echo $POD_NAME > /data/primary && echo app.fdb > /data/replicated-databases && chown -R firebird:firebird /data
     su -s /bin/sh firebird -c "/opt/firebird/bin/firebird" &
     sleep 3
     echo "CREATE DATABASE '\''localhost:/data/db.fdb'\'' USER SYSDBA PASSWORD '\''masterkey'\''; CREATE TABLE T (N INT); COMMIT; INSERT INTO T VALUES (1); INSERT INTO T VALUES (2); COMMIT;" | isql -q
-    su -s /bin/sh firebird -c ". /w/env.sh; PATH=/w/wrapped:\$PATH /w/fb-agent segment-server > /data/front.log 2>&1" &
+    echo "CREATE DATABASE '\''localhost:/data/app.fdb'\'' USER SYSDBA PASSWORD '\''masterkey'\''; COMMIT;" | isql -q
+    su -s /bin/sh firebird -c ". /w/env.sh; PATH=/w/wrapped:\$PATH REPLICATED_DATABASES_FILE=/data/replicated-databases /w/fb-agent segment-server > /data/front.log 2>&1" &
     sleep infinity' >/dev/null
   x() { docker exec "$NAME" bash -c ". /w/env.sh; $1"; }
   for _ in $(seq 1 40); do x 'front PING' 2>/dev/null | grep -q '^OK' && break; sleep 1; done
@@ -66,11 +70,13 @@ for image in "${images[@]}"; do
   # the fence and its lifting: no fbsvcmgr
   is "FENCE" 'front FENCE lease lost' "OK"
   is "the database is in full shutdown" 'shut' "1"
+  is "and so is the declarative database" 'appshut' "1"
   is "the marker says whose fence it is" 'cut -d" " -f2 /data/repl/self-fenced' "lease"
   is "STATE" 'front STATE' "OK fenced lease"
   is "FENCE again" 'front FENCE' "OK fenced"
   is "REJOIN" 'front REJOIN' "OK"
   is "the database is online" 'shut' "0"
+  is "and so is the declarative database" 'appshut' "0"
   is "the marker is gone" 'ls /data/repl/self-fenced 2>/dev/null | wc -l' "0"
   is "REJOIN without a fence" 'front REJOIN' "OK"
   is "rows after the fence" 'rows localhost:/data/db.fdb' "2"

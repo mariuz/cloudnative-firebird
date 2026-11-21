@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.180.0):** every item below is done; open work is in [TODO.md](TODO.md).
+> **Status note (v0.181.0):** every item below is done; open work is in [TODO.md](TODO.md).
 > Journal replication (still experimental, see TODO.md) works against the official
 > `firebirdsql/firebird` image (Firebird 4, 5 and the 6 snapshot). It covers replica re-seeding,
 > lag metrics, planned switchover, automatic failover with a primary Lease, and rolling updates with
@@ -190,6 +190,19 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `WAIT <seconds> [<segment>]` answers as soon as a segment after the given one is archived. The Rust puller sends it between two pulls instead of sleeping, so a segment is fetched when it appears. Measured with `hack/bench/puller.sh` (removed in v0.170.0) (three replicas on one archive, a 16 MB segment every 2 s, poll 5 s): 0.08 s from the archive to the replica (median, 0.16 s at most) against 2.4 s (5 s at most) for a polling puller. A Perl segment server answers `ERR bad request`; the puller then polls as before and asks again about once a minute. The archive timeout before it (`archiveTimeoutSeconds`) is unchanged.
   - Ten pullers waiting cost the front 0.07 s of CPU in ten seconds on an archive of 5,000 segments: the archive is looked at once for all of them, and read again only when its directory changed.
   - `tests/segment-server-front.test.ts` gives the same requests to the Perl server alone and to the front: listings, downloads, refusals, forwarded requests with uploads and downloads, the contact time the isolation check reads, stopping. The kind CI runs the replicated cluster behind the front, with segment TLS.
+- [x] **Declarative databases on replicated clusters, phase 3: switchover and failover over every database (experimental)** *(v0.181.0)*
+  - The switchover Job (`DATABASES`) stops writes on each declarative database of the old primary with the cluster database. It reads each one's final replication sequence (from the header, or `DB <file> HEADER`) and waits for the target and every replica to apply it (`DB <file> POSITION`). After the cluster database's in-place promotion it promotes each in place (`DB <file> PROMOTE none`). One that cannot be promoted in place makes the outcome `restart <file>: …`, and the target is restarted; its init promotes that database offline and leaves those already promoted as they are. The failover's promotion Job does the same after the cluster database's `PROMOTE`.
+  - The failover election ranks the candidates by the cluster database's position, then by their least position among the declarative databases. A candidate without a copy of one of them ranks below one that has them all. The result adds `databases=<host>:<least>,…`.
+  - A declarative database's offline promotion continues its journal after its own position, not after the cluster database's journal archive sequence (its segments are not uploaded).
+  - `FENCE` and `REJOIN` take every database the instance serves down and back, so an isolated primary stops writing to all of them; one that cannot be changed makes the reply an error.
+  - The annotation stays required until backups cover these databases (phase 4); the design note had it lifted here.
+  - Tests:
+    - The switchover program, with `DATABASES`: both databases stopped, waited for and promoted in place, and the restart outcome when one is not.
+    - The election's ranking, including a candidate without a copy, and the listed order on ties.
+    - The promotion Job's script against a stub agent.
+    - The Jobs' `DATABASES` only with the annotation.
+    - `hack/agent/role.sh`: FENCE and REJOIN over a second database.
+    - The kind CI: a planned switchover of the `multi` cluster. `sales.fdb` is promoted and publishing on the new primary, the old primary holds it as a replica, and the rows written after it reach both other instances, in both databases.
 - [x] **Declarative databases on replicated clusters, phase 2b: removal from every instance, the lag per database (experimental)** *(v0.180.0)*
   - Deleting a replicated `FirebirdDatabase` takes it off `status.replicatedDatabases`, and the instances roll again. `init-databases.sh` removes the tree of each database no longer listed (journal, archive, source, seeds). On a replica it also removes the read-only copy, which nothing updates any more. The primary's file follows `reclaimPolicy`: `delete` drops it, with the drop retried until the primary has let go of the database at its restart in that roll; `retain` keeps it. Nothing is removed while the list cannot be read.
   - The operator measures each replica in each of these databases as it measures the cluster database: `DB <file> ARCHIVED` on the primary and `DB <file> POSITION` on the replica. The result goes in `status.replicationStatus.replicas[].databases` (applied segment, pending, lag in segments and seconds, or why not measured), and in the lag gauges with a `database` label; the cluster database's series keep none.

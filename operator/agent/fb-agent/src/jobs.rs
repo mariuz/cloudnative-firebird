@@ -745,6 +745,12 @@ fn result_file(text: &str) {
 /// The final replication sequence: from the header statistics, or through the segment server
 /// when they are refused.
 fn final_sequence(host: &str, statistics: Option<String>, port_timeout: u64) -> Result<u64, Exit> {
+    final_sequence_of(host, None, statistics, port_timeout)
+}
+
+/// The final replication sequence of `database` (None: the cluster database; Some: a declarative
+/// one, asked with `DB <file>`).
+fn final_sequence_of(host: &str, database: Option<&str>, statistics: Option<String>, port_timeout: u64) -> Result<u64, Exit> {
     if let Some(statistics) = statistics {
         let sequence = statistics
             .split("Replication sequence:")
@@ -752,7 +758,8 @@ fn final_sequence(host: &str, statistics: Option<String>, port_timeout: u64) -> 
             .and_then(|rest| rest.trim_start().split(|c: char| !c.is_ascii_digit()).next().and_then(number));
         return Ok(sequence.unwrap_or(0));
     }
-    let reply = request(host, "HEADER", port_timeout).ok_or_else(|| Exit::from(format!("cannot reach the segment server of {host}\n")))?;
+    let reply = request(host, &crate::databases::request_about(database, "HEADER"), port_timeout)
+        .ok_or_else(|| Exit::from(format!("cannot reach the segment server of {host}\n")))?;
     let answer = reply.first().cloned();
     answer
         .as_deref()
@@ -854,9 +861,32 @@ pub fn switchover() -> Done {
         println!("writes stopped: {old} is in full shutdown{after}");
     }
 
+    // the declarative databases (DATABASES, docs/multi-database-replication.md): writes stopped
+    // on each too, beside the cluster database
+    let declarative: Vec<String> = var("DATABASES").split_whitespace().map(str::to_string).collect();
+    let directory = match database.rsplit_once('/') {
+        Some((dir, _)) if !dir.is_empty() => dir.to_string(),
+        _ => ".".to_string(),
+    };
+    let path_of = |file: &str| format!("{directory}/{file}");
+    for file in &declarative {
+        let before = header(&old, &path_of(file))?;
+        if before.as_ref().is_some_and(|b| !b.contains("full shutdown")) && !shut_down(&old, &path_of(file)) {
+            return die(format!("cannot shut down {file} on {old}\n"));
+        }
+        println!("writes stopped: {file} on {old} is in full shutdown");
+    }
+
     let statistics = header(&old, &database)?;
     let last = final_sequence(&old, statistics, 60)?;
     println!("final replication sequence of {old}: {last}");
+    let mut finals: Vec<(String, u64)> = Vec::new();
+    for file in &declarative {
+        let statistics = header(&old, &path_of(file))?;
+        let last = final_sequence_of(&old, Some(file), statistics, 60)?;
+        println!("final replication sequence of {file} on {old}: {last}");
+        finals.push((file.clone(), last));
+    }
     for host in std::iter::once(&target).chain(others.iter()) {
         wait_until(&format!("{host} to apply segment {last}"), timeout, false, || {
             let reply = request(host, "POSITION", 60);
@@ -867,6 +897,18 @@ pub fn switchover() -> Done {
             position(answer).is_some_and(|(sequence, pending)| sequence >= last && pending == 0)
         })?;
         println!("{host} has applied everything up to segment {last}");
+        for (file, last) in &finals {
+            let ask = format!("DB {file} POSITION");
+            wait_until(&format!("{host} to apply segment {last} of {file}"), timeout, false, || {
+                let reply = request(host, &ask, 60);
+                let answer = first(&reply).unwrap_or("");
+                if host == &target && answer == "OK primary" {
+                    return true;
+                }
+                position(answer).is_some_and(|(sequence, pending)| sequence >= *last && pending == 0)
+            })?;
+            println!("{host} has applied everything up to segment {last} of {file}");
+        }
     }
     println!("switchover ready: promote {target} after segment {last}");
 
@@ -892,6 +934,22 @@ pub fn switchover() -> Done {
             Some((sequence, rounds)) => {
                 outcome = format!("inplace {sequence} {rounds}");
                 println!("{target} promoted in place: its journal continues after segment {sequence}");
+                // then each declarative database; one that cannot be promoted in place has the
+                // target restarted, whose init promotes it offline (and leaves the others as they are)
+                for file in &declarative {
+                    let reply = request(&target, &format!("DB {file} PROMOTE none"), 60);
+                    let answer = match &reply {
+                        Some(lines) => lines.first().cloned().unwrap_or_else(|| "no reply".into()),
+                        None => "segment server not reachable".into(),
+                    };
+                    if answer.starts_with("OK ") {
+                        println!("{file} promoted in place on {target}: {answer}");
+                    } else {
+                        outcome = format!("restart {file}: {answer}");
+                        println!("in-place promotion of {file} on {target} failed ({answer}): the target is promoted offline instead");
+                        break;
+                    }
+                }
             }
             None => {
                 outcome = format!("restart {answer}");
@@ -912,8 +970,9 @@ pub fn failover() -> Done {
         return die("no candidate replicas\n");
     }
     let settle = seconds("SETTLE_SECONDS", 60);
-    let position_of = |host: &str| {
-        let mut reply = client::open(host, "POSITION", Some(Duration::from_secs(30))).ok()?;
+    let declarative: Vec<String> = var("DATABASES").split_whitespace().map(str::to_string).collect();
+    let position_in = |host: &str, request: &str| {
+        let mut reply = client::open(host, request, Some(Duration::from_secs(30))).ok()?;
         let answer = line(&mut reply);
         // ^OK (\d+) (\d+) (\d+)
         let mut fields = answer.strip_prefix("OK ")?.splitn(3, ' ');
@@ -922,6 +981,15 @@ pub fn failover() -> Done {
         let rest = fields.next()?;
         let pending: String = rest.chars().take_while(char::is_ascii_digit).collect();
         Some((sequence, number(&pending)?))
+    };
+    let position_of = |host: &str| position_in(host, "POSITION");
+    // a candidate's least position among the declarative databases (DATABASES): None when one of
+    // them has no position there (not seeded yet), which ranks it below one that has them all
+    let least_of = |host: &str| -> Option<u64> {
+        declarative
+            .iter()
+            .map(|file| position_in(host, &format!("DB {file} POSITION")).map(|(sequence, _)| sequence))
+            .try_fold(u64::MAX, |least, sequence| sequence.map(|s| least.min(s)))
     };
     let mut positions: HashMap<String, u64> = HashMap::new();
     let deadline = now() + settle;
@@ -951,14 +1019,24 @@ pub fn failover() -> Done {
     let Some(mut best) = ranked.first().copied() else {
         return die("no candidate reported a position\n");
     };
+    // the cluster database's position first, then the least among the declarative databases;
     // ties keep the listed order
+    let least: HashMap<String, Option<u64>> = ranked.iter().map(|h| ((*h).clone(), least_of(h))).collect();
+    let rank = |host: &String| (positions[host], least[host]);
     for host in &ranked {
-        if positions[*host] > positions[best] {
+        if rank(host) > rank(best) {
             best = host;
         }
     }
     let listed: Vec<String> = ranked.iter().map(|h| format!("{h}:{}", positions[*h])).collect();
-    let summary = format!("target={best} sequence={} positions={}", positions[best], listed.join(","));
+    let mut summary = format!("target={best} sequence={} positions={}", positions[best], listed.join(","));
+    if !declarative.is_empty() {
+        let shown: Vec<String> = ranked
+            .iter()
+            .map(|h| format!("{h}:{}", least[*h].map_or("none".to_string(), |s| s.to_string())))
+            .collect();
+        summary.push_str(&format!(" databases={}", shown.join(",")));
+    }
     println!("{summary}");
     result_file(&summary);
     Ok(())
