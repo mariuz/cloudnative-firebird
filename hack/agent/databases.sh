@@ -7,7 +7,8 @@
 #   - the requests without a selector are about the cluster database, as before;
 #   - "DB <file> <request>" is about that database: its own archive, LIST, GET, WAIT;
 #   - an unknown database, and the instance's requests with a selector, are refused;
-#   - the puller fetches every database's segments into that database's source directory.
+#   - the puller fetches every database's segments into that database's source directory;
+#   - a replica without a declarative database's file has the puller seed it (init-databases.sh).
 #
 #   hack/agent/databases.sh
 #
@@ -91,7 +92,11 @@ r=$work/replica
 mkdir -p "$r/repl/source"
 cp "$p/replicated-databases" "$r/replicated-databases"
 echo "127.0.0.1" > "$r/primary"
-POD_NAME=db-1 DATABASE_PATH=$r/mydb.fdb SOURCE_DIR=$r/repl/source STATE_FILE=$r/repl/.last-pulled REPLICATION_DIR=$r/repl \
+# the replica has neither declarative database: the puller seeds them with init-databases.sh
+# <file> (a stand-in that records its calls)
+mkdir -p "$r/scripts"
+printf '#!/bin/sh\necho "$1" >> %s/seeded\n' "$r" > "$r/scripts/init-databases.sh"
+POD_NAME=db-1 SCRIPT_DIR=$r/scripts DATABASE_PATH=$r/mydb.fdb SOURCE_DIR=$r/repl/source STATE_FILE=$r/repl/.last-pulled REPLICATION_DIR=$r/repl \
   PRIMARY_FILE=$r/primary REPLICATED_DATABASES_FILE=$r/replicated-databases POLL_SECONDS=1 \
   "$agent" puller > "$work/puller.log" 2>&1 &
 pids+=($!)
@@ -112,6 +117,9 @@ cmp -s "$p/repl/databases/app.fdb/archive/app.fdb.journal-000000002" "$r/repl/da
 segment "$p/repl/databases/sales.fdb/archive/sales.fdb.journal-000000006" 310
 for _ in $(seq 1 50); do [ "$(pulled "$r/repl/databases/sales.fdb/source")" = 2 ] && break; sleep 0.1; done
 [ "$(pulled "$r/repl/databases/sales.fdb/source")" = 2 ] && ok "a new segment of sales.fdb is fetched" || bad "sales.fdb's new segment was not fetched"
+grep -qx app.fdb "$r/seeded" 2>/dev/null && grep -qx sales.fdb "$r/seeded" && ok "the puller seeds the declarative databases the replica does not have" \
+  || bad "init-databases.sh calls: $(cat "$r/seeded" 2>&1)"
+[ "$(grep -c . "$r/seeded")" = 2 ] && ok "once each, not on every poll" || bad "init-databases.sh called $(grep -c . "$r/seeded") times"
 grep -q "segment puller (app.fdb): source=$r/repl/databases/app.fdb/source" "$work/puller.log" && ok "the puller names its loops" || bad "puller log: $(head -5 "$work/puller.log")"
 if grep -q "pull failed" "$work/puller.log"; then bad "a pull failed: $(grep "pull failed" "$work/puller.log" | head -3)"; else ok "no pull failed"; fi
 
