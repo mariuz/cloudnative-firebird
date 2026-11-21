@@ -312,7 +312,9 @@ describe('replication lag reconciliation', () => {
     const kubeConfig = new KubeConfig();
     vi.spyOn(kubeConfig, 'makeApiClient').mockReturnValue(new Proxy({}, { get: (_t, p: string) => fn(p) }) as never);
     const client: SegmentClient = vi.fn(async (host: string, _port: number, line: string) => {
-      const reply = replies[`${host.split('.')[0]} ${line.split(' ')[1]}`];
+      const words = line.split(' ');
+      // "DB <file> <request>": keyed "<pod> DB <file> <request>"
+      const reply = replies[`${host.split('.')[0]} ${words[1] === 'DB' ? words.slice(1, 4).join(' ') : words[1]}`];
       if (reply instanceof Error) throw reply;
       return reply ?? [];
     });
@@ -351,6 +353,42 @@ describe('replication lag reconciliation', () => {
     expect(exported).toContain('firebird_replication_lag_seconds{namespace="prod",cluster="db",pod="db-2"} 90\n');
     expect(exported).toContain('firebird_replication_lag_segments{namespace="prod",cluster="db",pod="db-1"} 0\n');
     expect(exported).toMatch(/firebird_operator_reconciles_total\{namespace="prod",cluster="db",result="success"\} \d+/);
+  });
+
+  it('measures the replicated declarative databases too, and exports them with a database label', async () => {
+    const annotated: FirebirdCluster = {
+      ...cluster,
+      metadata: { ...cluster.metadata, annotations: { 'firebird.cloudnative-firebird.io/replicated-databases': 'experimental' } },
+    };
+    const sales = {
+      metadata: { name: 'sales', namespace: 'prod' },
+      spec: { clusterName: 'db' },
+      status: { instances: [{ name: 'db-0', volume: 'v' }] },
+    };
+    const s = setup(
+      [pod('db-0'), pod('db-1'), pod('db-2')],
+      {
+        'db-0 ARCHIVED': ['22 10'],
+        'db-1 POSITION': ['OK 22 100 0'],
+        'db-2 POSITION': ['OK 22 100 0'],
+        'db-0 DB sales.fdb ARCHIVED': ['7 300', '8 30'],
+        'db-1 DB sales.fdb POSITION': ['OK 8 50 0'],
+        'db-2 DB sales.fdb POSITION': ['OK 6 50 1'],
+      },
+      {
+        listNamespacedCustomObject: vi.fn(async ({ plural }: { plural: string }) => ({ items: plural === 'firebirddatabases' ? [sales] : [] })),
+      },
+    );
+    await s.controller.reconcile(annotated);
+    expect(s.client).toHaveBeenCalledWith('db-0.db-headless.prod.svc', 3051, 'masterkey DB sales.fdb ARCHIVED');
+    expect(s.status().replicatedDatabases).toEqual(['sales.fdb']);
+    expect(s.status().replicationStatus.replicas).toMatchObject([
+      { name: 'db-1', lagSegments: 0, databases: [{ database: 'sales.fdb', appliedSequence: 8, lagSegments: 0, lagSeconds: 0 }] },
+      { name: 'db-2', lagSegments: 0, databases: [{ database: 'sales.fdb', appliedSequence: 6, pendingSegments: 1, lagSegments: 2, lagSeconds: 300 }] },
+    ]);
+    const exported = metrics.render();
+    expect(exported).toContain('firebird_replication_lag_seconds{namespace="prod",cluster="db",pod="db-2",database="sales.fdb"} 300\n');
+    expect(exported).toContain('firebird_replication_lag_seconds{namespace="prod",cluster="db",pod="db-2"} 0\n');
   });
 
   it('sends the primary the lowest applied segment, remembering replicas that are not ready', async () => {

@@ -1752,6 +1752,25 @@ spec:
                             type: boolean
                           error:
                             type: string
+                          databases:
+                            description: The declarative databases it replicates beside the cluster database (status.replicatedDatabases)
+                            type: array
+                            items:
+                              type: object
+                              required: [database]
+                              properties:
+                                database:
+                                  type: string
+                                appliedSequence:
+                                  type: integer
+                                pendingSegments:
+                                  type: integer
+                                lagSegments:
+                                  type: integer
+                                lagSeconds:
+                                  type: integer
+                                error:
+                                  type: string
                     segmentRetention:
                       description: Archived segments the primary keeps for the replicas past segmentRetentionHours
                       type: object

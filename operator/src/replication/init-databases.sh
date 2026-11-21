@@ -24,7 +24,10 @@ here=$(cd "$(dirname "$0")" && pwd)
 data=$(dirname "$DATABASE_PATH")
 base=$REPLICATION_DIR
 own() { [ "$(id -u)" -ne 0 ] || chown "$@"; }
-for file in $("$FB_AGENT" databases); do
+# the list, as the agent reads it: nothing is initialised or removed when it cannot be read
+[ -r "$REPLICATED_DATABASES_FILE" ] || exit 0
+listed=$("$FB_AGENT" databases) || exit 0
+for file in $listed; do
   [ -z "$only" ] || [ "$file" = "$only" ] || continue
   tree="$base/databases/$file"
   mkdir -p "$tree"
@@ -42,4 +45,21 @@ for file in $("$FB_AGENT" databases); do
     echo "the replication init of $file failed: the instance starts without it, it is tried again at the next start"
   fi
 done
+
+# A database no longer listed (its FirebirdDatabase deleted): its tree goes (journal, archive,
+# source, seeds), and on a replica its read-only copy, which nothing updates any more. A
+# database that is not a replica (the primary's) is left to its FirebirdDatabase (reclaimPolicy).
+if [ -z "$only" ] && [ -d "$base/databases" ]; then
+  for tree in "$base/databases"/*/; do
+    [ -d "$tree" ] || continue
+    file=$(basename "$tree")
+    case " $(echo $listed) " in *" $file "*) continue ;; esac
+    if [ -f "$data/$file" ] && gstat -h "$data/$file" 2>/dev/null | grep -q '^[[:space:]]*Attributes.*replica'; then
+      rm -f "$data/$file"
+      echo "$file is no longer replicated: its replica copy is removed"
+    fi
+    rm -rf "$tree"
+    echo "$file is no longer replicated: its replication files are removed"
+  done
+fi
 exit 0

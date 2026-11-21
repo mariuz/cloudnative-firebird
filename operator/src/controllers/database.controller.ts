@@ -248,8 +248,9 @@ export class FirebirdDatabaseController {
       log.info({ instances: targets.map((t) => t.name) }, 'Database dropped');
     }
 
-    // a replicated cluster: dropped on the primary (the replicas' copies stay until phase 2b of
-    // docs/multi-database-replication.md removes them)
+    // a replicated cluster: dropped on the primary; the replicas remove their copies when the
+    // instances roll without it (init-databases.sh). The primary may hold it until its own restart
+    // in that roll: a failed drop is retried on the next reconcile
     const primary = cluster.status?.replicationStatus?.primaryPod;
     const instances = (await this.instances(cluster)).filter((i) => !cluster.spec.replication?.enabled || i.name === primary);
     const dropped = (i: Instance) => droppedFrom.some((d) => d.name === i.name && d.volume === i.volume);

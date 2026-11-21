@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.179.0/cloudnative-firebird-0.179.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.180.0/cloudnative-firebird-0.180.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.179.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.180.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -240,7 +240,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.179.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.180.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -2308,10 +2308,16 @@ accepted on a replicated cluster (not a replica cluster), up to 16 of them
   follows its journal. A replica whose seed was not ready at its restart is seeded by its puller
   within a minute.
 
+Deleting one takes it off the list, and the instances roll once more. Each replica removes its
+read-only copy and the database's replication files. The primary's file follows `reclaimPolicy`:
+`delete` drops it once the primary no longer serves it, after its restart in that roll, and `retain`
+keeps it. Each replica's lag in each of these databases is in
+`status.replicationStatus.replicas[].databases`, and in the lag gauges with a `database` label.
+The cluster database's series keep no `database` label (since v0.180.0).
+
 Not yet covered, so a test cluster only: a switchover or failover does not promote these databases
 (phase 3), and backups, point-in-time recovery and snapshots cover the cluster database alone
-(phase 4). Deleting one with `reclaimPolicy: delete` drops it on the primary; the replicas keep
-their copies until phase 2b removes them.
+(phase 4).
 - The cluster's own database.
 - A file another `FirebirdDatabase` of the same cluster manages (the older resource keeps it).
 - The security database's name.

@@ -8,7 +8,8 @@
 #   - the declarative databases (init-databases.sh): on the primary, one created beside the
 #     cluster database publishes and gets its bootstrap seed in its own tree, one not created is
 #     left to its FirebirdDatabase; on a replica, the first is seeded from the primary's segment
-#     server with "DB <file>", the second is not seeded and the init goes on
+#     server with "DB <file>", the second is not seeded and the init goes on; a database no
+#     longer listed loses its tree, and on the replica its copy
 #   - the journal floor: the replication sequence written into the header of a real database
 #     (the on-disk structures of Firebird 4 and 5, and of 6), read back with gstat
 #
@@ -124,6 +125,16 @@ for image in "${images[@]}"; do
   is "sales.fdb is not seeded, and the init goes on" "instance /data/r db-1; initdb /data/r/replicated-databases | grep -c '^no seed source has it yet: not seeded now'" "1"
   is "nothing is left of sales.fdb's work files" "ls -A /data/r/repl/databases/sales.fdb | grep -c '^\.init'" "0"
   is "the replica's cluster database is untouched" "rows /data/r/db.fdb" "2"
+  # app.fdb no longer listed (its FirebirdDatabase deleted): the replica's copy and tree go, the
+  # primary keeps its file (its reclaimPolicy decides) and loses its tree
+  x "printf 'sales.fdb\n' > /data/r/replicated-databases; printf 'sales.fdb\n' > /data/p/replicated-databases"
+  is "a replica removes the copy of a database no longer listed" "instance /data/r db-1; initdb /data/r/replicated-databases | grep -c '^app.fdb is no longer replicated: its replica copy is removed'" "1"
+  is "the copy is gone" "[ -e /data/r/app.fdb ] && echo there || echo gone" "gone"
+  is "and its tree" "[ -e /data/r/repl/databases/app.fdb ] && echo there || echo gone" "gone"
+  is "the cluster database stays" "rows /data/r/db.fdb" "2"
+  is "the primary keeps its file" "instance /data/p db-0; initdb /data/p/replicated-databases >/dev/null; [ -f /data/p/app.fdb ] && echo kept" "kept"
+  is "and removes its tree" "[ -e /data/p/repl/databases/app.fdb ] && echo there || echo gone" "gone"
+  is "an unreadable list removes nothing" "instance /data/r db-1; mkdir -p /data/r/repl/databases/keep.fdb; initdb /data/r/no-such-list; [ -d /data/r/repl/databases/keep.fdb ] && echo kept" "kept"
 
   # the journal floor: the header of a real database, read back by gstat
   x "cp /data/q/db.fdb /data/floor.fdb"
