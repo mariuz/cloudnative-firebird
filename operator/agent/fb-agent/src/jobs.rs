@@ -145,7 +145,9 @@ pub fn backup_file(arguments: &[&str]) -> Done {
             println!("copied {file} ({size} bytes) to {name} on {host}");
         }
         ["nbackup", level, name] => {
-            let mut reply = request(&format!("NBACKUP {level} {name}"))?;
+            // about a declarative database with SEGMENT_DATABASE (a physical backup of a
+            // FirebirdDatabase on a replica); the files themselves are the instance's
+            let mut reply = request(&crate::databases::request_for_environment(&format!("NBACKUP {level} {name}")))?;
             let answer = line(&mut reply);
             if !answer.starts_with("OK") {
                 return Err(server(&answer));

@@ -279,6 +279,14 @@ describe('physical backups and restores with S3', () => {
     expect(pod.containers[0].args![0]).toContain('s3 cp "/work/$f" "s3://bkt/fb/$f"');
   });
 
+  it("asks a replica's segment server about a FirebirdDatabase for its nbackup (DB <file> NBACKUP)", () => {
+    const on = (replica: boolean, file?: string) => env(ownInit(podOf(buildBackupJob(makeBackup({ type: 'physical', s3 }), cluster, 'db-1', replica, file)))[0], 'SEGMENT_DATABASE')?.value;
+    expect(on(true, 'sales.fdb')).toBe('sales.fdb');
+    // the cluster database, or on the primary (through its server): no selector
+    expect(on(true)).toBeUndefined();
+    expect(on(false, 'sales.fdb')).toBeUndefined();
+  });
+
   it('takes a replica\'s nbackup through its segment server, with its position', () => {
     const pod = podOf(buildBackupJob(makeBackup({ type: 'physical', level: 1, s3, target: 'prefer-standby' }), cluster, 'db-1', true));
     const script = ownInit(pod)[0].args![0];

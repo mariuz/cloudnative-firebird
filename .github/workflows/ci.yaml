@@ -1274,6 +1274,31 @@ jobs:
           done
           echo "switchover to $primary: sales.fdb promoted with the cluster database, $old demoted, both follow it"
 
+          # backups of it (phase 4): logical and physical, on the primary
+          for type in logical physical; do
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: sales-$type
+            namespace: default
+          spec:
+            clusterName: multi
+            type: $type
+            database: sales
+          EOF
+          done
+          for type in logical physical; do
+            timeout 300 bash -c "until [ \"\$(kubectl get firebirdbackup sales-$type -o jsonpath={.status.phase})\" = Completed ]; do
+                [ \"\$(kubectl get firebirdbackup sales-$type -o jsonpath={.status.phase})\" = Failed ] && exit 1; sleep 3; done" \
+              || { kubectl get firebirdbackup sales-$type -o yaml; kubectl logs job/backup-sales-$type --all-containers || true; exit 1; }
+            [ "$(kubectl get firebirdbackup sales-$type -o jsonpath={.status.databasePath})" = "$S" ]
+            location=$(kubectl get firebirdbackup sales-$type -o jsonpath={.status.location})
+            kubectl exec "$primary" -c firebird -- test -s "$location" || { echo "no $type backup at $location on $primary"; exit 1; }
+            echo "$type backup of sales.fdb: $location"
+          done
+          kubectl delete firebirdbackup sales-logical sales-physical --wait=false
+
           # deleted (reclaimPolicy delete): dropped on the primary, no longer listed, and after the
           # roll gone from the replicas too
           revision=$(kubectl get statefulset multi -o jsonpath={.status.updateRevision})
