@@ -13,6 +13,11 @@
 #   bootstrap seed when it is missing or stale (the segments after it are no longer archived).
 #
 # Seeds avoid locking the primary: see ISSUES.md, issue 2.
+#
+# A declarative database (DECLARATIVE=true, run by init-databases.sh with that database's own
+# paths, and SEGMENT_DATABASE for its helpers' requests): the primary does not create it (its
+# FirebirdDatabase does), and a replica gives up after SEED_ATTEMPTS rounds of its seed sources
+# (6): the instance starts without it rather than wait.
 set -eu
 echo "replication init with the helpers of $("$FB_AGENT" version)"
 # files for the server: chown as root; as the firebird user (runAsFirebirdUser) they are its own
@@ -295,6 +300,10 @@ rm -f "$work" "$work.ctl" "$work.kind"
 
 case "$primary" in
   ""|"$POD_NAME"|"$POD_NAME".*)
+    if [ "${DECLARATIVE:-}" = true ]; then
+      echo "not created here: its FirebirdDatabase creates it on the primary"
+      exit 0
+    fi
     if [ -f "$DATA_DIR/.bootstrap.fdb" ]; then
       mv "$DATA_DIR/.bootstrap.fdb" "$work"
       origin="bootstrapped"
@@ -340,6 +349,7 @@ done
 
 # Replica: ready replicas first (a replica does not publish, so locking it is safe), then the
 # primary (its offline bootstrap seed, or a live copy only when explicitly allowed).
+rounds=0
 until
   fetched=""
   for source in $(cat "$SEED_SOURCES_FILE" 2>/dev/null || true) "$primary"; do
@@ -348,8 +358,14 @@ until
   done
   [ -n "$fetched" ]
 do
+  rounds=$((rounds + 1))
+  if [ "${DECLARATIVE:-}" = true ] && [ "$rounds" -ge "${SEED_ATTEMPTS:-6}" ]; then
+    rm -f "$work" "$work.ctl" "$work.kind"
+    echo "no seed source has it yet: not seeded now (at the instance's next start)"
+    exit 0
+  fi
   echo "no seed source available yet; retrying"
-  sleep 10
+  sleep "${SEED_RETRY_SECONDS:-10}"
 done
 kind=$(cat "$work.kind")
 

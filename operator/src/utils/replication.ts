@@ -49,7 +49,7 @@ function readScript(name: string): string {
 
 /** Replication files shipped in the cluster ConfigMap, keyed by file name */
 export const REPLICATION_SCRIPTS: Readonly<Record<string, string>> = Object.fromEntries(
-  ['init-instance.sh', 'enable-publication.sql'].map((name) => [name, readScript(name)]),
+  ['init-instance.sh', 'init-databases.sh', 'enable-publication.sql'].map((name) => [name, readScript(name)]),
 );
 
 /** Scripts inlined into containers: the image check and major upgrade Jobs, the archive follower */

@@ -132,7 +132,7 @@ released. Phase 2 is reachable only through the cluster annotation
 `firebird.cloudnative-firebird.io/replicated-databases: experimental`, used by the CI.
 
 1. **Agent: several streams.** *(1a, the segment server and the puller: v0.177.0; 1b, the
-   replication init and seeding: next)* `DB <file>` in the segment server and its clients. The per-database
+   replication init and seeding, `init-databases.sh`: v0.178.0)* `DB <file>` in the segment server and its clients. The per-database
    `Files` map, the puller loop per database and the replication init per database, all driven by
    `replicated-databases`. With an empty list the agent behaves as today; the conformance tests
    prove it, and new ones cover two databases. No operator change.

@@ -49,8 +49,9 @@ use std::time::Duration;
 /// As the Perl server: a client that sends nothing is dropped after this long.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// `fb-agent request`: with SEGMENT_DATABASE, about that declarative database (databases.rs)
 fn request(host: &str, request: &str) -> io::Result<()> {
-    let mut reply = client::open(host, request, None)?;
+    let mut reply = client::open(host, &databases::request_for_environment(request), None)?;
     io::copy(&mut reply, &mut io::stdout().lock())?;
     Ok(())
 }
@@ -123,12 +124,20 @@ fn main() -> ExitCode {
         ["failover"] => return job(jobs::failover()),
         ["sync-standby"] => return job(jobs::sync_standby()),
         ["fetch-seed", host, target] => init::fetch_seed(host, target),
+        // the declarative databases REPLICATED_DATABASES_FILE names, one file name per line, as
+        // the segment server and the puller read them (init-databases.sh runs the init for each)
+        ["databases"] => {
+            for database in databases::from_environment() {
+                println!("{}", database.file);
+            }
+            Ok(())
+        }
         ["replica-control", arguments @ ..] => init::replica_control(arguments),
         ["set-repl-seq", database, sequence] => init::set_sequence(database, sequence),
         ["reposition", sequence, control] => init::reposition(sequence, control),
         ["segment-server"] => server::run(),
         _ => {
-            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | lease-holder | metrics-exporter | backup-file ... | fetch-segments | pitr-plan ... | cut-segment <file> <length> | switchover | failover | sync-standby | segment-server");
+            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | databases | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | lease-holder | metrics-exporter | backup-file ... | fetch-segments | pitr-plan ... | cut-segment <file> <length> | switchover | failover | sync-standby | segment-server");
             return ExitCode::from(2);
         }
     };
