@@ -150,6 +150,39 @@ describe.skipIf(!agentBin)('replication scripts shipped to instance pods', () =>
     });
   });
 
+  it("fetch-segments asks about a declarative database's archive with SEGMENT_DATABASE", async () => {
+    const requests: string[] = [];
+    const server = fakeSegmentServer((request, sock) => {
+      requests.push(request);
+      if (request === 'DB sales.fdb LIST') sock.end('sales.fdb.journal-0000000004\n.\n');
+      else if (request === 'DB sales.fdb ARCHIVED') sock.end('4 60\n.\n');
+      else if (request === 'DB sales.fdb LINEAGE' || request.startsWith('DB sales.fdb POINTS')) sock.end('.\n');
+      else if (request === 'DB sales.fdb GET sales.fdb.journal-0000000004') sock.end('OK 4\nfour');
+      else sock.end('ERR bad request\n');
+    }, 'tok');
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const out = mkdtempSync(join(tmpdir(), 'fb-db-segments-'));
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(...agent(['fetch-segments']), {
+        env: {
+          ...process.env,
+          FIREBIRD_HOST: '127.0.0.1',
+          SEGMENT_PORT: String((server.address() as { port: number }).port),
+          ISC_PASSWORD: 'tok',
+          OUT_DIR: join(out, 'segments'),
+          RESULT_FILE: join(out, 'result'),
+          SEGMENT_DATABASE: 'sales.fdb',
+        },
+      });
+      child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`exit ${code}`))));
+    });
+    server.close();
+    // every request carries the selector; the segment comes into its own directory
+    expect(requests.every((r) => r.startsWith('DB sales.fdb '))).toBe(true);
+    expect(requests).toContain('DB sales.fdb GET sales.fdb.journal-0000000004');
+    expect(readFileSync(join(out, 'segments', 'sales.fdb.journal-0000000004'), 'utf8')).toBe('four');
+  });
+
   it('fetch-segments fetches archived segments that are not uploaded yet', async () => {
     const segments: Record<string, string> = {
       'mydb.fdb.journal-0000000001': 'one',

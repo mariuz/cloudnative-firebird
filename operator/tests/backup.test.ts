@@ -356,6 +356,14 @@ describe('point-in-time recovery', () => {
   const replicated = makeCluster({ replication: { enabled: true, journalArchiveS3: journals } });
   const chain = { type: 'physical' as const, path: 'nbackup-l0-a.nbk', incrementalPaths: ['nbackup-l1-b.nbk'], s3 };
 
+  it("replays a FirebirdDatabase's own journal archive", () => {
+    const restore = makeRestore({ restoreType: 'physical', pointInTime: {} });
+    const fetch = (source: typeof chain & { database?: string }) => podOf(buildRestoreJob(restore, replicated, source, 'db-1')).containers[1].args![0];
+    expect(fetch({ ...chain, database: 'sales.fdb' })).toContain(`s3 ls 's3://arch/prod/journals/sales.fdb/'`);
+    expect(fetch(chain)).toContain(`s3 ls 's3://arch/prod/journals/'`);
+    expect(fetch(chain)).not.toContain('journals/sales.fdb/');
+  });
+
   it('restores the chain, replays the journal archive and restores the result on the primary', () => {
     const restore = makeRestore({ restoreType: 'physical', pointInTime: { targetTime: '2026-10-01T12:15:30+02:00' } });
     const pod = podOf(buildRestoreJob(restore, replicated, chain, 'db-1'));
@@ -418,6 +426,31 @@ describe('point-in-time recovery', () => {
 });
 
 describe('journal archive CronJob', () => {
+  it("archives each replicated declarative database's segments under journals/<file>/", () => {
+    const cluster = makeCluster({ replication: { enabled: true, journalArchiveS3: s3 } });
+    cluster.metadata.annotations = { 'firebird.cloudnative-firebird.io/replicated-databases': 'experimental' };
+    cluster.status = { replicatedDatabases: ['sales.fdb', 'app.fdb'] };
+    const pod = buildJournalArchiveCronJob(cluster, 'db-1')!.spec!.jobTemplate.spec!.template.spec!;
+    const [list, , fetchDatabases] = ownInit(pod);
+    expect(ownInit(pod).map((c) => c.name)).toEqual(['list-uploaded', 'fetch-segments', 'fetch-database-segments']);
+    expect(env(list, 'DATABASES')?.value).toBe('app.fdb sales.fdb');
+    expect(list.args![0]).toContain(`s3 ls 's3://bkt/fb/journals/'"$f/" > $d/listing`);
+    expect(fetchDatabases.args![0]).toContain(
+      'SEGMENT_DATABASE=$f OUT_DIR=$d/segments SKIP_FILE=$d/uploaded LISTED_FILE=$d/listed-max RESULT_FILE=$d/result /opt/fb-agent/fb-agent fetch-segments',
+    );
+    expect(env(fetchDatabases, 'FIREBIRD_HOST')?.value).toBe('db-1.db-headless');
+    const upload = pod.containers[0];
+    expect(upload.args![0]).toContain(`s3 sync /work/segments/ 's3://bkt/fb/journals/'`);
+    expect(upload.args![0]).toContain(`s3 sync $d/segments/ 's3://bkt/fb/journals/'"$f/"`);
+    expect(env(upload, 'DATABASES')?.value).toBe('app.fdb sales.fdb');
+    // without them (or the annotation) the Job is as before
+    for (const c of [makeCluster({ replication: { enabled: true, journalArchiveS3: s3 } }), { ...cluster, metadata: { ...cluster.metadata, annotations: {} } }]) {
+      const plain = buildJournalArchiveCronJob(c, 'db-1')!.spec!.jobTemplate.spec!.template.spec!;
+      expect(ownInit(plain).map((x) => x.name)).toEqual(['list-uploaded', 'fetch-segments']);
+      expect(plain.containers[0].args![0]).not.toContain('$DATABASES');
+    }
+  });
+
   it('is only built with replication and journalArchiveS3', () => {
     expect(buildJournalArchiveCronJob(makeCluster())).toBeNull();
     expect(buildJournalArchiveCronJob(makeCluster({ replication: { enabled: true } }))).toBeNull();
