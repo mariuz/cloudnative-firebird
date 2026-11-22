@@ -13,7 +13,7 @@ import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/s
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.183.0';
+export const PLUGIN_VERSION = '0.184.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -647,7 +647,7 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
         const snapshotClass = parsed.flags.get('snapshot-class') as string | undefined;
         if (snapshotClass && type !== 'volumeSnapshot') throw new UsageError('--snapshot-class is for volumeSnapshot backups');
         const database = parsed.flags.get('database') as string | undefined;
-        if (database && type !== 'logical') throw new UsageError('--database (a FirebirdDatabase) is for logical backups');
+        if (database && type === 'volumeSnapshot') throw new UsageError('--database (a FirebirdDatabase) is for logical and physical backups (a volume snapshot covers the whole volume)');
         // the cluster's backup settings, as its scheduled backups have them (CloudNativePG #11733):
         // the flags override them; target applies to Job backups, verify to logical ones
         const targetFlag = parsed.flags.get('target') as string | undefined;

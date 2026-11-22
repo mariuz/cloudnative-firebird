@@ -2673,6 +2673,134 @@ jobs:
           reasons=$(kubectl get events --field-selector involvedObject.name=dr -o jsonpath='{range .items[*]}{.reason}{"\n"}{end}')
           for reason in ReplicaClusterPromoting ReplicaClusterPromoted; do echo "$reasons" | grep -qx "$reason" || { echo "no $reason event"; exit 1; }; done
           kubectl delete firebirdcluster dr src --wait=false
+
+      - name: Verify the journal archive and point-in-time recovery of a replicated declarative database (experimental)
+        if: matrix.track.id == 'extended'
+        run: |
+          # docs/multi-database-replication.md, phase 4b, on the S3 server of the step above: a
+          # declarative database archived under journals/<file>/ and recovered to a point in time
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: arch
+            namespace: default
+            annotations:
+              firebird.cloudnative-firebird.io/replicated-databases: experimental
+          spec:
+            instances: 2
+            storage:
+              size: 1Gi
+            replication:
+              enabled: true
+              archiveSchedule: "* * * * *"
+              archiveTimeoutSeconds: 3
+              journalArchiveS3: { bucket: dr, prefix: arch, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }
+          EOF
+          for p in arch-0 arch-1; do
+            timeout 300 bash -c "until kubectl get pod $p >/dev/null 2>&1; do sleep 3; done"
+            kubectl wait pod/$p --for=condition=Ready --timeout=300s
+          done
+          timeout 180 bash -c 'until [ "$(kubectl get firebirdcluster arch -o jsonpath={.status.phase})" = Running ]; do sleep 3; done'
+          revision=$(kubectl get statefulset arch -o jsonpath={.status.updateRevision})
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdDatabase
+          metadata:
+            name: ledger
+            namespace: default
+          spec:
+            clusterName: arch
+            reclaimPolicy: delete
+            initSql: "CREATE TABLE l (id INTEGER PRIMARY KEY); COMMIT;"
+          EOF
+          timeout 300 bash -c 'until [ "$(kubectl get firebirddatabase ledger -o jsonpath={.status.phase})" = Ready ]; do sleep 3; done'
+          timeout 120 bash -c 'until [ "$(kubectl get firebirdcluster arch -o jsonpath={.status.replicatedDatabases[*]})" = ledger.fdb ]; do sleep 3; done'
+          timeout 120 bash -c "until [ \"\$(kubectl get statefulset arch -o jsonpath={.status.updateRevision})\" != '$revision' ]; do sleep 3; done"
+          timeout 900 bash -c 'until [ "$(kubectl get statefulset arch -o jsonpath={.status.updatedReplicas}/{.status.readyReplicas})" = 2/2 ]; do sleep 5; done'
+          primary=$(kubectl get firebirdcluster arch -o jsonpath={.status.replicationStatus.primaryPod})
+          L=/var/lib/firebird/data/ledger.fdb
+          sql() { kubectl exec "$1" -c firebird -- bash -c "echo \"$3\" | isql -q localhost:$2" 2>&1; }
+          rows() { sql "$1" "$2" "select 'rows=' || count(*) from l;" | sed -n 's/.*rows=\([0-9]*\).*/\1/p'; }
+
+          # a volume snapshot of it is refused (it would not cover the declarative database's replication)
+          out=$(kubectl apply --dry-run=server -f - 2>&1 <<'EOF' || true
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: arch-snapshot
+            namespace: default
+          spec:
+            clusterName: arch
+            type: volumeSnapshot
+          EOF
+          ); echo "$out"
+          echo "$out" | grep -q 'a volume snapshot is refused'
+
+          # rows, the database's physical base backup in S3, then rows before and after the target
+          for i in $(seq 1 5); do sql "$primary" $L "insert into l values ($i); commit;" >/dev/null; done
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: ledger-base
+            namespace: default
+          spec:
+            clusterName: arch
+            database: ledger
+            type: physical
+            level: 0
+            s3: { bucket: dr, prefix: arch-backups, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }
+          EOF
+          timeout 300 bash -c 'until [ "$(kubectl get firebirdbackup ledger-base -o jsonpath={.status.phase})" = Completed ]; do
+            [ "$(kubectl get firebirdbackup ledger-base -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done' \
+            || { kubectl get firebirdbackup ledger-base -o jsonpath='{.status}'; echo; kubectl logs job/backup-ledger-base --all-containers || true; exit 1; }
+          for i in $(seq 6 10); do sql "$primary" $L "insert into l values ($i); commit;" >/dev/null; done
+          # the archive timeout closes their segment within seconds: the target is after it
+          sleep 10
+          target=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          sleep 5
+          for i in $(seq 11 15); do sql "$primary" $L "insert into l values ($i); commit;" >/dev/null; done
+          sleep 10
+          # every segment of it the primary archived is uploaded under journals/ledger.fdb/
+          last=$(kubectl exec "$primary" -c firebird -- ls /var/lib/firebird/data/replication/databases/ledger.fdb/archive | sed -n 's/.*\.journal-0*\([0-9][0-9]*\)$/\1/p' | sort -n | tail -n 1)
+          echo "the primary archived ledger.fdb up to segment $last"
+          timeout 300 bash -c "until kubectl exec deploy/s3 -- ls /data/dr/arch/journals/ledger.fdb/ 2>/dev/null | grep -Eq '\\.journal-0*$last\$'; do sleep 5; done" \
+            || { kubectl exec deploy/s3 -- ls -R /data/dr/arch | tail -30; kubectl get jobs; kubectl logs -l app.kubernetes.io/component=journal-archive --all-containers --tail=30 || true; exit 1; }
+          kubectl exec deploy/s3 -- ls /data/dr/arch/journals/ledger.fdb/ | head
+          # none of its segments lands beside the cluster database's (nothing writes to the
+          # cluster database here, so its own prefix holds no segment to look for)
+          if kubectl exec deploy/s3 -- ls /data/dr/arch/journals/ | grep -q '^ledger\.fdb.*\.journal-'; then
+            echo "a ledger.fdb segment in the cluster database's prefix"; kubectl exec deploy/s3 -- ls /data/dr/arch/journals/; exit 1
+          fi
+          timeout 180 bash -c 'until [ -z "$(kubectl get pods -l firebird.cloudnative-firebird.io/cluster=arch,app.kubernetes.io/component=journal-archive --field-selector=status.phase!=Succeeded,status.phase!=Failed -o name)" ]; do sleep 3; done'
+
+          # recovered to the target: the rows before it, not the ones after
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: ledger-pitr
+            namespace: default
+          spec:
+            clusterName: arch
+            backupName: ledger-base
+            restoreType: physical
+            targetDatabase: ledger-pitr.fdb
+            pointInTime:
+              targetTime: "$target"
+          EOF
+          timeout 600 bash -c 'until [ "$(kubectl get firebirdrestore ledger-pitr -o jsonpath={.status.phase})" = Completed ]; do
+            [ "$(kubectl get firebirdrestore ledger-pitr -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done' \
+            || { kubectl get firebirdrestore ledger-pitr -o jsonpath='{.status}'; echo; kubectl logs job/restore-ledger-pitr --all-containers --tail=60 || true; exit 1; }
+          got=$(rows "$primary" /var/lib/firebird/data/ledger-pitr.fdb)
+          [ "$got" = 10 ] || { echo "ledger-pitr.fdb has $got rows, expected 10 (the target $target)"; kubectl logs job/restore-ledger-pitr --all-containers --tail=60 || true; exit 1; }
+          echo "ledger.fdb recovered to $target from its own journal archive: 10 rows"
+
+          kubectl delete firebirdrestore ledger-pitr --wait=false
+          kubectl delete firebirdbackup ledger-base --wait=false
+          kubectl delete firebirddatabase ledger --wait=false
+          kubectl delete firebirdcluster arch --wait=false
           kubectl delete deployment s3 --wait=false
 
       - name: Verify volume snapshot backups and a cluster bootstrapped from one
@@ -2868,8 +2996,8 @@ jobs:
           on=$(kubectl get firebirdbackup sales-backup -o jsonpath={.status.instance}); on=${on:-dbs-0}
           kubectl exec "$on" -c firebird -- bash -c "echo \"select 'rows=' || count(*) from orders;\" | isql -q localhost:/var/lib/firebird/data/sales-restored.fdb" | tee /tmp/db-restored.txt
           grep -q 'rows=1' /tmp/db-restored.txt
-          # not a physical backup of it (the plugin; the CRD too), nor of another cluster's database (the operator)
-          if node operator/dist/plugin/kubectl-firebird.js backup dbs --type physical --database sales 2>/dev/null; then echo "a physical backup of a database was accepted"; exit 1; fi
+          # not a volume snapshot of it (the plugin; the CRD too), nor of another cluster's database (the operator)
+          if node operator/dist/plugin/kubectl-firebird.js backup dbs --type volumeSnapshot --database sales 2>/dev/null; then echo "a volume snapshot of a database was accepted"; exit 1; fi
           kubectl apply -f - <<'EOF'
           apiVersion: firebird.cloudnative-firebird.io/v1
           kind: FirebirdBackup

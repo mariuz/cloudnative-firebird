@@ -6,6 +6,7 @@ import { lifecycleErrors } from './lifecycle';
 import { managedServicesErrors } from './managed-services';
 import { imageCatalogRefErrors } from './image-catalog';
 import { replicaClusterErrors } from './replica-cluster';
+import { replicaClusterRefusal } from './replication';
 import { agentErrors } from './agent';
 import { parseCron } from './cron';
 import { volumeSnapshotRecoveryErrors, volumeSnapshotSpecErrors } from './volume-snapshot';
@@ -32,6 +33,10 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
 
   const agentProblems = agentErrors(cluster);
   if (agentProblems.length > 0) throw new ValidationError(agentProblems.join('; '));
+  // a cluster replicating declarative databases does not become a replica cluster (said before
+  // what else a replica cluster would need)
+  const replicaRefusal = replicaClusterRefusal(cluster);
+  if (replicaRefusal) throw new ValidationError(replicaRefusal);
   const replicaErrors = replicaClusterErrors(cluster);
   if (replicaErrors.length > 0) throw new ValidationError(replicaErrors.join('; '));
   const catalogErrors = imageCatalogRefErrors(cluster);

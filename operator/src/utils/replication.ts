@@ -107,6 +107,48 @@ export function replicatedDatabaseFiles(cluster: FirebirdCluster): string[] {
   return replicatedDatabasesEnabled(cluster) ? [...(cluster.status?.replicatedDatabases ?? [])].sort() : [];
 }
 
+/**
+ * Why a volume snapshot of the cluster is refused: it would copy the declarative databases'
+ * files without their replication state, which a cluster bootstrapped from it could not follow
+ */
+export function volumeSnapshotRefusal(cluster: FirebirdCluster): string | undefined {
+  const files = replicatedDatabaseFiles(cluster);
+  return files.length
+    ? `cluster ${cluster.metadata.name} replicates declarative databases (${files.join(', ')}): a volume snapshot is refused ` +
+        '(it would not cover their replication); take logical or physical backups of them (spec.database)'
+    : undefined;
+}
+
+/**
+ * Why the cluster may not become a replica cluster: it replicates declarative databases, which a
+ * replica cluster does not follow (their copies on its replicas would be removed)
+ */
+export function replicaClusterRefusal(cluster: FirebirdCluster): string | undefined {
+  const files = cluster.status?.replicatedDatabases ?? [];
+  return cluster.spec.replica?.enabled && files.length
+    ? `cluster ${cluster.metadata.name} replicates declarative databases (${files.join(', ')}): it cannot become a replica cluster, ` +
+        'which follows the cluster database only (delete their FirebirdDatabases first)'
+    : undefined;
+}
+
+/**
+ * Why a new replica cluster may not follow this archive: a cluster of the namespace replicates
+ * declarative databases into it (journals/<file>/), which a replica cluster does not follow
+ */
+export function replicaSourceRefusal(replica: FirebirdCluster, clusters: FirebirdCluster[]): string | undefined {
+  const follows = replica.spec.replica?.enabled ? replica.spec.replica.journalS3 : undefined;
+  if (!follows) return undefined;
+  const key = (s3: { bucket?: string; prefix?: string }) => `${s3.bucket}/${(s3.prefix ?? '').replace(/^\/+|\/+$/g, '')}`;
+  const source = clusters.find((c) => {
+    const archive = c.spec.replication?.journalArchiveS3;
+    return archive && c.metadata.name !== replica.metadata.name && key(archive) === key(follows) && replicatedDatabaseFiles(c).length > 0;
+  });
+  return source
+    ? `cluster ${source.metadata.name} replicates declarative databases (${replicatedDatabaseFiles(source).join(', ')}) into the journal archive ` +
+        'this replica cluster would follow: a replica cluster follows the cluster database only, refused'
+    : undefined;
+}
+
 /** A declarative database's tree, under the replication directory (the agent's databases.rs) */
 export function replicatedDatabaseDirectories(cluster: FirebirdCluster, dataDir: string, file: string) {
   const base = `${replicationDirectories(cluster, dataDir).base}/databases/${file}`;

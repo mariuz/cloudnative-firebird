@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.183.0):** every item below is done; open work is in [TODO.md](TODO.md).
+> **Status note (v0.184.0):** every item below is done; open work is in [TODO.md](TODO.md).
 > Journal replication (still experimental, see TODO.md) works against the official
 > `firebirdsql/firebird` image (Firebird 4, 5 and the 6 snapshot). It covers replica re-seeding,
 > lag metrics, planned switchover, automatic failover with a primary Lease, and rolling updates with
@@ -190,6 +190,16 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `WAIT <seconds> [<segment>]` answers as soon as a segment after the given one is archived. The Rust puller sends it between two pulls instead of sleeping, so a segment is fetched when it appears. Measured with `hack/bench/puller.sh` (removed in v0.170.0) (three replicas on one archive, a 16 MB segment every 2 s, poll 5 s): 0.08 s from the archive to the replica (median, 0.16 s at most) against 2.4 s (5 s at most) for a polling puller. A Perl segment server answers `ERR bad request`; the puller then polls as before and asks again about once a minute. The archive timeout before it (`archiveTimeoutSeconds`) is unchanged.
   - Ten pullers waiting cost the front 0.07 s of CPU in ten seconds on an archive of 5,000 segments: the archive is looked at once for all of them, and read again only when its directory changed.
   - `tests/segment-server-front.test.ts` gives the same requests to the Perl server alone and to the front: listings, downloads, refusals, forwarded requests with uploads and downloads, the contact time the isolation check reads, stopping. The kind CI runs the replicated cluster behind the front, with segment TLS.
+- [x] **Declarative databases on replicated clusters: snapshots and replica clusters refused, the archive tested end to end (experimental)** *(v0.184.0)*
+  - Refused while a cluster replicates declarative databases (`status.replicatedDatabases`), by the admission webhook and the operator:
+    - a volume snapshot of it, on demand or scheduled, which would copy their files without their replication state (one already taken is left as it is);
+    - turning it into a replica cluster, which would empty the list and have the replicas remove their copies;
+    - a new replica cluster following its journal archive (the same bucket and prefix in the namespace), which would follow the cluster database only.
+  - `kubectl firebird backup --type physical --database` is accepted, as the operator accepts it since v0.182.0. Only a volume snapshot of a `FirebirdDatabase` is refused.
+  - The kind CI (extended tracks, the S3 server of the replica cluster step) runs a replicated cluster with a journal archive and a `FirebirdDatabase`:
+    - the webhook refuses a volume snapshot of the cluster;
+    - the database's segments are uploaded under `journals/ledger.fdb/`, beside the cluster database's;
+    - after a physical base backup in S3, a `FirebirdRestore` with `pointInTime` between two batches of rows recovers exactly the rows before the target, from that archive.
 - [x] **Declarative databases on replicated clusters, phase 4b: their journal archive and point-in-time recovery** *(v0.183.0)*
   - The journal archive Job archives each replicated declarative database beside the cluster database. It lists `journals/<file>/` in the bucket, and the new `fetch-database-segments` container fetches that database's new segments, lineage markers and recovery points from the primary with `SEGMENT_DATABASE=<file>`. `fb-agent fetch-segments` then asks `DB <file> LIST`, `GET` and so on. The upload container syncs them to `journals/<file>/`. Without declarative databases the Job is as before.
   - A `FirebirdRestore` with `pointInTime` from a `FirebirdBackup` of a `FirebirdDatabase` (`spec.database`, a physical backup) replays that database's archive, `journals/<file>/`. A backup taken on a replica brings that database's position.
