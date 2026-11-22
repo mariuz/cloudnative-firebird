@@ -210,6 +210,11 @@ fn typed_row(columns: &[ColumnMeta], values: &[Value], blobs: &HashMap<u64, Stri
 const BLOB_TEXT: i32 = 1;
 const SQL_BLOB: i32 = 520;
 
+/// Whether the column is a text blob; the type as the server describes it keeps the nullable bit (521).
+fn text_blob(column: &ColumnMeta) -> bool {
+    column.sql_type & !1 == SQL_BLOB && column.sub_type == BLOB_TEXT
+}
+
 /// One statement in its own read-only transaction: the rows, text blobs read.
 fn query(connection: &mut Connection, sql: &str) -> Result<Vec<Row>, String> {
     let read_only = TransactionBuilder::new()
@@ -227,7 +232,7 @@ fn query(connection: &mut Connection, sql: &str) -> Result<Vec<Row>, String> {
             let values = row.into_values();
             let mut blobs = HashMap::new();
             for (column, value) in columns.iter().zip(&values) {
-                if let (Value::Blob(id), true) = (value, column.sql_type == SQL_BLOB && column.sub_type == BLOB_TEXT) {
+                if let (Value::Blob(id), true) = (value, text_blob(column)) {
                     let content = connection.read_blob(&transaction, *id)?;
                     blobs.insert(*id, String::from_utf8_lossy(&content).into_owned());
                 }
@@ -720,6 +725,16 @@ mod tests {
         assert_eq!(row["NOTE"], "a text blob");
         assert!(!row.contains_key("GONE"));
         assert_eq!(row.len(), 4);
+        // a text blob, nullable (521, as the server describes it) or not; not a binary blob nor a text column
+        let blob = |sql_type: i32, sub_type: i32| ColumnMeta {
+            sql_type,
+            sub_type,
+            ..column("note", "N", 0)
+        };
+        assert!(text_blob(&blob(521, 1)));
+        assert!(text_blob(&blob(520, 1)));
+        assert!(!text_blob(&blob(521, 0)));
+        assert!(!text_blob(&blob(449, 1)));
     }
 
     #[test]
