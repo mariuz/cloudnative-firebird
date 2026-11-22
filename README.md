@@ -2504,6 +2504,12 @@ The operator uses `~/.kube/config` when `KUBERNETES_SERVICE_HOST` is not set (lo
 
 For planned features inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg)—including automated failover, `nbackup` physical backups, PITR, `gfix` sweeping, and dedicated backup CRDs—see [ROADMAP.md](ROADMAP.md).
 
+## Related Projects
+
+[Kubebird](https://github.com/henryx/kubebird) is another Firebird operator: a single server per
+`Instance`, with backups to a local volume. [docs/kubebird-comparison.md](docs/kubebird-comparison.md)
+compares the two.
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
