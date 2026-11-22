@@ -2768,8 +2768,11 @@ jobs:
           timeout 300 bash -c "until kubectl exec deploy/s3 -- ls /data/dr/arch/journals/ledger.fdb/ 2>/dev/null | grep -Eq '\\.journal-0*$last\$'; do sleep 5; done" \
             || { kubectl exec deploy/s3 -- ls -R /data/dr/arch | tail -30; kubectl get jobs; kubectl logs -l app.kubernetes.io/component=journal-archive --all-containers --tail=30 || true; exit 1; }
           kubectl exec deploy/s3 -- ls /data/dr/arch/journals/ledger.fdb/ | head
-          # the cluster database's archive stays where it was
-          kubectl exec deploy/s3 -- ls /data/dr/arch/journals/ | grep -q '\.journal-'
+          # none of its segments lands beside the cluster database's (nothing writes to the
+          # cluster database here, so its own prefix holds no segment to look for)
+          if kubectl exec deploy/s3 -- ls /data/dr/arch/journals/ | grep -q '^ledger\.fdb.*\.journal-'; then
+            echo "a ledger.fdb segment in the cluster database's prefix"; kubectl exec deploy/s3 -- ls /data/dr/arch/journals/; exit 1
+          fi
           timeout 180 bash -c 'until [ -z "$(kubectl get pods -l firebird.cloudnative-firebird.io/cluster=arch,app.kubernetes.io/component=journal-archive --field-selector=status.phase!=Succeeded,status.phase!=Failed -o name)" ]; do sleep 3; done'
 
           # recovered to the target: the rows before it, not the ones after
