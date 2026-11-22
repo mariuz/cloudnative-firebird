@@ -421,4 +421,21 @@ esac
     expect(done.status).not.toBe(0);
     expect(done.stderr.toString()).toContain('DATABASE_PATH is required');
   });
+
+  it('query over the agent\'s own attachment with QUERY_CLIENT=agent, and refuse another client', async () => {
+    // no server on FIREBIRD_PORT 1: the database does not answer, every query fails, isql is never run
+    rmSync(join(dir, 'asked'), { force: true });
+    const { agent } = await start({ QUERY_CLIENT: 'agent' });
+    const lines = (await get(agent.port, '/metrics')).body.split('\n');
+    expect(lines).toContain('firebird_up 0');
+    expect(lines).toContain('firebird_exporter_query_error{query="attachments"} 1');
+    expect(readdirSync(dir)).not.toContain('asked');
+    expect(agent.log()).toContain("queries over the agent's own attachment (QUERY_CLIENT=agent)");
+    expect(agent.log()).toMatch(/the database does not answer: /);
+    const refused = spawnSync(agentBin!, ['metrics-exporter'], {
+      env: { PATH: process.env.PATH ?? '', DATABASE_PATH: '/db/test.fdb', QUERY_CLIENT: 'odbc' },
+    });
+    expect(refused.status).not.toBe(0);
+    expect(refused.stderr.toString()).toContain('QUERY_CLIENT: isql or agent, not odbc');
+  });
 });

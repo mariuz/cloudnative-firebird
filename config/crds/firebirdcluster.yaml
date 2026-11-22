@@ -379,6 +379,14 @@ spec:
                             minLength: 1
                             maxLength: 253
                             pattern: '^[-._a-zA-Z0-9]+$'
+                    customQueriesClient:
+                      description: >-
+                        How the metrics exporter runs the custom queries: isql (the default), one
+                        process per query and the values as isql prints them; or agent, the agent's
+                        own Firebird attachment, one per scrape, with typed values (a boolean 1 or
+                        0, dates and timestamps in seconds since the Unix epoch, text blobs as text).
+                      type: string
+                      enum: [isql, agent]
                     customQueriesSecret:
                       description: >-
                         The same in Secret keys. A query of the same name in a later source replaces an

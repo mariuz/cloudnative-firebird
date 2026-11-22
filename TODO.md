@@ -31,9 +31,11 @@ Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, 
   v0.169.0, with and without the agent opt-in, and checks the agent, no Perl, no proxy and a clean
   cluster ConfigMap after the upgrade. Its first run found that a merge patch never removed keys
   from the ConfigMap, and that the ConfigMap was written on every reconcile: both fixed.
-- [ ] **The metrics exporter over the agent's own connection**: it starts an `isql` per query on
-  every scrape; the agent already keeps a Firebird connection (STATE, seeds). Typed values at a
-  fraction of the cost; the values' formatting changes, so opt-in at first.
+- [x] **The metrics exporter over the agent's own connection** (v0.186.0): it started an `isql` per
+  query on every scrape. `monitoring.customQueriesClient: agent` runs the queries over the agent's
+  own Firebird client, one attachment per scrape, with typed values; opt-in, `isql` stays the
+  default. Next: make it the default once it has run for a while (compare `hack/agent/metrics.sh`'s
+  times per scrape).
 - [ ] **Object stores other than S3**: backups, the journal archive and replica clusters speak
   S3 (and S3-compatible endpoints: MinIO, GCS interoperability). Native Azure Blob and GCS, as
   CloudNativePG's Barman Cloud has.

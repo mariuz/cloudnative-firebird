@@ -6,7 +6,13 @@
 //! metrics: firebird_<query>_<column>, with the LABEL columns as labels. Queries marked primary
 //! run only where the database is not a replica.
 //!
-//! isql stays: the values are what it prints, as the Perl exporter served them.
+//! The queries run through isql by default: the values are what it prints, as the Perl exporter
+//! served them. With QUERY_CLIENT=agent (monitoring.customQueriesClient: agent, since v0.186.0)
+//! they run over the agent's own Firebird client instead: one attachment for the whole scrape,
+//! each statement in its own read-only read-committed transaction, no process started. The values
+//! are typed, which changes their text where isql printed something else (`cell`): a boolean is 1
+//! or 0, a date or timestamp the seconds since the Unix epoch (UTC), a time the seconds since
+//! midnight, a float its shortest exact form, a text blob its text; a NULL is no value.
 //!
 //! QUERIES_FILE, one block per query:
 //!   query <name>
@@ -19,15 +25,18 @@
 //! firebird_exporter_query_duration_seconds per query.
 //!
 //! Environment: DATABASE_PATH, QUERIES_FILE (/custom-queries/queries), METRICS_PORT (9187),
-//! QUERY_TIMEOUT_SECONDS (10), ISQL (isql), TMPDIR (/tmp), FIREBIRD_PORT.
+//! QUERY_TIMEOUT_SECONDS (10), QUERY_CLIENT (isql, or agent), ISQL (isql), TMPDIR (/tmp),
+//! FIREBIRD_PORT (3050), ISC_USER (SYSDBA), ISC_PASSWORD.
 
 use crate::client::var;
+use firebird_wire::{ColumnMeta, ConnectConfig, Connection, IsolationLevel, TransactionBuilder, Value, WireCrypt};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::process::{self, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -135,18 +144,185 @@ fn rows(output: &str) -> Vec<Row> {
     rows
 }
 
+/// Days from the Firebird epoch (1858-11-17) to the Unix epoch (1970-01-01)
+const UNIX_EPOCH_DAY: i64 = 40_587;
+
+/// A number with a decimal scale (NUMERIC, DECIMAL: the mantissa and a negative scale), as isql prints it.
+fn scaled(mantissa: i128, scale: i32) -> String {
+    if scale >= 0 {
+        return (mantissa * 10i128.pow(scale as u32)).to_string();
+    }
+    let digits = (-scale) as usize;
+    let text = mantissa.unsigned_abs().to_string();
+    let text = format!("{text:0>width$}", width = digits + 1);
+    let (whole, fraction) = text.split_at(text.len() - digits);
+    format!("{}{whole}.{fraction}", if mantissa < 0 { "-" } else { "" })
+}
+
+/// Seconds, with the fraction only when there is one (the server's unit is 1/10000 s).
+fn seconds(ten_thousandths: i64) -> String {
+    if ten_thousandths % 10_000 == 0 {
+        (ten_thousandths / 10_000).to_string()
+    } else {
+        format!("{}", ten_thousandths as f64 / 10_000.0)
+    }
+}
+
+/// The text of a typed value (QUERY_CLIENT=agent); None for a NULL and what has no text (a binary blob, an array).
+fn cell(value: &Value, scale: i32) -> Option<String> {
+    let day = |days: i32| (i64::from(days) - UNIX_EPOCH_DAY) * 86_400 * 10_000;
+    Some(match value {
+        Value::Null | Value::Blob(_) | Value::Array(_) => return None,
+        Value::Bool(b) => u8::from(*b).to_string(),
+        Value::Short(n) => scaled(i128::from(*n), scale),
+        Value::Int(n) => scaled(i128::from(*n), scale),
+        Value::BigInt(n) => scaled(i128::from(*n), scale),
+        Value::Int128(n) => scaled(*n, scale),
+        Value::Float(f) => f.to_string(),
+        Value::Double(f) => f.to_string(),
+        Value::DecFloat(d) => d.to_string(),
+        Value::Text(text) => text.clone(),
+        Value::Bytes(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        Value::Date(days) => seconds(day(*days)),
+        Value::Time(time) => seconds(i64::from(*time)),
+        Value::Timestamp(days, time) => seconds(day(*days) + i64::from(*time)),
+        Value::TimeTz(t) => seconds(i64::from(t.utc_time)),
+        Value::TimestampTz(t) => seconds(day(t.utc_date) + i64::from(t.utc_time)),
+    })
+}
+
+/// A fetched row: upper-case column names (the alias, else the field) and their text.
+fn typed_row(columns: &[ColumnMeta], values: &[Value], blobs: &HashMap<u64, String>) -> Row {
+    columns
+        .iter()
+        .zip(values)
+        .filter_map(|(column, value)| {
+            let text = match value {
+                Value::Blob(id) => blobs.get(id).cloned(),
+                value => cell(value, column.scale),
+            }?;
+            Some((column.name().to_uppercase(), text))
+        })
+        .collect()
+}
+
+/// BLOB SUB_TYPE TEXT, whose content is read for its text
+const BLOB_TEXT: i32 = 1;
+const SQL_BLOB: i32 = 520;
+
+/// One statement in its own read-only transaction: the rows, text blobs read.
+fn query(connection: &mut Connection, sql: &str) -> Result<Vec<Row>, String> {
+    let read_only = TransactionBuilder::new()
+        .isolation(IsolationLevel::ReadCommittedRecordVersion)
+        .read_only();
+    let transaction = connection.begin_with(&read_only).map_err(|e| e.to_string())?;
+    let ran = (|| {
+        let mut statement = connection.prepare(&transaction, sql)?;
+        statement.execute(connection, &transaction, &[])?;
+        let columns = statement.columns().to_vec();
+        let fetched = statement.fetch_all(connection)?;
+        statement.drop_statement(connection)?;
+        let mut rows = Vec::with_capacity(fetched.len());
+        for row in fetched {
+            let values = row.into_values();
+            let mut blobs = HashMap::new();
+            for (column, value) in columns.iter().zip(&values) {
+                if let (Value::Blob(id), true) = (value, column.sql_type == SQL_BLOB && column.sub_type == BLOB_TEXT) {
+                    let content = connection.read_blob(&transaction, *id)?;
+                    blobs.insert(*id, String::from_utf8_lossy(&content).into_owned());
+                }
+            }
+            rows.push(typed_row(&columns, &values, &blobs));
+        }
+        Ok::<_, firebird_wire::Error>(rows)
+    })();
+    match ran {
+        Ok(rows) => {
+            transaction.commit(connection).map_err(|e| e.to_string())?;
+            Ok(rows)
+        }
+        Err(error) => {
+            let _ = transaction.rollback(connection);
+            Err(error.to_string())
+        }
+    }
+}
+
+type Answer = Result<Vec<Row>, String>;
+
+/// The scrape's attachment (QUERY_CLIENT=agent): a thread that holds it and runs the statements it
+/// is sent. The client has no read timeout, so a statement that takes longer than the limit is left
+/// to that thread, which ends with its answer, and the next statement gets a new attachment.
+struct Session {
+    config: ConnectConfig,
+    limit: Duration,
+    worker: Option<(Sender<String>, Receiver<Answer>)>,
+}
+
+impl Session {
+    fn new(config: ConnectConfig, limit: Duration) -> Session {
+        Session {
+            config,
+            limit,
+            worker: None,
+        }
+    }
+
+    fn start(config: ConnectConfig) -> (Sender<String>, Receiver<Answer>) {
+        let (statements, inbox) = mpsc::channel::<String>();
+        let (outbox, answers) = mpsc::channel::<Answer>();
+        thread::spawn(move || {
+            let mut connection = match Connection::connect(&config) {
+                Ok(connection) => connection,
+                Err(error) => {
+                    for _ in inbox {
+                        if outbox.send(Err(error.to_string())).is_err() {
+                            break;
+                        }
+                    }
+                    return;
+                }
+            };
+            for sql in inbox {
+                if outbox.send(query(&mut connection, &sql)).is_err() {
+                    break;
+                }
+            }
+            let _ = connection.close();
+        });
+        (statements, answers)
+    }
+
+    fn run(&mut self, sql: &str) -> Answer {
+        let config = &self.config;
+        let (statements, answers) = self.worker.get_or_insert_with(|| Session::start(config.clone()));
+        let sent = statements.send(sql.to_string());
+        let answer = match sent.map(|_| answers.recv_timeout(self.limit)) {
+            Ok(Ok(answer)) => return answer,
+            Ok(Err(RecvTimeoutError::Timeout)) => Err(format!("timed out after {}s", self.limit.as_secs())),
+            _ => Err("the attachment was lost".to_string()),
+        };
+        self.worker = None;
+        answer
+    }
+}
+
+enum Client {
+    Isql { isql: String, temporary: String },
+    Agent { config: ConnectConfig },
+}
+
 struct Exporter {
     database: String,
     queries_file: String,
     timeout: String,
-    isql: String,
-    temporary: String,
+    client: Client,
 }
 
 impl Exporter {
     /// Runs one statement (isql -b, LIST mode): the rows, or the error.
-    fn run_sql(&self, sql: &str) -> Result<Vec<Row>, String> {
-        let file = format!("{}/metrics-query-{}.sql", self.temporary, process::id());
+    fn run_isql(&self, isql: &str, temporary: &str, sql: &str) -> Result<Vec<Row>, String> {
+        let file = format!("{temporary}/metrics-query-{}.sql", process::id());
         let statement = sql.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
         fs::write(&file, format!("SET LIST ON;\n{statement};\n")).map_err(|e| format!("cannot write {file}: {e}"))?;
         // what isql says on either stream, in the order it says it
@@ -157,7 +333,7 @@ impl Exporter {
                 "sh",
                 "timeout",
                 &self.timeout,
-                &self.isql,
+                isql,
                 "-q",
                 "-b",
                 "-i",
@@ -192,8 +368,18 @@ impl Exporter {
 
     /// One scrape: the text of /metrics.
     fn scrape(&self) -> String {
+        let limit = Duration::from_secs(self.timeout.parse().unwrap_or(10));
+        let mut session = match &self.client {
+            Client::Agent { config } => Some(Session::new(config.clone(), limit)),
+            Client::Isql { .. } => None,
+        };
+        let mut run_sql = |sql: &str| match (&self.client, session.as_mut()) {
+            (_, Some(session)) => session.run(sql),
+            (Client::Isql { isql, temporary }, None) => self.run_isql(isql, temporary, sql),
+            (Client::Agent { .. }, None) => Err("no attachment".into()),
+        };
         let mut lines: Vec<String> = Vec::new();
-        let state = self.run_sql("SELECT MON$REPLICA_MODE AS REPLICA_MODE FROM MON$DATABASE");
+        let state = run_sql("SELECT MON$REPLICA_MODE AS REPLICA_MODE FROM MON$DATABASE");
         let up = state.as_ref().is_ok_and(|rows| !rows.is_empty());
         let replica = up
             && state
@@ -219,7 +405,7 @@ impl Exporter {
             }
             let start = Instant::now();
             let answer = if up {
-                self.run_sql(&query.sql)
+                run_sql(&query.sql)
             } else {
                 Err("the database does not answer".into())
             };
@@ -333,18 +519,38 @@ pub fn run() -> io::Result<()> {
         return Err(io::Error::other("DATABASE_PATH is required"));
     }
     let or = |name: &str, default: &str| Some(var(name)).filter(|v| !v.is_empty()).unwrap_or_else(|| default.into());
+    let client = match or("QUERY_CLIENT", "isql").as_str() {
+        "agent" => Client::Agent {
+            config: ConnectConfig::new()
+                .host("127.0.0.1")
+                .port(var("FIREBIRD_PORT").parse().unwrap_or(3050))
+                .database(database.clone())
+                .user(or("ISC_USER", "SYSDBA"))
+                .password(var("ISC_PASSWORD"))
+                .wire_crypt(WireCrypt::Enabled)
+                .connect_timeout(Duration::from_secs(5)),
+        },
+        "isql" => Client::Isql {
+            isql: or("ISQL", "isql"),
+            temporary: or("TMPDIR", "/tmp"),
+        },
+        other => return Err(io::Error::other(format!("QUERY_CLIENT: isql or agent, not {other}"))),
+    };
+    let client_name = if matches!(client, Client::Agent { .. }) { "agent" } else { "isql" };
     let exporter = Exporter {
         database,
         queries_file: or("QUERIES_FILE", "/custom-queries/queries"),
         timeout: or("QUERY_TIMEOUT_SECONDS", "10"),
-        isql: or("ISQL", "isql"),
-        temporary: or("TMPDIR", "/tmp"),
+        client,
     };
     let port: u16 = or("METRICS_PORT", "9187")
         .parse()
         .map_err(|_| io::Error::other("METRICS_PORT: not a port"))?;
     let listener = TcpListener::bind(("0.0.0.0", port)).map_err(|e| io::Error::other(format!("cannot listen on {port}: {e}")))?;
     println!("metrics on :{port}/metrics");
+    if client_name == "agent" {
+        println!("queries over the agent's own attachment (QUERY_CLIENT=agent)");
+    }
 
     thread::spawn(move || loop {
         thread::sleep(Duration::from_secs(1));
@@ -439,6 +645,95 @@ mod tests {
         assert_eq!(read[1].len(), 3);
         assert!(rows("\n\n").is_empty());
         assert_eq!(rows("lower 1")[0]["LOWER"], "1");
+    }
+
+    #[test]
+    fn formats_typed_values_as_metrics_and_labels() {
+        use firebird_wire::{TimeTz, TimestampTz};
+        // NUMERIC and DECIMAL: the mantissa at its scale, as isql prints them
+        assert_eq!(cell(&Value::Int(1250), -2), Some("12.50".into()));
+        assert_eq!(cell(&Value::BigInt(-5), -3), Some("-0.005".into()));
+        assert_eq!(cell(&Value::Short(7), 0), Some("7".into()));
+        assert_eq!(
+            cell(&Value::Int128(-123456789012345678901234567), -4),
+            Some("-12345678901234567890123.4567".into())
+        );
+        assert_eq!(cell(&Value::Int(12), 2), Some("1200".into()));
+        assert_eq!(cell(&Value::Bool(true), 0), Some("1".into()));
+        assert_eq!(cell(&Value::Bool(false), 0), Some("0".into()));
+        assert_eq!(cell(&Value::Double(0.25), 0), Some("0.25".into()));
+        assert_eq!(cell(&Value::Double(3.0), 0), Some("3".into()));
+        assert_eq!(cell(&Value::Text("SYSDBA".into()), 0), Some("SYSDBA".into()));
+        assert_eq!(cell(&Value::Null, 0), None);
+        assert_eq!(cell(&Value::Array(1), 0), None);
+        // dates and times: seconds since the Unix epoch (UTC), a time since midnight
+        assert_eq!(cell(&Value::Date(40_587), 0), Some("0".into()));
+        assert_eq!(cell(&Value::Date(40_588), 0), Some("86400".into()));
+        assert_eq!(cell(&Value::Timestamp(40_587, 15_000), 0), Some("1.5".into()));
+        assert_eq!(cell(&Value::Time(36_000_000), 0), Some("3600".into()));
+        let tz = TimestampTz {
+            utc_date: 40_588,
+            utc_time: 10_000,
+            zone: 0,
+            offset: 120,
+        };
+        assert_eq!(cell(&Value::TimestampTz(tz), 0), Some("86401".into()));
+        let time = TimeTz {
+            utc_time: 20_000,
+            zone: 0,
+            offset: 0,
+        };
+        assert_eq!(cell(&Value::TimeTz(time), 0), Some("2".into()));
+        // every number the typed client gives is one the exporter serves
+        for value in ["12.50", "-0.005", "1", "0", "0.25", "86400", "1.5"] {
+            assert!(numeric(value), "{value}");
+        }
+    }
+
+    #[test]
+    fn names_typed_rows_by_alias() {
+        let column = |alias: &str, field: &str, scale: i32| ColumnMeta {
+            index: 0,
+            sql_type: 496,
+            sub_type: 0,
+            scale,
+            length: 4,
+            nullable: true,
+            field: field.into(),
+            relation: String::new(),
+            alias: alias.into(),
+            owner: String::new(),
+        };
+        let columns = [
+            column("total", "COUNT", 0),
+            column("", "MON$PAGE_SIZE", 0),
+            column("ratio", "R", -1),
+            column("gone", "G", 0),
+            column("note", "N", 0),
+        ];
+        let values = [Value::BigInt(3), Value::Int(8192), Value::Int(5), Value::Null, Value::Blob(9)];
+        let blobs = HashMap::from([(9u64, "a text blob".to_string())]);
+        let row = typed_row(&columns, &values, &blobs);
+        assert_eq!(row["TOTAL"], "3");
+        assert_eq!(row["MON$PAGE_SIZE"], "8192");
+        assert_eq!(row["RATIO"], "0.5");
+        assert_eq!(row["NOTE"], "a text blob");
+        assert!(!row.contains_key("GONE"));
+        assert_eq!(row.len(), 4);
+    }
+
+    #[test]
+    fn a_session_without_a_server_answers_each_statement() {
+        let config = ConnectConfig::new()
+            .host("127.0.0.1")
+            .port(1)
+            .database("/nowhere.fdb".to_string())
+            .user("SYSDBA".to_string())
+            .password("x".to_string())
+            .connect_timeout(Duration::from_secs(1));
+        let mut session = Session::new(config, Duration::from_secs(5));
+        assert!(session.run("SELECT 1 FROM RDB$DATABASE").is_err());
+        assert!(session.run("SELECT 2 FROM RDB$DATABASE").is_err());
     }
 
     #[test]

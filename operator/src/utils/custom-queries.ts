@@ -17,6 +17,10 @@ import { AGENT_PATH } from './agent';
  *       - total: { usage: GAUGE, description: "Attachments per user" }
  *
  * gives firebird_attachments_total{username="SYSDBA"} 2. Usages: GAUGE, COUNTER, LABEL, DISCARD.
+ *
+ * monitoring.customQueriesClient: agent (since v0.186.0) has the sidecar run them over the agent's
+ * own Firebird attachment, one per scrape, instead of an isql process per query: typed values
+ * (QUERY_CLIENT=agent, agent/fb-agent/src/metrics.rs).
  */
 
 export const METRICS_EXPORTER_CONTAINER = 'metrics-exporter';
@@ -213,6 +217,8 @@ export function buildMetricsExporterContainer(
       { name: 'DATABASE_PATH', value: options.databasePath },
       { name: 'QUERIES_FILE', value: `${CUSTOM_QUERIES_DIR}/${CUSTOM_QUERIES_KEY}` },
       { name: 'METRICS_PORT', value: String(METRICS_EXPORTER_PORT) },
+      // only when chosen, so the instance pods of other clusters do not change
+      ...(cluster.spec.monitoring?.customQueriesClient === 'agent' ? [{ name: 'QUERY_CLIENT', value: 'agent' }] : []),
     ],
     volumeMounts: [{ name: CUSTOM_QUERIES_VOLUME, mountPath: CUSTOM_QUERIES_DIR, readOnly: true }],
   };
@@ -239,6 +245,10 @@ export function customQueriesErrors(spec: FirebirdCluster['spec']): string[] {
         errors.push(`monitoring.${field}[${i}].key must be a ConfigMap or Secret key`);
       }
     });
+  }
+  const client = spec.monitoring?.customQueriesClient;
+  if (client !== undefined && client !== 'isql' && client !== 'agent') {
+    errors.push(`monitoring.customQueriesClient must be "isql" or "agent", not ${JSON.stringify(client)}`);
   }
   const refs = (spec.monitoring?.customQueriesConfigMap?.length ?? 0) + (spec.monitoring?.customQueriesSecret?.length ?? 0);
   if (refs > 0 && spec.monitoring?.exporter?.enabled && (spec.monitoring.exporter.port ?? 9108) === METRICS_EXPORTER_PORT) {

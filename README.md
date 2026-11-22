@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.185.0/cloudnative-firebird-0.185.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.186.0/cloudnative-firebird-0.186.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.185.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.186.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -240,7 +240,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.185.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.186.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -913,7 +913,7 @@ cluster that was never backed up has neither. `promtool test rules` checks the r
 `monitoring.customQueriesConfigMap` and `monitoring.customQueriesSecret` (CloudNativePG's fields
 and query format, since v0.112.0) list ConfigMap and Secret keys holding SQL queries as YAML. Every
 instance then runs a `metrics-exporter` sidecar (the Firebird image, `isql` against the local
-server) serving them on port 9187 (`custom-metrics`, `/metrics`):
+server, or the agent's own attachment, see below) serving them on port 9187 (`custom-metrics`, `/metrics`):
 
 ```yaml
 apiVersion: v1
@@ -952,6 +952,27 @@ event. Besides the queries' metrics, the sidecar serves `firebird_up` and, per q
 `firebird_exporter_query_error` and `firebird_exporter_query_duration_seconds`; a failing query's
 error is in the sidecar's log. With `enablePodMonitor`, the PodMonitor scrapes the `custom-metrics`
 port.
+
+**Over the agent's own attachment (since v0.186.0).** By default the sidecar starts one `isql`
+per query on every scrape and serves the values as `isql` prints them. With
+`monitoring.customQueriesClient: agent` it runs them over the agent's own Firebird client
+instead: one attachment for the whole scrape, each statement in its own read-only read-committed
+transaction, and no process started. The values are typed, so some of them change form:
+
+| Value | `isql` (default) | `agent` |
+|---|---|---|
+| `INTEGER`, `BIGINT`, `NUMERIC(9,2)` | `3`, `12.50` | the same |
+| `DOUBLE PRECISION` | `0.2500000000000000` | `0.25` |
+| `BOOLEAN` | `<true>`: no sample | `1` or `0` |
+| `DATE`, `TIMESTAMP` (with or without time zone) | `1970-01-02 00:00:00.0000`: no sample | seconds since the Unix epoch, UTC (`86400`) |
+| `TIME` | `10:00:00.0000`: no sample | seconds since midnight |
+| text `BLOB` as a label | the blob id | its text |
+| `NULL` | `<null>`: no label, no sample | the same |
+
+A query still has `QUERY_TIMEOUT_SECONDS` (10 s); one that takes longer is reported as failed and
+the next query gets a new attachment. Changing the option rolls the instances (the sidecar's
+environment); `isql` stays the default. The CI compares both clients against Firebird 4, 5 and the
+6 snapshot (`hack/agent/metrics.sh`, which also prints the time per scrape of each).
 
 ### Planned Switchover
 
