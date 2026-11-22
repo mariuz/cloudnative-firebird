@@ -67,7 +67,8 @@ for image in "${images[@]}"; do
   echo "### $image"
   docker rm -f "$NAME" >/dev/null 2>&1
   docker run -d --name "$NAME" -v "$work:/w" --entrypoint bash "$image" -c '. /w/env.sh
-    grep -q "^WireCrypt = Enabled" /opt/firebird/firebird.conf || printf "WireCrypt = Enabled\n" >> /opt/firebird/firebird.conf
+    grep -q "^AuthServer = Srp, Legacy_Auth" /opt/firebird/firebird.conf ||
+      printf "AuthServer = Srp, Legacy_Auth\nUserManager = Srp, Legacy_UserManager\nWireCrypt = Enabled\n" >> /opt/firebird/firebird.conf
     mkdir -p /data && chown firebird:firebird /data
     start_firebird; sleep 3
     isql -q <<SQL
@@ -116,7 +117,7 @@ SQL
     echo "$([ $port = 9187 ] && echo isql || echo agent): $ms ms per scrape"
   done
   if [ "$failed" = 1 ]; then
-    echo "--- isql"; cat "$work/m9187"; echo "--- agent"; cat "$work/m9188"; x 'tail -5 /data/isql.log /data/agent.log'
+    echo "--- isql"; cat "$work/m9187"; echo "--- agent"; cat "$work/m9188"; x 'tail -n 5 /data/isql.log /data/agent.log; ls -l /data'
     echo "### $image: FAILED"; status=1
   else
     echo "### $image: passed"
