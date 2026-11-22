@@ -799,8 +799,8 @@ export interface FirebirdClusterStatus {
   managedServices?: string[];
   /**
    * The declarative databases (FirebirdDatabase) replicated beside the cluster database, by file
-   * name: with the replicated-databases annotation, those created on the primary
-   * (docs/multi-database-replication.md)
+   * name: those created on the primary (docs/multi-database-replication.md). Absent until the
+   * first, empty after the last is removed
    */
   replicatedDatabases?: string[];
   /** A node maintenance window is in progress: the PodDisruptionBudget is removed */

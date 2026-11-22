@@ -2,7 +2,7 @@ import { INIT_SQL_DIR, INIT_SQL_VOLUME, initSqlVolume } from './init-sql';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { V1Container, V1EnvVar, V1VolumeMount } from '@kubernetes/client-node';
-import { API_GROUP, FirebirdCluster } from '../types';
+import { FirebirdCluster } from '../types';
 import { AGENT_PATH } from './agent';
 
 /**
@@ -82,29 +82,33 @@ export function replicationDirectories(cluster: FirebirdCluster, dataDir: string
   };
 }
 
-/**
- * Declarative databases on replicated clusters (docs/multi-database-replication.md, phase 2):
- * experimental, only on clusters annotated `firebird.cloudnative-firebird.io/replicated-databases:
- * experimental` until promotion covers them (phase 3)
- */
-export const REPLICATED_DATABASES_ANNOTATION = `${API_GROUP}/replicated-databases`;
-/** ConfigMap key listing them, one file name per line (the agent's REPLICATED_DATABASES_FILE) */
+/** ConfigMap key listing the declarative databases the instances replicate, one file name per line (the agent's REPLICATED_DATABASES_FILE) */
 export const REPLICATED_DATABASES_KEY = 'replicated-databases';
 /** How many one cluster replicates beside its database (the agent's limit too) */
 export const MAX_REPLICATED_DATABASES = 16;
 
-/** Whether the cluster may replicate declarative databases (replication, the annotation, no replica cluster) */
-export function replicatedDatabasesEnabled(cluster: FirebirdCluster): boolean {
-  return (
-    cluster.spec.replication?.enabled === true &&
-    cluster.metadata.annotations?.[REPLICATED_DATABASES_ANNOTATION] === 'experimental' &&
-    cluster.spec.replica?.enabled !== true
-  );
+/**
+ * Whether the cluster may replicate declarative databases (docs/multi-database-replication.md):
+ * every replicated cluster but a replica cluster, which follows the cluster database only. Until
+ * v0.185.0 this needed the `firebird.cloudnative-firebird.io/replicated-databases: experimental`
+ * annotation, which is no longer read.
+ */
+export function replicatedDatabasesAllowed(cluster: FirebirdCluster): boolean {
+  return cluster.spec.replication?.enabled === true && cluster.spec.replica?.enabled !== true;
+}
+
+/**
+ * Whether the instances are set up for declarative databases (the agent's list, init-databases.sh):
+ * once the cluster has replicated one. status.replicatedDatabases stays (empty) after the last is
+ * removed, so the replicas remove its copies; the instance pods of the other clusters do not change.
+ */
+export function replicatedDatabasesWired(cluster: FirebirdCluster): boolean {
+  return replicatedDatabasesAllowed(cluster) && cluster.status?.replicatedDatabases !== undefined;
 }
 
 /** The declarative databases the instances replicate (status.replicatedDatabases), by file name */
 export function replicatedDatabaseFiles(cluster: FirebirdCluster): string[] {
-  return replicatedDatabasesEnabled(cluster) ? [...(cluster.status?.replicatedDatabases ?? [])].sort() : [];
+  return replicatedDatabasesWired(cluster) ? [...(cluster.status?.replicatedDatabases ?? [])].sort() : [];
 }
 
 /**
@@ -257,8 +261,8 @@ function replicationEnv(
     // recovery points within a segment, for point-in-time recovery from the journal archive
     ...(cluster.spec.replication?.journalArchiveS3 ? [{ name: 'RECOVERY_POINTS', value: 'true' }] : []),
     ...isolationCheckEnv(cluster),
-    // only with the annotation, so the instance pods of other clusters do not change
-    ...(replicatedDatabasesEnabled(cluster)
+    // only once the cluster replicates declarative databases, so the instance pods of other clusters do not change
+    ...(replicatedDatabasesWired(cluster)
       ? [{ name: 'REPLICATED_DATABASES_FILE', value: `${OPERATOR_CONFIG_DIR}/${REPLICATED_DATABASES_KEY}` }]
       : []),
   ];
@@ -325,8 +329,8 @@ export function buildReplicationContainers(
     initContainer: {
       name: 'replication-init',
       image: options.image,
-      // the declarative databases after the cluster database's (init-databases.sh), with the annotation
-      command: replicatedDatabasesEnabled(cluster)
+      // the declarative databases after the cluster database's (init-databases.sh), once there are any
+      command: replicatedDatabasesWired(cluster)
         ? ['sh', '-c', `sh ${OPERATOR_CONFIG_DIR}/init-instance.sh && sh ${OPERATOR_CONFIG_DIR}/init-databases.sh`]
         : ['sh', `${OPERATOR_CONFIG_DIR}/init-instance.sh`],
       // bootstrap.initSql and initSqlRefs, run when it creates the database (utils/init-sql.ts)

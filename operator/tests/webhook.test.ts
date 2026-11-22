@@ -241,7 +241,7 @@ describe('admission checks', () => {
     const archive = { bucket: 'arch', prefix: 'src/', secretRef: { name: 's' } };
     const multi = {
       ...cluster,
-      metadata: { name: 'multi', namespace: 'default', annotations: { 'firebird.cloudnative-firebird.io/replicated-databases': 'experimental' } },
+      metadata: { name: 'multi', namespace: 'default' },
       spec: { ...cluster.spec, replication: { enabled: true, journalArchiveS3: archive } },
       status: { replicatedDatabases: ['sales.fdb'] },
     };
@@ -270,12 +270,18 @@ describe('admission checks', () => {
     expect((await validate(req('FirebirdCluster', follower('elsewhere')))).denied).toBeUndefined();
   });
 
-  it('refuses databases on replicated clusters and invalid database specs', async () => {
+  it('accepts databases on replicated clusters, refuses them on replica clusters, and checks their specs', async () => {
     const replicated = { ...cluster, metadata: { name: 'repl', namespace: 'default' }, spec: { ...cluster.spec, replication: { enabled: true } } };
-    const validate = createAdmissionValidator(lookups({ clusters: [cluster, replicated] }));
+    const replica = {
+      ...cluster,
+      metadata: { name: 'dr', namespace: 'default' },
+      spec: { ...cluster.spec, replication: { enabled: true }, replica: { enabled: true, journalS3: { bucket: 'arch', secretRef: { name: 's' } } } },
+    };
+    const validate = createAdmissionValidator(lookups({ clusters: [cluster, replicated, replica] }));
     const database = (spec: object) => ({ metadata: { name: 'sales' }, spec: { clusterName: 'db', ...spec } });
     expect(await validate(req('FirebirdDatabase', database({})))).toEqual({});
-    expect((await validate(req('FirebirdDatabase', database({ clusterName: 'repl' })))).denied).toMatch(/uses replication/);
+    expect(await validate(req('FirebirdDatabase', database({ clusterName: 'repl' })))).toEqual({});
+    expect((await validate(req('FirebirdDatabase', database({ clusterName: 'dr' })))).denied).toMatch(/is a replica cluster/);
     expect((await validate(req('FirebirdDatabase', database({ databaseName: 'mydb.fdb' })))).denied).toMatch(/is the cluster database/);
     expect((await validate(req('FirebirdDatabase', database({ pageSize: 1000 })))).denied).toMatch(/pageSize/);
     expect((await validate(req('FirebirdDatabase', database({ clusterName: 'later' })))).warnings).toEqual([

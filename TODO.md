@@ -7,7 +7,7 @@ are described, with reproduction steps, in [ISSUES.md](ISSUES.md).
 
 Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, most valuable first:
 
-- [ ] **Declarative databases on replicated clusters**: `FirebirdDatabase` works on clusters
+- [x] **Declarative databases on replicated clusters**: `FirebirdDatabase` works on clusters
   without replication only, so a replicated cluster has its one database. Firebird's
   `replication.conf` takes one section per database; each needs its own journal, archive, seed,
   segment serving and promotion. The largest item, and the main functional gap.
@@ -21,8 +21,8 @@ Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, 
   Phase 4a (physical backups of a FirebirdDatabase, on a replica too): v0.182.0.
   Phase 4b (the journal archive upload and point-in-time recovery per database): v0.183.0.
   Volume snapshots and replica clusters refused while declarative databases are replicated, and
-  the archive and its point-in-time recovery tested end to end: v0.184.0. Next: the annotation
-  goes (FirebirdDatabase accepted on every replicated cluster that is not a replica cluster).
+  the archive and its point-in-time recovery tested end to end: v0.184.0. The annotation is gone
+  (FirebirdDatabase accepted on every replicated cluster that is not a replica cluster): v0.185.0.
 - [x] **Alerting rules** (v0.174.0): `config/monitoring/firebird.rules.yaml` (operator, cluster,
   replication and backup alerts), a `PrometheusRule` in `config/deploy` and the chart
   (`prometheusRule.enabled`), tested with `promtool test rules` in the CI; the operator exports

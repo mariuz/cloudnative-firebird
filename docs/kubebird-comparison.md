@@ -47,7 +47,7 @@ PITR, or the CloudNativePG way of working.
 | Shadow files | Yes, on a separate shadow PVC | No |
 | Owner | `owner`: SYSDBA or a declared user; the database is created and restored as that user | Created by SYSDBA; access through `FirebirdUser` grants and `FirebirdRole` privileges |
 | Removing one | `DROP DATABASE` when it leaves the list | `reclaimPolicy: delete` drops it; `retain` keeps the file |
-| With several instances | — | Created on every instance; on replicated clusters, published on the primary and replicated to every replica (behind an experimental annotation, see [multi-database-replication.md](multi-database-replication.md)) |
+| With several instances | — | Created on every instance; on replicated clusters, published on the primary and replicated to every replica (since v0.185.0 without an annotation, see [multi-database-replication.md](multi-database-replication.md)) |
 
 ## Users and credentials
 

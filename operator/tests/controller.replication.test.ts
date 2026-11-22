@@ -107,6 +107,7 @@ function makeMockKubeConfig({
     createNamespacedCustomObject: createNamespacedCustomObjectImpl,
     deleteNamespacedCustomObject: deleteNamespacedCustomObjectImpl,
     patchNamespacedCustomObjectStatus: patchNamespacedCustomObjectStatusImpl,
+    listNamespacedCustomObject: vi.fn().mockResolvedValue({ items: [] }),
   };
 
   const mockPolicyApi = {
