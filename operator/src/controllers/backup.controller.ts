@@ -51,6 +51,7 @@ import {
 } from '../utils/backup';
 import { existingTargetMessage, restoreTargetExists, superuserPasswordFrom } from '../utils/restore-target';
 import { SegmentClient, segmentRequest } from '../utils/replication-lag';
+import { volumeSnapshotRefusal } from '../utils/replication';
 import { cronJobNeedsUpdate, databaseName, FIREBIRD_DATA_DIR, instancePodSelector, withTemplateHash } from '../utils/resources';
 import { managedDatabaseName } from '../utils/databases';
 
@@ -272,6 +273,13 @@ export class FirebirdBackupController {
     try {
       validateBackupSpec(backup);
       if (backup.spec.type === 'volumeSnapshot') {
+        // not of a cluster replicating declarative databases (one already taken is left as it is)
+        if (!backup.status?.phase || backup.status.phase === 'Pending') {
+          // a missing cluster is the snapshot's own business, as before
+          const target = await this.getCluster(namespace, backup.spec.clusterName).catch(() => undefined);
+          const refusal = target ? volumeSnapshotRefusal(target) : undefined;
+          if (refusal) throw new ValidationError(refusal);
+        }
         await this.reconcileSnapshotBackup(backup, log);
         return;
       }

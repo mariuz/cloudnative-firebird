@@ -237,6 +237,39 @@ describe('admission checks', () => {
     expect((await validate(req('FirebirdUser', { metadata: { name: 'app' }, spec: { clusterName: 'db' } }))).denied).toMatch(/passwordSecret.name or password/);
   });
 
+  it('refuses volume snapshots and replica clusters around replicated declarative databases', async () => {
+    const archive = { bucket: 'arch', prefix: 'src/', secretRef: { name: 's' } };
+    const multi = {
+      ...cluster,
+      metadata: { name: 'multi', namespace: 'default', annotations: { 'firebird.cloudnative-firebird.io/replicated-databases': 'experimental' } },
+      spec: { ...cluster.spec, replication: { enabled: true, journalArchiveS3: archive } },
+      status: { replicatedDatabases: ['sales.fdb'] },
+    };
+    const validate = createAdmissionValidator({ ...lookups({ clusters: [cluster, multi] }), clusters: async () => [cluster, multi] as never });
+    const snapshot = (clusterName: string) => ({ metadata: { name: 'snap' }, spec: { clusterName, type: 'volumeSnapshot' } });
+    expect((await validate(req('FirebirdBackup', snapshot('multi')))).denied).toMatch(/replicates declarative databases \(sales\.fdb\): a volume snapshot is refused/);
+    expect((await validate(req('FirebirdBackup', snapshot('db')))).denied).toBeUndefined();
+    const scheduled = { metadata: { name: 'nightly' }, spec: { clusterName: 'multi', type: 'volumeSnapshot', schedule: '0 2 * * *' } };
+    expect((await validate(req('FirebirdScheduledBackup', scheduled))).denied).toMatch(/a volume snapshot is refused/);
+    // the cluster itself becoming a replica cluster: refused while it replicates them
+    const asReplica = { ...multi, spec: { ...multi.spec, replica: { enabled: true, journalS3: { bucket: 'other' } } }, status: undefined };
+    expect((await validate(req('FirebirdCluster', asReplica, 'UPDATE', multi))).denied).toMatch(/cannot become a replica cluster/);
+    // a new replica cluster following its archive (same bucket and prefix): refused; another archive is not
+    const follower = (prefix: string) => ({
+      ...cluster,
+      metadata: { name: 'dr', namespace: 'default' },
+      spec: {
+        ...cluster.spec,
+        instances: 1,
+        replication: { enabled: true },
+        bootstrap: { recovery: { sourcePath: 'nbackup-l0.nbk', s3: { bucket: 'arch', prefix: 'backups', secretRef: { name: 's' } } } },
+        replica: { enabled: true, journalS3: { bucket: 'arch', prefix, secretRef: { name: 's' } } },
+      },
+    });
+    expect((await validate(req('FirebirdCluster', follower('src')))).denied).toMatch(/replicates declarative databases \(sales\.fdb\) into the journal archive/);
+    expect((await validate(req('FirebirdCluster', follower('elsewhere')))).denied).toBeUndefined();
+  });
+
   it('refuses databases on replicated clusters and invalid database specs', async () => {
     const replicated = { ...cluster, metadata: { name: 'repl', namespace: 'default' }, spec: { ...cluster.spec, replication: { enabled: true } } };
     const validate = createAdmissionValidator(lookups({ clusters: [cluster, replicated] }));

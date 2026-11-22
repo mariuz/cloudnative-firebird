@@ -1,3 +1,4 @@
+import { replicaSourceRefusal, volumeSnapshotRefusal } from './replication';
 import { segmentTlsRequired } from './segment-tls-default';
 import { CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Secret } from '@kubernetes/client-node';
 import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdRole, FirebirdUser, RESOURCE_PLURAL } from '../types';
@@ -36,6 +37,8 @@ export interface AdmissionLookups {
   /** The object, or undefined when it does not exist */
   cluster(namespace: string, name: string): Promise<FirebirdCluster | undefined>;
   backup(namespace: string, name: string): Promise<FirebirdBackup | undefined>;
+  /** The clusters of a namespace (a new replica cluster's source archive) */
+  clusters?(namespace: string): Promise<FirebirdCluster[]>;
   secret(namespace: string, name: string): Promise<V1Secret | undefined>;
   /**
    * The primary (Lease holder) and whether the file `target` exists in its data directory, or
@@ -79,6 +82,8 @@ export function apiLookups(kubeConfig: KubeConfig): AdmissionLookups {
       get(() => custom.getNamespacedCustomObject({ group: API_GROUP, version: API_VERSION, namespace, plural: RESOURCE_PLURAL, name })),
     backup: (namespace, name) =>
       get(() => custom.getNamespacedCustomObject({ group: API_GROUP, version: API_VERSION, namespace, plural: 'firebirdbackups', name })),
+    clusters: async (namespace) =>
+      ((await custom.listNamespacedCustomObject({ group: API_GROUP, version: API_VERSION, namespace, plural: RESOURCE_PLURAL })) as { items?: FirebirdCluster[] }).items ?? [],
     secret: (namespace, name) => get(() => core.readNamespacedSecret({ namespace, name })),
   };
 }
@@ -144,7 +149,13 @@ export function createAdmissionValidator(lookups: AdmissionLookups): AdmissionVa
       switch (kind) {
         case 'FirebirdCluster': {
           const cluster = object as FirebirdCluster;
-          validateClusterSpec(cluster);
+          // the stored status (the declarative databases it replicates), whatever the request carries
+          const stored = (request.oldObject as FirebirdCluster | undefined)?.status;
+          validateClusterSpec(stored ? { ...cluster, status: { ...(cluster.status ?? {}), replicatedDatabases: stored.replicatedDatabases } } : cluster);
+          if (cluster.spec.replica?.enabled && request.operation === 'CREATE' && lookups.clusters) {
+            const refusal = replicaSourceRefusal(cluster, await lookups.clusters(namespace));
+            if (refusal) return { denied: refusal, warnings };
+          }
           desiredFencedInstances(cluster);
           const superuser = cluster.spec.superuserSecret?.name;
           const clone = cluster.spec.bootstrap?.clone;
@@ -173,14 +184,19 @@ export function createAdmissionValidator(lookups: AdmissionLookups): AdmissionVa
         case 'FirebirdBackup': {
           const backup = object as FirebirdBackup;
           validateBackupSpec(backup);
-          await clusterOf(backup.spec.clusterName);
+          const target = await clusterOf(backup.spec.clusterName);
+          const snapshotRefusal = backup.spec.type === 'volumeSnapshot' && target ? volumeSnapshotRefusal(target) : undefined;
+          if (snapshotRefusal) return { denied: snapshotRefusal, warnings };
           await secretWarnings(secretRefNames(backup.spec));
           break;
         }
         case 'FirebirdScheduledBackup': {
           const scheduled = object as { spec: { clusterName: string } } & Parameters<typeof validateScheduledBackupSpec>[0];
           validateScheduledBackupSpec(scheduled);
-          await clusterOf(scheduled.spec.clusterName);
+          const scheduledTarget = await clusterOf(scheduled.spec.clusterName);
+          const scheduledRefusal =
+            (scheduled.spec as { type?: string }).type === 'volumeSnapshot' && scheduledTarget ? volumeSnapshotRefusal(scheduledTarget) : undefined;
+          if (scheduledRefusal) return { denied: scheduledRefusal, warnings };
           await secretWarnings(secretRefNames(scheduled.spec));
           break;
         }

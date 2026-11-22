@@ -20,8 +20,9 @@ Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, 
   Phase 3 (switchover, failover and fencing over every database): v0.181.0.
   Phase 4a (physical backups of a FirebirdDatabase, on a replica too): v0.182.0.
   Phase 4b (the journal archive upload and point-in-time recovery per database): v0.183.0.
-  Left before the annotation goes: an end-to-end kind test of the archive and its point-in-time
-  recovery, and a decision on volume snapshots and replica clusters (refuse, or cover).
+  Volume snapshots and replica clusters refused while declarative databases are replicated, and
+  the archive and its point-in-time recovery tested end to end: v0.184.0. Next: the annotation
+  goes (FirebirdDatabase accepted on every replicated cluster that is not a replica cluster).
 - [x] **Alerting rules** (v0.174.0): `config/monitoring/firebird.rules.yaml` (operator, cluster,
   replication and backup alerts), a `PrometheusRule` in `config/deploy` and the chart
   (`prometheusRule.enabled`), tested with `promtool test rules` in the CI; the operator exports

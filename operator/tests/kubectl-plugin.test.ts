@@ -400,7 +400,10 @@ describe('kubectl firebird', () => {
     expect(await exec('backup', 'db', '--database', 'sales', '--name', 'sales-1')).toBe(0);
     expect(api.createBackup.mock.calls.at(-1)[1].spec).toEqual({ clusterName: 'db', type: 'logical', database: 'sales', s3: { bucket: 'bk', secretRef: { name: 's' } } });
     expect(out.at(-1)).toContain('(logical of FirebirdDatabase sales, to s3://bk)');
-    expect(await exec('backup', 'db', '--type', 'physical', '--database', 'sales')).toBe(2);
+    // a physical backup of it too (since v0.182.0), not a volume snapshot
+    expect(await exec('backup', 'db', '--type', 'physical', '--database', 'sales')).toBe(0);
+    expect(api.createBackup.mock.calls.at(-1)[1].spec).toMatchObject({ clusterName: 'db', type: 'physical', database: 'sales' });
+    expect(await exec('backup', 'db', '--type', 'volumeSnapshot', '--database', 'sales')).toBe(2);
   });
 
   it("takes the cluster's backup target and verify, which the flags override (CloudNativePG #11733)", async () => {
