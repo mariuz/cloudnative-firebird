@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.184.0):** every item below is done; open work is in [TODO.md](TODO.md).
+> **Status note (v0.185.0):** every item below is done; open work is in [TODO.md](TODO.md).
 > Journal replication (still experimental, see TODO.md) works against the official
 > `firebirdsql/firebird` image (Firebird 4, 5 and the 6 snapshot). It covers replica re-seeding,
 > lag metrics, planned switchover, automatic failover with a primary Lease, and rolling updates with
@@ -190,6 +190,11 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `WAIT <seconds> [<segment>]` answers as soon as a segment after the given one is archived. The Rust puller sends it between two pulls instead of sleeping, so a segment is fetched when it appears. Measured with `hack/bench/puller.sh` (removed in v0.170.0) (three replicas on one archive, a 16 MB segment every 2 s, poll 5 s): 0.08 s from the archive to the replica (median, 0.16 s at most) against 2.4 s (5 s at most) for a polling puller. A Perl segment server answers `ERR bad request`; the puller then polls as before and asks again about once a minute. The archive timeout before it (`archiveTimeoutSeconds`) is unchanged.
   - Ten pullers waiting cost the front 0.07 s of CPU in ten seconds on an archive of 5,000 segments: the archive is looked at once for all of them, and read again only when its directory changed.
   - `tests/segment-server-front.test.ts` gives the same requests to the Perl server alone and to the front: listings, downloads, refusals, forwarded requests with uploads and downloads, the contact time the isolation check reads, stopping. The kind CI runs the replicated cluster behind the front, with segment TLS.
+- [x] **Declarative databases on replicated clusters without the annotation** *(v0.185.0)*
+  - The admission webhook and the controller accept a `FirebirdDatabase` on every replicated cluster that is not a replica cluster (up to 16). The cluster annotation `firebird.cloudnative-firebird.io/replicated-databases: experimental`, needed since v0.179.0, is no longer read. A replica cluster refuses them with its own message: it follows its source's cluster database only.
+  - The instances are set up for these databases (the ConfigMap's `replicated-databases` list, the agent's `REPLICATED_DATABASES_FILE`, `init-databases.sh` in the replication init) only once the cluster has replicated one: `status.replicatedDatabases` is absent until the first and stays, empty, after the last, so the replicas still remove the copies. The operator upgrade therefore changes no pod template of a cluster without them; a cluster annotated before with none of them rolls once, out of that setup.
+  - Every replicated cluster now lists the namespace's `FirebirdDatabase`s at each reconcile; a list that fails keeps `status.replicatedDatabases` as it is (warning logged) instead of failing the reconcile.
+  - Unit tests: the status list's lifecycle (absent, listed, empty after the last, kept on a failed list), no change to the ConfigMap, pod template or Jobs before the first database or on a replica cluster (the old annotation included), the webhook accepting a database on a replicated cluster and refusing one on a replica cluster. The kind CI's `multi` and `arch` clusters run without the annotation; `multi` checks that the ConfigMap has no list and the replication init no `init-databases.sh` before its first `FirebirdDatabase`, and an empty list after its last.
 - [x] **Declarative databases on replicated clusters: snapshots and replica clusters refused, the archive tested end to end (experimental)** *(v0.184.0)*
   - Refused while a cluster replicates declarative databases (`status.replicatedDatabases`), by the admission webhook and the operator:
     - a volume snapshot of it, on demand or scheduled, which would copy their files without their replication state (one already taken is left as it is);

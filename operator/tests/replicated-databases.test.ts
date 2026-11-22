@@ -7,14 +7,14 @@ import { V1Job } from '@kubernetes/client-node';
 import { buildFailoverJob, buildPromoteJob, buildSwitchoverJob } from '../src/utils/switchover';
 import { AGENT_PATH } from '../src/utils/agent';
 import { buildConfigMap, buildStatefulSet, replicationConfigHash } from '../src/utils/resources';
-import { buildReplicationConf, REPLICATED_DATABASES_ANNOTATION } from '../src/utils/replication';
+import { buildReplicationConf } from '../src/utils/replication';
 import { FirebirdCluster } from '../src/types';
 import { makeCluster } from './helpers/factories';
+import { FirebirdClusterController } from '../src/controllers/firebirdcluster.controller';
 
-/** docs/multi-database-replication.md, phase 2: what the instances get for the declarative databases */
-function annotated(databases?: string[], annotation = 'experimental'): FirebirdCluster {
+/** docs/multi-database-replication.md: what the instances get for the declarative databases (status.replicatedDatabases) */
+function annotated(databases?: string[]): FirebirdCluster {
   const cluster = makeCluster({ instances: 3, replication: { enabled: true } });
-  cluster.metadata.annotations = { [REPLICATED_DATABASES_ANNOTATION]: annotation };
   if (databases) cluster.status = { ...(cluster.status ?? {}), replicatedDatabases: databases };
   return cluster;
 }
@@ -55,26 +55,37 @@ describe('replicated declarative databases', () => {
       '-c',
       'sh /etc/firebird-operator/init-instance.sh && sh /etc/firebird-operator/init-databases.sh',
     ]);
-    // annotated without databases yet: an empty list, the same pods
-    expect(buildConfigMap(annotated(), { primaryPod: 'test-cluster-0' })?.data?.['replicated-databases']).toBe('');
+    // after the last one is removed: an empty list, the same pods, so the replicas remove its copies
+    expect(buildConfigMap(annotated([]), { primaryPod: 'test-cluster-0' })?.data?.['replicated-databases']).toBe('');
+    expect(env(annotated([]), 'segment-server').REPLICATED_DATABASES_FILE).toBe('/etc/firebird-operator/replicated-databases');
   });
 
   it('rolls the instances when the list changes', () => {
     expect(replicationConfigHash(annotated(['app.fdb']))).not.toBe(replicationConfigHash(annotated()));
+    expect(replicationConfigHash(annotated([]))).not.toBe(replicationConfigHash(annotated(['app.fdb'])));
     expect(replicationConfigHash(annotated(['app.fdb', 'sales.fdb']))).not.toBe(replicationConfigHash(annotated(['app.fdb'])));
   });
 
-  it('changes nothing without the annotation, or with another value', () => {
-    for (const cluster of [makeCluster({ instances: 3, replication: { enabled: true } }), annotated(['app.fdb'], 'yes')]) {
-      cluster.status = { ...(cluster.status ?? {}), replicatedDatabases: ['app.fdb'] };
+  it('changes nothing before the first database, nor on a replica cluster; the old annotation is not read', () => {
+    const before = makeCluster({ instances: 3, replication: { enabled: true } });
+    // the annotation that gated them until v0.185.0 changes nothing either
+    before.metadata.annotations = { 'firebird.cloudnative-firebird.io/replicated-databases': 'experimental' };
+    const s3 = { bucket: 'dr', prefix: 'prod', endpoint: 'http://s3:9000', secretRef: { name: 's3' } };
+    const replica = makeCluster({
+      instances: 1,
+      replication: { enabled: true },
+      replica: { enabled: true, journalS3: s3, pollIntervalSeconds: 10 },
+      bootstrap: { recovery: { sourcePath: 'nbackup-l0.nbk', s3 } },
+    });
+    replica.status = { ...(replica.status ?? {}), replicatedDatabases: ['app.fdb'] };
+    for (const cluster of [before, replica]) {
       expect(buildConfigMap(cluster, { primaryPod: 'test-cluster-0' })?.data?.['replicated-databases']).toBeUndefined();
       expect(env(cluster, 'segment-server').REPLICATED_DATABASES_FILE).toBeUndefined();
       expect(replicationInit(cluster).command).toEqual(['sh', '/etc/firebird-operator/init-instance.sh']);
       expect(buildReplicationConf(cluster, '/d/mydb.fdb', '/d')).not.toContain('app.fdb');
     }
-    expect(replicationConfigHash(makeCluster({ instances: 3, replication: { enabled: true } }))).toBe(
-      replicationConfigHash(annotated(['app.fdb'], 'yes')),
-    );
+    expect(replicationConfigHash(makeCluster({ instances: 3, replication: { enabled: true } }))).toBe(replicationConfigHash(before));
+    expect(buildStatefulSet(makeCluster({ instances: 3, replication: { enabled: true } })).spec!.template).toEqual(buildStatefulSet(before).spec!.template);
   });
 
   it('has the switchover, promotion and failover Jobs cover them (phase 3)', () => {
@@ -86,7 +97,7 @@ describe('replicated declarative databases', () => {
     ];
     for (const job of jobs(annotated(['sales.fdb', 'app.fdb']))) expect(jobEnv(job).DATABASES).toBe('app.fdb sales.fdb');
     for (const job of jobs(annotated())) expect(jobEnv(job).DATABASES).toBeUndefined();
-    for (const job of jobs(annotated(['app.fdb'], 'yes'))) expect(jobEnv(job).DATABASES).toBeUndefined();
+    for (const job of jobs(annotated([]))) expect(jobEnv(job).DATABASES).toBeUndefined();
   });
 
   it('has the promotion Job promote each in place, and report an error for the first that is not', () => {
@@ -110,5 +121,43 @@ describe('replicated declarative databases', () => {
     expect(failed.stdout.trim().split('\n').at(-1)).toBe('ERR sales.fdb: ERR cannot shut down');
     // the operator's reading: in place only for "OK <S>"
     expect(/^OK \d+/.test(failed.stdout.trim().split('\n').at(-1)!)).toBe(false);
+  });
+});
+
+describe('status.replicatedDatabases', () => {
+  const log = { info: () => undefined, warn: () => undefined } as never;
+  const db = (name: string, clusterName = 'test-cluster', created = true) => ({
+    metadata: { name },
+    spec: { clusterName },
+    status: created ? { instances: [{ name: 'test-cluster-0', volume: 'v' }] } : {},
+  });
+  // the private resolver, against a list of FirebirdDatabases (or a failing list)
+  const resolve = async (cluster: FirebirdCluster, items: unknown[] | Error) => {
+    const controller = Object.create(FirebirdClusterController.prototype) as { customApi: unknown };
+    controller.customApi = {
+      listNamespacedCustomObject: async () => {
+        if (items instanceof Error) throw items;
+        return { items };
+      },
+    };
+    await (controller as unknown as { resolveReplicatedDatabases: (c: FirebirdCluster, l: never) => Promise<void> }).resolveReplicatedDatabases(cluster, log);
+    return cluster.status?.replicatedDatabases;
+  };
+
+  it('is absent until the first database, lists those created on the primary, and empty after the last', async () => {
+    expect(await resolve(annotated(), [])).toBeUndefined();
+    expect(await resolve(annotated(), [db('other', 'elsewhere'), db('pending', 'test-cluster', false)])).toBeUndefined();
+    expect(await resolve(annotated(), [db('sales'), db('app')])).toEqual(['app.fdb', 'sales.fdb']);
+    // the last one removed: empty, so the instances stay set up and the replicas remove the copies
+    expect(await resolve(annotated(['app.fdb']), [])).toEqual([]);
+    expect(await resolve(annotated([]), [])).toEqual([]);
+    // a list that fails leaves it as it is
+    expect(await resolve(annotated(['app.fdb']), new Error('forbidden'))).toEqual(['app.fdb']);
+  });
+
+  it('is absent without replication', async () => {
+    const plain = makeCluster({ instances: 1 });
+    plain.status = { replicatedDatabases: [] };
+    expect(await resolve(plain, [db('app')])).toBeUndefined();
   });
 });

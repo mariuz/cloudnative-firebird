@@ -358,7 +358,7 @@ describe('replication lag reconciliation', () => {
   it('measures the replicated declarative databases too, and exports them with a database label', async () => {
     const annotated: FirebirdCluster = {
       ...cluster,
-      metadata: { ...cluster.metadata, annotations: { 'firebird.cloudnative-firebird.io/replicated-databases': 'experimental' } },
+      metadata: { ...cluster.metadata },
     };
     const sales = {
       metadata: { name: 'sales', namespace: 'prod' },

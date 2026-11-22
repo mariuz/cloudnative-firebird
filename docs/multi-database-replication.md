@@ -1,6 +1,6 @@
 # Declarative databases on replicated clusters
 
-Status: design, 2026-11-20. Tracked in [TODO.md](../TODO.md) ("Declarative databases on replicated
+Status: implemented (v0.177.0 – v0.185.0); designed 2026-11-20. Tracked in [TODO.md](../TODO.md) ("Declarative databases on replicated
 clusters").
 
 ## The gap
@@ -127,9 +127,12 @@ alternative, a configuration reload without a restart, would need the Firebird s
 
 ## Phases
 
-The admission webhook keeps refusing a `FirebirdDatabase` on a replicated cluster until phase 3 is
-released. Phase 2 is reachable only through the cluster annotation
-`firebird.cloudnative-firebird.io/replicated-databases: experimental`, used by the CI.
+Until v0.185.0 a `FirebirdDatabase` on a replicated cluster needed the cluster annotation
+`firebird.cloudnative-firebird.io/replicated-databases: experimental`, used by the CI. Since then
+every replicated cluster that is not a replica cluster accepts one, and the annotation is no longer
+read. The instances are set up for these databases (the agent's list, `init-databases.sh`) from
+the first one on (`status.replicatedDatabases` present, empty after the last), so clusters without
+them keep their pods.
 
 1. **Agent: several streams.** *(1a, the segment server and the puller: v0.177.0; 1b, the
    replication init and seeding, `init-databases.sh`: v0.178.0)* `DB <file>` in the segment server and its clients. The per-database

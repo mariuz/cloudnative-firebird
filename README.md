@@ -18,7 +18,7 @@ A cloud-native Kubernetes operator for [Firebird SQL](https://firebirdsql.org/) 
 - **Declarative users** (`FirebirdUser`, after CloudNativePG's `DatabaseRole`) with Secret-backed passwords, role grants and a reclaim policy; users persist across pod restarts
 - **Managed services** (`spec.managed.services`): additional Services (rw / ro / r, LoadBalancer, NodePort) from templates, and turning off the replica Service
 - **Image catalogs** (`FirebirdImageCatalog`, `FirebirdClusterImageCatalog`): clusters reference a Firebird major version; editing the catalog rolls them out (or major-upgrades them)
-- **Declarative databases** (`FirebirdDatabase`, after CloudNativePG's `Database`) on clusters without replication: created on every instance, dropped with `reclaimPolicy: delete`; on replicated clusters behind an experimental annotation (since v0.179.0)
+- **Declarative databases** (`FirebirdDatabase`, after CloudNativePG's `Database`): created on every instance of a cluster without replication; on a replicated cluster created on the primary and replicated to every replica, moved by switchovers and failovers, backed up and recovered to a point in time (since v0.185.0 without an annotation); dropped with `reclaimPolicy: delete`
 - **Declarative roles** (`FirebirdRole`): a database role and exactly the privileges it holds on tables, views, procedures, functions, packages, sequences and exceptions
 - **Automatic failover** (opt-in) to the synchronous standby (no transaction lost) or the most advanced replica; the old primary is re-seeded when it returns
 - **Planned switchover** with the `targetPrimary` annotation: no data loss, the other replicas continue without re-seeding
@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.184.0/cloudnative-firebird-0.184.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.185.0/cloudnative-firebird-0.185.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.184.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.185.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -240,7 +240,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.184.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.185.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -2291,14 +2291,17 @@ before the resource goes. An instance that holds it but stays unready for 15 min
 file, with a warning event. `retain` leaves the files.
 
 **Refused.**
-- Clusters with replication, refused by the admission webhook and the controller.
-  Switchover, failover, backups and point-in-time recovery cover the cluster's one database
-  (`spec.databaseName`), so another database would be lost at the first failover.
+- Replica clusters, by the admission webhook and the controller: a replica cluster follows the
+  cluster database (`spec.databaseName`) of its source only.
 
-**Replicated clusters (experimental, since v0.179.0).** With the cluster annotation
-`firebird.cloudnative-firebird.io/replicated-databases: experimental`, a `FirebirdDatabase` is
-accepted on a replicated cluster (not a replica cluster), up to 16 of them
-([docs/multi-database-replication.md](docs/multi-database-replication.md)):
+**Replicated clusters (since v0.179.0; without an annotation since v0.185.0).** A
+`FirebirdDatabase` is accepted on a replicated cluster that is not a replica cluster, up to 16 of
+them ([docs/multi-database-replication.md](docs/multi-database-replication.md)). Until v0.185.0 it
+needed the cluster annotation `firebird.cloudnative-firebird.io/replicated-databases:
+experimental`, which is no longer read. The instances of a cluster are set up for these databases
+(the agent's list, `init-databases.sh`) when the first one is created, which rolls them anyway, so
+the operator upgrade changes nothing on the others. A cluster annotated before v0.185.0 with none
+of them rolls once, out of that setup:
 
 - the Job creates it once, on the primary;
 - the cluster then lists it in `status.replicatedDatabases`, which gives it its own

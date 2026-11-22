@@ -1154,19 +1154,17 @@ jobs:
           [ "$(kubectl exec repl-0 -c firebird -- bash -c "echo \"select count(*) from rdb\\\$roles where rdb\\\$role_name = 'REPORTING';\" | isql -q localhost:$DB" | awk '$1 ~ /^[0-9]+$/ { print $1 }')" = 0 ]
           echo "role applied, updated and dropped"
 
-      - name: Verify declarative databases on a replicated cluster (experimental)
+      - name: Verify declarative databases on a replicated cluster
         if: matrix.track.id == 'core'
         run: |
-          # docs/multi-database-replication.md, phase 2: a cluster of its own (the switchover and
-          # failover steps cover the cluster database only until phase 3)
+          # docs/multi-database-replication.md: a replicated cluster of its own, with no annotation
+          # (needed until v0.185.0)
           kubectl apply -f - <<'EOF'
           apiVersion: firebird.cloudnative-firebird.io/v1
           kind: FirebirdCluster
           metadata:
             name: multi
             namespace: default
-            annotations:
-              firebird.cloudnative-firebird.io/replicated-databases: experimental
           spec:
             instances: 3
             storage:
@@ -1185,8 +1183,12 @@ jobs:
           primary=$(kubectl get firebirdcluster multi -o jsonpath={.status.replicationStatus.primaryPod})
           replicas=$(for p in multi-0 multi-1 multi-2; do [ "$p" = "$primary" ] || echo "$p"; done)
           echo "primary: $primary"
-          # no declarative database yet: an empty list, read by the agent
-          [ "$(kubectl get configmap multi-config -o jsonpath='{.data.replicated-databases}')" = "" ]
+          # no declarative database yet: no list, the instances as on any replicated cluster
+          if kubectl get configmap multi-config -o jsonpath='{.data}' | grep -q '"replicated-databases"'; then
+            echo "a list of replicated databases before the first FirebirdDatabase"; exit 1
+          fi
+          kubectl get statefulset multi -o jsonpath='{.spec.template.spec.initContainers[?(@.name=="replication-init")].command}' | grep -q init-databases.sh \
+            && { echo "init-databases.sh before the first FirebirdDatabase"; exit 1; }
           revision=$(kubectl get statefulset multi -o jsonpath={.status.updateRevision})
 
           kubectl apply -f - <<'EOF'
@@ -1306,7 +1308,10 @@ jobs:
           # delete returns once the roll and the drop are done
           kubectl delete firebirddatabase sales --wait=true --timeout=900s \
             || { kubectl get firebirddatabase sales -o yaml; kubectl get events --field-selector involvedObject.name=sales; exit 1; }
-          timeout 120 bash -c 'until [ -z "$(kubectl get firebirdcluster multi -o jsonpath={.status.replicatedDatabases})" ]; do sleep 3; done'
+          timeout 120 bash -c 'until [ -z "$(kubectl get firebirdcluster multi -o jsonpath={.status.replicatedDatabases[*]})" ]; do sleep 3; done'
+          # an empty list, not none: the instances stay set up, so the replicas remove their copies
+          kubectl get configmap multi-config -o jsonpath='{.data}' | grep -q '"replicated-databases":""' \
+            || { echo "no empty list after the last FirebirdDatabase"; kubectl get firebirdcluster multi -o jsonpath='{.status.replicatedDatabases}'; exit 1; }
           timeout 120 bash -c "until [ \"\$(kubectl get statefulset multi -o jsonpath={.status.updateRevision})\" != '$revision' ]; do sleep 3; done"
           timeout 900 bash -c 'until [ "$(kubectl get statefulset multi -o jsonpath={.status.updatedReplicas}/{.status.readyReplicas})" = 3/3 ]; do sleep 5; done'
           for pod in multi-0 multi-1 multi-2; do
@@ -2674,7 +2679,7 @@ jobs:
           for reason in ReplicaClusterPromoting ReplicaClusterPromoted; do echo "$reasons" | grep -qx "$reason" || { echo "no $reason event"; exit 1; }; done
           kubectl delete firebirdcluster dr src --wait=false
 
-      - name: Verify the journal archive and point-in-time recovery of a replicated declarative database (experimental)
+      - name: Verify the journal archive and point-in-time recovery of a replicated declarative database
         if: matrix.track.id == 'extended'
         run: |
           # docs/multi-database-replication.md, phase 4b, on the S3 server of the step above: a
@@ -2685,8 +2690,6 @@ jobs:
           metadata:
             name: arch
             namespace: default
-            annotations:
-              firebird.cloudnative-firebird.io/replicated-databases: experimental
           spec:
             instances: 2
             storage:
@@ -3011,8 +3014,9 @@ jobs:
           kubectl get firebirdbackup sales-other -o jsonpath={.status.error} | grep -q 'belongs to cluster dbs'
           kubectl delete firebirdbackup sales-backup sales-other
           kubectl delete firebirdrestore sales-restore
-          # refused on a replicated cluster (the webhook)
-          if kubectl apply -f - <<'EOF' 2>/tmp/db-denied.txt; then echo "a database on a replicated cluster was accepted"; exit 1; fi
+          # accepted on a replicated cluster without any annotation since v0.185.0 (the webhook; a
+          # dry run, so repl does not roll under the next steps: the multi and arch clusters cover the rest)
+          kubectl apply --dry-run=server -f - <<'EOF' || { echo "a database on a replicated cluster was refused"; exit 1; }
           apiVersion: firebird.cloudnative-firebird.io/v1
           kind: FirebirdDatabase
           metadata:
@@ -3020,7 +3024,6 @@ jobs:
           spec:
             clusterName: repl
           EOF
-          grep -q 'uses replication' /tmp/db-denied.txt
           # reclaimPolicy delete drops it from every instance; retain keeps the file
           kubectl delete firebirddatabase sales --timeout=300s
           kubectl delete firebirddatabase archive --timeout=120s

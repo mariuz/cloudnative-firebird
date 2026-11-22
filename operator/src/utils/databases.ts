@@ -2,7 +2,7 @@ import { clusterImage } from './image-catalog';
 import { V1Job } from '@kubernetes/client-node';
 import { API_GROUP, FirebirdCluster, FirebirdDatabase } from '../types';
 import { clusterLabels, databaseName, FIREBIRD_DATA_DIR, jobPodSpec, superuserClientEnv } from './resources';
-import { instanceHost, MAX_REPLICATED_DATABASES, REPLICATED_DATABASES_ANNOTATION, replicatedDatabasesEnabled } from './replication';
+import { instanceHost, MAX_REPLICATED_DATABASES } from './replication';
 import { ValidationError } from './validation';
 import { boundedJobName } from './volume-snapshot';
 
@@ -13,12 +13,11 @@ import { boundedJobName } from './volume-snapshot';
  * status records the instances and volumes it is on, so a replaced volume gets it again. With
  * reclaimPolicy "delete" a finalizer drops it from every instance when the resource is deleted.
  *
- * Replicated clusters are refused: switchover, failover, backups and point-in-time recovery cover
- * the one cluster database only, so another database would be lost at a failover. With the
- * cluster's `replicated-databases: experimental` annotation (docs/multi-database-replication.md,
- * phase 2) it is created once, on the primary, and the instances replicate it: the cluster lists
- * it in status.replicatedDatabases, which gives it a replication.conf section and its own
- * journal, archive and seeds, and rolls the instances.
+ * On a replicated cluster (docs/multi-database-replication.md) it is created once, on the primary,
+ * and the instances replicate it: the cluster lists it in status.replicatedDatabases, which gives
+ * it a replication.conf section and its own journal, archive and seeds, and rolls the instances.
+ * Switchover, failover, fencing, backups and point-in-time recovery cover it. A replica cluster,
+ * which follows the cluster database only, is refused.
  */
 
 /** Holds a FirebirdDatabase with reclaimPolicy "delete" until it is dropped */
@@ -71,11 +70,10 @@ export function validateDatabaseSpec(database: FirebirdDatabase): void {
  * a file another (older) FirebirdDatabase of the cluster manages
  */
 export function databaseClusterError(database: FirebirdDatabase, cluster: FirebirdCluster, others: FirebirdDatabase[]): string | undefined {
-  if (cluster.spec.replication?.enabled && !replicatedDatabasesEnabled(cluster)) {
+  if (cluster.spec.replica?.enabled) {
     return (
-      `cluster ${cluster.metadata.name} uses replication, which covers its database ${databaseName(cluster)} only: ` +
-      'another database would exist on the primary alone and be lost at a failover' +
-      (cluster.spec.replica?.enabled ? '' : ` (experimental: annotate the cluster ${REPLICATED_DATABASES_ANNOTATION}=experimental)`)
+      `cluster ${cluster.metadata.name} is a replica cluster, which follows its database ${databaseName(cluster)} only: ` +
+      'another database would not be replicated from the source cluster'
     );
   }
   const file = managedDatabaseName(database);

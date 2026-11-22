@@ -428,7 +428,6 @@ describe('point-in-time recovery', () => {
 describe('journal archive CronJob', () => {
   it("archives each replicated declarative database's segments under journals/<file>/", () => {
     const cluster = makeCluster({ replication: { enabled: true, journalArchiveS3: s3 } });
-    cluster.metadata.annotations = { 'firebird.cloudnative-firebird.io/replicated-databases': 'experimental' };
     cluster.status = { replicatedDatabases: ['sales.fdb', 'app.fdb'] };
     const pod = buildJournalArchiveCronJob(cluster, 'db-1')!.spec!.jobTemplate.spec!.template.spec!;
     const [list, , fetchDatabases] = ownInit(pod);
@@ -443,8 +442,8 @@ describe('journal archive CronJob', () => {
     expect(upload.args![0]).toContain(`s3 sync /work/segments/ 's3://bkt/fb/journals/'`);
     expect(upload.args![0]).toContain(`s3 sync $d/segments/ 's3://bkt/fb/journals/'"$f/"`);
     expect(env(upload, 'DATABASES')?.value).toBe('app.fdb sales.fdb');
-    // without them (or the annotation) the Job is as before
-    for (const c of [makeCluster({ replication: { enabled: true, journalArchiveS3: s3 } }), { ...cluster, metadata: { ...cluster.metadata, annotations: {} } }]) {
+    // without them (none yet, or none left) the Job is as before
+    for (const c of [makeCluster({ replication: { enabled: true, journalArchiveS3: s3 } }), { ...cluster, status: { replicatedDatabases: [] } }]) {
       const plain = buildJournalArchiveCronJob(c, 'db-1')!.spec!.jobTemplate.spec!.template.spec!;
       expect(ownInit(plain).map((x) => x.name)).toEqual(['list-uploaded', 'fetch-segments']);
       expect(plain.containers[0].args![0]).not.toContain('$DATABASES');

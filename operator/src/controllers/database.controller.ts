@@ -158,7 +158,7 @@ export class FirebirdDatabaseController {
     }
 
     const all = await this.instances(cluster);
-    // a replicated cluster (the replicated-databases annotation): created once, on the primary;
+    // a replicated cluster: created once, on the primary;
     // the other instances replicate it from there (status.replicatedDatabases of the cluster)
     const replicated = cluster.spec.replication?.enabled === true;
     if (replicated && created.length > 0) {

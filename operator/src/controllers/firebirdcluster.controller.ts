@@ -221,7 +221,7 @@ import {
   replicationEnabled,
   MAX_REPLICATED_DATABASES,
   replicatedDatabaseFiles,
-  replicatedDatabasesEnabled,
+  replicatedDatabasesAllowed,
 } from '../utils/replication';
 import { planVolumeExpansion } from '../utils/storage';
 import { validateClusterSpec } from '../utils/validation';
@@ -469,8 +469,8 @@ export class FirebirdClusterController {
       const seedSourcePods = instances.seedSources.filter(
         (pod) => !(pod in reseed.requests) && !(pod in switchover.promote) && !(pod in switchover.demote),
       );
-      // the declarative databases the instances replicate (the replicated-databases annotation):
-      // before the ConfigMap and the StatefulSet, which both follow them
+      // the declarative databases the instances replicate: before the ConfigMap and the
+      // StatefulSet, which both follow them
       await this.resolveReplicatedDatabases(cluster, log);
       await this.reconcileConfigMap(cluster, primaryPod, seedSourcePods, reseed.requests, log, switchover, instances.peerAddresses);
       // the ConfigMap lists the requests before the pods restart into their init containers
@@ -3119,21 +3119,30 @@ export class FirebirdClusterController {
 
   /** Reconcile custom firebird.conf settings or init.sql script ConfigMap */
   /**
-   * status.replicatedDatabases: with the replicated-databases annotation, the files of the
-   * cluster's FirebirdDatabases created on the primary and not being deleted (at most
-   * MAX_REPLICATED_DATABASES); none without it. Recorded with the reconcile's status write; the
-   * ConfigMap and the pod template follow it, so a change rolls the instances.
+   * status.replicatedDatabases: the files of the cluster's FirebirdDatabases created on the primary
+   * and not being deleted (at most MAX_REPLICATED_DATABASES), on a replicated cluster that is not a
+   * replica cluster. Absent until the first one, so the instances of other clusters do not change;
+   * empty, not absent, after the last one is removed, so the replicas remove its copies. Recorded
+   * with the reconcile's status write; the ConfigMap and the pod template follow it, so a change
+   * rolls the instances.
    */
   private async resolveReplicatedDatabases(cluster: FirebirdCluster, log: Logger): Promise<void> {
     const { name, namespace = 'default' } = cluster.metadata;
     let files: string[] = [];
-    if (replicatedDatabasesEnabled(cluster)) {
-      const list = (await this.customApi.listNamespacedCustomObject({
-        group: API_GROUP,
-        version: API_VERSION,
-        namespace,
-        plural: 'firebirddatabases',
-      })) as { items?: FirebirdDatabase[] };
+    if (replicatedDatabasesAllowed(cluster)) {
+      let list: { items?: FirebirdDatabase[] };
+      try {
+        list = (await this.customApi.listNamespacedCustomObject({
+          group: API_GROUP,
+          version: API_VERSION,
+          namespace,
+          plural: 'firebirddatabases',
+        })) as { items?: FirebirdDatabase[] };
+      } catch (err) {
+        // every replicated cluster asks: one that cannot keeps what it replicates, and reconciles on
+        log.warn({ err }, 'Cannot list the FirebirdDatabases; the replicated databases stay as they are');
+        return;
+      }
       files = [
         ...new Set(
           (list.items ?? [])
@@ -3145,10 +3154,11 @@ export class FirebirdClusterController {
         .sort()
         .slice(0, MAX_REPLICATED_DATABASES);
     }
-    const current = cluster.status?.replicatedDatabases ?? [];
-    if (JSON.stringify(current) === JSON.stringify(files)) return;
-    log.info({ from: current, to: files }, 'Replicated databases changed: the instances roll');
-    Object.assign((cluster.status ??= {}), { replicatedDatabases: files.length > 0 ? files : undefined });
+    const current = cluster.status?.replicatedDatabases;
+    const next = files.length > 0 ? files : current !== undefined && replicatedDatabasesAllowed(cluster) ? [] : undefined;
+    if (JSON.stringify(current) === JSON.stringify(next)) return;
+    log.info({ from: current ?? [], to: next ?? [] }, 'Replicated databases changed: the instances roll');
+    Object.assign((cluster.status ??= {}), { replicatedDatabases: next });
   }
 
   private async reconcileConfigMap(

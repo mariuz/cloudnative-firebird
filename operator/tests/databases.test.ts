@@ -51,25 +51,20 @@ describe('FirebirdDatabase spec', () => {
     expect(() => validateDatabaseSpec(makeDatabase({ clusterName: '' }))).toThrow(/clusterName/);
   });
 
-  it('accepts a replicated cluster with the replicated-databases annotation, up to 16 databases', () => {
+  it('accepts a replicated cluster, up to 16 databases, but not a replica cluster', () => {
     const cluster = makeCluster({ replication: { enabled: true } });
-    cluster.metadata.annotations = { 'firebird.cloudnative-firebird.io/replicated-databases': 'experimental' };
     expect(databaseClusterError(makeDatabase(), cluster, [])).toBeUndefined();
     const others = Array.from({ length: 16 }, (_, i) =>
       makeDatabase({}, { name: `other${i}`, creationTimestamp: '2026-10-01T00:00:00Z' }),
     );
     expect(databaseClusterError(makeDatabase(), cluster, others)).toMatch(/replicates 16 databases/);
     expect(databaseClusterError(makeDatabase(), cluster, others.slice(1))).toBeUndefined();
-    // the hint, and not on a replica cluster
-    expect(databaseClusterError(makeDatabase(), makeCluster({ replication: { enabled: true } }), [])).toMatch(/replicated-databases=experimental/);
     const replica = makeCluster({ replication: { enabled: true }, replica: { enabled: true, source: 'other' } as never });
-    replica.metadata.annotations = cluster.metadata.annotations;
-    expect(databaseClusterError(makeDatabase(), replica, [])).toMatch(/lost at a failover/);
+    expect(databaseClusterError(makeDatabase(), replica, [])).toMatch(/is a replica cluster/);
   });
 
-  it('refuses replicated clusters, the cluster database and a file another resource manages', () => {
+  it('refuses the cluster database and a file another resource manages', () => {
     expect(databaseClusterError(makeDatabase(), makeCluster(), [])).toBeUndefined();
-    expect(databaseClusterError(makeDatabase(), makeCluster({ replication: { enabled: true } }), [])).toMatch(/lost at a failover/);
     expect(databaseClusterError(makeDatabase({ databaseName: 'mydb.fdb' }), makeCluster(), [])).toMatch(/is the cluster database/);
     const older = makeDatabase({ databaseName: 'sales.fdb' }, { name: 'first', creationTimestamp: '2026-10-11T09:00:00Z' });
     const newer = makeDatabase();
@@ -192,12 +187,12 @@ describe('FirebirdDatabaseController', () => {
     expect(status()).toMatchObject({ phase: 'Creating' });
   });
 
-  it('refuses a replicated cluster and a conflicting file, without a Job', async () => {
-    const replicated = setup({ cluster: makeCluster({ replication: { enabled: true } }) });
-    await replicated.controller.reconcileDatabase(makeDatabase());
-    expect(replicated.created()).toHaveLength(0);
-    expect(replicated.status()).toMatchObject({ phase: 'Failed', message: expect.stringContaining('replication') });
-    expect(replicated.events()).toContain('DatabaseFailed');
+  it('refuses a replica cluster and a conflicting file, without a Job', async () => {
+    const replica = setup({ cluster: makeCluster({ replication: { enabled: true }, replica: { enabled: true, source: 'other' } as never }) });
+    await replica.controller.reconcileDatabase(makeDatabase());
+    expect(replica.created()).toHaveLength(0);
+    expect(replica.status()).toMatchObject({ phase: 'Failed', message: expect.stringContaining('replica cluster') });
+    expect(replica.events()).toContain('DatabaseFailed');
 
     const older = makeDatabase({}, { name: 'first', creationTimestamp: '2026-10-01T00:00:00Z' }, { phase: 'Ready' });
     const conflict = setup({ others: [older] });
@@ -205,10 +200,10 @@ describe('FirebirdDatabaseController', () => {
     expect(conflict.status()).toMatchObject({ phase: 'Failed', message: 'first.fdb is managed by FirebirdDatabase first' });
   });
 
-  describe('on a replicated cluster with the replicated-databases annotation', () => {
+  describe('on a replicated cluster', () => {
     const annotated = (status?: FirebirdCluster['status']): FirebirdCluster => ({
       ...makeCluster({ instances: 2, replication: { enabled: true } }),
-      metadata: { name: 'db', namespace: 'default', uid: 'c-uid', annotations: { 'firebird.cloudnative-firebird.io/replicated-databases': 'experimental' } },
+      metadata: { name: 'db', namespace: 'default', uid: 'c-uid' },
       ...(status ? { status } : {}),
     });
 
