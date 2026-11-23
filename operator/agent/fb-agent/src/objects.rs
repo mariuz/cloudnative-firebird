@@ -17,9 +17,13 @@
 //!
 //! Besides: OBJECT_SSE_C_KEY_FILE, S3's customer key as the file `aws s3 --sse-c-key fileb://`
 //! reads; AWS_SERVER_SIDE_ENCRYPTION takes the aws CLI's values (AES256, aws:kms, with
-//! AWS_SSE_KMS_KEY_ID); an http:// AWS_ENDPOINT is allowed without AWS_ALLOW_HTTP. OBJECT_CA_FILE, PEM certificates trusted besides the
-//! Mozilla roots built in (a private endpoint's CA): the system's store is not read, an instance
-//! image need not have one.
+//! AWS_SSE_KMS_KEY_ID). An http:// endpoint (AWS_ENDPOINT, AZURE_STORAGE_ENDPOINT, GOOGLE_BASE_URL)
+//! is allowed plain HTTP. OBJECT_CA_FILE, PEM certificates trusted besides the Mozilla roots
+//! built in (a private endpoint's CA): the system's store is not read, an instance image need
+//! not have one.
+//!
+//! GCS: object_store 0.14.2 asks for a credential on every upload and delete even with
+//! GOOGLE_SKIP_SIGNATURE; GOOGLE_BEARER_TOKEN gives it one (for an emulator that checks none).
 //!
 //! object_store is async: this subcommand alone runs a current-thread tokio runtime.
 
@@ -91,16 +95,26 @@ fn client_options() -> Result<ClientOptions, Failed> {
     Ok(options)
 }
 
+/// The variable that holds a store's endpoint, whose http:// allows plain HTTP to it
+fn endpoint_variable(kind: &str) -> &'static str {
+    match kind {
+        "s3" => "AWS_ENDPOINT",
+        "azure" => "AZURE_STORAGE_ENDPOINT",
+        _ => "GOOGLE_BASE_URL",
+    }
+}
+
 /// The store OBJECT_STORE names, from the environment
 fn store() -> Result<Arc<dyn ObjectStore>, Failed> {
-    let options = client_options()?;
     let kind = var("OBJECT_STORE");
+    let mut options = client_options()?;
+    // an http:// endpoint is meant (MinIO, an emulator): the crate refuses one otherwise
+    if var(endpoint_variable(&kind)).starts_with("http://") {
+        options = options.with_allow_http(true);
+    }
     Ok(match kind.as_str() {
         "s3" => {
             let mut builder = AmazonS3Builder::from_env().with_client_options(options);
-            if var("AWS_ENDPOINT").starts_with("http://") {
-                builder = builder.with_allow_http(true);
-            }
             let customer_key = var("OBJECT_SSE_C_KEY_FILE");
             if !customer_key.is_empty() {
                 let key =
@@ -290,6 +304,13 @@ mod tests {
             "prod/journals/ledger.fdb/ledger.fdb.journal-000000001"
         );
         assert_eq!(path("a//b", "/c").as_ref(), "a/b/c");
+    }
+
+    #[test]
+    fn each_store_names_its_endpoint() {
+        assert_eq!(endpoint_variable("s3"), "AWS_ENDPOINT");
+        assert_eq!(endpoint_variable("azure"), "AZURE_STORAGE_ENDPOINT");
+        assert_eq!(endpoint_variable("gcs"), "GOOGLE_BASE_URL");
     }
 
     #[test]

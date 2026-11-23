@@ -1,7 +1,8 @@
 #!/bin/bash
 # Checks `fb-agent objects` (docs/object-stores.md, phase 1) against real servers of each store, in
-# Docker: S3 (rclone serve s3, plain and over TLS with a CA of its own), Azure Blob (Azurite) and
-# GCS (fake-gcs-server). For each store, every operation:
+# Docker: S3 (rclone serve s3, plain and over TLS with a CA of its own; access keys of 3
+# characters or more), Azure Blob (Azurite) and GCS (fake-gcs-server, with a bearer token it does
+# not check: objects.rs). For each store, every operation:
 #
 #   - put of a small object and of one over the multipart threshold, get of it back, whole;
 #   - list of the names directly under a prefix, past the first page of a listing (1100 objects);
@@ -42,9 +43,9 @@ openssl req -newkey rsa:2048 -nodes -subj /CN=127.0.0.1 -keyout "$work/certs/key
 printf 'subjectAltName=IP:127.0.0.1\n' > "$work/certs/san"
 openssl x509 -req -in "$work/certs/req.pem" -CA "$work/certs/ca.pem" -CAkey "$work/certs/ca.key" -CAcreateserial -days 1 -extfile "$work/certs/san" -out "$work/certs/cert.pem" 2>/dev/null
 chmod 644 "$work/certs/"*
-docker run -d --name objects-s3 -p 127.0.0.1:18080:8080 -v "$work/s3:/data" "$RCLONE" serve s3 --auth-key AK,SK --addr :8080 /data >/dev/null
+docker run -d --name objects-s3 -p 127.0.0.1:18080:8080 -v "$work/s3:/data" "$RCLONE" serve s3 --auth-key ci-key,ci-secret-key --addr :8080 /data >/dev/null
 docker run -d --name objects-s3-tls -p 127.0.0.1:18443:8443 -v "$work/s3:/data" -v "$work/certs:/certs:ro" "$RCLONE" \
-  serve s3 --auth-key AK,SK --addr :8443 --cert /certs/cert.pem --key /certs/key.pem /data >/dev/null
+  serve s3 --auth-key ci-key,ci-secret-key --addr :8443 --cert /certs/cert.pem --key /certs/key.pem /data >/dev/null
 docker run -d --name objects-azurite -p 127.0.0.1:10000:10000 "$AZURITE" azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck --loose >/dev/null
 docker run -d --name objects-gcs -p 127.0.0.1:4443:4443 "$FAKE_GCS" -scheme http -port 4443 -public-host 127.0.0.1:4443 >/dev/null
 up() { for _ in $(seq 1 60); do curl -sk -o /dev/null "$1" && return 0; sleep 1; done; echo "$1 did not come up"; exit 1; }
@@ -103,12 +104,12 @@ exercise() {
   [ ! -e "$work/x" ] && [ ! -e "$work/x.tmp" ] && ok "$store: and leaves no file" || bad "$store: a file left by the failed get"
 }
 
-exercise s3 OBJECT_STORE=s3 AWS_ENDPOINT=http://127.0.0.1:18080 AWS_ACCESS_KEY_ID=AK AWS_SECRET_ACCESS_KEY=SK AWS_DEFAULT_REGION=us-east-1 AWS_BUCKET=fbk
+exercise s3 OBJECT_STORE=s3 AWS_ENDPOINT=http://127.0.0.1:18080 AWS_ACCESS_KEY_ID=ci-key AWS_SECRET_ACCESS_KEY=ci-secret-key AWS_DEFAULT_REGION=us-east-1 AWS_BUCKET=fbk
 exercise azure OBJECT_STORE=azure AZURE_STORAGE_USE_EMULATOR=true AZURE_CONTAINER_NAME=fbk
-exercise gcs OBJECT_STORE=gcs GOOGLE_BASE_URL=http://127.0.0.1:4443 GOOGLE_SKIP_SIGNATURE=true GOOGLE_BUCKET=fbk
+exercise gcs OBJECT_STORE=gcs GOOGLE_BASE_URL=http://127.0.0.1:4443 GOOGLE_BEARER_TOKEN=emulator GOOGLE_BUCKET=fbk
 
 echo "### the stores' edges"
-s3=(OBJECT_STORE=s3 AWS_ENDPOINT=http://127.0.0.1:18080 AWS_ACCESS_KEY_ID=AK AWS_SECRET_ACCESS_KEY=SK AWS_DEFAULT_REGION=us-east-1 OBJECT_PREFIX=edges)
+s3=(OBJECT_STORE=s3 AWS_ENDPOINT=http://127.0.0.1:18080 AWS_ACCESS_KEY_ID=ci-key AWS_SECRET_ACCESS_KEY=ci-secret-key AWS_DEFAULT_REGION=us-east-1 OBJECT_PREFIX=edges)
 env "${s3[@]}" AWS_BUCKET=nosuch "$agent" objects exists x 2>/dev/null; [ $? = 2 ] && ok "s3: a missing bucket is an error (2), not a missing object" || bad "s3: exists in a missing bucket"
 if env "${s3[@]}" AWS_BUCKET=fbk AWS_SECRET_ACCESS_KEY=wrong "$agent" objects list "" 2>/dev/null; then bad "s3: a wrong secret was accepted"; else ok "s3: a wrong secret is refused"; fi
 if env OBJECT_STORE=azure AZURE_STORAGE_USE_EMULATOR=true AZURE_CONTAINER_NAME=nosuch "$agent" objects list "" 2>/dev/null; then bad "azure: a missing container listed"; else ok "azure: a missing container is an error"; fi
@@ -125,7 +126,7 @@ head -c 31 /dev/urandom > "$work/short.key"
 env "${s3[@]}" AWS_BUCKET=fbk OBJECT_SSE_C_KEY_FILE="$work/short.key" "$agent" objects put "$work/small" enc2.fbk 2>/dev/null
 [ $? = 2 ] && ok "s3: an SSE-C key that is not 32 bytes is refused" || bad "s3: a short SSE-C key"
 # TLS: the endpoint's CA through OBJECT_CA_FILE; without it, the certificate is not trusted
-tls=(OBJECT_STORE=s3 AWS_ENDPOINT=https://127.0.0.1:18443 AWS_ACCESS_KEY_ID=AK AWS_SECRET_ACCESS_KEY=SK AWS_DEFAULT_REGION=us-east-1 AWS_BUCKET=fbk OBJECT_PREFIX=run-s3)
+tls=(OBJECT_STORE=s3 AWS_ENDPOINT=https://127.0.0.1:18443 AWS_ACCESS_KEY_ID=ci-key AWS_SECRET_ACCESS_KEY=ci-secret-key AWS_DEFAULT_REGION=us-east-1 AWS_BUCKET=fbk OBJECT_PREFIX=run-s3)
 [ "$(env "${tls[@]}" OBJECT_CA_FILE="$work/certs/ca.pem" "$agent" objects list journals | grep -c .)" = 4 ] \
   && ok "s3 over TLS with OBJECT_CA_FILE" || bad "s3 over TLS: $(env "${tls[@]}" OBJECT_CA_FILE="$work/certs/ca.pem" "$agent" objects list journals 2>&1 | head -2)"
 if env "${tls[@]}" "$agent" objects list journals >/dev/null 2>&1; then bad "s3 over TLS: an untrusted certificate was accepted"; else ok "s3 over TLS: an untrusted certificate is refused"; fi
@@ -134,9 +135,9 @@ env OBJECT_STORE=nfs "$agent" objects list x 2>/dev/null; [ $? = 2 ] && ok "an u
 # the time of a 70 MiB put and get, each store
 for store in s3 azure gcs; do
   case $store in
-    s3) cfg=(OBJECT_STORE=s3 AWS_ENDPOINT=http://127.0.0.1:18080 AWS_ACCESS_KEY_ID=AK AWS_SECRET_ACCESS_KEY=SK AWS_DEFAULT_REGION=us-east-1 AWS_BUCKET=fbk) ;;
+    s3) cfg=(OBJECT_STORE=s3 AWS_ENDPOINT=http://127.0.0.1:18080 AWS_ACCESS_KEY_ID=ci-key AWS_SECRET_ACCESS_KEY=ci-secret-key AWS_DEFAULT_REGION=us-east-1 AWS_BUCKET=fbk) ;;
     azure) cfg=(OBJECT_STORE=azure AZURE_STORAGE_USE_EMULATOR=true AZURE_CONTAINER_NAME=fbk) ;;
-    gcs) cfg=(OBJECT_STORE=gcs GOOGLE_BASE_URL=http://127.0.0.1:4443 GOOGLE_SKIP_SIGNATURE=true GOOGLE_BUCKET=fbk) ;;
+    gcs) cfg=(OBJECT_STORE=gcs GOOGLE_BASE_URL=http://127.0.0.1:4443 GOOGLE_BEARER_TOKEN=emulator GOOGLE_BUCKET=fbk) ;;
   esac
   s=$(date +%s%N)
   env "${cfg[@]}" OBJECT_PREFIX=timing "$agent" objects put "$work/big" big.nbk && env "${cfg[@]}" OBJECT_PREFIX=timing "$agent" objects get big.nbk "$work/back"
