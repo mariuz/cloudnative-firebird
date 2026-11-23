@@ -42,8 +42,9 @@ Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, 
   `fb-agent objects` on Apache Arrow's `object_store`; `azureBlob` and `gcs` beside every `s3`
   field; the `aws` CLI until the agent becomes S3's default):
   [docs/object-stores.md](docs/object-stores.md). Phase 1a (`fb-agent objects`, tested against
-  S3, Azurite and fake-gcs-server): v0.187.0. Next: phase 1b, the command builder and the S3
-  opt-in (`s3.client: agent`).
+  S3, Azurite and fake-gcs-server): v0.187.0. Phase 1b (the S3 opt-in, `s3.client: agent`, at
+  every call site): v0.188.0. Next: phase 2, backups, restores, bootstrap and retention on Azure
+  Blob and GCS.
 - [ ] **A CloudNativePG sweep**: the last stopped at `a11083b` (2026-11-10).
 - [ ] **Firebird 6 readiness**: when Firebird 6 is released, run the "Firebird formats" workflow
   against it and move the default image once it is stable (below).

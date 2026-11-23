@@ -1,5 +1,6 @@
 import { clusterImage } from './image-catalog';
 import { AGENT_PATH } from './agent';
+import { agentClient, agentClientContainer, agentObjects } from './object-store';
 import {
   V1Container,
   V1CronJob,
@@ -179,6 +180,16 @@ function retentionScript(o: {
  * Retention of a backup series in S3 (after the upload); `history` for nbackup series
  */
 export function s3RetentionScript(s3: S3BackupConfiguration, series: string, seconds: number, history?: string): string {
+  if (agentClient(s3)) {
+    return retentionScript({
+      list: agentObjects.list(agentObjects.key('')),
+      remove: agentObjects.rm('"$k"') + (history ? `; ${agentObjects.rm('"$k.ctl"')} >/dev/null 2>&1 || true` : ''),
+      tmp: WORK_DIR,
+      series,
+      seconds,
+      history,
+    });
+  }
   const dir = `s3://${s3.bucket}/${s3KeyPrefix(s3)}`;
   return retentionScript({
     list: `${awsCommand(s3)} s3 ls ${shellQuote(dir)} | awk '{ print $4 }'`,
@@ -446,7 +457,26 @@ export function buildBackupPodSpec(
         : []),
     ],
     containers: [
-      {
+      agentClient(s3)
+        ? agentClientContainer(cluster, s3, {
+            name: 'upload',
+            command: ['/bin/sh', '-c'],
+            args: [
+              `set -eu; f=$(cat ${WORK_DIR}/.name); ` +
+                (physical ? `if [ -f "${WORK_DIR}/$f.ctl" ]; then ${agentObjects.put(`"${WORK_DIR}/$f.ctl"`, '"$f.ctl"')}; fi; ` : '') +
+                agentObjects.put(`"${WORK_DIR}/$f"`, '"$f"') +
+                (options.retention?.policy
+                  ? `; ${s3RetentionScript(
+                      s3,
+                      options.retention.series,
+                      retentionSeconds(options.retention.policy),
+                      physical ? `${WORK_DIR}/history` : undefined,
+                    )}`
+                  : ''),
+            ],
+            volumeMounts: [workMount, ...s3ClientMounts(s3)],
+          })
+        : {
         name: 'upload',
         image: s3ClientImage(s3),
         command: ['/bin/sh', '-c'],
@@ -692,7 +722,14 @@ export function buildRestoreJob(
     podSpec = jobPodSpec(cluster, {
       restartPolicy: 'Never',
       initContainers: [
-        {
+        agentClient(s3)
+          ? agentClientContainer(cluster, s3, {
+              name: 'download',
+              command: ['/bin/sh', '-c'],
+              args: ['set -eu; ' + keys.map((k, i) => agentObjects.get(agentObjects.key(k), `${WORK_DIR}/${serverNames[i]}`)).join('; ')],
+              volumeMounts: [workMount, ...s3ClientMounts(s3)],
+            })
+          : {
           name: 'download',
           image: s3ClientImage(s3),
           command: ['/bin/sh', '-c'],
@@ -727,7 +764,14 @@ export function buildRestoreJob(
     podSpec = jobPodSpec(cluster, {
       restartPolicy: 'Never',
       initContainers: [
-        {
+        agentClient(s3)
+          ? agentClientContainer(cluster, s3, {
+              name: 'download',
+              command: ['/bin/sh', '-c'],
+              args: [`set -eu; ${agentObjects.get(agentObjects.key(source.path), `${WORK_DIR}/backup.fbk`)}`],
+              volumeMounts: [workMount, ...s3ClientMounts(s3)],
+            })
+          : {
           name: 'download',
           image: s3ClientImage(s3),
           command: ['/bin/sh', '-c'],
@@ -865,9 +909,28 @@ function replayPodSpec(
   const { chain, journalS3, target } = options;
   const journals = s3Uri(journalS3, options.journalPrefix ?? 'journals/');
   const fail = 'fail() { echo "$1" > /work/fetcher.failed; echo "$1" >&2; exit 1; }; ';
+  const lastCtl = chain ? `${chain.keys[chain.keys.length - 1]}.ctl` : '';
   const initContainers: V1Container[] = chain
     ? [
-        {
+        agentClient(chain.s3)
+          ? agentClientContainer(
+              cluster,
+              chain.s3,
+              {
+                name: 'download',
+                command: ['/bin/sh', '-c'],
+                args: [
+                  `set -eu; mkdir -p ${WORK_DIR}/chain; ` +
+                    chain.keys.map((k, i) => agentObjects.get(agentObjects.key(k), `${WORK_DIR}/chain/${i}.nbk`)).join('; ') +
+                    // taken on a replica: its position at the copy, next to the last file of the chain
+                    `; if ${agentObjects.exists(agentObjects.key(lastCtl))}; then ` +
+                    `${agentObjects.get(agentObjects.key(lastCtl), `${WORK_DIR}/chain/position.ctl`)}; fi`,
+                ],
+                volumeMounts: [workMount, ...s3ClientMounts(chain.s3, 'chain')],
+              },
+              'chain',
+            )
+          : {
           name: 'download',
           image: s3ClientImage(chain.s3),
           command: ['/bin/sh', '-c'],
@@ -885,7 +948,35 @@ function replayPodSpec(
         },
       ]
     : [];
-  const fetcher: V1Container = {
+  const journalKey = agentObjects.key(options.journalPrefix ?? 'journals/');
+  const fetcher: V1Container = agentClient(journalS3)
+    ? agentClientContainer(
+        cluster,
+        journalS3,
+        {
+          name: 'journal-fetch',
+          command: ['/bin/sh', '-c'],
+          args: [
+            `set -eu; W=${WORK_DIR}; mkdir -p $W/segments $W/req; ${fail}` +
+              // the listing as the aws CLI prints it, which pitr-restore.sh reads
+              `${agentObjects.listLong(journalKey)} > $W/journals.tmp 2> $W/ls.err || ` +
+              'fail "listing the journal archive failed: $(cat $W/ls.err)"; ' +
+              'mv $W/journals.tmp $W/journals.list; start=$(date +%s); ' +
+              'while [ ! -f $W/finished ]; do ' +
+              'for r in $W/req/*.req; do [ -f "$r" ] || continue; err=""; ' +
+              'for s in $(cat "$r"); do ' +
+              'case "$s" in *[!A-Za-z0-9._-]*) err="invalid segment name $s"; break ;; esac; ' +
+              `${agentObjects.get(`${journalKey}"$s"`, '"$W/segments/$s"')} 2> $W/cp.err || ` +
+              '{ err="$s: $(cat $W/cp.err)"; break; }; done; ' +
+              'if [ -z "$err" ]; then mv "$r" "${r%.req}.ok"; else echo "$err" > "${r%.req}.err"; rm -f "$r"; fi; done; ' +
+              'hb=$(cat $W/heartbeat 2>/dev/null || true); [ $(( $(date +%s) - ${hb:-$start} )) -lt 300 ] || ' +
+              'fail "the Firebird container stopped"; sleep 1; done',
+          ],
+          volumeMounts: [workMount, ...s3ClientMounts(journalS3, 'journals')],
+        },
+        'journals',
+      )
+    : {
     name: 'journal-fetch',
     image: s3ClientImage(journalS3),
     command: ['/bin/sh', '-c'],
@@ -1082,7 +1173,19 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
   const databases = replicatedDatabaseFiles(cluster);
   const databasesEnv: V1EnvVar[] = databases.length ? [{ name: 'DATABASES', value: databases.join(' ') }] : [];
   const perDatabase = (body: string) => (databases.length ? `; for f in $DATABASES; do d=${WORK_DIR}/db/$f; mkdir -p $d; ${body}; done` : '');
-  const upload: V1Container = {
+  const upload: V1Container = agentClient(s3)
+    ? agentClientContainer(cluster, s3, {
+        name: 'upload',
+        command: ['/bin/sh', '-c'],
+        // the segments not in the archive yet (they never change once there)
+        args: [
+          `set -eu; ${agentObjects.sync(`${WORK_DIR}/segments/`, agentObjects.key('journals/'))} > /dev/null` +
+            perDatabase(`[ ! -d $d/segments ] || ${agentObjects.sync('$d/segments/', `${agentObjects.key('journals/')}"$f/"`)} > /dev/null`),
+        ],
+        env: databasesEnv,
+        volumeMounts: [workMount, ...s3ClientMounts(s3)],
+      })
+    : {
     name: 'upload',
     image: s3ClientImage(s3),
     command: ['/bin/sh', '-c'],
@@ -1115,7 +1218,25 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
   const podSpec: V1PodSpec = jobPodSpec(cluster, {
     restartPolicy: 'Never',
     initContainers: [
-      {
+      agentClient(s3)
+        ? agentClientContainer(
+            cluster,
+            s3,
+            {
+              name: 'list-uploaded',
+              command: ['/bin/sh', '-c'],
+              // the names only; a failed listing uploads everything again
+              args: [
+                `${agentObjects.list(agentObjects.key('journals/'))} > ${WORK_DIR}/uploaded || : > ${WORK_DIR}/uploaded` +
+                  perDatabase(`${agentObjects.list(`${agentObjects.key('journals/')}"$f/"`)} > $d/uploaded || : > $d/uploaded`),
+              ],
+              env: databasesEnv,
+              volumeMounts: [workMount],
+            },
+            's3',
+            { sseCustomerKey: false },
+          )
+        : {
         name: 'list-uploaded',
         image: s3ClientImage(s3),
         command: ['/bin/sh', '-c'],
@@ -1279,7 +1400,15 @@ export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Contai
     const s3 = recovery.s3;
     const key = recovery.sourcePath ?? 'backup.fbk';
     return [
-      {
+      agentClient(s3)
+        ? agentClientContainer(cluster, s3, {
+            name: 'bootstrap-download',
+            command: ['/bin/sh', '-c'],
+            args: [guard + agentObjects.get(agentObjects.key(key), `${WORK_DIR}/backup.fbk`)],
+            env,
+            volumeMounts: [...mounts, workMount, ...s3ClientMounts(s3)],
+          })
+        : {
         name: 'bootstrap-download',
         image: s3ClientImage(s3),
         command: ['/bin/sh', '-c'],

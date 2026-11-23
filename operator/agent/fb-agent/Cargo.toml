@@ -27,5 +27,7 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 tokio = { version = "1", default-features = false, features = ["rt"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 base64 = "0.22"
+# the last modification of a listed object (object_store's type), as `aws s3 ls` prints it
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 # the Mozilla roots, so that an instance image without a CA store reaches the cloud endpoints
 webpki-root-certs = "1"
