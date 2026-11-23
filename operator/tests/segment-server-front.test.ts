@@ -742,6 +742,9 @@ describe.skipIf(!agentBin)('the segment server (fb-agent segment-server)', () =>
     const kept = await run('3', {});
     await until(() => archived(kept.fronted).length === 3);
     expect(archived(kept.fronted)).toEqual([4, 5, 6]);
+    // the pruning may finish before its line is read off the agent's stdout (the archive was
+    // already pruned on the first look, without the event loop running in between)
+    await until(() => kept.agent.out().includes('the agent prunes the archive'));
     expect(kept.agent.out()).toContain('the agent prunes the archive and samples the recovery points\n');
     // each new length of the segment being written is a recovery point, once
     await until(() => points(kept.fronted).length === 1);
