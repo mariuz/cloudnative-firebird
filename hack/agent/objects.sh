@@ -1,14 +1,19 @@
 #!/bin/bash
 # Checks `fb-agent objects` (docs/object-stores.md, phase 1) against real servers of each store, in
 # Docker: S3 (rclone serve s3, plain and over TLS with a CA of its own; access keys of 3
-# characters or more), Azure Blob (Azurite) and GCS (fake-gcs-server, with a bearer token it does
-# not check: objects.rs). For each store, every operation:
+# characters or more) and Azure Blob (Azurite), every operation:
 #
 #   - put of a small object and of one over the multipart threshold, get of it back, whole;
 #   - list of the names directly under a prefix, past the first page of a listing (1100 objects);
 #   - sync of what is missing only, exists (0, 1, and 2 for a missing bucket), rm (twice);
 #   - a failed get leaves no file, a refused credential is an error;
 #   - S3: SSE-C (the object unreadable without its key), TLS through OBJECT_CA_FILE only.
+#
+# GCS (fake-gcs-server, with a bearer token it does not check: objects.rs): reads only. object_store
+# uploads through GCS's XML API (PUT of an object, POST ?uploads for a multipart one), which
+# fake-gcs-server takes for signed URLs only, as Google's storage-testbench has no XML multipart
+# upload or listing: the objects are put through fake-gcs-server's JSON API, and the agent lists,
+# gets (70 MiB, whole), tests and removes them. Uploads to GCS are covered by no emulator.
 #
 #   hack/agent/objects.sh
 #
@@ -104,9 +109,35 @@ exercise() {
   [ ! -e "$work/x" ] && [ ! -e "$work/x.tmp" ] && ok "$store: and leaves no file" || bad "$store: a file left by the failed get"
 }
 
+# exercise_reads <store> <put command> <env...>: the reads, against objects put by <put command> <file> <key>
+gcs_put() { curl -sf -X POST -H 'Content-Type: application/octet-stream' --data-binary "@$1" \
+  "http://127.0.0.1:4443/upload/storage/v1/b/fbk/o?uploadType=media&name=$(printf %s "$2" | sed 's|/|%2F|g')" >/dev/null; }
+exercise_reads() {
+  local store=$1 out
+  shift
+  cfg=("$@")
+  run() { env OBJECT_PREFIX="run-$store" "${cfg[@]}" "$agent" objects "$@"; }
+  echo "### $store (reads)"
+  rm -f "$work/back" "$work/x"
+  gcs_put "$work/small" "run-$store/backup.fbk" && gcs_put "$work/big" "run-$store/big.nbk" \
+    && for f in "$work"/seg/*; do gcs_put "$f" "run-$store/journals/${f##*/}"; done \
+    || { bad "$store: the objects could not be put through the emulator's own API"; return; }
+  if run get big.nbk "$work/back" && cmp -s "$work/big" "$work/back"; then ok "$store: a 70 MiB object, whole"; else bad "$store: get of the 70 MiB object"; fi
+  [ ! -e "$work/back.tmp" ] && ok "$store: no partial file left" || bad "$store: $work/back.tmp left"
+  out=$(run list "" | sort | tr '\n' ' ')
+  [ "$out" = "backup.fbk big.nbk " ] && ok "$store: list: $out" || bad "$store: list: \"$out\""
+  [ "$(run list journals/ | grep -c .)" = "$(ls "$work/seg" | grep -c .)" ] && ok "$store: list of a prefix" || bad "$store: list journals/: $(run list journals/ | tr '\n' ' ')"
+  run exists backup.fbk; [ $? = 0 ] && ok "$store: exists" || bad "$store: exists"
+  run exists nothing.fbk; [ $? = 1 ] && ok "$store: not there: 1" || bad "$store: not there"
+  run rm backup.fbk && run rm backup.fbk && ok "$store: rm, and rm of what is gone" || bad "$store: rm"
+  run exists backup.fbk; [ $? = 1 ] && ok "$store: gone after rm" || bad "$store: still there after rm"
+  if run get nothing.fbk "$work/x" 2>/dev/null; then bad "$store: get of a missing object succeeded"; else ok "$store: get of a missing object fails"; fi
+  [ ! -e "$work/x" ] && [ ! -e "$work/x.tmp" ] && ok "$store: and leaves no file" || bad "$store: a file left by the failed get"
+}
+
 exercise s3 OBJECT_STORE=s3 AWS_ENDPOINT=http://127.0.0.1:18080 AWS_ACCESS_KEY_ID=ci-key AWS_SECRET_ACCESS_KEY=ci-secret-key AWS_DEFAULT_REGION=us-east-1 AWS_BUCKET=fbk
 exercise azure OBJECT_STORE=azure AZURE_STORAGE_USE_EMULATOR=true AZURE_CONTAINER_NAME=fbk
-exercise gcs OBJECT_STORE=gcs GOOGLE_BASE_URL=http://127.0.0.1:4443 GOOGLE_BEARER_TOKEN=emulator GOOGLE_BUCKET=fbk
+exercise_reads gcs OBJECT_STORE=gcs GOOGLE_BASE_URL=http://127.0.0.1:4443 GOOGLE_BEARER_TOKEN=emulator GOOGLE_BUCKET=fbk
 
 echo "### the stores' edges"
 s3=(OBJECT_STORE=s3 AWS_ENDPOINT=http://127.0.0.1:18080 AWS_ACCESS_KEY_ID=ci-key AWS_SECRET_ACCESS_KEY=ci-secret-key AWS_DEFAULT_REGION=us-east-1 OBJECT_PREFIX=edges)
@@ -132,12 +163,11 @@ tls=(OBJECT_STORE=s3 AWS_ENDPOINT=https://127.0.0.1:18443 AWS_ACCESS_KEY_ID=ci-k
 if env "${tls[@]}" "$agent" objects list journals >/dev/null 2>&1; then bad "s3 over TLS: an untrusted certificate was accepted"; else ok "s3 over TLS: an untrusted certificate is refused"; fi
 env OBJECT_STORE=nfs "$agent" objects list x 2>/dev/null; [ $? = 2 ] && ok "an unknown store is refused (2)" || bad "an unknown store"
 
-# the time of a 70 MiB put and get, each store
-for store in s3 azure gcs; do
+# the time of a 70 MiB put and get, each store an emulator takes uploads for
+for store in s3 azure; do
   case $store in
     s3) cfg=(OBJECT_STORE=s3 AWS_ENDPOINT=http://127.0.0.1:18080 AWS_ACCESS_KEY_ID=ci-key AWS_SECRET_ACCESS_KEY=ci-secret-key AWS_DEFAULT_REGION=us-east-1 AWS_BUCKET=fbk) ;;
     azure) cfg=(OBJECT_STORE=azure AZURE_STORAGE_USE_EMULATOR=true AZURE_CONTAINER_NAME=fbk) ;;
-    gcs) cfg=(OBJECT_STORE=gcs GOOGLE_BASE_URL=http://127.0.0.1:4443 GOOGLE_BEARER_TOKEN=emulator GOOGLE_BUCKET=fbk) ;;
   esac
   s=$(date +%s%N)
   env "${cfg[@]}" OBJECT_PREFIX=timing "$agent" objects put "$work/big" big.nbk && env "${cfg[@]}" OBJECT_PREFIX=timing "$agent" objects get big.nbk "$work/back"
