@@ -1,7 +1,7 @@
 # Object stores other than S3
 
-Status: design, 2026-11-23 (revised: the cloud APIs directly, from the agent). Tracked in
-[TODO.md](../TODO.md) ("Object stores other than S3").
+Status: design, 2026-11-23 (revised: the cloud APIs directly, from the agent). Phase 1a,
+`fb-agent objects`: v0.187.0. Tracked in [TODO.md](../TODO.md) ("Object stores other than S3").
 
 ## The gap
 
@@ -214,9 +214,12 @@ is `spec.serviceAccountName`, as for S3's workload identity today.
     well-known development account and key;
   - [fake-gcs-server](https://github.com/fsouza/fake-gcs-server).
 
-  For each store it checks every operation: a multipart object of more than 64 MiB, a listing
+  For S3 and Azure it checks every operation: a multipart object of more than 64 MiB, a listing
   past the first page, `sync` of what is missing only, `exists` exit statuses, and a refused
-  credential.
+  credential. For GCS it checks the reads only. `object_store` uploads through GCS's XML API,
+  which fake-gcs-server accepts for signed URLs only and storage-testbench does not implement
+  for multipart, so the test puts the objects through fake-gcs-server's JSON API. GCS uploads
+  need a real bucket: a CI job with a GCS credential is an open question below.
 - **Unit tests.** They prove the `aws` client's Jobs are byte-identical, and pin the `agent`
   client's command lines.
 - **The kind CI.** It already runs an S3 server in the cluster. The backup, restore,
@@ -225,7 +228,8 @@ is `spec.serviceAccountName`, as for S3's workload identity today.
 
 ## Phases
 
-1. **`fb-agent objects` and the command builder, S3 opt-in.** The subcommand on `object_store`,
+1. **`fb-agent objects` and the command builder, S3 opt-in.** *(1a, `fb-agent objects` and
+   `hack/agent/objects.sh`: v0.187.0; 1b, the command builder and `s3.client: agent`)* The subcommand on `object_store`,
    with all three stores built in and tested by `hack/agent/objects.sh`. Also
    `utils/object-store.ts`, with every caller moved onto it (the `aws` client byte-identical), and
    `s3.client: agent`. The kind CI runs its object store steps with the agent's client on one
@@ -255,5 +259,8 @@ Each phase is a release.
 - **A private endpoint's CA.** A `caSecretRef` beside `endpoint`, for MinIO or Ceph behind an
   internal CA. The `aws` client has no such option today (it would be `AWS_CA_BUNDLE`), so this
   would be new for both clients.
+- **GCS uploads in CI.** No emulator takes `object_store`'s XML API uploads (above). A CI job
+  against a real bucket would need a GCS service account key as a repository secret, with a
+  lifecycle rule deleting what the runs leave.
 - **How long `aws` stays** after phase 5. Recommended: one minor release with a deprecation
   warning event on clusters that still select it, then removal.
