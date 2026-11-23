@@ -117,7 +117,7 @@ jobs:
             npx vitest run tests/agent-conformance.test.ts tests/puller-conformance.test.ts tests/segment-server-front.test.ts tests/isolation-check.test.ts tests/segment-tls.test.ts tests/init-helpers-conformance.test.ts tests/lease-holder-conformance.test.ts tests/metrics-exporter-conformance.test.ts tests/jobs-conformance.test.ts tests/switchover.test.ts tests/sync-scripts.test.ts tests/replication-scripts.test.ts 2>&1 | tee /tmp/conformance.txt
           # none skipped: every test of these files runs the static binary, or the protocol and
           # files it shares with the operator (colour codes stripped: the runner's output has them)
-          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +148 passed \(148\)'
+          sed 's/\x1b\[[0-9;]*m//g' /tmp/conformance.txt | grep -Eq 'Tests +149 passed \(149\)'
 
       # the declarative databases beside the cluster database (docs/multi-database-replication.md):
       # "DB <file>" requests to a segment server with three archives, and one puller following all
@@ -125,6 +125,18 @@ jobs:
       - name: Declarative databases in the segment server and the puller
         working-directory: .
         run: FB_AGENT_BIN="$PWD/operator/agent/target/x86_64-unknown-linux-musl/release/fb-agent" hack/agent/databases.sh
+
+      # the custom metrics exporter with isql and with the agent's own attachment
+      # (QUERY_CLIENT=agent): typed values, one attachment per scrape, the time per scrape
+      - name: Metrics exporter against Firebird 4 and 5
+        working-directory: .
+        run: hack/agent/metrics.sh firebirdsql/firebird:4 firebirdsql/firebird:5
+
+      # the snapshot image moves: a failure is reported, and does not fail the job
+      - name: Metrics exporter against the Firebird 6 snapshot
+        working-directory: .
+        continue-on-error: true
+        run: hack/agent/metrics.sh firebirdsql/firebird:6-snapshot
 
       # STATE from the segment server's service attachment in every state of the database, on
       # real servers (docs/rust-agent-segment-server.md)
@@ -3483,6 +3495,28 @@ jobs:
           grep -qx 'firebird_exporter_query_error{query="broken"} 1' /tmp/metrics-agent.txt
           kubectl logs metrics-0 -c metrics-exporter | grep -q '^metrics on :9187/metrics$'
           kubectl logs metrics-0 -c metrics-exporter | grep -q '^query broken: '
+          # monitoring.customQueriesClient: agent (v0.186.0): the queries over the agent's own
+          # attachment, one per scrape, with typed values; the instance rolls onto the new sidecar
+          kubectl patch configmap fb-queries --type merge -p '{"data": {"queries.yaml": "typed:\n  query: \"SELECT TRUE AS FLAG, CAST(\u00271970-01-02 00:00:00\u0027 AS TIMESTAMP) AS STAMP, CAST(12.5 AS NUMERIC(9,2)) AS AMOUNT, CURRENT_CONNECTION AS CONN FROM RDB$DATABASE\"\n  metrics:\n    - flag: { usage: GAUGE, description: \"A boolean\" }\n    - stamp: { usage: GAUGE, description: \"A timestamp\" }\n    - amount: { usage: GAUGE, description: \"A NUMERIC\" }\n    - conn: { usage: GAUGE, description: \"The attachment\" }\nsession:\n  query: \"SELECT CURRENT_CONNECTION AS CONN FROM RDB$DATABASE\"\n  metrics:\n    - conn: { usage: GAUGE, description: \"The attachment\" }\n"}}'
+          kubectl patch firebirdcluster metrics --type merge -p '{"spec":{"monitoring":{"customQueriesClient":"agent"}}}'
+          timeout 300 bash -c 'until kubectl get pod metrics-0 -o jsonpath="{.spec.containers[?(@.name==\"metrics-exporter\")].env[?(@.name==\"QUERY_CLIENT\")].value}" 2>/dev/null | grep -qx agent; do sleep 3; done' \
+            || { kubectl get pod metrics-0 -o jsonpath='{.spec.containers[?(@.name=="metrics-exporter")].env}'; echo; exit 1; }
+          kubectl wait pod/metrics-0 --for=condition=Ready --timeout=600s
+          timeout 240 bash -c 'until kubectl get --raw /api/v1/namespaces/default/pods/metrics-0:9187/proxy/metrics 2>/dev/null | grep -q "^firebird_typed_flag"; do sleep 5; done' \
+            || { scrape || true; kubectl logs metrics-0 -c metrics-exporter --tail=30; exit 1; }
+          scrape | tee /tmp/metrics-typed.txt | grep -v '^#'
+          grep -qx 'firebird_up 1' /tmp/metrics-typed.txt
+          # isql printed <true> and a date: no sample; typed, a boolean is 1 and a timestamp seconds since the epoch
+          grep -qx 'firebird_typed_flag 1' /tmp/metrics-typed.txt
+          grep -qx 'firebird_typed_stamp 86400' /tmp/metrics-typed.txt
+          grep -qx 'firebird_typed_amount 12.50' /tmp/metrics-typed.txt
+          # one attachment for the whole scrape: both queries ran on the same connection
+          conn=$(sed -n 's/^firebird_typed_conn \([0-9]*\)$/\1/p' /tmp/metrics-typed.txt)
+          [ -n "$conn" ] && grep -qx "firebird_session_conn $conn" /tmp/metrics-typed.txt
+          grep -qx 'firebird_exporter_query_error{query="broken"} 1' /tmp/metrics-typed.txt
+          kubectl logs metrics-0 -c metrics-exporter | grep -q "queries over the agent's own attachment (QUERY_CLIENT=agent)"
+          kubectl logs metrics-0 -c metrics-exporter | grep -q '^query broken: '
+
           # no Perl runs in the pod
           for c in $(kubectl get pod metrics-0 -o jsonpath='{.spec.containers[*].name}'); do
             if kubectl exec metrics-0 -c "$c" -- sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null' | tr '\0' ' ' | grep -qw perl; then echo "$c runs Perl"; exit 1; fi

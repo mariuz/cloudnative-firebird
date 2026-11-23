@@ -187,6 +187,22 @@ good: { query: "SELECT 1 AS A FROM RDB$DATABASE", metrics: [ { a: { usage: GAUGE
     expect(() => validateClusterSpec(withQueries({ exporter: { enabled: true, port: 9187 } }))).toThrow(
       "monitoring.exporter.port 9187 is the custom queries' metrics exporter port",
     );
+    expect(customQueriesErrors(withQueries({ customQueriesClient: 'agent' }).spec)).toEqual([]);
+    expect(customQueriesErrors(withQueries({ customQueriesClient: 'odbc' as never }).spec)).toEqual([
+      'monitoring.customQueriesClient must be "isql" or "agent", not "odbc"',
+    ]);
+  });
+
+  it("run over the agent's own attachment only when chosen (customQueriesClient: agent)", () => {
+    const env = (cluster: FirebirdCluster) => container(buildStatefulSet(cluster), 'metrics-exporter')!.env ?? [];
+    expect(env(withQueries({ customQueriesClient: 'agent' }))).toContainEqual({ name: 'QUERY_CLIENT', value: 'agent' });
+    // isql, said or not: the sidecar as before, so the instances of other clusters do not roll
+    for (const cluster of [withQueries(), withQueries({ customQueriesClient: 'isql' })]) {
+      expect(env(cluster).some((e) => e.name === 'QUERY_CLIENT')).toBe(false);
+      expect(statefulSetNeedsUpdate(buildStatefulSet(cluster), buildStatefulSet(withQueries()))).toBe(false);
+    }
+    // choosing the agent's client changes the sidecar: the instances roll
+    expect(statefulSetNeedsUpdate(buildStatefulSet(withQueries()), buildStatefulSet(withQueries({ customQueriesClient: 'agent' })))).toBe(true);
   });
 });
 

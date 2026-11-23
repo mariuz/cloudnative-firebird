@@ -9,6 +9,7 @@ spec:
     size: 1Gi
   monitoring:
     enablePodMonitor: true
+    customQueriesClient: agent
     customQueriesConfigMap:
       - { name: firebird-queries, key: queries.yaml }
     customQueriesSecret:

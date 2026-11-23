@@ -213,6 +213,11 @@ export interface MonitoringConfiguration {
   customQueriesConfigMap?: Array<{ name: string; key: string }>;
   /** The same in Secret keys (queries of the same name: the last source wins, Secrets after ConfigMaps) */
   customQueriesSecret?: Array<{ name: string; key: string }>;
+  /**
+   * How the exporter runs them: "isql" (default: a process per query, the values as isql prints
+   * them) or "agent" (the agent's own attachment, one per scrape, typed values; since v0.186.0)
+   */
+  customQueriesClient?: 'isql' | 'agent';
 }
 
 /**
