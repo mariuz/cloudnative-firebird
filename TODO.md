@@ -38,7 +38,9 @@ Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, 
   times per scrape).
 - [ ] **Object stores other than S3**: backups, the journal archive and replica clusters speak
   S3 (and S3-compatible endpoints: MinIO, GCS interoperability). Native Azure Blob and GCS, as
-  CloudNativePG's Barman Cloud has.
+  CloudNativePG's Barman Cloud has. Design and phases (rclone for Azure and GCS, the `aws` CLI
+  stays for S3, `azureBlob` and `gcs` beside every `s3` field):
+  [docs/object-stores.md](docs/object-stores.md). Next: phase 1, the command builder (S3 only).
 - [ ] **A CloudNativePG sweep**: the last stopped at `a11083b` (2026-11-10).
 - [ ] **Firebird 6 readiness**: when Firebird 6 is released, run the "Firebird formats" workflow
   against it and move the default image once it is stable (below).
