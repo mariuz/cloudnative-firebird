@@ -13,6 +13,8 @@
 //!                                          the replication init container's helpers (init.rs)
 //!   fb-agent lease-holder                  the primary Lease holder sidecar (lease.rs)
 //!   fb-agent metrics-exporter              the custom metrics exporter sidecar (metrics.rs)
+//!   fb-agent objects list|put|get|sync|rm|exists ...
+//!                                          S3, Azure Blob and GCS (objects.rs)
 //!   fb-agent backup-file | fetch-segments | pitr-plan | cut-segment | switchover | failover |
 //!            sync-standby                  the Jobs' programs (jobs.rs)
 //!   fb-agent segment-server                the segment server (server.rs)
@@ -26,6 +28,7 @@ mod isolation;
 mod jobs;
 mod lease;
 mod metrics;
+mod objects;
 mod promote;
 mod puller;
 mod role;
@@ -115,6 +118,8 @@ fn main() -> ExitCode {
         ["isolation-check"] => isolation::command().map_err(io::Error::other),
         ["lease-holder"] => lease::run(),
         ["metrics-exporter"] => metrics::run(),
+        // the object stores (objects.rs): its own messages and exit status
+        ["objects", rest @ ..] => return objects::command(rest),
         // the Jobs' programs: their own messages and exit status (jobs.rs)
         ["backup-file", rest @ ..] => return job(jobs::backup_file(rest)),
         ["fetch-segments"] => return job(jobs::fetch_segments()),
@@ -137,7 +142,7 @@ fn main() -> ExitCode {
         ["reposition", sequence, control] => init::reposition(sequence, control),
         ["segment-server"] => server::run(),
         _ => {
-            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | databases | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | lease-holder | metrics-exporter | backup-file ... | fetch-segments | pitr-plan ... | cut-segment <file> <length> | switchover | failover | sync-standby | segment-server");
+            eprintln!("usage: fb-agent version | request <host> <request...> | serve | puller | isolation-check | fetch-seed <host> <file> | databases | replica-control ... | set-repl-seq <database> <sequence> | reposition <U> <control> | lease-holder | metrics-exporter | objects ... | backup-file ... | fetch-segments | pitr-plan ... | cut-segment <file> <length> | switchover | failover | sync-standby | segment-server");
             return ExitCode::from(2);
         }
     };

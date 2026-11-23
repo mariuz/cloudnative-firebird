@@ -126,6 +126,12 @@ jobs:
         working-directory: .
         run: FB_AGENT_BIN="$PWD/operator/agent/target/x86_64-unknown-linux-musl/release/fb-agent" hack/agent/databases.sh
 
+      # fb-agent objects (docs/object-stores.md, phase 1a) against S3 (rclone serve s3, plain and
+      # over TLS), Azure Blob (Azurite) and GCS (fake-gcs-server)
+      - name: Object stores (fb-agent objects) against S3, Azurite and fake-gcs-server
+        working-directory: .
+        run: FB_AGENT_BIN="$PWD/operator/agent/target/x86_64-unknown-linux-musl/release/fb-agent" hack/agent/objects.sh
+
       # the custom metrics exporter with isql and with the agent's own attachment
       # (QUERY_CLIENT=agent): typed values, one attachment per scrape, the time per scrape
       - name: Metrics exporter against Firebird 4 and 5

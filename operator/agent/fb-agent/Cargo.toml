@@ -18,3 +18,14 @@ signal-hook = { version = "0.3", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # the Lease object of the Kubernetes API, read and written back whole by the lease holder
 serde_json = "1"
+# fb-agent objects (objects.rs, docs/object-stores.md): S3, Azure Blob and GCS over their own APIs.
+# pinned, as firebird-wire; the *-base features with the ring provider and reqwest without one
+# (rustls gets ring installed), so no aws-lc-rs for the static musl builds
+object_store = { version = "=0.14.2", default-features = false, features = ["aws-base", "azure-base", "gcp-base", "ring", "reqwest"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+# object_store is async: a current-thread runtime in `objects` only
+tokio = { version = "1", default-features = false, features = ["rt"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+base64 = "0.22"
+# the Mozilla roots, so that an instance image without a CA store reaches the cloud endpoints
+webpki-root-certs = "1"
