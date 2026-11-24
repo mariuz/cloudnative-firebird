@@ -1,6 +1,6 @@
 import { clusterImage } from './image-catalog';
 import { AGENT_PATH } from './agent';
-import { agentClient, agentClientContainer, agentObjects } from './object-store';
+import { agentClient, agentClientContainer, agentObjects, gcsKeyDir, gcsKeyVolumeName, objectStoreOf, objectUri, storeKind, withObjectStoreLabels } from './object-store';
 import {
   V1Container,
   V1CronJob,
@@ -266,6 +266,17 @@ export function sseCustomerKeyFile(id = 's3'): string {
 
 /** The Secret volume of an SSE-C key, for the pods of the S3 client containers */
 export function s3ClientVolumes(s3: S3BackupConfiguration, id = 's3'): V1Volume[] {
+  if (storeKind(s3) === 'gcs') {
+    // the service account key, as a file (GOOGLE_SERVICE_ACCOUNT)
+    return s3.secretRef
+      ? [
+          {
+            name: gcsKeyVolumeName(id),
+            secret: { secretName: s3.secretRef.name, items: [{ key: 'APPLICATION_CREDENTIALS', path: 'key.json' }], defaultMode: 0o444 },
+          },
+        ]
+      : [];
+  }
   if (!s3.sseCustomerKey) return [];
   return [
     {
@@ -280,6 +291,7 @@ export function s3ClientVolumes(s3: S3BackupConfiguration, id = 's3'): V1Volume[
 }
 
 export function s3ClientMounts(s3: S3BackupConfiguration, id = 's3'): V1VolumeMount[] {
+  if (storeKind(s3) === 'gcs') return s3.secretRef ? [{ name: gcsKeyVolumeName(id), mountPath: gcsKeyDir(id), readOnly: true }] : [];
   if (!s3.sseCustomerKey) return [];
   return [{ name: sseCustomerKeyVolumeName(id), mountPath: `${SSE_C_DIR}/${id}`, readOnly: true }];
 }
@@ -533,7 +545,7 @@ function serverSideVerifyScript(): string {
 
 /** Where a backup with a fixed file name ends up */
 export function backupLocation(fileName: string, s3?: S3BackupConfiguration): string {
-  return s3 ? s3Uri(s3, fileName) : `${FIREBIRD_DATA_DIR}/${fileName}`;
+  return s3 ? objectUri(s3, fileName) : `${FIREBIRD_DATA_DIR}/${fileName}`;
 }
 
 /** File name of the backup taken for a FirebirdBackup */
@@ -569,7 +581,7 @@ function cronJob(
       jobTemplate: {
         spec: {
           backoffLimit: 2,
-          template: { metadata: { labels }, spec: podSpec },
+          template: { metadata: { labels: withObjectStoreLabels(labels, podSpec) }, spec: podSpec },
         },
       },
     },
@@ -598,7 +610,7 @@ export function buildBackupCronJob(cluster: FirebirdCluster, primaryPod?: string
       type,
       level: backup?.level,
       fileName: scheduledFileName(name, type, backup?.level),
-      s3: backup?.s3,
+      s3: objectStoreOf(backup),
       retention: { series: name, policy: backup?.retentionPolicy },
       verify: backup?.verify,
       replica,
@@ -634,7 +646,7 @@ export function buildScheduledBackupCronJob(
       type,
       level: spec.level,
       fileName: scheduledFileName(sbName, type, spec.level),
-      s3: spec.s3,
+      s3: objectStoreOf(spec),
       retention: { series: sbName, policy: spec.retentionPolicy },
       verify: spec.verify,
       replica,
@@ -657,6 +669,16 @@ export function buildBackupJob(
   const { name: backupName, namespace = 'default', uid } = backup.metadata;
   const clusterName = backup.spec.clusterName;
   const labels = { ...clusterLabels(clusterName), 'app.kubernetes.io/component': 'on-demand-backup' };
+  const podSpec = buildBackupPodSpec(cluster, {
+    primaryHost: instanceHost(cluster, primaryPod ?? `${clusterName}-0`),
+    type: jobBackupType(backup.spec.type),
+    level: backup.spec.level,
+    fileName: onDemandBackupFileName(backup),
+    s3: objectStoreOf(backup.spec),
+    verify: backup.spec.verify,
+    replica,
+    databaseFile,
+  });
   return {
     apiVersion: 'batch/v1',
     kind: 'Job',
@@ -668,19 +690,7 @@ export function buildBackupJob(
     },
     spec: {
       backoffLimit: 2,
-      template: {
-        metadata: { labels },
-        spec: buildBackupPodSpec(cluster, {
-          primaryHost: instanceHost(cluster, primaryPod ?? `${clusterName}-0`),
-          type: jobBackupType(backup.spec.type),
-          level: backup.spec.level,
-          fileName: onDemandBackupFileName(backup),
-          s3: backup.spec.s3,
-          verify: backup.spec.verify,
-          replica,
-          databaseFile,
-        }),
-      },
+      template: { metadata: { labels: withObjectStoreLabels(labels, podSpec) }, spec: podSpec },
     },
   };
 }
@@ -821,7 +831,7 @@ export function buildRestoreJob(
       labels,
       ownerReferences: [ownerReference('FirebirdRestore', restoreName, uid)],
     },
-    spec: { backoffLimit: 2, template: { metadata: { labels }, spec: podSpec } },
+    spec: { backoffLimit: 2, template: { metadata: { labels: withObjectStoreLabels(labels, podSpec) }, spec: podSpec } },
   };
 }
 
@@ -1056,6 +1066,28 @@ export function buildRecoveryBootstrapJob(cluster: FirebirdCluster): V1Job {
   const target = replicationEnabled(cluster) && !replica
     ? `${FIREBIRD_DATA_DIR}/.bootstrap.fdb`
     : `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`;
+  const podSpec = replayPodSpec(cluster, {
+    chain: { s3: objectStoreOf(recovery)!, keys },
+    journalS3: replica ? replica.journalS3 : recovery.pointInTime!.journalS3!,
+    // a replica cluster: every archived segment
+    target: replica ? {} : recovery.pointInTime!,
+    command: `set -eu; . ${OPERATOR_CONFIG_DIR}/pitr-restore.sh`,
+    env: [
+      { name: 'LOCAL_TARGET', value: target },
+      { name: 'CHAIN_COUNT', value: String(keys.length) },
+      ...(replica ? [{ name: 'REPLICA_SOURCE', value: replicationDirectories(cluster, FIREBIRD_DATA_DIR).source }] : []),
+    ],
+    volumes: [{ name: 'firebird-data', persistentVolumeClaim: { claimName: instanceDataClaimName(cluster, 0) } }],
+    mounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }],
+    // a new volume's root belongs to root: the group makes it writable for the Firebird user
+    securityContext: {
+      runAsNonRoot: true,
+      runAsUser: FIREBIRD_UID,
+      runAsGroup: FIREBIRD_UID,
+      fsGroup: FIREBIRD_UID,
+      seccompProfile: { type: 'RuntimeDefault' },
+    },
+  });
   return {
     apiVersion: 'batch/v1',
     kind: 'Job',
@@ -1067,31 +1099,7 @@ export function buildRecoveryBootstrapJob(cluster: FirebirdCluster): V1Job {
     },
     spec: {
       backoffLimit: 2,
-      template: {
-        metadata: { labels },
-        spec: replayPodSpec(cluster, {
-          chain: { s3: recovery.s3!, keys },
-          journalS3: replica ? replica.journalS3 : recovery.pointInTime!.journalS3!,
-          // a replica cluster: every archived segment
-          target: replica ? {} : recovery.pointInTime!,
-          command: `set -eu; . ${OPERATOR_CONFIG_DIR}/pitr-restore.sh`,
-          env: [
-            { name: 'LOCAL_TARGET', value: target },
-            { name: 'CHAIN_COUNT', value: String(keys.length) },
-            ...(replica ? [{ name: 'REPLICA_SOURCE', value: replicationDirectories(cluster, FIREBIRD_DATA_DIR).source }] : []),
-          ],
-          volumes: [{ name: 'firebird-data', persistentVolumeClaim: { claimName: instanceDataClaimName(cluster, 0) } }],
-          mounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }],
-          // a new volume's root belongs to root: the group makes it writable for the Firebird user
-          securityContext: {
-            runAsNonRoot: true,
-            runAsUser: FIREBIRD_UID,
-            runAsGroup: FIREBIRD_UID,
-            fsGroup: FIREBIRD_UID,
-            seccompProfile: { type: 'RuntimeDefault' },
-          },
-        }),
-      },
+      template: { metadata: { labels: withObjectStoreLabels(labels, podSpec) }, spec: podSpec },
     },
   };
 }
@@ -1396,8 +1404,9 @@ export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Contai
     volumeMounts: [...mounts, ...extraMounts],
   });
 
-  if (recovery.s3) {
-    const s3 = recovery.s3;
+  const store = objectStoreOf(recovery);
+  if (store) {
+    const s3 = store;
     const key = recovery.sourcePath ?? 'backup.fbk';
     return [
       agentClient(s3)
@@ -1425,5 +1434,18 @@ export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Contai
 /** Volumes needed by the bootstrap init containers, beyond the data and config volumes */
 export function bootstrapVolumes(cluster: FirebirdCluster): V1Volume[] {
   const recovery = cluster.spec.bootstrap?.recovery;
-  return recovery?.s3 && !recovery.pointInTime ? [workVolume, ...s3ClientVolumes(recovery.s3)] : [];
+  const store = objectStoreOf(recovery);
+  return store && !recovery?.pointInTime ? [workVolume, ...s3ClientVolumes(store)] : [];
+}
+
+/**
+ * Labels of the instance pods for the bootstrap init containers: AKS workload identity's when
+ * the backup comes from an Azure container without a Secret
+ */
+export function bootstrapPodLabels(cluster: FirebirdCluster): Record<string, string> {
+  const recovery = cluster.spec.bootstrap?.recovery;
+  const store = objectStoreOf(recovery);
+  return store && !recovery?.pointInTime && storeKind(store) === 'azure' && !store.secretRef
+    ? { 'azure.workload.identity/use': 'true' }
+    : {};
 }

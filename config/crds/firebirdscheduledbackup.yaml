@@ -57,6 +57,8 @@ spec:
               description: FirebirdScheduledBackupSpec defines the desired state of a FirebirdScheduledBackup
               type: object
               x-kubernetes-validations:
+                - rule: '(has(self.s3) ? 1 : 0) + (has(self.azureBlob) ? 1 : 0) + (has(self.gcs) ? 1 : 0) <= 1'
+                  message: at most one of s3, azureBlob and gcs (one object store)
                 - rule: "!has(self.verify) || !self.verify || !has(self.type) || self.type != 'physical'"
                   message: verify is supported for logical backups only
                 - rule: "!has(self.type) || self.type != 'volumeSnapshot' || (!has(self.s3) && !has(self.level))"
@@ -199,6 +201,49 @@ spec:
                         name:
                           type: string
                           minLength: 1
+                azureBlob:
+                  description: Azure Blob Storage instead of S3, through fb-agent objects (since v0.189.0; at most one of s3, azureBlob and gcs)
+                  type: object
+                  required: [storageAccount, container]
+                  properties:
+                    storageAccount:
+                      type: string
+                      pattern: '^[a-z0-9]{3,24}$'
+                    container:
+                      type: string
+                      pattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'
+                    prefix:
+                      type: string
+                    endpoint:
+                      description: The account's Blob endpoint instead of https://<storageAccount>.blob.core.windows.net (Azurite http://azurite:10000/devstoreaccount1)
+                      type: string
+                    secretRef:
+                      description: A Secret with AZURE_STORAGE_ACCOUNT_KEY or AZURE_STORAGE_SAS_KEY; without it AKS workload identity or a managed identity
+                      type: object
+                      required: [name]
+                      properties:
+                        name:
+                          type: string
+                gcs:
+                  description: Google Cloud Storage instead of S3, through fb-agent objects (since v0.189.0; at most one of s3, azureBlob and gcs)
+                  type: object
+                  required: [bucket]
+                  properties:
+                    bucket:
+                      type: string
+                      minLength: 1
+                    prefix:
+                      type: string
+                    endpoint:
+                      description: The storage API's base URL instead of https://storage.googleapis.com (tests)
+                      type: string
+                    secretRef:
+                      description: A Secret with APPLICATION_CREDENTIALS, a service account's JSON key; without it Application Default Credentials (GKE workload identity)
+                      type: object
+                      required: [name]
+                      properties:
+                        name:
+                          type: string
             status:
               description: FirebirdScheduledBackupStatus defines the observed state of FirebirdScheduledBackup
               type: object

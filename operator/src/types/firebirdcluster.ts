@@ -129,6 +129,52 @@ export interface S3BackupConfiguration {
 }
 
 /**
+ * An Azure Blob Storage container (docs/object-stores.md, since v0.189.0): the transfers run
+ * through `fb-agent objects`, over Azure's own API. Objects are encrypted at rest by the service.
+ */
+export interface AzureBlobConfiguration {
+  /** The storage account */
+  storageAccount: string;
+  /** The container */
+  container: string;
+  /** Object key prefix/folder inside the container */
+  prefix?: string;
+  /**
+   * The account's Blob endpoint instead of https://<storageAccount>.blob.core.windows.net (e.g.
+   * Azurite: http://azurite:10000/devstoreaccount1)
+   */
+  endpoint?: string;
+  /**
+   * Secret holding AZURE_STORAGE_ACCOUNT_KEY (the account key) or AZURE_STORAGE_SAS_KEY (a SAS
+   * token). Without it the pods use AKS workload identity (labelled
+   * azure.workload.identity/use, through spec.serviceAccountName) or a managed identity.
+   */
+  secretRef?: {
+    name: string;
+  };
+}
+
+/**
+ * A Google Cloud Storage bucket (docs/object-stores.md, since v0.189.0): the transfers run
+ * through `fb-agent objects`, over GCS's own API. Objects are encrypted at rest by the service.
+ */
+export interface GCSConfiguration {
+  /** The bucket */
+  bucket: string;
+  /** Object key prefix/folder inside the bucket */
+  prefix?: string;
+  /**
+   * Secret holding APPLICATION_CREDENTIALS, a service account's JSON key. Without it the pods use
+   * Application Default Credentials: GKE workload identity through spec.serviceAccountName.
+   */
+  secretRef?: {
+    name: string;
+  };
+  /** The storage API's base URL instead of https://storage.googleapis.com (tests) */
+  endpoint?: string;
+}
+
+/**
  * Backup configuration for a Firebird cluster.
  */
 export interface BackupConfiguration {
@@ -157,6 +203,10 @@ export interface BackupConfiguration {
   retentionPolicy?: string;
   /** Upload backups to S3 instead of the primary's data directory */
   s3?: S3BackupConfiguration;
+  /** Azure Blob Storage instead of S3 (since v0.189.0; at most one of s3, azureBlob and gcs) */
+  azureBlob?: AzureBlobConfiguration;
+  /** Google Cloud Storage instead of S3 (since v0.189.0; at most one of s3, azureBlob and gcs) */
+  gcs?: GCSConfiguration;
   /**
    * Where the backup runs: "primary" (default) or "prefer-standby", a ready replica when one
    * qualifies (backups to S3 only; server-side backups always run on the primary)
@@ -366,6 +416,10 @@ export interface BackupRecoveryConfiguration {
   sourcePath?: string;
   /** S3 cloud storage source configuration */
   s3?: S3BackupConfiguration;
+  /** Azure Blob Storage instead of S3 (since v0.189.0; at most one of s3, azureBlob and gcs) */
+  azureBlob?: AzureBlobConfiguration;
+  /** Google Cloud Storage instead of S3 (since v0.189.0; at most one of s3, azureBlob and gcs) */
+  gcs?: GCSConfiguration;
   /**
    * Point-in-time recovery: sourcePath is an nbackup level 0 object key (with
    * incrementalPaths on top), and the journal archive in pointInTime.journalS3 (required) is

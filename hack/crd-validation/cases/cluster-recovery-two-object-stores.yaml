@@ -1,0 +1,17 @@
+# expect: at most one of s3, azureBlob and gcs
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  bootstrap:
+    recovery:
+      sourcePath: backup.fbk
+      azureBlob:
+        storageAccount: account1
+        container: backups
+      gcs:
+        bucket: b

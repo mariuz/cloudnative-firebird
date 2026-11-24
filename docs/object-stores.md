@@ -1,7 +1,8 @@
 # Object stores other than S3
 
 Status: design, 2026-11-23 (revised: the cloud APIs directly, from the agent). Phase 1a,
-`fb-agent objects`: v0.187.0. Phase 1b, `s3.client: agent`: v0.188.0. Tracked in [TODO.md](../TODO.md) ("Object stores other than S3").
+`fb-agent objects`: v0.187.0. Phase 1b, `s3.client: agent`: v0.188.0. Phase 2, backups, restores, bootstrap and
+retention on Azure Blob and GCS: v0.189.0. Tracked in [TODO.md](../TODO.md) ("Object stores other than S3").
 
 ## The gap
 
@@ -234,11 +235,14 @@ is `spec.serviceAccountName`, as for S3's workload identity today.
    `utils/object-store.ts`, with every caller moved onto it (the `aws` client byte-identical), and
    `s3.client: agent`. The kind CI runs its object store steps with the agent's client on one
    track.
-2. **Backups, restores, bootstrap and retention on Azure Blob and GCS.** The `azureBlob` and `gcs`
-   fields on backups, schedules, restores and `bootstrap.recovery`; credentials; the webhook
-   rules. The kind CI runs Azurite and fake-gcs-server and takes a logical and a physical backup
-   to each, restores them, bootstraps a cluster from one, and checks retention. The ROADMAP
-   entry of v0.4.0 is corrected.
+2. **Backups, restores, bootstrap and retention on Azure Blob and GCS.** *(v0.189.0)* The
+   `azureBlob` and `gcs` fields on backups, schedules, restores and `bootstrap.recovery`;
+   credentials; the webhook rules and a CEL rule (one store). The kind CI runs Azurite and
+   fake-gcs-server: a logical and a physical backup to Azurite, both restored, and retention
+   deleting an expired backup there; from fake-gcs-server, a restore and a cluster bootstrapped
+   from a backup put through its JSON API (no emulator takes object_store's GCS uploads). The
+   ROADMAP entry of v0.4.0 is corrected. A point-in-time recovery reads the backup chain from
+   any store and its journals from S3 until phase 3; a replica cluster still bootstraps from S3.
 3. **The journal archive and point-in-time recovery on Azure Blob and GCS**, declarative
    databases' `journals/<file>/` included. The kind CI repeats its PITR step against each store.
 4. **Replica clusters following an Azure Blob or GCS archive.** `archive-follower.sh` moves onto
