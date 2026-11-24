@@ -1,5 +1,4 @@
 import { CoreV1Event, dumpYaml, V1Deployment, V1Job, V1PersistentVolumeClaim, V1Pod, V1Service, V1StatefulSet } from '@kubernetes/client-node';
-import { objectStoreOf, objectUri } from '../utils/object-store';
 import { API_GROUP, API_VERSION, RECONCILIATION_DISABLED_ANNOTATION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdScheduledBackup } from '../types';
 import { isPodReady, ROLE_LABEL } from '../utils/routing';
 import { nextCronTime } from '../utils/cron';
@@ -667,7 +666,8 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
         const s3 = type !== 'volumeSnapshot' ? cluster.spec.backup?.s3 : undefined;
         const azureBlob = type !== 'volumeSnapshot' ? cluster.spec.backup?.azureBlob : undefined;
         const gcs = type !== 'volumeSnapshot' ? cluster.spec.backup?.gcs : undefined;
-        const store = objectStoreOf({ s3, azureBlob, gcs });
+        // named here: the plugin loads none of the operator's Job builders (their scripts are not in its build)
+        const store = s3 ? `s3://${s3.bucket}` : azureBlob ? `azure://${azureBlob.storageAccount}/${azureBlob.container}` : gcs ? `gs://${gcs.bucket}` : undefined;
         const body: FirebirdBackup = {
           apiVersion: `${API_GROUP}/${API_VERSION}` as FirebirdBackup['apiVersion'],
           kind: 'FirebirdBackup',
@@ -688,7 +688,7 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
         await api.createBackup(namespace, body);
         const details = [
           `${type}${database ? ` of FirebirdDatabase ${database}` : ''}`,
-          ...(store ? [`to ${objectUri({ ...store, prefix: undefined }, '').replace(/\/$/, '')}`] : []),
+          ...(store ? [`to ${store}`] : []),
           ...(target === 'prefer-standby' ? ['from a replica if one is ready'] : []),
           ...(verify ? ['verified'] : []),
         ];
