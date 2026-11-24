@@ -2854,7 +2854,9 @@ jobs:
                 containers:
                   - name: azurite
                     image: mcr.microsoft.com/azure-storage/azurite:3.34.0
-                    command: [azurite-blob, --blobHost, 0.0.0.0, --skipApiVersionCheck, --loose]
+                    # path-style URLs for every host: with a dotted host name (azurite.default.svc)
+                    # Azurite would take its first label for the account (production-style URLs)
+                    command: [azurite-blob, --blobHost, 0.0.0.0, --skipApiVersionCheck, --loose, --disableProductStyleUrl]
                     ports: [{ containerPort: 10000 }]
           ---
           apiVersion: v1
@@ -2891,8 +2893,7 @@ jobs:
           kubectl rollout status deployment/azurite --timeout=180s
           kubectl rollout status deployment/fake-gcs --timeout=180s
           # Azure's Python SDK in a pod for what the operator does not do: the container, seeding,
-          # listing and copying a backup to fake-gcs-server (the script on stdin; rclone cannot
-          # address an endpoint of its own, only a domain suffix or the emulator on localhost)
+          # listing and copying a backup to fake-gcs-server (the script on stdin)
           azure() {
             kubectl run "azure-$RANDOM" --rm -i --restart=Never --quiet --image=python:3.12-slim \
               --env=AZ="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=$AZURE_KEY;BlobEndpoint=$AZURE_ENDPOINT;" \
