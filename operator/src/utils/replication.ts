@@ -1,5 +1,5 @@
 import { INIT_SQL_DIR, INIT_SQL_VOLUME, initSqlVolume } from './init-sql';
-import { journalArchiveOf, sameObjectStoreLocation } from './object-store';
+import { journalArchiveOf, sameObjectStoreLocation } from './object-store-fields';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { V1Container, V1EnvVar, V1VolumeMount } from '@kubernetes/client-node';

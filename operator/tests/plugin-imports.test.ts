@@ -22,18 +22,33 @@ function imports(file: string): string[] {
     .filter((p) => existsSync(p));
 }
 
+/** Every module the file loads, directly or not (paths relative to src/) */
+function reachable(entry: string): string[] {
+  const seen = new Set<string>();
+  const queue = [join(src, entry)];
+  while (queue.length) {
+    const file = queue.pop()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    queue.push(...imports(file));
+  }
+  return [...seen].map((f) => f.slice(src.length + 1));
+}
+
 describe('the kubectl plugin', () => {
   it('loads no module that reads the replication scripts', () => {
-    const seen = new Set<string>();
-    const queue = [join(src, 'plugin', 'kubectl-firebird.ts')];
-    while (queue.length) {
-      const file = queue.pop()!;
-      if (seen.has(file)) continue;
-      seen.add(file);
-      queue.push(...imports(file));
-    }
-    const reached = [...seen].map((f) => f.slice(src.length + 1));
+    const reached = reachable('plugin/kubectl-firebird.ts');
     expect(reached).toContain('plugin/cli.ts');
     expect(reached).not.toContain('utils/replication.ts');
+  });
+});
+
+describe('the operator modules', () => {
+  // utils/backup builds its Jobs' mounts from utils/replication's constants when it loads: were
+  // utils/replication to load utils/backup, the one loaded first would see the other's constants
+  // undefined (v0.190.0's first commit: a backup Job with an empty mountPath, refused by the API)
+  it('keep utils/replication from loading utils/backup', () => {
+    expect(reachable('utils/backup.ts')).toContain('utils/replication.ts');
+    expect(reachable('utils/replication.ts')).not.toContain('utils/backup.ts');
   });
 });
