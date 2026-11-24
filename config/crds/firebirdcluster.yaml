@@ -936,14 +936,14 @@ spec:
                       x-kubernetes-validations:
                         - rule: '(has(self.s3) ? 1 : 0) + (has(self.azureBlob) ? 1 : 0) + (has(self.gcs) ? 1 : 0) <= 1'
                           message: at most one of s3, azureBlob and gcs (one object store)
-                        - rule: has(self.volumeSnapshot) || has(self.s3) || (has(self.sourcePath) && self.sourcePath != '')
+                        - rule: has(self.volumeSnapshot) || has(self.s3) || has(self.azureBlob) || has(self.gcs) || (has(self.sourcePath) && self.sourcePath != '')
                           message: bootstrap recovery requires sourcePath, s3 or volumeSnapshot
-                        - rule: "!has(self.volumeSnapshot) || (!has(self.s3) && !has(self.sourcePath) && !has(self.pointInTime))"
+                        - rule: "!has(self.volumeSnapshot) || (!has(self.s3) && !has(self.azureBlob) && !has(self.gcs) && !has(self.sourcePath) && !has(self.pointInTime))"
                           message: bootstrap.recovery.volumeSnapshot is mutually exclusive with sourcePath, s3 and pointInTime
                         - rule: "!has(self.incrementalPaths) || size(self.incrementalPaths) == 0 || has(self.pointInTime)"
                           message: bootstrap.recovery.incrementalPaths applies to point-in-time recovery only
-                        - rule: "!has(self.pointInTime) || (has(self.s3) && has(self.sourcePath) && has(self.pointInTime.journalS3))"
-                          message: bootstrap.recovery.pointInTime needs s3, sourcePath and pointInTime.journalS3
+                        - rule: "!has(self.pointInTime) || ((has(self.s3) || has(self.azureBlob) || has(self.gcs)) && has(self.sourcePath) && (has(self.pointInTime.journalS3) || has(self.pointInTime.journalAzureBlob) || has(self.pointInTime.journalGCS)))"
+                          message: bootstrap.recovery.pointInTime needs an object store (s3, azureBlob or gcs), sourcePath and a journal archive (pointInTime.journalS3, journalAzureBlob or journalGCS)
                       properties:
                         sourcePath:
                           description: >-
