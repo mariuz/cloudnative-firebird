@@ -1,0 +1,16 @@
+# expect: at most one of journalS3, journalAzureBlob and journalGCS
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRestore
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  restoreType: physical
+  backupPath: nbackup-l0.nbk
+  s3:
+    bucket: b
+  pointInTime:
+    journalS3:
+      bucket: b
+    journalGCS:
+      bucket: j

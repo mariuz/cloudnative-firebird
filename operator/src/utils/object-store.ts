@@ -1,5 +1,5 @@
 import { V1Container, V1EnvVar, V1PodSpec } from '@kubernetes/client-node';
-import { AzureBlobConfiguration, FirebirdCluster, GCSConfiguration, S3BackupConfiguration } from '../types';
+import { AzureBlobConfiguration, FirebirdCluster, GCSConfiguration, PointInTimeRecovery, S3BackupConfiguration } from '../types';
 import { AGENT_PATH } from './agent';
 import { clusterImage } from './image-catalog';
 import { shellQuote, sseCustomerKeyFile } from './backup';
@@ -67,6 +67,27 @@ export function objectStoreOf(fields: ObjectStoreFields | undefined): ObjectStor
   if (fields?.azureBlob) return azureBlobStore(fields.azureBlob);
   if (fields?.gcs) return gcsStore(fields.gcs);
   return undefined;
+}
+
+/** The cluster's journal archive (phase 3): journalArchiveS3, journalArchiveAzureBlob or journalArchiveGCS */
+export function journalArchiveOf(cluster: FirebirdCluster): ObjectStoreConfiguration | undefined {
+  const r = cluster.spec.replication;
+  return r ? objectStoreOf({ s3: r.journalArchiveS3, azureBlob: r.journalArchiveAzureBlob, gcs: r.journalArchiveGCS }) : undefined;
+}
+
+/** The journal archive a point-in-time recovery names: journalS3, journalAzureBlob or journalGCS */
+export function pointInTimeJournalOf(pitr: PointInTimeRecovery | undefined): ObjectStoreConfiguration | undefined {
+  return pitr ? objectStoreOf({ s3: pitr.journalS3, azureBlob: pitr.journalAzureBlob, gcs: pitr.journalGCS }) : undefined;
+}
+
+/** Whether two stores are the same place: kind, account, bucket or container, and prefix */
+export function sameObjectStoreLocation(a: S3BackupConfiguration, b: S3BackupConfiguration): boolean {
+  return (
+    storeKind(a) === storeKind(b) &&
+    (a as ObjectStoreConfiguration).storageAccount === (b as ObjectStoreConfiguration).storageAccount &&
+    a.bucket === b.bucket &&
+    prefix(a) === prefix(b)
+  );
 }
 
 /** The kind of a store */

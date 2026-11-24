@@ -1,4 +1,5 @@
 import { initSqlRefs } from '../utils/init-sql';
+import { journalArchiveOf } from '../utils/object-store';
 import { smartShutdownInProgress } from '../utils/lifecycle';
 import { reconciliationPaused } from '../utils/suspension';
 import { inheritMetadata, inheritedMetadataMissing, missingInheritedMetadata, withInheritedMetadata } from '../utils/pod-settings';
@@ -2826,7 +2827,7 @@ export class FirebirdClusterController {
   /** Reconcile CronJob for replication journal continuous archiving to S3 */
   /** status.journalArchiveSequence: see journalArchiveListedSequence (utils/backup.ts) */
   private async journalArchiveSequence(cluster: FirebirdCluster, stored?: number): Promise<number | undefined> {
-    if (!replicationEnabled(cluster) || !cluster.spec.replication?.journalArchiveS3) return stored;
+    if (!replicationEnabled(cluster) || !journalArchiveOf(cluster)) return stored;
     const pods = (
       await this.coreApi.listNamespacedPod({
         namespace: cluster.metadata.namespace ?? 'default',
@@ -2844,7 +2845,7 @@ export class FirebirdClusterController {
     const { name, namespace = 'default' } = cluster.metadata;
     const cronJobName = `${name}-journal-archive`;
 
-    if (cluster.spec.replication?.enabled && cluster.spec.replication.journalArchiveS3) {
+    if (cluster.spec.replication?.enabled && journalArchiveOf(cluster)) {
       const built = buildJournalArchiveCronJob(cluster, primaryPod);
       if (!built) return;
       const desired = withTemplateHash(withInheritedMetadata(cluster, withHibernation(built, cluster)));

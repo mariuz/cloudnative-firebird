@@ -207,6 +207,8 @@ spec:
                     The backup must have been taken on the primary.
                   type: object
                   x-kubernetes-validations:
+                    - rule: '(has(self.journalS3) ? 1 : 0) + (has(self.journalAzureBlob) ? 1 : 0) + (has(self.journalGCS) ? 1 : 0) <= 1'
+                      message: at most one of journalS3, journalAzureBlob and journalGCS (one journal archive)
                     - rule: "!(has(self.targetTime) && has(self.targetSegment))"
                       message: targetTime and targetSegment are mutually exclusive
                   properties:
@@ -276,6 +278,49 @@ spec:
                             name:
                               type: string
                               minLength: 1
+                    journalAzureBlob:
+                      description: The journal archive to replay in Azure Blob Storage instead of S3, through fb-agent objects (since v0.190.0)
+                      type: object
+                      required: [storageAccount, container]
+                      properties:
+                        storageAccount:
+                          type: string
+                          pattern: '^[a-z0-9]{3,24}$'
+                        container:
+                          type: string
+                          pattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'
+                        prefix:
+                          type: string
+                        endpoint:
+                          description: The account's Blob endpoint instead of https://<storageAccount>.blob.core.windows.net
+                          type: string
+                        secretRef:
+                          description: A Secret with AZURE_STORAGE_ACCOUNT_KEY or AZURE_STORAGE_SAS_KEY; without it AKS workload identity or a managed identity
+                          type: object
+                          required: [name]
+                          properties:
+                            name:
+                              type: string
+                    journalGCS:
+                      description: The journal archive to replay in Google Cloud Storage instead of S3, through fb-agent objects (since v0.190.0)
+                      type: object
+                      required: [bucket]
+                      properties:
+                        bucket:
+                          type: string
+                          minLength: 1
+                        prefix:
+                          type: string
+                        endpoint:
+                          description: The storage API's base URL instead of https://storage.googleapis.com (tests)
+                          type: string
+                        secretRef:
+                          description: A Secret with APPLICATION_CREDENTIALS, a service account's JSON key; without it Application Default Credentials (GKE workload identity)
+                          type: object
+                          required: [name]
+                          properties:
+                            name:
+                              type: string
             status:
               description: FirebirdRestoreStatus defines the observed state of FirebirdRestore
               type: object

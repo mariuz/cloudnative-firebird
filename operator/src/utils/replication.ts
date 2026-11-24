@@ -1,4 +1,5 @@
 import { INIT_SQL_DIR, INIT_SQL_VOLUME, initSqlVolume } from './init-sql';
+import { journalArchiveOf, sameObjectStoreLocation } from './object-store';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { V1Container, V1EnvVar, V1VolumeMount } from '@kubernetes/client-node';
@@ -142,10 +143,9 @@ export function replicaClusterRefusal(cluster: FirebirdCluster): string | undefi
 export function replicaSourceRefusal(replica: FirebirdCluster, clusters: FirebirdCluster[]): string | undefined {
   const follows = replica.spec.replica?.enabled ? replica.spec.replica.journalS3 : undefined;
   if (!follows) return undefined;
-  const key = (s3: { bucket?: string; prefix?: string }) => `${s3.bucket}/${(s3.prefix ?? '').replace(/^\/+|\/+$/g, '')}`;
   const source = clusters.find((c) => {
-    const archive = c.spec.replication?.journalArchiveS3;
-    return archive && c.metadata.name !== replica.metadata.name && key(archive) === key(follows) && replicatedDatabaseFiles(c).length > 0;
+    const archive = journalArchiveOf(c);
+    return archive && c.metadata.name !== replica.metadata.name && sameObjectStoreLocation(archive, follows) && replicatedDatabaseFiles(c).length > 0;
   });
   return source
     ? `cluster ${source.metadata.name} replicates declarative databases (${replicatedDatabaseFiles(source).join(', ')}) into the journal archive ` +
@@ -255,11 +255,11 @@ function replicationEnv(
     ...(cluster.spec.replication?.pruneAppliedSegments
       ? [
           { name: 'PRUNE_APPLIED', value: 'true' },
-          ...(cluster.spec.replication.journalArchiveS3 ? [{ name: 'ARCHIVE_UPLOAD', value: 'true' }] : []),
+          ...(journalArchiveOf(cluster) ? [{ name: 'ARCHIVE_UPLOAD', value: 'true' }] : []),
         ]
       : []),
     // recovery points within a segment, for point-in-time recovery from the journal archive
-    ...(cluster.spec.replication?.journalArchiveS3 ? [{ name: 'RECOVERY_POINTS', value: 'true' }] : []),
+    ...(journalArchiveOf(cluster) ? [{ name: 'RECOVERY_POINTS', value: 'true' }] : []),
     ...isolationCheckEnv(cluster),
     // only once the cluster replicates declarative databases, so the instance pods of other clusters do not change
     ...(replicatedDatabasesWired(cluster)

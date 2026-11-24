@@ -362,6 +362,13 @@ export interface ReplicationConfiguration {
   failover?: FailoverConfiguration;
   /** Cloud S3 storage configuration for continuous journal archiving (PITR) */
   journalArchiveS3?: S3BackupConfiguration;
+  /**
+   * The journal archive in Azure Blob Storage instead of S3 (since v0.190.0; at most one of
+   * journalArchiveS3, journalArchiveAzureBlob and journalArchiveGCS)
+   */
+  journalArchiveAzureBlob?: AzureBlobConfiguration;
+  /** The journal archive in Google Cloud Storage instead of S3 (since v0.190.0) */
+  journalArchiveGCS?: GCSConfiguration;
   /** Cron schedule for archiving completed journal files to object storage */
   archiveSchedule?: string;
   /** Replication lag and readiness-aware routing of read-only traffic to replicas */
