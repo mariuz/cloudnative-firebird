@@ -2827,6 +2827,225 @@ jobs:
           kubectl delete firebirdcluster arch --wait=false
           kubectl delete deployment s3 --wait=false
 
+      - name: Verify backups, restores, retention and bootstrap on Azure Blob (Azurite) and GCS (fake-gcs-server)
+        if: matrix.track.id == 'extended'
+        run: |
+          # docs/object-stores.md, phase 2: azureBlob and gcs beside s3, through fb-agent objects.
+          # Azurite takes every operation; fake-gcs-server only the reads (object_store uploads
+          # through GCS's XML API, which no emulator takes), so the GCS backup is put through its
+          # JSON API, then restored and bootstrapped from
+          AZURE_KEY='Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=='
+          AZURE_ENDPOINT=http://azurite.default.svc:10000/devstoreaccount1
+          GCS_ENDPOINT=http://fake-gcs.default.svc:4443
+          kubectl create secret generic azure-credentials --from-literal=AZURE_STORAGE_ACCOUNT_KEY="$AZURE_KEY"
+          # a service account file without OAuth, for an emulator (object_store's disable_oauth)
+          kubectl create secret generic gcs-credentials \
+            --from-literal=APPLICATION_CREDENTIALS='{"disable_oauth": true, "private_key": "", "private_key_id": "", "client_email": "ci@example.com"}'
+          kubectl apply -f - <<'EOF'
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: azurite
+          spec:
+            selector: { matchLabels: { app: azurite } }
+            template:
+              metadata: { labels: { app: azurite } }
+              spec:
+                containers:
+                  - name: azurite
+                    image: mcr.microsoft.com/azure-storage/azurite:3.34.0
+                    # path-style URLs for every host: with a dotted host name (azurite.default.svc)
+                    # Azurite would take its first label for the account (production-style URLs)
+                    command: [azurite-blob, --blobHost, 0.0.0.0, --skipApiVersionCheck, --loose, --disableProductStyleUrl]
+                    ports: [{ containerPort: 10000 }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: azurite
+          spec:
+            selector: { app: azurite }
+            ports: [{ port: 10000, targetPort: 10000 }]
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: fake-gcs
+          spec:
+            selector: { matchLabels: { app: fake-gcs } }
+            template:
+              metadata: { labels: { app: fake-gcs } }
+              spec:
+                containers:
+                  - name: fake-gcs
+                    image: fsouza/fake-gcs-server:1.52.2
+                    args: [-scheme, http, -port, "4443", -public-host, "fake-gcs.default.svc:4443"]
+                    ports: [{ containerPort: 4443 }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: fake-gcs
+          spec:
+            selector: { app: fake-gcs }
+            ports: [{ port: 4443, targetPort: 4443 }]
+          EOF
+          kubectl rollout status deployment/azurite --timeout=180s
+          kubectl rollout status deployment/fake-gcs --timeout=180s
+          # Azure's Python SDK in a pod for what the operator does not do: the container, seeding,
+          # listing and copying a backup to fake-gcs-server (the script on stdin)
+          azure() {
+            kubectl run "azure-$RANDOM" --rm -i --restart=Never --quiet --image=python:3.12-slim \
+              --env=AZ="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=$AZURE_KEY;BlobEndpoint=$AZURE_ENDPOINT;" \
+              --env=GCS="$GCS_ENDPOINT" --env=HOME=/tmp --command -- \
+              sh -c 'pip install -q --disable-pip-version-check --root-user-action=ignore azure-storage-blob >/dev/null && python -u -'
+          }
+          azure <<'PY'
+          import os
+          from azure.storage.blob import BlobServiceClient
+          BlobServiceClient.from_connection_string(os.environ['AZ']).create_container('fbk')
+          print('container fbk created')
+          PY
+          LIST='import os; from azure.storage.blob import BlobServiceClient as S; c = S.from_connection_string(os.environ["AZ"]).get_container_client("fbk")'
+          GCS="{ bucket: fbk, prefix: prod, endpoint: \"$GCS_ENDPOINT\", secretRef: { name: gcs-credentials } }"
+          DB_DIR=/var/lib/firebird/data
+          wait_phase() {
+            for _ in $(seq 1 60); do
+              phase=$(kubectl get "$1" "$2" -o jsonpath='{.status.phase}')
+              [ "$phase" = "$3" ] && return 0
+              [ "$phase" = Failed ] && break
+              sleep 5
+            done
+            kubectl get "$1" "$2" -o yaml; kubectl logs "job/$4" --all-containers || true; return 1
+          }
+          count() { kubectl exec "$1" -c firebird -- bash -c "echo 'select count(*) from app;' | isql -q localhost:$DB_DIR/$2" | awk '$1 ~ /^[0-9]+$/ { print $1 }'; }
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: objs
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+          EOF
+          timeout 300 bash -c 'until kubectl get pod objs-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/objs-0 --for=condition=Ready --timeout=300s
+          kubectl exec objs-0 -c firebird -- bash -c "echo \"create table app (id int); commit; insert into app values (1); insert into app values (2); insert into app values (3); commit;\" | isql -q localhost:$DB_DIR/mydb.fdb"
+          # a logical and a physical backup to Azure Blob
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: objs-logical
+          spec:
+            clusterName: objs
+            azureBlob: { storageAccount: devstoreaccount1, container: fbk, prefix: logical, endpoint: "$AZURE_ENDPOINT", secretRef: { name: azure-credentials } }
+          ---
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: objs-physical
+          spec:
+            clusterName: objs
+            type: physical
+            level: 0
+            azureBlob: { storageAccount: devstoreaccount1, container: fbk, prefix: physical, endpoint: "$AZURE_ENDPOINT", secretRef: { name: azure-credentials } }
+          EOF
+          wait_phase firebirdbackup objs-logical Completed backup-objs-logical
+          wait_phase firebirdbackup objs-physical Completed backup-objs-physical
+          [ "$(kubectl get firebirdbackup objs-logical -o jsonpath={.status.location})" = azure://devstoreaccount1/fbk/logical/backup-objs-logical.fbk ]
+          listed=$(echo "$LIST; print('\\n'.join(b.name for b in c.list_blobs()))" | azure)
+          echo "$listed"
+          grep -q 'physical/nbackup-l0-objs-physical.nbk' <<<"$listed"
+          # restored from Azure Blob, each into a new database file
+          kubectl apply -f - <<'EOF'
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: objs-logical
+          spec:
+            clusterName: objs
+            backupName: objs-logical
+          ---
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: objs-physical
+          spec:
+            clusterName: objs
+            backupName: objs-physical
+            restoreType: physical
+          EOF
+          wait_phase firebirdrestore objs-logical Completed restore-objs-logical
+          wait_phase firebirdrestore objs-physical Completed restore-objs-physical
+          [ "$(count objs-0 restore-objs-logical.fdb)" = 3 ]
+          [ "$(count objs-0 restore-objs-physical.fdb)" = 3 ]
+          # retention: an expired backup of the series (its time is in its name) is deleted after
+          # the next one is uploaded
+          echo "$LIST; c.upload_blob('retention/backup-objs-sched-20200101T000000Z.fbk', b'old')" | azure
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdScheduledBackup
+          metadata:
+            name: objs-sched
+          spec:
+            clusterName: objs
+            schedule: "0 0 1 1 *"
+            retentionPolicy: 7d
+            azureBlob: { storageAccount: devstoreaccount1, container: fbk, prefix: retention, endpoint: "$AZURE_ENDPOINT", secretRef: { name: azure-credentials } }
+          EOF
+          timeout 120 bash -c 'until kubectl get cronjob sched-backup-objs-sched >/dev/null 2>&1; do sleep 3; done'
+          kubectl create job objs-sched-now --from=cronjob/sched-backup-objs-sched
+          kubectl wait job/objs-sched-now --for=condition=Complete --timeout=300s || { kubectl logs job/objs-sched-now --all-containers; exit 1; }
+          kubectl logs job/objs-sched-now --all-containers | grep 'retention: deleted backup-objs-sched-20200101T000000Z.fbk'
+          listed=$(echo "$LIST; print('\\n'.join(b.name for b in c.list_blobs(name_starts_with='retention/')))" | azure)
+          echo "$listed"
+          if grep -q 20200101T000000Z <<<"$listed"; then echo "the expired backup was kept"; exit 1; fi
+          grep -Eq '^retention/backup-objs-sched-[0-9]{8}T[0-9]{6}Z[.]fbk$' <<<"$listed"
+          # GCS: the logical backup, copied from Azurite through fake-gcs-server's JSON API
+          azure <<'PY'
+          import os, urllib.request
+          from azure.storage.blob import BlobServiceClient
+          data = BlobServiceClient.from_connection_string(os.environ['AZ']).get_container_client('fbk').download_blob('logical/backup-objs-logical.fbk').readall()
+          def post(path, body, kind):
+              urllib.request.urlopen(urllib.request.Request(os.environ['GCS'] + path, data=body, headers={'Content-Type': kind})).read()
+          post('/storage/v1/b', b'{"name": "fbk"}', 'application/json')
+          post('/upload/storage/v1/b/fbk/o?uploadType=media&name=prod/backup.fbk', data, 'application/octet-stream')
+          print(f'backup.fbk ({len(data)} bytes) copied to fake-gcs-server')
+          PY
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: objs-gcs
+          spec:
+            clusterName: objs
+            backupPath: backup.fbk
+            gcs: $GCS
+          ---
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: objs-boot
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            bootstrap:
+              recovery:
+                sourcePath: backup.fbk
+                gcs: $GCS
+          EOF
+          wait_phase firebirdrestore objs-gcs Completed restore-objs-gcs
+          [ "$(count objs-0 restore-objs-gcs.fdb)" = 3 ]
+          timeout 300 bash -c 'until kubectl get pod objs-boot-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/objs-boot-0 --for=condition=Ready --timeout=300s \
+            || { kubectl describe pod objs-boot-0 | tail -30; kubectl logs objs-boot-0 -c bootstrap-download || true; exit 1; }
+          [ "$(count objs-boot-0 mydb.fdb)" = 3 ]
+          kubectl delete firebirdcluster objs objs-boot --wait=false
+          kubectl delete deployment azurite fake-gcs --wait=false
+
       - name: Verify volume snapshot backups and a cluster bootstrapped from one
         if: matrix.track.id == 'extended'
         run: |

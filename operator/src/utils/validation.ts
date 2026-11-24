@@ -1,4 +1,5 @@
 import { tempVolumeErrors } from './temp-volume';
+import { ObjectStoreFields, objectStoreFieldsSet, objectStoreOf } from './object-store';
 import { customQueriesErrors } from './custom-queries';
 import { extraConfigErrors } from './pod-settings';
 import { initSqlRefsErrors } from './init-sql';
@@ -242,7 +243,9 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
     }
   } else if (spec.bootstrap?.recovery) {
     const { sourcePath, s3 } = spec.bootstrap.recovery;
-    if ((!sourcePath || sourcePath.trim() === '') && !s3) {
+    validateObjectStores('spec.bootstrap.recovery', spec.bootstrap.recovery);
+    const store = objectStoreOf(spec.bootstrap.recovery);
+    if ((!sourcePath || sourcePath.trim() === '') && !store) {
       throw new ValidationError('Bootstrap recovery requires either sourcePath or s3 configuration');
     }
     if (s3) {
@@ -259,7 +262,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       throw new ValidationError('bootstrap.recovery.incrementalPaths applies to point-in-time recovery only');
     }
     if (pointInTime) {
-      if (!s3 || !sourcePath) {
+      if (!store || !sourcePath) {
         throw new ValidationError('bootstrap.recovery.pointInTime needs s3 and sourcePath (an nbackup level 0 object key)');
       }
       if (!pointInTime.journalS3) {
@@ -303,6 +306,7 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
         );
       }
     }
+    validateObjectStores('spec.backup', spec.backup);
     if (spec.backup.s3) {
       if (!spec.backup.s3.bucket || spec.backup.s3.bucket.trim() === '') {
         throw new ValidationError('S3 backup bucket name is required');
@@ -438,6 +442,44 @@ function validateRetention(field: string, policy?: string): void {
   }
 }
 
+/**
+ * The object stores of a source or destination: at most one of s3, azureBlob and gcs, each with
+ * its container or bucket (`field` is the path of the resource's fields, e.g. "spec"; s3 is
+ * checked by validateS3 or the cluster's own checks)
+ */
+export function validateObjectStores(field: string, fields: ObjectStoreFields | undefined): void {
+  const set = objectStoreFieldsSet(fields);
+  if (set.length > 1) {
+    throw new ValidationError(`${field}: ${set.join(' and ')} exclude each other (one object store)`);
+  }
+  const azure = fields?.azureBlob;
+  if (azure) {
+    // the account name as Azure names them; the container as Azure names them
+    if (!azure.storageAccount || !/^[a-z0-9]{3,24}$/.test(azure.storageAccount)) {
+      throw new ValidationError(`${field}.azureBlob.storageAccount is required: 3 to 24 lowercase letters and digits`);
+    }
+    if (!azure.container || !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(azure.container)) {
+      throw new ValidationError(`${field}.azureBlob.container is required: 3 to 63 lowercase letters, digits and hyphens`);
+    }
+    if (azure.endpoint !== undefined && !/^https?:\/\/[^\s]+$/.test(azure.endpoint)) {
+      throw new ValidationError(`${field}.azureBlob.endpoint must be an http:// or https:// URL`);
+    }
+    if (azure.secretRef && (!azure.secretRef.name || azure.secretRef.name.trim() === '')) {
+      throw new ValidationError(`${field}.azureBlob.secretRef.name is required`);
+    }
+  }
+  const gcs = fields?.gcs;
+  if (gcs) {
+    if (!gcs.bucket || gcs.bucket.trim() === '') throw new ValidationError(`${field}.gcs.bucket is required`);
+    if (gcs.endpoint !== undefined && !/^https?:\/\/[^\s]+$/.test(gcs.endpoint)) {
+      throw new ValidationError(`${field}.gcs.endpoint must be an http:// or https:// URL`);
+    }
+    if (gcs.secretRef && (!gcs.secretRef.name || gcs.secretRef.name.trim() === '')) {
+      throw new ValidationError(`${field}.gcs.secretRef.name is required`);
+    }
+  }
+}
+
 /** A bucket and credentials Secret are required for S3 sources and destinations */
 function validateS3(field: string, s3?: S3BackupConfiguration): void {
   if (!s3) return;
@@ -509,6 +551,7 @@ export function validateBackupSpec(backup: FirebirdBackup): void {
   if (backup.spec.level !== undefined && ![0, 1, 2].includes(backup.spec.level)) {
     throw new ValidationError(`Invalid physical backup level: ${backup.spec.level}. Must be 0, 1, or 2.`);
   }
+  validateObjectStores('spec', backup.spec);
   validateS3('spec', backup.spec.s3);
   validateBackupDestination('spec', backup.spec.type, backup.spec.verify);
   validateTarget('spec', backup.spec.target);
@@ -537,14 +580,16 @@ export function validateRestoreSpec(restore: FirebirdRestore): void {
       `Invalid targetDatabase "${spec.targetDatabase}": must be a file name (letters, digits, ".", "_", "-")`,
     );
   }
+  validateObjectStores('spec', spec);
   validateS3('spec', spec.s3);
-  if (spec.backupPath && !spec.s3) validateServerPath('backupPath', spec.backupPath);
+  const store = objectStoreOf(spec);
+  if (spec.backupPath && !store) validateServerPath('backupPath', spec.backupPath);
   if (spec.incrementalBackupPaths?.length) {
     if (spec.restoreType !== 'physical' || spec.backupName) {
       throw new ValidationError('incrementalBackupPaths applies to physical restores from backupPath only');
     }
-    // with s3 they are object keys relative to s3.prefix, like backupPath
-    if (!spec.s3) spec.incrementalBackupPaths.forEach((p, i) => validateServerPath(`incrementalBackupPaths[${i}]`, p));
+    // in an object store they are keys relative to its prefix, like backupPath
+    if (!store) spec.incrementalBackupPaths.forEach((p, i) => validateServerPath(`incrementalBackupPaths[${i}]`, p));
   }
   const pitr = spec.pointInTime;
   if (pitr) {
@@ -615,6 +660,7 @@ export function validateScheduledBackupSpec(scheduledBackup: {
   if (scheduledBackup.spec.level !== undefined && ![0, 1, 2].includes(scheduledBackup.spec.level)) {
     throw new ValidationError(`Invalid physical backup level: ${scheduledBackup.spec.level}. Must be 0, 1, or 2.`);
   }
+  validateObjectStores('spec', scheduledBackup.spec);
   validateS3('spec', scheduledBackup.spec.s3);
   validateBackupDestination('spec', scheduledBackup.spec.type, scheduledBackup.spec.verify);
   validateRetention('spec', scheduledBackup.spec.retentionPolicy);

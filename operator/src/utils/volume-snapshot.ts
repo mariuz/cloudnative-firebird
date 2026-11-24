@@ -229,7 +229,7 @@ export function lockTimedOut(backup: FirebirdBackup, lockedAt: string | undefine
 
 /** Validation of the volumeSnapshot settings of a backup spec */
 export function volumeSnapshotSpecErrors(
-  spec: { type?: string; volumeSnapshot?: VolumeSnapshotConfiguration; level?: number; s3?: unknown; verify?: boolean; target?: string },
+  spec: { type?: string; volumeSnapshot?: VolumeSnapshotConfiguration; level?: number; s3?: unknown; azureBlob?: unknown; gcs?: unknown; verify?: boolean; target?: string },
   path: string,
 ): string[] {
   if (spec.type !== 'volumeSnapshot') {
@@ -237,7 +237,9 @@ export function volumeSnapshotSpecErrors(
   }
   const errors: string[] = [];
   if (spec.level !== undefined) errors.push(`${path}.level is for physical backups; a volume snapshot copies the whole volume`);
-  if (spec.s3) errors.push(`${path}.s3 is not used by volume snapshots (the CSI driver stores them)`);
+  for (const field of ['s3', 'azureBlob', 'gcs'] as const) {
+    if (spec[field]) errors.push(`${path}.${field} is not used by volume snapshots (the CSI driver stores them)`);
+  }
   if (spec.verify) errors.push(`${path}.verify is for logical backups`);
   if (spec.target === 'prefer-standby') errors.push(`${path}.target prefer-standby: volume snapshots are taken of the primary`);
   const timeout = spec.volumeSnapshot?.lockTimeoutSeconds;
@@ -422,8 +424,8 @@ export function volumeSnapshotRecoveryErrors(cluster: FirebirdCluster): string[]
   if (source.databaseName !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(source.databaseName)) {
     errors.push(`${path}.databaseName must be a file name (letters, digits, ".", "_", "-")`);
   }
-  if (recovery.sourcePath || recovery.s3 || recovery.pointInTime || recovery.incrementalPaths?.length) {
-    errors.push(`${path} is mutually exclusive with sourcePath, s3, incrementalPaths and pointInTime`);
+  if (recovery.sourcePath || recovery.s3 || recovery.azureBlob || recovery.gcs || recovery.pointInTime || recovery.incrementalPaths?.length) {
+    errors.push(`${path} is mutually exclusive with sourcePath, s3, azureBlob, gcs, incrementalPaths and pointInTime`);
   }
   if (cluster.spec.replica) errors.push(`${path}: a replica cluster bootstraps from an nbackup in S3 (bootstrap.recovery.sourcePath)`);
   return errors;

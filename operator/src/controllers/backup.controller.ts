@@ -1,4 +1,5 @@
 import { recordBackupOutcome } from '../utils/metrics';
+import { objectStoreOf } from '../utils/object-store';
 import { withInheritedMetadata } from '../utils/pod-settings';
 import { clusterStoppedReason } from '../utils/major-upgrade';
 import { replicaClusterFollowing } from '../utils/replica-cluster';
@@ -156,7 +157,7 @@ export class FirebirdBackupController {
     if (spec.target !== 'prefer-standby') return primaryPod;
     const { name, namespace = 'default' } = cluster.metadata;
     const pods = (await this.coreApi.listNamespacedPod({ namespace, labelSelector: instancePodSelector(name) })).items;
-    return chooseBackupInstance({ cluster, primaryPod, pods, target: spec.target, s3: spec.s3, type: jobBackupType(spec.type) });
+    return chooseBackupInstance({ cluster, primaryPod, pods, target: spec.target, s3: objectStoreOf(spec), type: jobBackupType(spec.type) });
   }
 
   /** Records a Kubernetes event on a backup or restore */
@@ -286,7 +287,7 @@ export class FirebirdBackupController {
       const cluster = await this.getCluster(namespace, backup.spec.clusterName);
       const jobName = `backup-${name}`;
       const fileName = onDemandBackupFileName(backup);
-      const base: Partial<FirebirdBackupStatus> = { jobName, backupFileName: fileName, location: backupLocation(fileName, backup.spec.s3) };
+      const base: Partial<FirebirdBackupStatus> = { jobName, backupFileName: fileName, location: backupLocation(fileName, objectStoreOf(backup.spec)) };
 
       let job = await this.readJob(jobName, namespace);
       if (!job) {
@@ -753,7 +754,7 @@ export class FirebirdBackupController {
         type: spec.restoreType ?? 'logical',
         path: spec.backupPath!,
         incrementalPaths: spec.incrementalBackupPaths,
-        s3: spec.s3,
+        s3: objectStoreOf(spec),
       };
     }
     let backup: FirebirdBackup;
@@ -780,7 +781,7 @@ export class FirebirdBackupController {
     }
     // a FirebirdDatabase's backup: its own journal archive for a point-in-time recovery
     const file = backup.spec.database ? backup.status.databasePath?.split('/').pop() : undefined;
-    return { type, path: backup.status.backupFileName, s3: backup.spec.s3, ...(file ? { database: file } : {}) };
+    return { type, path: backup.status.backupFileName, s3: objectStoreOf(backup.spec), ...(file ? { database: file } : {}) };
   }
 
   /**

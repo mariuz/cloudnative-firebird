@@ -32,7 +32,7 @@ import {
   RESOURCE_KIND,
 } from '../types';
 import { READ_ROUTABLE_LABEL, ROLE_LABEL } from './routing';
-import { bootstrapVolumes, buildBootstrapInitContainers, s3ClientVolumes } from './backup';
+import { bootstrapPodLabels, bootstrapVolumes, buildBootstrapInitContainers, s3ClientVolumes } from './backup';
 import { AGENT_PATH, withAgent, withAgentInJob } from './agent';
 import { databaseOnlineCheck } from './fencing';
 import { PENDING_DROPS_DIR, pendingDropsConfigMapName, pendingDropsInitScript } from './pending-drops';
@@ -451,7 +451,7 @@ export function buildStatefulSet(
       },
       template: {
         metadata: inheritMetadata(cluster, {
-          labels,
+          labels: { ...labels, ...bootstrapPodLabels(cluster) },
           annotations: {
             ...(secretHash ? { 'firebird.cloudnative-firebird.io/superuser-secret-hash': secretHash } : {}),
             // replication.conf is mounted via subPath, which does not follow ConfigMap

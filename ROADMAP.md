@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.188.0):** every item below is done; open work is in [TODO.md](TODO.md).
+> **Status note (v0.189.0):** every item below is done; open work is in [TODO.md](TODO.md).
 > Journal replication (still experimental, see TODO.md) works against the official
 > `firebirdsql/firebird` image (Firebird 4, 5 and the 6 snapshot). It covers replica re-seeding,
 > lag metrics, planned switchover, automatic failover with a primary Lease, and rolling updates with
@@ -63,9 +63,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
 - [x] **Physical Incremental Backups (`nbackup`)** *(v0.3.0)*
   - Support for `nbackup` level 0 (full base backup) and level 1/2 incremental backups.
   - Delta file locking management during physical backup window.
-- [x] **Cloud Object Storage Support (S3, GCS, Azure Blob)** *(v0.4.0)*
+- [x] **Cloud Object Storage Support (S3; GCS and Azure Blob since v0.189.0)** *(v0.4.0)*
   - Direct upload of backup archives (`gbak` / `nbackup`) to object storage.
-  - Secret-based cloud credentials management (`AWS_ACCESS_KEY_ID`, `GCS_KEY`, etc.).
+  - Secret-based cloud credentials management (`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`).
+  - Corrected in v0.189.0: only S3 (and S3-compatible endpoints) was implemented here; Azure Blob and GCS came with docs/object-stores.md, phase 2.
 - [x] **Point-In-Time Recovery (PITR) & Journal Archiving** *(archiving since v0.5.0, working since v0.10.0, replay since v0.45.0)*
   - Continuous archiving of Firebird 4.0+ replication journal files to object storage.
   - Replay of archived journal segments on top of `nbackup` base backups up to a target time or
@@ -190,6 +191,12 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `WAIT <seconds> [<segment>]` answers as soon as a segment after the given one is archived. The Rust puller sends it between two pulls instead of sleeping, so a segment is fetched when it appears. Measured with `hack/bench/puller.sh` (removed in v0.170.0) (three replicas on one archive, a 16 MB segment every 2 s, poll 5 s): 0.08 s from the archive to the replica (median, 0.16 s at most) against 2.4 s (5 s at most) for a polling puller. A Perl segment server answers `ERR bad request`; the puller then polls as before and asks again about once a minute. The archive timeout before it (`archiveTimeoutSeconds`) is unchanged.
   - Ten pullers waiting cost the front 0.07 s of CPU in ten seconds on an archive of 5,000 segments: the archive is looked at once for all of them, and read again only when its directory changed.
   - `tests/segment-server-front.test.ts` gives the same requests to the Perl server alone and to the front: listings, downloads, refusals, forwarded requests with uploads and downloads, the contact time the isolation check reads, stopping. The kind CI runs the replicated cluster behind the front, with segment TLS.
+- [x] **Object stores from the agent, phase 2: Azure Blob Storage and Google Cloud Storage** *(v0.189.0)*
+  - `azureBlob` (`storageAccount`, `container`, `prefix`, `endpoint`, `secretRef`) and `gcs` (`bucket`, `prefix`, `endpoint`, `secretRef`) beside `s3` on `FirebirdBackup`, `FirebirdScheduledBackup`, `spec.backup`, `FirebirdRestore` and `bootstrap.recovery`: backups, retention, logical and physical restores, a point-in-time recovery's backup chain and bootstrapping run `fb-agent objects` in the cluster's image against the store's own API. At most one store per resource (the webhook, and a CEL rule in the CRDs); account and container names as Azure takes them.
+  - Credentials: Azure's account key or SAS token from the Secret (`AZURE_STORAGE_ACCOUNT_KEY`, `AZURE_STORAGE_SAS_KEY`), else AKS workload identity (the pods are labelled `azure.workload.identity/use: "true"`) or a managed identity; GCS's service account JSON key (`APPLICATION_CREDENTIALS`, mounted as a file), else Application Default Credentials (GKE workload identity). `status.location` is `azure://<account>/<container>/<key>` or `gs://<bucket>/<key>`; a restore of a `FirebirdBackup` reads its store; `kubectl firebird backup` carries the cluster's store.
+  - Internally the call sites take any store in the S3 configuration's shape (`utils/object-store.ts`, `objectStoreOf`), so the aws client's pods are unchanged (the phase 1b snapshot still matches).
+  - Tests: `tests/object-store-azure-gcs.test.ts` (every place under four configurations: the environment, the key file and its volume, workload identity's label, no aws CLI, scripts parsed by `sh -n`; locations; the instance pod's bootstrap; validation) and seven CRD admission cases. The kind CI's extended track runs Azurite and fake-gcs-server in the cluster: a logical and a physical backup to Azurite, both restored, retention deleting an expired backup; a restore and a bootstrapped cluster from fake-gcs-server. GCS uploads have no emulator (object_store's XML API) and remain untested.
+  - The ROADMAP entry of v0.4.0 is corrected: it listed GCS and Azure Blob, which were never implemented before this release.
 - [x] **Object stores from the agent, phase 1b: `s3.client: agent`** *(v0.188.0)*
   - `client: aws | agent` on every S3 configuration (backups, schedules, `spec.backup`, restores, the journal archive, `bootstrap.recovery`); `aws`, the default, is the aws CLI as before. With `agent`, the configuration's transfers run `fb-agent objects` in the cluster's image (`utils/object-store.ts`): the backup upload and retention, physical, logical and point-in-time restores (the chain and the journals), the journal archive's upload and listing, bootstrap downloads and replica clusters' archive followers. Keys, credentials, endpoint (by path; AWS's by virtual host), region, SSE-S3, SSE-KMS and SSE-C are the configuration's, as with the aws CLI.
   - `fb-agent objects list --long` lists as `aws s3 ls` does (date, time, size and name, UTC), so the scripts that read a listing (`pitr-restore.sh`, `archive-follower.sh`) are unchanged; the follower's `aws_s3` function is swapped for one on the agent.

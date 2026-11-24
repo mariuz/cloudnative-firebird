@@ -1,0 +1,24 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  bootstrap:
+    recovery:
+      sourcePath: backup.fbk
+      gcs:
+        bucket: firebird-backups
+        secretRef:
+          name: gcs-creds
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"
+    retentionPolicy: 7d
+    azureBlob:
+      storageAccount: account1
+      container: backups
+      endpoint: http://azurite:10000/account1

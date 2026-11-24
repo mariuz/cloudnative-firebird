@@ -1,4 +1,5 @@
 import { replicaSourceRefusal, volumeSnapshotRefusal } from './replication';
+import { objectStoreOf } from './object-store';
 import { segmentTlsRequired } from './segment-tls-default';
 import { CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Secret } from '@kubernetes/client-node';
 import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdRole, FirebirdUser, RESOURCE_PLURAL } from '../types';
@@ -277,12 +278,12 @@ async function restoreRefusal(
     if (backup.status?.phase !== 'Completed' || !backup.status.backupFileName) {
       warnings.push(`FirebirdBackup ${spec.backupName} has not completed yet: the restore waits for it`);
       // its file name is known once it completes: a placeholder, so only the type is checked
-      source = { type, path: 'pending.nbk', s3: backup.spec.s3 };
+      source = { type, path: 'pending.nbk', s3: objectStoreOf(backup.spec) };
     } else {
-      source = { type, path: backup.status.backupFileName, s3: backup.spec.s3 };
+      source = { type, path: backup.status.backupFileName, s3: objectStoreOf(backup.spec) };
     }
   } else {
-    source = { type: spec.restoreType ?? 'logical', path: spec.backupPath ?? '', incrementalPaths: spec.incrementalBackupPaths, s3: spec.s3 };
+    source = { type: spec.restoreType ?? 'logical', path: spec.backupPath ?? '', incrementalPaths: spec.incrementalBackupPaths, s3: objectStoreOf(spec) };
   }
   if (!cluster) return undefined;
   const sourceError = pointInTimeSourceError(restore, cluster, source);

@@ -13,7 +13,7 @@ import { RECONCILIATION_LOOP_ANNOTATION, reconciliationPaused } from '../utils/s
  * and routing): the operator's constants it writes are repeated here and checked by the tests.
  */
 
-export const PLUGIN_VERSION = '0.188.0';
+export const PLUGIN_VERSION = '0.189.0';
 
 export const TARGET_PRIMARY_ANNOTATION = `${API_GROUP}/targetPrimary`;
 export const FENCED_INSTANCES_ANNOTATION = `${API_GROUP}/fencedInstances`;
@@ -662,8 +662,12 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
           type !== 'logical' ? undefined : parsed.flags.has('verify') ? true : parsed.flags.has('no-verify') ? undefined : cluster.spec.backup?.verify || undefined;
         const stamp = io.now().toISOString().replace(/[-:T]/g, '').slice(0, 14);
         const backupName = (parsed.flags.get('name') as string | undefined) ?? `${cluster.metadata.name}-${stamp}`;
-        // the backup's own S3 destination, as the cluster's scheduled backups have it
+        // the backup's own object store, as the cluster's scheduled backups have it
         const s3 = type !== 'volumeSnapshot' ? cluster.spec.backup?.s3 : undefined;
+        const azureBlob = type !== 'volumeSnapshot' ? cluster.spec.backup?.azureBlob : undefined;
+        const gcs = type !== 'volumeSnapshot' ? cluster.spec.backup?.gcs : undefined;
+        // named here: the plugin loads none of the operator's Job builders (their scripts are not in its build)
+        const store = s3 ? `s3://${s3.bucket}` : azureBlob ? `azure://${azureBlob.storageAccount}/${azureBlob.container}` : gcs ? `gs://${gcs.bucket}` : undefined;
         const body: FirebirdBackup = {
           apiVersion: `${API_GROUP}/${API_VERSION}` as FirebirdBackup['apiVersion'],
           kind: 'FirebirdBackup',
@@ -673,6 +677,8 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
             type: type as FirebirdBackup['spec']['type'],
             ...(levelFlag !== undefined ? { level: Number(levelFlag) as 0 | 1 | 2 } : {}),
             ...(s3 ? { s3 } : {}),
+            ...(azureBlob ? { azureBlob } : {}),
+            ...(gcs ? { gcs } : {}),
             ...(snapshotClass ? { volumeSnapshot: { className: snapshotClass } } : {}),
             ...(database ? { database } : {}),
             ...(target ? { target } : {}),
@@ -682,7 +688,7 @@ export async function run(argv: string[], api: PluginApi, io: PluginIo, defaultN
         await api.createBackup(namespace, body);
         const details = [
           `${type}${database ? ` of FirebirdDatabase ${database}` : ''}`,
-          ...(s3 ? [`to s3://${s3.bucket}`] : []),
+          ...(store ? [`to ${store}`] : []),
           ...(target === 'prefer-standby' ? ['from a replica if one is ready'] : []),
           ...(verify ? ['verified'] : []),
         ];

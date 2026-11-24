@@ -1,4 +1,4 @@
-import { S3BackupConfiguration } from './firebirdcluster';
+import { AzureBlobConfiguration, GCSConfiguration, S3BackupConfiguration } from './firebirdcluster';
 
 /**
   * Specification for an on-demand FirebirdBackup resource.
@@ -28,6 +28,10 @@ export interface FirebirdBackupSpec {
    * Logical backups only.
    */
   s3?: S3BackupConfiguration;
+  /** Azure Blob Storage instead of S3 (since v0.189.0; at most one of s3, azureBlob and gcs) */
+  azureBlob?: AzureBlobConfiguration;
+  /** Google Cloud Storage instead of S3 (since v0.189.0; at most one of s3, azureBlob and gcs) */
+  gcs?: GCSConfiguration;
   /**
    * Where the backup runs: "primary" (default) or "prefer-standby", a ready replica when one
    * qualifies (backups to S3 only; server-side backups always run on the primary)
@@ -160,6 +164,10 @@ export interface FirebirdRestoreSpec {
   targetDatabase?: string;
   /** S3 source: backupPath (and incrementalBackupPaths) are object keys relative to s3.prefix */
   s3?: S3BackupConfiguration;
+  /** Azure Blob Storage instead of S3 (since v0.189.0; at most one of s3, azureBlob and gcs) */
+  azureBlob?: AzureBlobConfiguration;
+  /** Google Cloud Storage instead of S3 (since v0.189.0; at most one of s3, azureBlob and gcs) */
+  gcs?: GCSConfiguration;
   /**
    * Point-in-time recovery (physical restores): the journal segments archived after the backup
    * are replayed on top of it, up to the target. Without a target, every archived segment is
@@ -248,6 +256,10 @@ export interface FirebirdScheduledBackupSpec {
   retentionPolicy?: string;
   /** Upload backups to S3 instead of the primary's data directory */
   s3?: S3BackupConfiguration;
+  /** Azure Blob Storage instead of S3 (since v0.189.0; at most one of s3, azureBlob and gcs) */
+  azureBlob?: AzureBlobConfiguration;
+  /** Google Cloud Storage instead of S3 (since v0.189.0; at most one of s3, azureBlob and gcs) */
+  gcs?: GCSConfiguration;
   /**
    * Where the backup runs: "primary" (default) or "prefer-standby", a ready replica when one
    * qualifies (backups to S3 only; server-side backups always run on the primary)

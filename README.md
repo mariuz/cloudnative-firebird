@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.188.0/cloudnative-firebird-0.188.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.189.0/cloudnative-firebird-0.189.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.188.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.189.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -240,7 +240,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.188.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.189.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -1645,6 +1645,45 @@ copy outside the cluster: losing it loses those backups. To move to a new key, w
 bucket or prefix with it. Every configuration that reads the same objects (a restore source,
 `bootstrap.recovery.s3`, `pointInTime.journalS3`, a replica cluster's `replica.journalS3`) names
 the same key. `encryption` and `sseCustomerKey` cannot be combined.
+
+**Azure Blob Storage and Google Cloud Storage** (v0.189.0, CloudNativePG's `azureCredentials` and
+`googleCredentials`). `azureBlob` or `gcs` instead of `s3` on a `FirebirdBackup`, a
+`FirebirdScheduledBackup`, `spec.backup`, a `FirebirdRestore` and `bootstrap.recovery`: backups,
+their retention, restores (logical, physical, and the backup chain of a point-in-time recovery)
+and bootstrapping go to the store over its own API, through `fb-agent objects` in the cluster's
+image (docs/object-stores.md). At most one of `s3`, `azureBlob` and `gcs` is set. A restore of a
+`FirebirdBackup` reads its store, and `status.location` names it
+(`azure://<account>/<container>/<key>`, `gs://<bucket>/<key>`). Both services encrypt every object
+at rest, with a customer-managed key set on the account or the bucket, so S3's `region`,
+`encryption`, `kmsKeyId`, `sseCustomerKey`, `client` and `clientImage` have no equivalent. The
+journal archive, point-in-time recovery's journals and replica clusters stay on S3 for now (the
+next phases).
+
+```yaml
+spec:
+  backup:
+    enabled: true
+    schedule: "0 2 * * *"
+    retentionPolicy: 30d
+    # a Secret with AZURE_STORAGE_ACCOUNT_KEY (the account key) or AZURE_STORAGE_SAS_KEY (a SAS
+    # token); without secretRef the pods use AKS workload identity (they are labelled
+    # azure.workload.identity/use: "true", spec.serviceAccountName is the identity's) or a
+    # managed identity. endpoint: the account's Blob endpoint, if not
+    # https://<storageAccount>.blob.core.windows.net
+    azureBlob: { storageAccount: mybackups, container: firebird, prefix: prod, secretRef: { name: azure-creds } }
+---
+  bootstrap:
+    recovery:
+      sourcePath: nightly/backup.fbk
+      # a Secret with APPLICATION_CREDENTIALS, a service account's JSON key, mounted as a file;
+      # without secretRef, Application Default Credentials (GKE workload identity through
+      # spec.serviceAccountName)
+      gcs: { bucket: firebird-backups, prefix: prod, secretRef: { name: gcs-creds } }
+```
+
+Tested in the kind CI against Azurite (backups, restores, retention) and fake-gcs-server
+(restores and bootstrap). No emulator takes the uploads `object_store` makes to GCS (its XML
+API), so GCS uploads are not covered by a test yet.
 
 **Pod settings and inherited metadata** (v0.106.0, CloudNativePG `priorityClassName`,
 `schedulerName`, `imagePullPolicy`, `imagePullSecrets` and `inheritedMetadata`). Every pod of the
