@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.187.0/cloudnative-firebird-0.187.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.188.0/cloudnative-firebird-0.188.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.187.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.188.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -240,7 +240,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.187.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.188.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -1500,7 +1500,13 @@ with the SYSDBA password. A physical restore from S3 works the other way:
 the Job downloads the files (`backupPath` and `incrementalBackupPaths` are object keys), copies
 them next to the database (`restore-<name>-<n>.nbk`), restores them with `action_nrest` and
 removes them again. The S3 client image defaults to `amazon/aws-cli` and can be changed with
-`s3.clientImage`. Server-side backups share the primary's volume, so they protect against logical
+`s3.clientImage`. `s3.client: agent` (since v0.188.0, opt-in) moves every transfer of that
+configuration (backups, retention, restores, the journal archive, point-in-time recovery,
+bootstrap and replica clusters' followers) off the aws CLI onto the agent's own S3 client,
+`fb-agent objects`, run in the cluster's image: no `amazon/aws-cli` pull, the same keys,
+credentials (the secret's `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, or the pod's identity),
+endpoint, region and encryption (`clientImage` is not used). `aws`, the default, keeps the aws CLI
+(docs/object-stores.md). Server-side backups share the primary's volume, so they protect against logical
 errors, not against losing the volume.
 
 **Backups from a replica.** `target: prefer-standby` (CloudNativePG's `target`) on

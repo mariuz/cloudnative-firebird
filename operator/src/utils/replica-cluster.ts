@@ -3,6 +3,7 @@ import { FirebirdCluster } from '../types';
 import { s3ClientEnv, s3ClientImage, s3ClientMounts, s3Uri, sseCustomerKeyFile } from './backup';
 import { FIREBIRD_DATA_DIR } from './resources';
 import { replicationDirectories, UPGRADE_SCRIPTS } from './replication';
+import { agentClient, objectStoreEnv, objectStoreImage } from './object-store';
 
 /**
  * Replica clusters (CloudNativePG replica clusters, spec.replica).
@@ -34,9 +35,44 @@ export function replicaClusterFollowing(cluster: FirebirdCluster): boolean {
 export const DEFAULT_FOLLOW_POLL_SECONDS = 30;
 
 /** The archive-follower sidecar of a following replica cluster's instance pods */
+/** The follower script's S3 client, the aws CLI, as archive-follower.sh defines it */
+export const FOLLOWER_AWS_CLIENT =
+  'aws_s3() { if [ -n "${S3_ENDPOINT:-}" ]; then aws --endpoint-url "$S3_ENDPOINT" s3 "$@"; else aws s3 "$@"; fi; }';
+/**
+ * The same calls through `fb-agent objects` (s3.client: agent): `ls <prefix>` as the aws CLI lists
+ * it, `cp [--only-show-errors] <key> <file>`; JOURNALS is then the key prefix, journals/
+ */
+export const FOLLOWER_AGENT_CLIENT =
+  'aws_s3() { c=$1; shift; [ "$1" != --only-show-errors ] || shift; ' +
+  'case "$c" in ls) "$FB_AGENT" objects list --long "$1" ;; cp) "$FB_AGENT" objects get "$1" "$2" ;; *) return 2 ;; esac; }';
+
+/** The follower script, for the archive's client */
+export function archiveFollowerScript(agent: boolean): string {
+  const script = UPGRADE_SCRIPTS['archive-follower.sh'];
+  if (!agent) return script;
+  if (!script.includes(FOLLOWER_AWS_CLIENT)) throw new Error("archive-follower.sh no longer defines aws_s3 as the operator replaces it");
+  return script.replace(FOLLOWER_AWS_CLIENT, FOLLOWER_AGENT_CLIENT);
+}
+
 export function buildArchiveFollowerContainer(cluster: FirebirdCluster): V1Container {
   const replica = cluster.spec.replica!;
   const dirs = replicationDirectories(cluster, FIREBIRD_DATA_DIR);
+  if (agentClient(replica.journalS3)) {
+    return {
+      name: 'archive-follower',
+      image: objectStoreImage(cluster),
+      command: ['/bin/sh', '-c', archiveFollowerScript(true)],
+      env: [
+        ...objectStoreEnv(replica.journalS3, 'follow'),
+        { name: 'SOURCE_DIR', value: dirs.source },
+        { name: 'REPLICATION_DIR', value: dirs.base },
+        { name: 'JOURNALS', value: 'journals/' },
+        { name: 'POLL_SECONDS', value: String(replica.pollIntervalSeconds ?? DEFAULT_FOLLOW_POLL_SECONDS) },
+      ],
+      resources: { requests: { cpu: '10m', memory: '64Mi' } },
+      volumeMounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }, ...s3ClientMounts(replica.journalS3, 'follow')],
+    };
+  }
   return {
     name: 'archive-follower',
     image: s3ClientImage(replica.journalS3),

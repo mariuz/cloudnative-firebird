@@ -2,6 +2,8 @@
 //! (docs/object-stores.md), with Apache Arrow's object_store: S3, Azure Blob and GCS.
 //!
 //!   fb-agent objects list <prefix>        the names of the objects under the prefix, one per line
+//!   fb-agent objects list --long <prefix> the same as `aws s3 ls` prints them: "<date> <time> <size>
+//!                                         <name>" (UTC), for the scripts that read its listings
 //!   fb-agent objects put <file> <key>     one object; multipart above 64 MiB
 //!   fb-agent objects get <key> <file>     to <file>.tmp, then renamed
 //!   fb-agent objects sync <dir> <prefix>  each file of <dir> not listed under <prefix> yet
@@ -34,7 +36,7 @@ use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::path::Path;
-use object_store::{Certificate, ClientOptions, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
+use object_store::{Certificate, ClientOptions, ObjectMeta, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
 use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{Read, Write};
@@ -138,14 +140,28 @@ fn store() -> Result<Arc<dyn ObjectStore>, Failed> {
     })
 }
 
+/// The objects directly under the prefix
+async fn list_objects(store: &dyn ObjectStore, prefix: &Path) -> Result<Vec<ObjectMeta>, Failed> {
+    Ok(store.list_with_delimiter(Some(prefix)).await?.objects)
+}
+
 /// The names of the objects directly under the prefix
 async fn list(store: &dyn ObjectStore, prefix: &Path) -> Result<Vec<String>, Failed> {
-    let listed = store.list_with_delimiter(Some(prefix)).await?;
-    Ok(listed
-        .objects
+    Ok(list_objects(store, prefix)
+        .await?
         .iter()
         .filter_map(|meta| meta.location.filename().map(str::to_string))
         .collect())
+}
+
+/// An object as `aws s3 ls` lists it: its last modification (UTC), size and name
+fn long_line(meta: &ObjectMeta) -> Option<String> {
+    let name = meta.location.filename()?;
+    Some(format!(
+        "{} {:>10} {name}",
+        meta.last_modified.format("%Y-%m-%d %H:%M:%S"),
+        meta.size
+    ))
 }
 
 async fn put(store: &dyn ObjectStore, file: &str, key: &Path) -> Result<(), Failed> {
@@ -231,6 +247,14 @@ async fn run(arguments: &[&str]) -> Result<(), Failed> {
             }
             Ok(())
         }
+        ["list", "--long", prefix] => {
+            let store = store()?;
+            let mut out = std::io::stdout().lock();
+            for line in list_objects(store.as_ref(), &path(&base, prefix)).await?.iter().filter_map(long_line) {
+                writeln!(out, "{line}")?;
+            }
+            Ok(())
+        }
         ["put", file, key] => put(store()?.as_ref(), file, &path(&base, key)).await,
         ["get", key, file] => get(store()?.as_ref(), &path(&base, key), file).await,
         ["sync", dir, prefix] => sync(store()?.as_ref(), dir, &path(&base, prefix), prefix).await,
@@ -262,7 +286,7 @@ async fn run(arguments: &[&str]) -> Result<(), Failed> {
             }
         }
         _ => Err(Failed(
-            "usage: fb-agent objects list <prefix> | put <file> <key> | get <key> <file> | sync <dir> <prefix> | rm <key> | exists <key>"
+            "usage: fb-agent objects list [--long] <prefix> | put <file> <key> | get <key> <file> | sync <dir> <prefix> | rm <key> | exists <key>"
                 .into(),
             2,
         )),
@@ -304,6 +328,25 @@ mod tests {
             "prod/journals/ledger.fdb/ledger.fdb.journal-000000001"
         );
         assert_eq!(path("a//b", "/c").as_ref(), "a/b/c");
+    }
+
+    #[test]
+    fn long_listings_as_the_aws_cli_prints_them() {
+        let meta = |name: &str, size: u64| ObjectMeta {
+            location: path("prod", name),
+            last_modified: chrono::DateTime::from_timestamp(1_795_449_446, 0).unwrap(),
+            size,
+            e_tag: None,
+            version: None,
+        };
+        assert_eq!(
+            long_line(&meta("journals/db.fdb.journal-000000012", 1234)).as_deref(),
+            Some("2026-11-23 15:57:26       1234 db.fdb.journal-000000012")
+        );
+        // the scripts read the name as the fourth field, the date and time as the first two
+        let line = long_line(&meta("b.fbk", 73_400_320)).unwrap();
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(fields, ["2026-11-23", "15:57:26", "73400320", "b.fbk"]);
     }
 
     #[test]

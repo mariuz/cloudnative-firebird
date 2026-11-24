@@ -1,7 +1,7 @@
 # Object stores other than S3
 
 Status: design, 2026-11-23 (revised: the cloud APIs directly, from the agent). Phase 1a,
-`fb-agent objects`: v0.187.0. Tracked in [TODO.md](../TODO.md) ("Object stores other than S3").
+`fb-agent objects`: v0.187.0. Phase 1b, `s3.client: agent`: v0.188.0. Tracked in [TODO.md](../TODO.md) ("Object stores other than S3").
 
 ## The gap
 
@@ -229,7 +229,7 @@ is `spec.serviceAccountName`, as for S3's workload identity today.
 ## Phases
 
 1. **`fb-agent objects` and the command builder, S3 opt-in.** *(1a, `fb-agent objects` and
-   `hack/agent/objects.sh`: v0.187.0; 1b, the command builder and `s3.client: agent`)* The subcommand on `object_store`,
+   `hack/agent/objects.sh`: v0.187.0; 1b, the command builder and `s3.client: agent`: v0.188.0)* The subcommand on `object_store`,
    with all three stores built in and tested by `hack/agent/objects.sh`. Also
    `utils/object-store.ts`, with every caller moved onto it (the `aws` client byte-identical), and
    `s3.client: agent`. The kind CI runs its object store steps with the agent's client on one

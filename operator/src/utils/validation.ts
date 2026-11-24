@@ -448,8 +448,11 @@ function validateS3(field: string, s3?: S3BackupConfiguration): void {
   validateS3Encryption(`${field}.s3`, s3);
 }
 
-/** encryption (SSE-S3 or SSE-KMS) or sseCustomerKey (SSE-C), at the path of the S3 configuration */
+/** client, encryption (SSE-S3 or SSE-KMS) or sseCustomerKey (SSE-C), at the path of the S3 configuration */
 export function validateS3Encryption(path: string, s3: S3BackupConfiguration): void {
+  if (s3.client !== undefined && s3.client !== 'aws' && s3.client !== 'agent') {
+    throw new ValidationError(`${path}.client "${s3.client}" is invalid: use "aws" (the aws CLI) or "agent" (fb-agent objects)`);
+  }
   if (s3.encryption !== undefined && s3.encryption !== 'AES256' && s3.encryption !== 'aws:kms') {
     throw new ValidationError(`${path}.encryption "${s3.encryption}" is invalid: use "AES256" (SSE-S3) or "aws:kms" (SSE-KMS)`);
   }

@@ -73,7 +73,12 @@ const withBinary = (c: V1Container): V1Container => ({
 
 /** An instance pod spec with the agent binary in the containers that run it */
 export function withAgent<T extends V1PodSpec>(spec: T): T {
-  return withInstaller(spec, (c) => (AGENT_CONTAINERS.includes(c.name) ? withBinary(c) : c));
+  return withInstaller(spec, (c) => (AGENT_CONTAINERS.includes(c.name) || runsObjectClient(c) ? withBinary(c) : c));
+}
+
+/** A container of the agent's object store client (s3.client: agent: a replica cluster's archive follower) */
+function runsObjectClient(c: V1Container): boolean {
+  return (c.env ?? []).some((e) => e.name === 'OBJECT_STORE');
 }
 
 /**
