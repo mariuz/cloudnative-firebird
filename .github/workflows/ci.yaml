@@ -2890,13 +2890,22 @@ jobs:
           EOF
           kubectl rollout status deployment/azurite --timeout=180s
           kubectl rollout status deployment/fake-gcs --timeout=180s
-          # rclone in a pod for what the operator does not do: the container, seeding and listing
+          # Azure's Python SDK in a pod for what the operator does not do: the container, seeding,
+          # listing and copying a backup to fake-gcs-server (the script on stdin; rclone cannot
+          # address an endpoint of its own, only a domain suffix or the emulator on localhost)
           azure() {
-            kubectl run "azure-$RANDOM" --rm -i --restart=Never --quiet --image=rclone/rclone:1.75.2 \
-              --env=RCLONE_AZUREBLOB_ACCOUNT=devstoreaccount1 --env=RCLONE_AZUREBLOB_KEY="$AZURE_KEY" \
-              --env=RCLONE_AZUREBLOB_ENDPOINT="$AZURE_ENDPOINT" --env=HOME=/tmp --command -- sh -c "$1"
+            kubectl run "azure-$RANDOM" --rm -i --restart=Never --quiet --image=python:3.12-slim \
+              --env=AZ="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=$AZURE_KEY;BlobEndpoint=$AZURE_ENDPOINT;" \
+              --env=GCS="$GCS_ENDPOINT" --env=HOME=/tmp --command -- \
+              sh -c 'pip install -q --disable-pip-version-check --root-user-action=ignore azure-storage-blob >/dev/null && python -u -'
           }
-          azure 'rclone mkdir :azureblob:fbk'
+          azure <<'PY'
+          import os
+          from azure.storage.blob import BlobServiceClient
+          BlobServiceClient.from_connection_string(os.environ['AZ']).create_container('fbk')
+          print('container fbk created')
+          PY
+          LIST='import os; from azure.storage.blob import BlobServiceClient as S; c = S.from_connection_string(os.environ["AZ"]).get_container_client("fbk")'
           GCS="{ bucket: fbk, prefix: prod, endpoint: \"$GCS_ENDPOINT\", secretRef: { name: gcs-credentials } }"
           DB_DIR=/var/lib/firebird/data
           wait_phase() {
@@ -2945,7 +2954,7 @@ jobs:
           wait_phase firebirdbackup objs-logical Completed backup-objs-logical
           wait_phase firebirdbackup objs-physical Completed backup-objs-physical
           [ "$(kubectl get firebirdbackup objs-logical -o jsonpath={.status.location})" = azure://devstoreaccount1/fbk/logical/backup-objs-logical.fbk ]
-          listed=$(azure 'rclone lsl :azureblob:fbk')
+          listed=$(echo "$LIST; print('\\n'.join(b.name for b in c.list_blobs()))" | azure)
           echo "$listed"
           grep -q 'physical/nbackup-l0-objs-physical.nbk' <<<"$listed"
           # restored from Azure Blob, each into a new database file
@@ -2973,7 +2982,7 @@ jobs:
           [ "$(count objs-0 restore-objs-physical.fdb)" = 3 ]
           # retention: an expired backup of the series (its time is in its name) is deleted after
           # the next one is uploaded
-          azure 'echo old | rclone rcat :azureblob:fbk/retention/backup-objs-sched-20200101T000000Z.fbk'
+          echo "$LIST; c.upload_blob('retention/backup-objs-sched-20200101T000000Z.fbk', b'old')" | azure
           kubectl apply -f - <<EOF
           apiVersion: firebird.cloudnative-firebird.io/v1
           kind: FirebirdScheduledBackup
@@ -2989,14 +2998,21 @@ jobs:
           kubectl create job objs-sched-now --from=cronjob/sched-backup-objs-sched
           kubectl wait job/objs-sched-now --for=condition=Complete --timeout=300s || { kubectl logs job/objs-sched-now --all-containers; exit 1; }
           kubectl logs job/objs-sched-now --all-containers | grep 'retention: deleted backup-objs-sched-20200101T000000Z.fbk'
-          listed=$(azure 'rclone lsf :azureblob:fbk/retention')
+          listed=$(echo "$LIST; print('\\n'.join(b.name for b in c.list_blobs(name_starts_with='retention/')))" | azure)
           echo "$listed"
           if grep -q 20200101T000000Z <<<"$listed"; then echo "the expired backup was kept"; exit 1; fi
-          grep -Eq '^backup-objs-sched-[0-9]{8}T[0-9]{6}Z[.]fbk$' <<<"$listed"
+          grep -Eq '^retention/backup-objs-sched-[0-9]{8}T[0-9]{6}Z[.]fbk$' <<<"$listed"
           # GCS: the logical backup, copied from Azurite through fake-gcs-server's JSON API
-          azure "rclone copyto :azureblob:fbk/logical/backup-objs-logical.fbk /tmp/b.fbk &&
-            wget -q -O /dev/null --header 'Content-Type: application/json' --post-data '{\"name\":\"fbk\"}' $GCS_ENDPOINT/storage/v1/b &&
-            wget -q -O /dev/null --header 'Content-Type: application/octet-stream' --post-file /tmp/b.fbk '$GCS_ENDPOINT/upload/storage/v1/b/fbk/o?uploadType=media&name=prod/backup.fbk'"
+          azure <<'PY'
+          import os, urllib.request
+          from azure.storage.blob import BlobServiceClient
+          data = BlobServiceClient.from_connection_string(os.environ['AZ']).get_container_client('fbk').download_blob('logical/backup-objs-logical.fbk').readall()
+          def post(path, body, kind):
+              urllib.request.urlopen(urllib.request.Request(os.environ['GCS'] + path, data=body, headers={'Content-Type': kind})).read()
+          post('/storage/v1/b', b'{"name": "fbk"}', 'application/json')
+          post('/upload/storage/v1/b/fbk/o?uploadType=media&name=prod/backup.fbk', data, 'application/octet-stream')
+          print(f'backup.fbk ({len(data)} bytes) copied to fake-gcs-server')
+          PY
           kubectl apply -f - <<EOF
           apiVersion: firebird.cloudnative-firebird.io/v1
           kind: FirebirdRestore
