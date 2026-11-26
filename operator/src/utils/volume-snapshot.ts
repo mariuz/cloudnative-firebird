@@ -427,6 +427,6 @@ export function volumeSnapshotRecoveryErrors(cluster: FirebirdCluster): string[]
   if (recovery.sourcePath || recovery.s3 || recovery.azureBlob || recovery.gcs || recovery.pointInTime || recovery.incrementalPaths?.length) {
     errors.push(`${path} is mutually exclusive with sourcePath, s3, azureBlob, gcs, incrementalPaths and pointInTime`);
   }
-  if (cluster.spec.replica) errors.push(`${path}: a replica cluster bootstraps from an nbackup in S3 (bootstrap.recovery.sourcePath)`);
+  if (cluster.spec.replica) errors.push(`${path}: a replica cluster bootstraps from an nbackup in an object store (bootstrap.recovery.sourcePath)`);
   return errors;
 }

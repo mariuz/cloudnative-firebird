@@ -1,4 +1,5 @@
 import { clusterImage } from './image-catalog';
+import { replicaJournalOf } from './object-store-fields';
 import { buildArchiveFollowerContainer, replicaClusterFollowing } from './replica-cluster';
 import { instanceAffinity, instanceTopologySpreadConstraints } from './scheduling';
 import { withSegmentTls } from './segment-tls-pods';
@@ -396,7 +397,7 @@ export function buildStatefulSet(
     { name: PENDING_DROPS_VOLUME, configMap: { name: pendingDropsConfigMapName(name), optional: true } },
     ...bootstrapVolumes(cluster),
     // the archive follower's SSE-C key
-    ...(replication && replicaClusterFollowing(cluster) ? s3ClientVolumes(cluster.spec.replica!.journalS3, 'follow') : []),
+    ...(replication && replicaClusterFollowing(cluster) ? s3ClientVolumes(replicaJournalOf(cluster)!, 'follow') : []),
     ...(initSqlVolume(cluster) ? [initSqlVolume(cluster)!] : []),
     ...(projectedVolume(cluster) ? [projectedVolume(cluster)!] : []),
     ...(tempVolume(cluster) ? [tempVolume(cluster)!] : []),

@@ -46,6 +46,10 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
   // what else a replica cluster would need)
   const replicaRefusal = replicaClusterRefusal(cluster);
   if (replicaRefusal) throw new ValidationError(replicaRefusal);
+  if (cluster.spec?.replica) {
+    const r = cluster.spec.replica;
+    validateObjectStores('spec.replica', { s3: r.journalS3, azureBlob: r.journalAzureBlob, gcs: r.journalGCS }, POINT_IN_TIME_FIELDS);
+  }
   const replicaErrors = replicaClusterErrors(cluster);
   if (replicaErrors.length > 0) throw new ValidationError(replicaErrors.join('; '));
   const catalogErrors = imageCatalogRefErrors(cluster);

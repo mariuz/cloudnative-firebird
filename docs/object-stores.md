@@ -3,7 +3,8 @@
 Status: design, 2026-11-23 (revised: the cloud APIs directly, from the agent). Phase 1a,
 `fb-agent objects`: v0.187.0. Phase 1b, `s3.client: agent`: v0.188.0. Phase 2, backups, restores, bootstrap and
 retention on Azure Blob and GCS: v0.189.0. Phase 3, the journal archive and point-in-time
-recovery on Azure Blob and GCS: v0.190.0. Tracked in [TODO.md](../TODO.md) ("Object stores other than S3").
+recovery on Azure Blob and GCS: v0.190.0. Phase 4, replica clusters following an Azure Blob or GCS
+archive: v0.191.0. Tracked in [TODO.md](../TODO.md) ("Object stores other than S3").
 
 ## The gap
 
@@ -251,9 +252,12 @@ is `spec.serviceAccountName`, as for S3's workload identity today.
    whatever the store. The kind CI repeats the PITR step against Azurite (the archive Job's sync
    and listing, a physical base backup, a recovery to a time); GCS has no emulator for uploads,
    so its archive is covered by the unit tests only.
-4. **Replica clusters following an Azure Blob or GCS archive.** `archive-follower.sh` moves onto
-   the builder, and the replica-source refusal of v0.184.0 compares stores of any kind. The kind
-   CI repeats the replica cluster step against each store.
+4. **Replica clusters following an Azure Blob or GCS archive.** *(v0.191.0)* `replica.journalAzureBlob`
+   and `journalGCS` beside `journalS3` (exactly one, the webhook and CEL); the bootstrap chain in
+   any store. `archive-follower.sh` runs on the agent's client for them (its `aws_s3` swapped, as
+   with `s3.client: agent`), and the replica-source refusal of v0.184.0 compares stores of any
+   kind. The kind CI bootstraps a replica cluster from Azurite, follows the source's archive there
+   and promotes it; GCS has no emulator for uploads, so its follower is covered by the unit tests.
 5. **The agent by default for S3.** `s3.client` defaults to `agent` once it has run for a
    release. `aws` stays selectable for a deprecation period, and is then removed with
    `clientImage`.

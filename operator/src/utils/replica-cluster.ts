@@ -3,7 +3,16 @@ import { FirebirdCluster } from '../types';
 import { s3ClientEnv, s3ClientImage, s3ClientMounts, s3Uri, sseCustomerKeyFile } from './backup';
 import { FIREBIRD_DATA_DIR } from './resources';
 import { replicationDirectories, UPGRADE_SCRIPTS } from './replication';
-import { agentClient, journalArchiveOf, objectStoreEnv, objectStoreImage, sameObjectStoreLocation } from './object-store';
+import {
+  agentClient,
+  journalArchiveOf,
+  objectStoreEnv,
+  objectStoreFieldsSet,
+  objectStoreImage,
+  objectStoreOf,
+  replicaJournalOf,
+  sameObjectStoreLocation,
+} from './object-store';
 
 /**
  * Replica clusters (CloudNativePG replica clusters, spec.replica).
@@ -56,40 +65,42 @@ export function archiveFollowerScript(agent: boolean): string {
 
 export function buildArchiveFollowerContainer(cluster: FirebirdCluster): V1Container {
   const replica = cluster.spec.replica!;
+  // the source's archive in any store (phase 4); Azure Blob and GCS always through the agent
+  const journal = replicaJournalOf(cluster)!;
   const dirs = replicationDirectories(cluster, FIREBIRD_DATA_DIR);
-  if (agentClient(replica.journalS3)) {
+  if (agentClient(journal)) {
     return {
       name: 'archive-follower',
       image: objectStoreImage(cluster),
       command: ['/bin/sh', '-c', archiveFollowerScript(true)],
       env: [
-        ...objectStoreEnv(replica.journalS3, 'follow'),
+        ...objectStoreEnv(journal, 'follow'),
         { name: 'SOURCE_DIR', value: dirs.source },
         { name: 'REPLICATION_DIR', value: dirs.base },
         { name: 'JOURNALS', value: 'journals/' },
         { name: 'POLL_SECONDS', value: String(replica.pollIntervalSeconds ?? DEFAULT_FOLLOW_POLL_SECONDS) },
       ],
       resources: { requests: { cpu: '10m', memory: '64Mi' } },
-      volumeMounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }, ...s3ClientMounts(replica.journalS3, 'follow')],
+      volumeMounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }, ...s3ClientMounts(journal, 'follow')],
     };
   }
   return {
     name: 'archive-follower',
-    image: s3ClientImage(replica.journalS3),
+    image: s3ClientImage(journal),
     command: ['/bin/sh', '-c', UPGRADE_SCRIPTS['archive-follower.sh']],
     env: [
-      ...s3ClientEnv(replica.journalS3),
+      ...s3ClientEnv(journal),
       { name: 'SOURCE_DIR', value: dirs.source },
       { name: 'REPLICATION_DIR', value: dirs.base },
-      { name: 'JOURNALS', value: s3Uri(replica.journalS3, 'journals/') },
-      ...(replica.journalS3.endpoint ? [{ name: 'S3_ENDPOINT', value: replica.journalS3.endpoint }] : []),
-      ...(replica.journalS3.sseCustomerKey ? [{ name: 'S3_SSE_C_KEY_FILE', value: sseCustomerKeyFile('follow') }] : []),
+      { name: 'JOURNALS', value: s3Uri(journal, 'journals/') },
+      ...(journal.endpoint ? [{ name: 'S3_ENDPOINT', value: journal.endpoint }] : []),
+      ...(journal.sseCustomerKey ? [{ name: 'S3_SSE_C_KEY_FILE', value: sseCustomerKeyFile('follow') }] : []),
       { name: 'POLL_SECONDS', value: String(replica.pollIntervalSeconds ?? DEFAULT_FOLLOW_POLL_SECONDS) },
       // the aws CLI may write a cache under HOME, whatever user the container runs as
       { name: 'HOME', value: '/tmp' },
     ],
     resources: { requests: { cpu: '10m', memory: '64Mi' } },
-    volumeMounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }, ...s3ClientMounts(replica.journalS3, 'follow')],
+    volumeMounts: [{ name: 'firebird-data', mountPath: FIREBIRD_DATA_DIR }, ...s3ClientMounts(journal, 'follow')],
   };
 }
 
@@ -123,7 +134,11 @@ export function replicaClusterErrors(cluster: FirebirdCluster): string[] {
   const replica = spec.replica;
   if (!replica) return [];
   const errors: string[] = [];
-  if (!replica.journalS3?.bucket) errors.push('replica.journalS3.bucket is required (the source cluster\'s journal archive)');
+  const stores = objectStoreFieldsSet({ s3: replica.journalS3, azureBlob: replica.journalAzureBlob, gcs: replica.journalGCS });
+  if (stores.length !== 1) {
+    errors.push('replica: exactly one of journalS3, journalAzureBlob and journalGCS (the source cluster\'s journal archive)');
+  }
+  if (replica.journalS3 && !replica.journalS3.bucket) errors.push('replica.journalS3.bucket is required (the source cluster\'s journal archive)');
   if (replica.journalS3?.sseCustomerKey && !replica.journalS3.sseCustomerKey.name) errors.push('replica.journalS3.sseCustomerKey.name is required');
   const poll = replica.pollIntervalSeconds;
   if (poll !== undefined && (!Number.isInteger(poll) || poll < 5 || poll > 3600)) {
@@ -131,15 +146,18 @@ export function replicaClusterErrors(cluster: FirebirdCluster): string[] {
   }
   if (!spec.replication?.enabled) errors.push('a replica cluster needs replication.enabled (its instance is a replica of the source)');
   const recovery = spec.bootstrap?.recovery;
-  if (!recovery?.sourcePath || !recovery.s3) {
-    errors.push('a replica cluster bootstraps from the source\'s nbackup chain in S3: bootstrap.recovery with sourcePath and s3');
+  if (!recovery?.sourcePath || !objectStoreOf(recovery)) {
+    errors.push(
+      'a replica cluster bootstraps from the source\'s nbackup chain in an object store: bootstrap.recovery with sourcePath and s3 (or azureBlob, gcs)',
+    );
   }
   if (recovery?.pointInTime) errors.push('a replica cluster follows the whole archive: bootstrap.recovery.pointInTime is not allowed');
   if (replica.enabled && spec.instances !== 1) {
     errors.push('a replica cluster runs one instance while it follows the source (scale it after the promotion)');
   }
   const own = journalArchiveOf(cluster);
-  if (own && replica.journalS3 && sameObjectStoreLocation(own, replica.journalS3)) {
+  const follows = replicaJournalOf(cluster);
+  if (own && follows && sameObjectStoreLocation(own, follows)) {
     errors.push('replication.journalArchiveS3 must not be the source\'s journal archive (replica.journalS3): the promoted cluster would archive over it');
   }
   return errors;

@@ -68,6 +68,12 @@ export function journalArchiveOf(cluster: FirebirdCluster): ObjectStoreConfigura
   return r ? objectStoreOf({ s3: r.journalArchiveS3, azureBlob: r.journalArchiveAzureBlob, gcs: r.journalArchiveGCS }) : undefined;
 }
 
+/** The source's journal archive a replica cluster follows (phase 4): journalS3, journalAzureBlob or journalGCS */
+export function replicaJournalOf(cluster: FirebirdCluster): ObjectStoreConfiguration | undefined {
+  const r = cluster.spec.replica;
+  return r ? objectStoreOf({ s3: r.journalS3, azureBlob: r.journalAzureBlob, gcs: r.journalGCS }) : undefined;
+}
+
 /** The journal archive a point-in-time recovery names: journalS3, journalAzureBlob or journalGCS */
 export function pointInTimeJournalOf(pitr: PointInTimeRecovery | undefined): ObjectStoreConfiguration | undefined {
   return pitr ? objectStoreOf({ s3: pitr.journalS3, azureBlob: pitr.journalAzureBlob, gcs: pitr.journalGCS }) : undefined;

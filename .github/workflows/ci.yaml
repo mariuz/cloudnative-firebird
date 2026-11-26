@@ -3047,7 +3047,7 @@ jobs:
           # Azurite stays for the next step
           kubectl delete deployment fake-gcs --wait=false
 
-      - name: Verify the journal archive and point-in-time recovery on Azure Blob (Azurite)
+      - name: Verify the journal archive, point-in-time recovery and a replica cluster on Azure Blob (Azurite)
         if: matrix.track.id == 'extended'
         run: |
           # docs/object-stores.md, phase 3: replication.journalArchiveAzureBlob, the archive Job's
@@ -3138,6 +3138,53 @@ jobs:
           got=$(rows /var/lib/firebird/data/azarch-pitr.fdb)
           [ "$got" = 10 ] || { echo "azarch-pitr.fdb has $got rows, expected 10 (the target $target)"; kubectl logs job/restore-azarch-pitr --all-containers --tail=60 || true; exit 1; }
           echo "recovered to $target from the journal archive in Azure Blob: 10 rows"
+
+          # docs/object-stores.md, phase 4: a replica cluster following that archive in Azure Blob,
+          # bootstrapped from the same base backup there, then promoted
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: azdr
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            replication:
+              enabled: true
+            replica:
+              enabled: true
+              pollIntervalSeconds: 5
+              journalAzureBlob: $AZ, prefix: azarch }
+            bootstrap:
+              recovery:
+                sourcePath: nbackup-l0-azarch-base.nbk
+                azureBlob: $AZ, prefix: azarch-backups }
+          EOF
+          timeout 600 bash -c 'until kubectl get pod azdr-0 >/dev/null 2>&1; do
+            [ -n "$(kubectl get job azdr-pitr-recovery -o jsonpath="{.status.failed}" 2>/dev/null)" ] && { kubectl logs job/azdr-pitr-recovery --all-containers; exit 1; }; sleep 5; done' \
+            || { kubectl describe pod -l job-name=azdr-pitr-recovery | tail -40; kubectl logs job/azdr-pitr-recovery --all-containers --tail=30 || true; exit 1; }
+          kubectl wait pod/azdr-0 --for=condition=Ready --timeout=300s
+          kubectl get pod azdr-0 -o jsonpath='{.spec.containers[*].name}' | grep -q archive-follower
+          drsql() { kubectl exec azdr-0 -c firebird -- bash -c "echo \"$1\" | isql -q localhost:$DB" 2>&1; }
+          drrows() { drsql "select 'rows=' || count(*) from t;" | sed -n 's/.*rows=\([0-9]*\).*/\1/p'; }
+          [ "$(drrows)" = 15 ] || { echo "the replica cluster has $(drrows) rows, expected 15"; kubectl logs azdr-0 -c archive-follower --tail=20; exit 1; }
+          # it follows: a change on the source arrives through the archive in Azure Blob
+          sql $DB "insert into t values (16); commit;" >/dev/null
+          for _ in $(seq 1 60); do [ "$(drrows)" = 16 ] && break; sleep 5; done
+          [ "$(drrows)" = 16 ] || { kubectl get firebirdcluster azdr -o jsonpath='{.status.replicaCluster}'; echo; kubectl logs azdr-0 -c archive-follower --tail=30; exit 1; }
+          timeout 60 bash -c 'until [ "$(kubectl get firebirdcluster azdr -o jsonpath={.status.replicaCluster.phase})" = Following ]; do sleep 5; done'
+          echo "the replica cluster follows the archive in Azure Blob: 16 rows"
+          # promoted: a primary of its own
+          kubectl patch firebirdcluster azdr --type merge -p '{"spec":{"replica":{"enabled":false}}}'
+          timeout 300 bash -c 'until [ "$(kubectl get firebirdcluster azdr -o jsonpath={.status.replicaCluster.phase})" = Promoted ]; do sleep 5; done' \
+            || { kubectl get firebirdcluster azdr -o jsonpath='{.status}'; exit 1; }
+          kubectl wait pod/azdr-0 --for=condition=Ready --timeout=300s
+          if kubectl get pod azdr-0 -o jsonpath='{.spec.containers[*].name}' | grep -q archive-follower; then echo "the follower stayed after the promotion"; exit 1; fi
+          drsql "insert into t values (17); commit;" >/dev/null
+          [ "$(drrows)" = 17 ] || { echo "the promoted cluster has $(drrows) rows, expected 17"; exit 1; }
+          echo "promoted: 17 rows"
+          kubectl delete firebirdcluster azdr --wait=false
           kubectl delete firebirdrestore azarch-pitr --wait=false
           kubectl delete firebirdbackup azarch-base --wait=false
           kubectl delete firebirdcluster azarch --wait=false
