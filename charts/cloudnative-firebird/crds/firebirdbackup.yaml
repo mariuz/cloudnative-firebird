@@ -59,7 +59,7 @@ spec:
                   message: at most one of s3, azureBlob and gcs (one object store)
                 - rule: "!has(self.verify) || !self.verify || !has(self.type) || self.type != 'physical'"
                   message: verify is supported for logical backups only
-                - rule: "!has(self.type) || self.type != 'volumeSnapshot' || (!has(self.s3) && !has(self.level))"
+                - rule: "!has(self.type) || self.type != 'volumeSnapshot' || (!has(self.s3) && !has(self.azureBlob) && !has(self.gcs) && !has(self.level))"
                   message: a volumeSnapshot backup copies the primary's whole volume (no s3 or level)
                 - rule: "!has(self.database) || !has(self.type) || self.type != 'volumeSnapshot'"
                   message: a volumeSnapshot covers the whole volume, not one FirebirdDatabase (spec.database)

@@ -1,6 +1,18 @@
 import { clusterImage } from './image-catalog';
 import { AGENT_PATH } from './agent';
-import { agentClient, agentClientContainer, agentObjects, gcsKeyDir, gcsKeyVolumeName, objectStoreOf, objectUri, storeKind, withObjectStoreLabels } from './object-store';
+import {
+  agentClient,
+  agentClientContainer,
+  agentObjects,
+  gcsKeyDir,
+  gcsKeyVolumeName,
+  journalArchiveOf,
+  objectStoreOf,
+  objectUri,
+  pointInTimeJournalOf,
+  storeKind,
+  withObjectStoreLabels,
+} from './object-store';
 import {
   V1Container,
   V1CronJob,
@@ -838,9 +850,9 @@ export function buildRestoreJob(
 /** Backup file names the segment server's FILE command serves (the agent's segment server) */
 const SERVER_BACKUP_FILE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.(?:nbk|fbk)$/;
 
-/** Journal archive a point-in-time recovery replays: its own journalS3, or the cluster's */
+/** Journal archive a point-in-time recovery replays: its own (journalS3, journalAzureBlob or journalGCS), or the cluster's */
 export function pointInTimeJournalS3(restore: FirebirdRestore, cluster: FirebirdCluster): S3BackupConfiguration | undefined {
-  return restore.spec.pointInTime?.journalS3 ?? cluster.spec.replication?.journalArchiveS3;
+  return pointInTimeJournalOf(restore.spec.pointInTime) ?? journalArchiveOf(cluster);
 }
 
 /** Problem with a point-in-time recovery's source that the spec alone does not show, if any */
@@ -848,7 +860,7 @@ export function pointInTimeSourceError(restore: FirebirdRestore, cluster: Firebi
   if (!restore.spec.pointInTime) return undefined;
   if (source.type !== 'physical') return 'pointInTime needs a physical (nbackup) backup';
   if (!pointInTimeJournalS3(restore, cluster)) {
-    return "pointInTime needs a journal archive: set pointInTime.journalS3, or the cluster's spec.replication.journalArchiveS3";
+    return "pointInTime needs a journal archive: set pointInTime.journalS3 (or journalAzureBlob, journalGCS), or the cluster's spec.replication.journalArchiveS3 (or journalArchiveAzureBlob, journalArchiveGCS)";
   }
   if (!source.s3) {
     const bad = [source.path, ...(source.incrementalPaths ?? [])].find((p) => !SERVER_BACKUP_FILE.test(serverFileName(p)));
@@ -1068,7 +1080,7 @@ export function buildRecoveryBootstrapJob(cluster: FirebirdCluster): V1Job {
     : `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`;
   const podSpec = replayPodSpec(cluster, {
     chain: { s3: objectStoreOf(recovery)!, keys },
-    journalS3: replica ? replica.journalS3 : recovery.pointInTime!.journalS3!,
+    journalS3: replica ? replica.journalS3 : pointInTimeJournalOf(recovery.pointInTime)!,
     // a replica cluster: every archived segment
     target: replica ? {} : recovery.pointInTime!,
     command: `set -eu; . ${OPERATOR_CONFIG_DIR}/pitr-restore.sh`,
@@ -1170,7 +1182,7 @@ export function journalArchiveListedSequence(pods: V1Pod[], stored?: number): nu
  */
 export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?: string): V1CronJob | null {
   const { name, namespace = 'default' } = cluster.metadata;
-  const s3 = cluster.spec.replication?.journalArchiveS3;
+  const s3 = journalArchiveOf(cluster);
   if (!replicationEnabled(cluster) || !s3) return null;
 
   const labels = journalArchiveLabels(cluster);
@@ -1239,7 +1251,8 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
                   perDatabase(`${agentObjects.list(`${agentObjects.key('journals/')}"$f/"`)} > $d/uploaded || : > $d/uploaded`),
               ],
               env: databasesEnv,
-              volumeMounts: [workMount],
+              // no SSE-C key (a listing needs none); a GCS service account key, which it does
+              volumeMounts: [workMount, ...(storeKind(s3) === 'gcs' ? s3ClientMounts(s3) : [])],
             },
             's3',
             { sseCustomerKey: false },

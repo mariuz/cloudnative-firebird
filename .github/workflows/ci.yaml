@@ -3044,7 +3044,104 @@ jobs:
             || { kubectl describe pod objs-boot-0 | tail -30; kubectl logs objs-boot-0 -c bootstrap-download || true; exit 1; }
           [ "$(count objs-boot-0 mydb.fdb)" = 3 ]
           kubectl delete firebirdcluster objs objs-boot --wait=false
-          kubectl delete deployment azurite fake-gcs --wait=false
+          # Azurite stays for the next step
+          kubectl delete deployment fake-gcs --wait=false
+
+      - name: Verify the journal archive and point-in-time recovery on Azure Blob (Azurite)
+        if: matrix.track.id == 'extended'
+        run: |
+          # docs/object-stores.md, phase 3: replication.journalArchiveAzureBlob, the archive Job's
+          # sync and listing, the instance's recovery points, and a point-in-time recovery whose
+          # backup chain and journals come from Azurite (the step above runs it, with its key)
+          AZURE_KEY='Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=='
+          AZURE_ENDPOINT=http://azurite.default.svc:10000/devstoreaccount1
+          AZ="{ storageAccount: devstoreaccount1, container: fbk, endpoint: \"$AZURE_ENDPOINT\", secretRef: { name: azure-credentials }"
+          listing() {
+            echo "import os; from azure.storage.blob import BlobServiceClient as S; c = S.from_connection_string(os.environ['AZ']).get_container_client('fbk'); print('\\n'.join(b.name for b in c.list_blobs(name_starts_with='$1')))" |
+              kubectl run "azure-$RANDOM" --rm -i --restart=Never --quiet --image=python:3.12-slim \
+                --env=AZ="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=$AZURE_KEY;BlobEndpoint=$AZURE_ENDPOINT;" \
+                --env=HOME=/tmp --command -- sh -c 'pip install -q --disable-pip-version-check --root-user-action=ignore azure-storage-blob >/dev/null && python -u -'
+          }
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdCluster
+          metadata:
+            name: azarch
+          spec:
+            instances: 1
+            storage:
+              size: 1Gi
+            replication:
+              enabled: true
+              archiveSchedule: "* * * * *"
+              archiveTimeoutSeconds: 3
+              journalArchiveAzureBlob: $AZ, prefix: azarch }
+          EOF
+          timeout 300 bash -c 'until kubectl get pod azarch-0 >/dev/null 2>&1; do sleep 3; done'
+          kubectl wait pod/azarch-0 --for=condition=Ready --timeout=300s
+          DB=/var/lib/firebird/data/mydb.fdb
+          sql() { kubectl exec azarch-0 -c firebird -- bash -c "echo \"$2\" | isql -q localhost:$1" 2>&1; }
+          rows() { sql "$1" "select 'rows=' || count(*) from t;" | sed -n 's/.*rows=\([0-9]*\).*/\1/p'; }
+          sql $DB "create table t (id int primary key); commit;" >/dev/null
+          for i in $(seq 1 5); do sql $DB "insert into t values ($i); commit;" >/dev/null; done
+          # the physical base backup in Azure Blob, then rows before and after the target
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdBackup
+          metadata:
+            name: azarch-base
+          spec:
+            clusterName: azarch
+            type: physical
+            level: 0
+            azureBlob: $AZ, prefix: azarch-backups }
+          EOF
+          timeout 300 bash -c 'until [ "$(kubectl get firebirdbackup azarch-base -o jsonpath={.status.phase})" = Completed ]; do
+            [ "$(kubectl get firebirdbackup azarch-base -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done' \
+            || { kubectl get firebirdbackup azarch-base -o jsonpath='{.status}'; echo; kubectl logs job/backup-azarch-base --all-containers || true; exit 1; }
+          for i in $(seq 6 10); do sql $DB "insert into t values ($i); commit;" >/dev/null; done
+          # the archive timeout closes their segment within seconds: the target is after it
+          sleep 10
+          target=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          sleep 5
+          for i in $(seq 11 15); do sql $DB "insert into t values ($i); commit;" >/dev/null; done
+          sleep 10
+          # every segment the primary archived is uploaded under journals/
+          last=$(kubectl exec azarch-0 -c firebird -- ls /var/lib/firebird/data/replication/archive | sed -n 's/.*\.journal-0*\([0-9][0-9]*\)$/\1/p' | sort -n | tail -n 1)
+          echo "the primary archived up to segment $last"
+          for _ in $(seq 1 30); do
+            listed=$(listing azarch/journals/)
+            grep -Eq "\.journal-0*$last\$" <<<"$listed" && break
+            sleep 10
+          done
+          echo "$listed" | tail -5
+          grep -Eq "\.journal-0*$last\$" <<<"$listed" \
+            || { kubectl get jobs; kubectl logs -l app.kubernetes.io/component=journal-archive --all-containers --tail=30 || true; exit 1; }
+          timeout 180 bash -c 'until [ -z "$(kubectl get pods -l firebird.cloudnative-firebird.io/cluster=azarch,app.kubernetes.io/component=journal-archive --field-selector=status.phase!=Succeeded,status.phase!=Failed -o name)" ]; do sleep 3; done'
+          # recovered to the target from the cluster's archive in Azure Blob: the rows before it only
+          kubectl apply -f - <<EOF
+          apiVersion: firebird.cloudnative-firebird.io/v1
+          kind: FirebirdRestore
+          metadata:
+            name: azarch-pitr
+          spec:
+            clusterName: azarch
+            backupName: azarch-base
+            restoreType: physical
+            targetDatabase: azarch-pitr.fdb
+            pointInTime:
+              targetTime: "$target"
+          EOF
+          timeout 600 bash -c 'until [ "$(kubectl get firebirdrestore azarch-pitr -o jsonpath={.status.phase})" = Completed ]; do
+            [ "$(kubectl get firebirdrestore azarch-pitr -o jsonpath={.status.phase})" = Failed ] && exit 1; sleep 5; done' \
+            || { kubectl get firebirdrestore azarch-pitr -o jsonpath='{.status}'; echo; kubectl logs job/restore-azarch-pitr --all-containers --tail=60 || true; exit 1; }
+          got=$(rows /var/lib/firebird/data/azarch-pitr.fdb)
+          [ "$got" = 10 ] || { echo "azarch-pitr.fdb has $got rows, expected 10 (the target $target)"; kubectl logs job/restore-azarch-pitr --all-containers --tail=60 || true; exit 1; }
+          echo "recovered to $target from the journal archive in Azure Blob: 10 rows"
+          kubectl delete firebirdrestore azarch-pitr --wait=false
+          kubectl delete firebirdbackup azarch-base --wait=false
+          kubectl delete firebirdcluster azarch --wait=false
+          kubectl delete deployment azurite --wait=false
 
       - name: Verify volume snapshot backups and a cluster bootstrapped from one
         if: matrix.track.id == 'extended'

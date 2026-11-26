@@ -3,7 +3,7 @@ import { FirebirdCluster } from '../types';
 import { s3ClientEnv, s3ClientImage, s3ClientMounts, s3Uri, sseCustomerKeyFile } from './backup';
 import { FIREBIRD_DATA_DIR } from './resources';
 import { replicationDirectories, UPGRADE_SCRIPTS } from './replication';
-import { agentClient, objectStoreEnv, objectStoreImage } from './object-store';
+import { agentClient, journalArchiveOf, objectStoreEnv, objectStoreImage, sameObjectStoreLocation } from './object-store';
 
 /**
  * Replica clusters (CloudNativePG replica clusters, spec.replica).
@@ -138,8 +138,8 @@ export function replicaClusterErrors(cluster: FirebirdCluster): string[] {
   if (replica.enabled && spec.instances !== 1) {
     errors.push('a replica cluster runs one instance while it follows the source (scale it after the promotion)');
   }
-  const own = spec.replication?.journalArchiveS3;
-  if (own && replica.journalS3 && own.bucket === replica.journalS3.bucket && (own.prefix ?? '') === (replica.journalS3.prefix ?? '')) {
+  const own = journalArchiveOf(cluster);
+  if (own && replica.journalS3 && sameObjectStoreLocation(own, replica.journalS3)) {
     errors.push('replication.journalArchiveS3 must not be the source\'s journal archive (replica.journalS3): the promoted cluster would archive over it');
   }
   return errors;

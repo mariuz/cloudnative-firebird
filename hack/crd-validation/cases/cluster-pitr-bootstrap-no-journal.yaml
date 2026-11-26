@@ -1,4 +1,4 @@
-# expect: pointInTime needs s3, sourcePath and pointInTime.journalS3
+# expect: pointInTime needs an object store (s3, azureBlob or gcs), sourcePath and a journal archive
 apiVersion: firebird.cloudnative-firebird.io/v1
 kind: FirebirdCluster
 metadata:

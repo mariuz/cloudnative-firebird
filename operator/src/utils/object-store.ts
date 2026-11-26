@@ -1,5 +1,6 @@
 import { V1Container, V1EnvVar, V1PodSpec } from '@kubernetes/client-node';
-import { AzureBlobConfiguration, FirebirdCluster, GCSConfiguration, S3BackupConfiguration } from '../types';
+import { FirebirdCluster, S3BackupConfiguration } from '../types';
+import { ObjectStoreConfiguration, objectStorePrefix as prefix, storeKind } from './object-store-fields';
 import { AGENT_PATH } from './agent';
 import { clusterImage } from './image-catalog';
 import { shellQuote, sseCustomerKeyFile } from './backup';
@@ -14,65 +15,7 @@ import { shellQuote, sseCustomerKeyFile } from './backup';
  * `list --long`, laid out as `aws s3 ls` prints it.
  */
 
-/**
- * A store of any kind, as the call sites take it (phase 2): an S3 configuration as it is, or an
- * Azure Blob or GCS one in its shape, with `store` set and the agent's client (the bucket is the
- * container; region, encryption and clientImage are S3's only and never set on them)
- */
-export interface ObjectStoreConfiguration extends S3BackupConfiguration {
-  /** The kind of store: s3 when unset */
-  store?: 's3' | 'azure' | 'gcs';
-  /** Azure: the storage account */
-  storageAccount?: string;
-}
-
-/** Where a resource configures its store: s3, or one of its siblings */
-export interface ObjectStoreFields {
-  s3?: S3BackupConfiguration;
-  azureBlob?: AzureBlobConfiguration;
-  gcs?: GCSConfiguration;
-}
-
-/** The fields of a store's resource that are set (more than one is refused by the webhook) */
-export function objectStoreFieldsSet(fields: ObjectStoreFields | undefined): ('s3' | 'azureBlob' | 'gcs')[] {
-  return (['s3', 'azureBlob', 'gcs'] as const).filter((f) => fields?.[f] !== undefined && fields[f] !== null);
-}
-
-export function azureBlobStore(azure: AzureBlobConfiguration): ObjectStoreConfiguration {
-  return {
-    store: 'azure',
-    client: 'agent',
-    storageAccount: azure.storageAccount,
-    bucket: azure.container,
-    ...(azure.prefix !== undefined ? { prefix: azure.prefix } : {}),
-    ...(azure.endpoint !== undefined ? { endpoint: azure.endpoint } : {}),
-    ...(azure.secretRef ? { secretRef: azure.secretRef } : {}),
-  };
-}
-
-export function gcsStore(gcs: GCSConfiguration): ObjectStoreConfiguration {
-  return {
-    store: 'gcs',
-    client: 'agent',
-    bucket: gcs.bucket,
-    ...(gcs.prefix !== undefined ? { prefix: gcs.prefix } : {}),
-    ...(gcs.endpoint !== undefined ? { endpoint: gcs.endpoint } : {}),
-    ...(gcs.secretRef ? { secretRef: gcs.secretRef } : {}),
-  };
-}
-
-/** The store a resource configures (s3 first, as the webhook allows one only), or none */
-export function objectStoreOf(fields: ObjectStoreFields | undefined): ObjectStoreConfiguration | undefined {
-  if (fields?.s3) return fields.s3;
-  if (fields?.azureBlob) return azureBlobStore(fields.azureBlob);
-  if (fields?.gcs) return gcsStore(fields.gcs);
-  return undefined;
-}
-
-/** The kind of a store */
-export function storeKind(s3: S3BackupConfiguration): 's3' | 'azure' | 'gcs' {
-  return (s3 as ObjectStoreConfiguration).store ?? 's3';
-}
+export * from './object-store-fields';
 
 /** Whether the configuration's transfers run through `fb-agent objects` (always, off S3) */
 export function agentClient(s3: S3BackupConfiguration): boolean {
@@ -111,10 +54,6 @@ export function gcsKeyDir(id: string): string {
 
 const OBJECTS = `${AGENT_PATH} objects`;
 
-/** The prefix without its slashes, as the agent joins keys to it */
-function prefix(s3: S3BackupConfiguration): string {
-  return (s3.prefix ?? '').replace(/^\/+|\/+$/g, '');
-}
 
 /**
  * The agent's environment for the configuration: the store, its credentials (or none, for the

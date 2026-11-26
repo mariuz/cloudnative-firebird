@@ -1,0 +1,16 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdRestore
+metadata:
+  name: r1
+spec:
+  clusterName: c1
+  restoreType: physical
+  backupPath: nbackup-l0.nbk
+  gcs:
+    bucket: backups
+  pointInTime:
+    targetTime: "2026-10-01T10:15:00Z"
+    journalGCS:
+      bucket: journals
+      prefix: prod

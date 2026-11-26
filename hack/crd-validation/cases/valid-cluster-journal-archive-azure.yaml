@@ -1,0 +1,17 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 2
+  storage:
+    size: 1Gi
+  replication:
+    enabled: true
+    journalArchiveAzureBlob:
+      storageAccount: account1
+      container: journals
+      prefix: prod
+      secretRef:
+        name: azure-creds

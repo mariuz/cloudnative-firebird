@@ -1,0 +1,16 @@
+# expect: at most one of journalArchiveS3, journalArchiveAzureBlob and journalArchiveGCS
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 2
+  storage:
+    size: 1Gi
+  replication:
+    enabled: true
+    journalArchiveS3:
+      bucket: b
+    journalArchiveAzureBlob:
+      storageAccount: account1
+      container: journals

@@ -44,8 +44,8 @@ Planned 2026-11-19, after the Rust agent (docs/rust-agent-roadmap.md) was done, 
   [docs/object-stores.md](docs/object-stores.md). Phase 1a (`fb-agent objects`, tested against
   S3, Azurite and fake-gcs-server): v0.187.0. Phase 1b (the S3 opt-in, `s3.client: agent`, at
   every call site): v0.188.0. Phase 2 (backups, restores, bootstrap and retention on Azure Blob
-  and GCS): v0.189.0. Next: phase 3, the journal archive and point-in-time recovery on Azure Blob
-  and GCS.
+  and GCS): v0.189.0. Phase 3 (the journal archive and point-in-time recovery on Azure Blob and
+  GCS): v0.190.0. Next: phase 4, replica clusters following an Azure Blob or GCS archive.
 - [ ] **A CloudNativePG sweep**: the last stopped at `a11083b` (2026-11-10).
 - [ ] **Firebird 6 readiness**: when Firebird 6 is released, run the "Firebird formats" workflow
   against it and move the default image once it is stable (below).

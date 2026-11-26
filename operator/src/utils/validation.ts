@@ -1,5 +1,13 @@
 import { tempVolumeErrors } from './temp-volume';
-import { ObjectStoreFields, objectStoreFieldsSet, objectStoreOf } from './object-store';
+import {
+  journalArchiveOf,
+  ObjectStoreFields,
+  objectStoreFieldsSet,
+  objectStoreOf,
+  pointInTimeJournalOf,
+  sameObjectStoreLocation,
+  storeKind,
+} from './object-store';
 import { customQueriesErrors } from './custom-queries';
 import { extraConfigErrors } from './pod-settings';
 import { initSqlRefsErrors } from './init-sql';
@@ -209,6 +217,11 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
         `Invalid readOnlyRouting maxLagSeconds: ${routing.maxLagSeconds}. Must be a non-negative number.`,
       );
     }
+    validateObjectStores('spec.replication', {
+      s3: spec.replication.journalArchiveS3,
+      azureBlob: spec.replication.journalArchiveAzureBlob,
+      gcs: spec.replication.journalArchiveGCS,
+    }, JOURNAL_ARCHIVE_FIELDS);
     if (spec.replication.journalArchiveS3) {
       if (!spec.replication.journalArchiveS3.bucket || spec.replication.journalArchiveS3.bucket.trim() === '') {
         throw new ValidationError('Replication journalArchiveS3 bucket name is required');
@@ -265,12 +278,15 @@ export function validateClusterSpec(cluster: FirebirdCluster): void {
       if (!store || !sourcePath) {
         throw new ValidationError('bootstrap.recovery.pointInTime needs s3 and sourcePath (an nbackup level 0 object key)');
       }
-      if (!pointInTime.journalS3) {
-        throw new ValidationError('bootstrap.recovery.pointInTime.journalS3 is required (the source cluster\'s journal archive)');
+      const journal = pointInTimeJournalOf(pointInTime);
+      if (!journal) {
+        throw new ValidationError(
+          'bootstrap.recovery.pointInTime.journalS3 is required (the source cluster\'s journal archive; or journalAzureBlob, journalGCS)',
+        );
       }
       validatePointInTime('bootstrap.recovery.pointInTime', pointInTime);
-      const own = spec.replication?.journalArchiveS3;
-      if (own && sameS3Location(own, pointInTime.journalS3)) {
+      const own = journalArchiveOf({ spec } as FirebirdCluster);
+      if (own && sameJournalArchive(own, journal)) {
         throw new ValidationError(
           'bootstrap.recovery.pointInTime.journalS3 is this cluster\'s own replication.journalArchiveS3: ' +
             'the recovered cluster would archive its segments over the ones it recovers from',
@@ -447,35 +463,41 @@ function validateRetention(field: string, policy?: string): void {
  * its container or bucket (`field` is the path of the resource's fields, e.g. "spec"; s3 is
  * checked by validateS3 or the cluster's own checks)
  */
-export function validateObjectStores(field: string, fields: ObjectStoreFields | undefined): void {
+export function validateObjectStores(
+  field: string,
+  fields: ObjectStoreFields | undefined,
+  names: { s3: string; azureBlob: string; gcs: string } = { s3: 's3', azureBlob: 'azureBlob', gcs: 'gcs' },
+): void {
   const set = objectStoreFieldsSet(fields);
   if (set.length > 1) {
-    throw new ValidationError(`${field}: ${set.join(' and ')} exclude each other (one object store)`);
+    throw new ValidationError(`${field}: ${set.map((f) => names[f]).join(' and ')} exclude each other (one object store)`);
   }
   const azure = fields?.azureBlob;
   if (azure) {
-    // the account name as Azure names them; the container as Azure names them
+    const at = `${field}.${names.azureBlob}`;
+    // the account and container names as Azure takes them
     if (!azure.storageAccount || !/^[a-z0-9]{3,24}$/.test(azure.storageAccount)) {
-      throw new ValidationError(`${field}.azureBlob.storageAccount is required: 3 to 24 lowercase letters and digits`);
+      throw new ValidationError(`${at}.storageAccount is required: 3 to 24 lowercase letters and digits`);
     }
     if (!azure.container || !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(azure.container)) {
-      throw new ValidationError(`${field}.azureBlob.container is required: 3 to 63 lowercase letters, digits and hyphens`);
+      throw new ValidationError(`${at}.container is required: 3 to 63 lowercase letters, digits and hyphens`);
     }
     if (azure.endpoint !== undefined && !/^https?:\/\/[^\s]+$/.test(azure.endpoint)) {
-      throw new ValidationError(`${field}.azureBlob.endpoint must be an http:// or https:// URL`);
+      throw new ValidationError(`${at}.endpoint must be an http:// or https:// URL`);
     }
     if (azure.secretRef && (!azure.secretRef.name || azure.secretRef.name.trim() === '')) {
-      throw new ValidationError(`${field}.azureBlob.secretRef.name is required`);
+      throw new ValidationError(`${at}.secretRef.name is required`);
     }
   }
   const gcs = fields?.gcs;
   if (gcs) {
-    if (!gcs.bucket || gcs.bucket.trim() === '') throw new ValidationError(`${field}.gcs.bucket is required`);
+    const at = `${field}.${names.gcs}`;
+    if (!gcs.bucket || gcs.bucket.trim() === '') throw new ValidationError(`${at}.bucket is required`);
     if (gcs.endpoint !== undefined && !/^https?:\/\/[^\s]+$/.test(gcs.endpoint)) {
-      throw new ValidationError(`${field}.gcs.endpoint must be an http:// or https:// URL`);
+      throw new ValidationError(`${at}.endpoint must be an http:// or https:// URL`);
     }
     if (gcs.secretRef && (!gcs.secretRef.name || gcs.secretRef.name.trim() === '')) {
-      throw new ValidationError(`${field}.gcs.secretRef.name is required`);
+      throw new ValidationError(`${at}.secretRef.name is required`);
     }
   }
 }
@@ -611,7 +633,17 @@ function validatePointInTime(field: string, pitr: PointInTimeRecovery): void {
   if (pitr.targetSegment !== undefined && (!Number.isSafeInteger(pitr.targetSegment) || pitr.targetSegment < 1)) {
     throw new ValidationError(`${field}.targetSegment must be a positive integer`);
   }
+  validateObjectStores(`spec.${field}`, { s3: pitr.journalS3, azureBlob: pitr.journalAzureBlob, gcs: pitr.journalGCS }, POINT_IN_TIME_FIELDS);
   validateS3(`spec.${field}.journalS3`, pitr.journalS3);
+}
+
+/** The journal archive fields of spec.replication, and of a point-in-time recovery */
+const JOURNAL_ARCHIVE_FIELDS = { s3: 'journalArchiveS3', azureBlob: 'journalArchiveAzureBlob', gcs: 'journalArchiveGCS' };
+const POINT_IN_TIME_FIELDS = { s3: 'journalS3', azureBlob: 'journalAzureBlob', gcs: 'journalGCS' };
+
+/** Whether two journal archives are the same place: S3's on the same endpoint, the others by account */
+function sameJournalArchive(a: S3BackupConfiguration, b: S3BackupConfiguration): boolean {
+  return storeKind(a) === 's3' && storeKind(b) === 's3' ? sameS3Location(a, b) : sameObjectStoreLocation(a, b);
 }
 
 /** Whether two S3 locations are the same bucket and prefix (on the same endpoint) */

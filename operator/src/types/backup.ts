@@ -186,8 +186,15 @@ export interface PointInTimeRecovery {
   targetTime?: string;
   /** Recover up to the end of this journal segment (mutually exclusive with targetTime) */
   targetSegment?: number;
-  /** Journal archive to replay; defaults to the cluster's spec.replication.journalArchiveS3 */
+  /**
+   * Journal archive to replay; defaults to the cluster's journal archive
+   * (spec.replication.journalArchiveS3, journalArchiveAzureBlob or journalArchiveGCS)
+   */
   journalS3?: S3BackupConfiguration;
+  /** The journal archive in Azure Blob Storage (since v0.190.0; at most one of journalS3, journalAzureBlob and journalGCS) */
+  journalAzureBlob?: AzureBlobConfiguration;
+  /** The journal archive in Google Cloud Storage (since v0.190.0; at most one of journalS3, journalAzureBlob and journalGCS) */
+  journalGCS?: GCSConfiguration;
 }
 
 /**

@@ -431,6 +431,8 @@ esac
     expect(lines).toContain('firebird_exporter_query_error{query="attachments"} 1');
     expect(readdirSync(dir)).not.toContain('asked');
     expect(agent.log()).toContain("queries over the agent's own attachment (QUERY_CLIENT=agent)");
+    // printed by the scrape, which may answer before the line is read off the agent's stdout
+    for (let i = 0; i < 50 && !/the database does not answer: /.test(agent.log()); i++) await new Promise((r) => setTimeout(r, 100));
     expect(agent.log()).toMatch(/the database does not answer: /);
     const refused = spawnSync(agentBin!, ['metrics-exporter'], {
       env: { PATH: process.env.PATH ?? '', DATABASE_PATH: '/db/test.fdb', QUERY_CLIENT: 'odbc' },
