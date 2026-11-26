@@ -120,8 +120,8 @@ spec:
                       type: string
                     client:
                       description: >-
-                        The object store client: aws (the default), the aws CLI of clientImage; or agent, the
-                        instance image with fb-agent objects over the store's own API (docs/object-stores.md)
+                        The object store client: agent (the default since v0.192.0), the instance image with fb-agent
+                        objects over the store's own API; or aws (deprecated), the aws CLI of clientImage (docs/object-stores.md)
                       type: string
                       enum: [aws, agent]
                     clientImage:
@@ -241,8 +241,8 @@ spec:
                           type: string
                         client:
                           description: >-
-                            The object store client: aws (the default), the aws CLI of clientImage; or agent, the
-                            instance image with fb-agent objects over the store's own API (docs/object-stores.md)
+                            The object store client: agent (the default since v0.192.0), the instance image with fb-agent
+                            objects over the store's own API; or aws (deprecated), the aws CLI of clientImage (docs/object-stores.md)
                           type: string
                           enum: [aws, agent]
                         clientImage:

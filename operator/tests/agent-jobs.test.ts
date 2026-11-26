@@ -14,7 +14,7 @@ import { makeCluster } from './helpers/factories';
  * Job's pod, and every program the Job runs is the agent's command (agent/fb-agent/src/jobs.rs).
  * The commands' own tests are in jobs-conformance.test.ts and the tests of their Jobs.
  */
-const s3 = { bucket: 'bkt', prefix: 'fb/', secretRef: { name: 's3-creds' }, endpoint: 'http://minio:9000' };
+const s3 = { client: 'aws' as const, bucket: 'bkt', prefix: 'fb/', secretRef: { name: 's3-creds' }, endpoint: 'http://minio:9000' };
 const annotated = (cluster: FirebirdCluster, value: string): FirebirdCluster => ({
   ...cluster,
   metadata: { ...cluster.metadata, annotations: { ...cluster.metadata.annotations, [AGENT_ANNOTATION]: value } },

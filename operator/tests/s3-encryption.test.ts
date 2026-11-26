@@ -19,7 +19,7 @@ import { makeCluster } from './helpers/factories';
  * Server-side encryption of the S3 objects (CloudNativePG #11775): SSE-S3 or SSE-KMS on uploads,
  * SSE-C (the key from a Secret) on uploads and downloads
  */
-const base = { bucket: 'bkt', prefix: 'fb/', secretRef: { name: 's3-creds' } };
+const base = { client: 'aws' as const, bucket: 'bkt', prefix: 'fb/', secretRef: { name: 's3-creds' } };
 const sseS3: S3BackupConfiguration = { ...base, encryption: 'AES256' };
 const sseKms: S3BackupConfiguration = { ...base, encryption: 'aws:kms', kmsKeyId: 'alias/fb backups' };
 const sseC: S3BackupConfiguration = { ...base, sseCustomerKey: { name: 'fb-sse' } };
@@ -101,7 +101,7 @@ describe('restores', () => {
   });
 
   it('to a point in time read the chain and the journal archive each with its own key', () => {
-    const journals = { bucket: 'arch', prefix: 'prod', sseCustomerKey: { name: 'arch-sse' } };
+    const journals = { client: 'aws' as const, bucket: 'arch', prefix: 'prod', sseCustomerKey: { name: 'arch-sse' } };
     const cluster = makeCluster({ replication: { enabled: true, journalArchiveS3: journals } });
     const chain = { type: 'physical' as const, path: 'l0.nbk', s3: sseC };
     const pod = podOf(buildRestoreJob(restore({ restoreType: 'physical', pointInTime: { targetSegment: 9 } }), cluster, chain, 'db-1'));
@@ -133,12 +133,12 @@ describe('the journal archive', () => {
   });
 
   it('is followed by a replica cluster with the archive key', () => {
-    const journalS3 = { bucket: 'dr', prefix: 'prod', sseCustomerKey: { name: 'dr-sse' } };
+    const journalS3 = { client: 'aws' as const, bucket: 'dr', prefix: 'prod', sseCustomerKey: { name: 'dr-sse' } };
     const cluster = makeCluster({
       instances: 1,
       replication: { enabled: true },
       replica: { enabled: true, journalS3 },
-      bootstrap: { recovery: { sourcePath: 'l0.nbk', s3: { bucket: 'dr', prefix: 'prod', sseCustomerKey: { name: 'dr-sse' } } } },
+      bootstrap: { recovery: { sourcePath: 'l0.nbk', s3: { client: 'aws' as const, bucket: 'dr', prefix: 'prod', sseCustomerKey: { name: 'dr-sse' } } } },
     });
     expect(replicaClusterErrors(cluster)).toEqual([]);
     const follower = buildArchiveFollowerContainer(cluster);
@@ -153,9 +153,9 @@ describe('the journal archive', () => {
     const follow = readFileSync(join(__dirname, '..', 'src', 'replication', 'archive-follower.sh'), 'utf8');
     expect(follow).toContain('aws_s3 cp --only-show-errors ${S3_SSE_C_KEY_FILE:+--sse-c AES256 --sse-c-key "fileb://$S3_SSE_C_KEY_FILE"} "$JOURNALS$name"');
     // no key volume without SSE-C
-    const plain = buildStatefulSet(makeCluster({ ...cluster.spec, replica: { enabled: true, journalS3: { bucket: 'dr' } } }));
+    const plain = buildStatefulSet(makeCluster({ ...cluster.spec, replica: { enabled: true, journalS3: { client: 'aws' as const, bucket: 'dr' } } }));
     expect(plain.spec!.template.spec!.volumes!.map((v) => v.name)).not.toContain('follow-sse-c');
-    expect(buildArchiveFollowerContainer(makeCluster({ ...cluster.spec, replica: { enabled: true, journalS3: { bucket: 'dr' } } })).env).not.toContainEqual(
+    expect(buildArchiveFollowerContainer(makeCluster({ ...cluster.spec, replica: { enabled: true, journalS3: { client: 'aws' as const, bucket: 'dr' } } })).env).not.toContainEqual(
       expect.objectContaining({ name: 'S3_SSE_C_KEY_FILE' }),
     );
   });

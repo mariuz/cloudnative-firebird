@@ -554,3 +554,23 @@ describe('FirebirdClusterController – replication seed sources', () => {
     expect(api('listNamespacedPod')).not.toHaveBeenCalled();
   });
 });
+
+describe('FirebirdClusterController – the deprecated aws S3 client (v0.192.0)', () => {
+  const events = (api: (m: string) => ReturnType<typeof vi.fn>) =>
+    api('createNamespacedEvent').mock.calls.map((c) => c[0].body as { reason: string; type: string; message: string });
+
+  it('reports a cluster that selects the aws CLI, and only then', async () => {
+    const aws = makeMockKubeConfig();
+    await new FirebirdClusterController(aws.kubeConfig).reconcile(
+      makeCluster({ backup: { enabled: true, schedule: '0 2 * * *', s3: { bucket: 'b', client: 'aws' } } }),
+    );
+    const deprecated = events(aws.api).filter((e) => e.reason === 'S3ClientDeprecated');
+    expect(deprecated).toHaveLength(1);
+    expect(deprecated[0].type).toBe('Warning');
+    expect(deprecated[0].message).toMatch(/^spec.backup.s3: client aws \(the aws CLI of clientImage\) is deprecated/);
+
+    const agent = makeMockKubeConfig();
+    await new FirebirdClusterController(agent.kubeConfig).reconcile(makeCluster({ backup: { enabled: true, schedule: '0 2 * * *', s3: { bucket: 'b' } } }));
+    expect(events(agent.api).map((e) => e.reason)).not.toContain('S3ClientDeprecated');
+  });
+});

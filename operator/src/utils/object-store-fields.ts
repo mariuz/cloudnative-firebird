@@ -98,3 +98,24 @@ export function storeKind(s3: S3BackupConfiguration): 's3' | 'azure' | 'gcs' {
 export function objectStorePrefix(s3: S3BackupConfiguration): string {
   return (s3.prefix ?? '').replace(/^\/+|\/+$/g, '');
 }
+
+/**
+ * The S3 configurations of a resource's spec that select the aws CLI (client: aws, deprecated
+ * since v0.192.0 and removed with clientImage in a later release), by path, e.g.
+ * "spec.backup.s3"; clientImage alone selects nothing since the agent became the default
+ */
+export function awsClientPaths(spec: unknown, path = 'spec'): string[] {
+  if (!spec || typeof spec !== 'object') return [];
+  if (Array.isArray(spec)) return spec.flatMap((v, i) => awsClientPaths(v, `${path}[${i}]`));
+  const o = spec as Record<string, unknown>;
+  const own = typeof o.bucket === 'string' && o.client === 'aws' ? [path] : [];
+  return [...own, ...Object.entries(o).flatMap(([k, v]) => awsClientPaths(v, `${path}.${k}`))];
+}
+
+/** The deprecation message for the paths that select the aws CLI */
+export function awsClientDeprecation(paths: string[]): string | undefined {
+  return paths.length
+    ? `${paths.join(', ')}: client aws (the aws CLI of clientImage) is deprecated since v0.192.0 and will be removed with ` +
+        'clientImage in a later release; the agent (fb-agent objects) is the default S3 client'
+    : undefined;
+}

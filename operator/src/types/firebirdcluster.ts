@@ -108,9 +108,10 @@ export interface S3BackupConfiguration {
   /** Object key prefix/folder inside bucket */
   prefix?: string;
   /**
-   * The client of the uploads and downloads: "aws" (default), the aws CLI of clientImage; or
-   * "agent", `fb-agent objects` in the instance image, over S3's own API (docs/object-stores.md,
-   * since v0.188.0). clientImage is not used with "agent".
+   * The client of the uploads and downloads: "agent" (the default since v0.192.0), `fb-agent
+   * objects` in the instance image, over S3's own API; or "aws" (deprecated: removed with
+   * clientImage in a later release), the aws CLI of clientImage (docs/object-stores.md).
+   * clientImage is not used with "agent".
    */
   client?: 'aws' | 'agent';
   /** Image providing the `aws` CLI for uploads and downloads (default "amazon/aws-cli:2.37.4") */

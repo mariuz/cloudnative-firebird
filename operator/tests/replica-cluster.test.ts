@@ -14,7 +14,7 @@ import { validateClusterSpec } from '../src/utils/validation';
 import { FirebirdCluster, ReplicaClusterStatus } from '../src/types';
 import { makeCluster, notFoundError } from './helpers/factories';
 
-const source = { bucket: 'dr', prefix: 'prod', endpoint: 'http://s3:9000', secretRef: { name: 's3' } };
+const source = { client: 'aws' as const, bucket: 'dr', prefix: 'prod', endpoint: 'http://s3:9000', secretRef: { name: 's3' } };
 const replicaCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): FirebirdCluster =>
   makeCluster({
     instances: 1,
@@ -40,7 +40,7 @@ describe('replica clusters', () => {
     // more instances once promoted
     expect(replicaClusterErrors(replicaCluster({ instances: 3, replica: { enabled: false, journalS3: source } }))).toEqual([]);
     expect(
-      replicaClusterErrors(replicaCluster({ replication: { enabled: true, journalArchiveS3: { bucket: 'dr', prefix: 'prod' } } })),
+      replicaClusterErrors(replicaCluster({ replication: { enabled: true, journalArchiveS3: { client: 'aws' as const, bucket: 'dr', prefix: 'prod' } } })),
     ).toContainEqual(expect.stringMatching(/must not be the source/));
     expect(replicaClusterErrors(replicaCluster({ replica: { enabled: true, journalS3: source, pollIntervalSeconds: 1 } }))).toContainEqual(
       expect.stringMatching(/pollIntervalSeconds/),

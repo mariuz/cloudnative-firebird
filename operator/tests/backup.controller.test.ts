@@ -118,7 +118,7 @@ describe('FirebirdBackupController', () => {
     });
 
     it('reports an S3 location for uploaded backups', async () => {
-      const s3 = { bucket: 'b', prefix: 'p', secretRef: { name: 's' } };
+      const s3 = { client: 'aws' as const, bucket: 'b', prefix: 'p', secretRef: { name: 's' } };
       await controller.reconcileBackup(makeBackup({ spec: { clusterName: 'test-cluster', s3 } }));
       expect(lastStatus().location).toBe('s3://b/p/backup-test-backup.fbk');
     });
@@ -225,7 +225,7 @@ describe('FirebirdBackupController', () => {
 
     it('takes physical backups to S3 on clusters with replication', async () => {
       cluster.spec.replication = { enabled: true };
-      const s3 = { bucket: 'b', secretRef: { name: 's' } };
+      const s3 = { client: 'aws' as const, bucket: 'b', secretRef: { name: 's' } };
       await controller.reconcileBackup(makeBackup({ spec: { clusterName: 'test-cluster', type: 'physical', s3 } }));
       const job = batchApi.createNamespacedJob.mock.calls[0][0].body as V1Job;
       expect(job.spec?.template.spec?.initContainers?.map((c) => c.name)[0]).toBe('agent-install');
@@ -379,7 +379,7 @@ describe('FirebirdBackupController', () => {
     });
 
     it('restores a physical backup from S3, with or without replication', async () => {
-      const s3 = { bucket: 'b', secretRef: { name: 's' } };
+      const s3 = { client: 'aws' as const, bucket: 'b', secretRef: { name: 's' } };
       objects['firebirdbackups/base'] = makeBackup({
         metadata: { name: 'base', namespace: 'default' },
         spec: { clusterName: 'test-cluster', type: 'physical', s3 },
@@ -407,7 +407,7 @@ describe('FirebirdBackupController', () => {
       expect(batchApi.createNamespacedJob).not.toHaveBeenCalled();
       expect(lastStatus()).toMatchObject({ phase: 'Failed', error: expect.stringContaining('journalArchiveS3') });
 
-      cluster.spec.replication = { enabled: true, journalArchiveS3: { bucket: 'j' } };
+      cluster.spec.replication = { enabled: true, journalArchiveS3: { client: 'aws' as const, bucket: 'j' } };
       await controller.reconcileRestore(physical);
       const job = batchApi.createNamespacedJob.mock.calls[0][0].body as V1Job;
       expect(job.spec?.template.spec?.containers.map((c) => c.name)).toEqual(['firebird-restore', 'journal-fetch']);

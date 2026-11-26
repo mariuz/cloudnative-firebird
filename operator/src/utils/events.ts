@@ -112,6 +112,8 @@ export const EventReason = {
   RoleApplied: 'RoleApplied',
   RoleFailed: 'RoleFailed',
   RoleDropped: 'RoleDropped',
+  /** A spec selects the aws CLI as its S3 client (client: aws), deprecated since v0.192.0 */
+  S3ClientDeprecated: 'S3ClientDeprecated',
 } as const;
 
 export class EventRecorder {

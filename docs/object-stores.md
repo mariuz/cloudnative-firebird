@@ -4,7 +4,7 @@ Status: design, 2026-11-23 (revised: the cloud APIs directly, from the agent). P
 `fb-agent objects`: v0.187.0. Phase 1b, `s3.client: agent`: v0.188.0. Phase 2, backups, restores, bootstrap and
 retention on Azure Blob and GCS: v0.189.0. Phase 3, the journal archive and point-in-time
 recovery on Azure Blob and GCS: v0.190.0. Phase 4, replica clusters following an Azure Blob or GCS
-archive: v0.191.0. Tracked in [TODO.md](../TODO.md) ("Object stores other than S3").
+archive: v0.191.0. Phase 5, the agent by default for S3: v0.192.0. Tracked in [TODO.md](../TODO.md) ("Object stores other than S3").
 
 ## The gap
 
@@ -258,9 +258,12 @@ is `spec.serviceAccountName`, as for S3's workload identity today.
    with `s3.client: agent`), and the replica-source refusal of v0.184.0 compares stores of any
    kind. The kind CI bootstraps a replica cluster from Azurite, follows the source's archive there
    and promotes it; GCS has no emulator for uploads, so its follower is covered by the unit tests.
-5. **The agent by default for S3.** `s3.client` defaults to `agent` once it has run for a
-   release. `aws` stays selectable for a deprecation period, and is then removed with
-   `clientImage`.
+5. **The agent by default for S3.** *(v0.192.0)* `s3.client` defaults to `agent`, after it ran
+   for four releases (opt-in since v0.188.0). `aws` stays selectable for one minor release: the
+   webhook warns on every apply that selects it and a cluster that does gets an
+   `S3ClientDeprecated` Warning event. It is then removed with `clientImage`. The kind CI runs
+   every S3 step on the default, and the replica cluster step on `client: aws` while it exists;
+   the aws client's pods are still pinned by the phase 1b snapshot (now with `client: aws`).
 
 Each phase is a release.
 
@@ -276,5 +279,5 @@ Each phase is a release.
 - **GCS uploads in CI.** No emulator takes `object_store`'s XML API uploads (above). A CI job
   against a real bucket would need a GCS service account key as a repository secret, with a
   lifecycle rule deleting what the runs leave.
-- **How long `aws` stays** after phase 5. Recommended: one minor release with a deprecation
-  warning event on clusters that still select it, then removal.
+- **How long `aws` stays** after phase 5. Decided in v0.192.0: one minor release, with a
+  deprecation warning (webhook and event) on what still selects it, then removal.

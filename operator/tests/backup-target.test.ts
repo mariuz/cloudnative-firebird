@@ -5,7 +5,7 @@ import { validateBackupSpec, validateClusterSpec } from '../src/utils/validation
 import { FirebirdBackupController } from '../src/controllers/backup.controller';
 import { FirebirdBackup, FirebirdCluster } from '../src/types';
 
-const s3 = { bucket: 'b' };
+const s3 = { client: 'aws' as const, bucket: 'b' };
 const cluster = (status: FirebirdCluster['status'] = {}): FirebirdCluster => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
   kind: 'FirebirdCluster',

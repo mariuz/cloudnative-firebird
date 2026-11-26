@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.191.0):** every item below is done; open work is in [TODO.md](TODO.md).
+> **Status note (v0.192.0):** every item below is done; open work is in [TODO.md](TODO.md).
 > Journal replication (still experimental, see TODO.md) works against the official
 > `firebirdsql/firebird` image (Firebird 4, 5 and the 6 snapshot). It covers replica re-seeding,
 > lag metrics, planned switchover, automatic failover with a primary Lease, and rolling updates with
@@ -191,6 +191,11 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `WAIT <seconds> [<segment>]` answers as soon as a segment after the given one is archived. The Rust puller sends it between two pulls instead of sleeping, so a segment is fetched when it appears. Measured with `hack/bench/puller.sh` (removed in v0.170.0) (three replicas on one archive, a 16 MB segment every 2 s, poll 5 s): 0.08 s from the archive to the replica (median, 0.16 s at most) against 2.4 s (5 s at most) for a polling puller. A Perl segment server answers `ERR bad request`; the puller then polls as before and asks again about once a minute. The archive timeout before it (`archiveTimeoutSeconds`) is unchanged.
   - Ten pullers waiting cost the front 0.07 s of CPU in ten seconds on an archive of 5,000 segments: the archive is looked at once for all of them, and read again only when its directory changed.
   - `tests/segment-server-front.test.ts` gives the same requests to the Perl server alone and to the front: listings, downloads, refusals, forwarded requests with uploads and downloads, the contact time the isolation check reads, stopping. The kind CI runs the replicated cluster behind the front, with segment TLS.
+- [x] **Object stores from the agent, phase 5: the agent by default for S3** *(v0.192.0)*
+  - `s3.client` defaults to `agent`: every S3 transfer (backups, retention, restores, the journal archive, point-in-time recovery, bootstrap, replica clusters' followers) runs `fb-agent objects` in the cluster's image, with no client image. It was opt-in for four releases (since v0.188.0) and ran on the kind CI's archive and recovery step throughout.
+  - `client: aws` still selects the aws CLI of `clientImage`, deprecated for one minor release and then removed with `clientImage`: the webhook warns on every create or change that selects it (with each place, e.g. `spec.backup.s3`), and a cluster that does gets an `S3ClientDeprecated` Warning event.
+  - Upgrading moves S3 configurations without a client onto the agent: their Jobs and CronJobs change, and a replica cluster following an S3 archive rolls its instance pod (its follower's image and environment change). `client: aws` set beforehand keeps the aws CLI.
+  - Tests: the default is the agent's pods at every place under the five S3 configurations; the aws client's snapshot of phase 1b is unchanged, now under `client: aws`, and the tests of the aws command lines name it; the webhook warning and the cluster's event. The kind CI runs every S3 step on the default, the replica cluster step on `client: aws`.
 - [x] **Object stores from the agent, phase 4: replica clusters following an Azure Blob or GCS archive** *(v0.191.0)*
   - `replica.journalAzureBlob` and `replica.journalGCS` beside `replica.journalS3`, exactly one of the three (the webhook, and a CEL rule in place of `journalS3` being required); a replica cluster bootstraps from the source's nbackup chain in `bootstrap.recovery.s3`, `azureBlob` or `gcs`.
   - The archive follower sidecar runs on the agent's client for them, in the instance image (`archive-follower.sh` with its `aws_s3` swapped, as for `s3.client: agent`), its GCS key mounted from the instance pod; the recovery bootstrap Job replays the archive from the same store. Without a Secret for an Azure archive, the instance pods are labelled for AKS workload identity while the cluster follows.

@@ -9,7 +9,7 @@ import {
 import { validateClusterSpec, validateScheduledBackupSpec } from '../src/utils/validation';
 import { FirebirdCluster, FirebirdScheduledBackup } from '../src/types';
 
-const s3 = { bucket: 'b', prefix: 'prod', endpoint: 'http://s3:8333' };
+const s3 = { client: 'aws' as const, bucket: 'b', prefix: 'prod', endpoint: 'http://s3:8333' };
 const cluster = (backup: FirebirdCluster['spec']['backup']): FirebirdCluster => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
   kind: 'FirebirdCluster',

@@ -1,5 +1,5 @@
 import { replicaSourceRefusal, volumeSnapshotRefusal } from './replication';
-import { objectStoreOf } from './object-store';
+import { awsClientDeprecation, awsClientPaths, objectStoreOf } from './object-store';
 import { segmentTlsRequired } from './segment-tls-default';
 import { CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Secret } from '@kubernetes/client-node';
 import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdRole, FirebirdUser, RESOURCE_PLURAL } from '../types';
@@ -133,6 +133,8 @@ export function createAdmissionValidator(lookups: AdmissionLookups): AdmissionVa
       return {};
     }
     if (!specChanged) return {};
+    const deprecation = awsClientDeprecation(awsClientPaths(object.spec));
+    if (deprecation) warnings.push(deprecation);
 
     const secretWarnings = async (names: string[]) => {
       for (const name of names) {
