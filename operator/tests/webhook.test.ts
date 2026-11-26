@@ -151,6 +151,27 @@ describe('admission checks', () => {
     status: { phase, backupFileName: phase === 'Completed' ? `${name}.fbk` : undefined, ...extra },
   });
 
+  it('warns about the deprecated aws client (client: aws), wherever an S3 configuration selects it', async () => {
+    const validate = createAdmissionValidator(lookups({ clusters: [cluster] }));
+    const out = await validate(
+      req('FirebirdBackup', { metadata: { name: 'b', namespace: 'default' }, spec: { clusterName: 'db', s3: { bucket: 'b', client: 'aws' } } }),
+    );
+    expect(out.denied).toBeUndefined();
+    expect(out.warnings).toContainEqual(expect.stringMatching(/^spec.s3: client aws \(the aws CLI of clientImage\) is deprecated since v0.192.0/));
+    const replicated = {
+      ...cluster,
+      spec: { ...cluster.spec, replication: { enabled: true, journalArchiveS3: { bucket: 'j', client: 'aws' } }, backup: { enabled: true, s3: { bucket: 'b', client: 'aws' } } },
+    };
+    expect((await validate(req('FirebirdCluster', replicated))).warnings).toContainEqual(
+      expect.stringMatching(/^spec.replication.journalArchiveS3, spec.backup.s3: client aws/),
+    );
+    // the default (the agent) and clientImage alone warn about nothing
+    const quiet = await validate(
+      req('FirebirdBackup', { metadata: { name: 'b', namespace: 'default' }, spec: { clusterName: 'db', s3: { bucket: 'b', clientImage: 'x/aws:1' } } }),
+    );
+    expect(quiet.warnings ?? []).not.toContainEqual(expect.stringMatching(/deprecated/));
+  });
+
   it('refuses restores the operator would fail for good', async () => {
     const validate = createAdmissionValidator(
       lookups({ clusters: [cluster], backups: [backup('ok', 'Completed'), backup('bad', 'Failed'), backup('phys', 'Completed', 'physical')] }),

@@ -17,9 +17,13 @@ import { shellQuote, sseCustomerKeyFile } from './backup';
 
 export * from './object-store-fields';
 
-/** Whether the configuration's transfers run through `fb-agent objects` (always, off S3) */
+/**
+ * Whether the configuration's transfers run through `fb-agent objects`: always off S3, and on S3
+ * unless it selects the aws CLI (client: aws, deprecated) — the default since v0.192.0
+ * (docs/object-stores.md, phase 5)
+ */
 export function agentClient(s3: S3BackupConfiguration): boolean {
-  return s3.client === 'agent' || storeKind(s3) !== 's3';
+  return s3.client !== 'aws' || storeKind(s3) !== 's3';
 }
 
 /** `s3://bucket/prefix/key`, `azure://account/container/prefix/key` or `gs://bucket/prefix/key` */

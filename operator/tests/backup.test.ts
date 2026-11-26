@@ -31,7 +31,7 @@ const makeCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): Firebird
   spec: { instances: 1, storage: { size: '1Gi' }, ...overrides },
 });
 
-const s3 = { bucket: 'bkt', prefix: 'fb/', secretRef: { name: 's3-creds' }, endpoint: 'http://minio:9000' };
+const s3 = { client: 'aws' as const, bucket: 'bkt', prefix: 'fb/', secretRef: { name: 's3-creds' }, endpoint: 'http://minio:9000' };
 
 const makeBackup = (spec: Partial<FirebirdBackup['spec']> = {}): FirebirdBackup => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
@@ -352,7 +352,7 @@ describe('physical backups and restores with S3', () => {
 });
 
 describe('point-in-time recovery', () => {
-  const journals = { bucket: 'arch', prefix: 'prod', secretRef: { name: 'arch-creds' } };
+  const journals = { client: 'aws' as const, bucket: 'arch', prefix: 'prod', secretRef: { name: 'arch-creds' } };
   const replicated = makeCluster({ replication: { enabled: true, journalArchiveS3: journals } });
   const chain = { type: 'physical' as const, path: 'nbackup-l0-a.nbk', incrementalPaths: ['nbackup-l1-b.nbk'], s3 };
 
@@ -398,7 +398,7 @@ describe('point-in-time recovery', () => {
   it('takes a server-side chain through the file server, and a journal archive of its own', () => {
     const restore = makeRestore({
       restoreType: 'physical',
-      pointInTime: { targetSegment: 42, journalS3: { bucket: 'other' } },
+      pointInTime: { targetSegment: 42, journalS3: { client: 'aws' as const, bucket: 'other' } },
     });
     const pod = podOf(
       buildRestoreJob(restore, makeCluster(), { type: 'physical', path: '/var/lib/firebird/data/l0.nbk', incrementalPaths: ['l1.nbk'] }),
@@ -598,8 +598,8 @@ describe('helpers', () => {
   });
 
   it('builds S3 URIs with a normalised prefix and quotes shell values', () => {
-    expect(s3Uri({ bucket: 'b', secretRef: { name: 's' } }, 'k')).toBe('s3://b/k');
-    expect(s3Uri({ bucket: 'b', prefix: '/a/b/', secretRef: { name: 's' } }, 'k')).toBe('s3://b/a/b/k');
+    expect(s3Uri({ client: 'aws' as const, bucket: 'b', secretRef: { name: 's' } }, 'k')).toBe('s3://b/k');
+    expect(s3Uri({ client: 'aws' as const, bucket: 'b', prefix: '/a/b/', secretRef: { name: 's' } }, 'k')).toBe('s3://b/a/b/k');
     expect(shellQuote("it's")).toBe(`'it'\\''s'`);
   });
 });

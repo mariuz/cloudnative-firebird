@@ -100,10 +100,20 @@ const configurations: Record<string, S3BackupConfiguration> = {
   'client image': { bucket: 'bkt', clientImage: 'example.com/aws-cli:2' },
 };
 
-describe('the aws client (the default)', () => {
+describe('the aws client (client: aws, the default until v0.192.0, deprecated)', () => {
   for (const [name, s3] of Object.entries(configurations)) {
     it(`is what it was before the object store builder: ${name}`, () => {
-      expect(objectStorePods(s3)).toMatchSnapshot();
+      expect(objectStorePods({ ...s3, client: 'aws' })).toMatchSnapshot();
+    });
+  }
+});
+
+describe('the default client (since v0.192.0, docs/object-stores.md phase 5)', () => {
+  for (const [name, s3] of Object.entries(configurations)) {
+    it(`is the agent at every place: ${name}`, () => {
+      // the configurations name no client
+      expect(s3.client).toBeUndefined();
+      expect(objectStorePods(s3)).toEqual(objectStorePods({ ...s3, client: 'agent' }));
     });
   }
 });
@@ -174,7 +184,7 @@ describe('the agent client (s3.client: agent)', () => {
   });
 
   it("runs the replica cluster's follower through the agent, the script otherwise the same", () => {
-    const aws = buildArchiveFollowerContainer(cluster({ instances: 1, replica: { enabled: true, journalS3: { bucket: 'bkt' } } }));
+    const aws = buildArchiveFollowerContainer(cluster({ instances: 1, replica: { enabled: true, journalS3: { bucket: 'bkt', client: 'aws' } } }));
     const agent = buildArchiveFollowerContainer(cluster({ instances: 1, replica: { enabled: true, journalS3: { bucket: 'bkt', client: 'agent' } } }));
     expect(agent.command![2]).toContain(FOLLOWER_AGENT_CLIENT);
     expect(agent.command![2]).not.toContain(FOLLOWER_AWS_CLIENT);

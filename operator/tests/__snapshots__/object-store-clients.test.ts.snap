@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`the aws client (the default) > is what it was before the object store builder: SSE-C 1`] = `
+exports[`the aws client (client: aws, the default until v0.192.0, deprecated) > is what it was before the object store builder: SSE-C 1`] = `
 {
   "bootstrap from a logical backup": [
     {
@@ -2641,7 +2641,7 @@ done
 }
 `;
 
-exports[`the aws client (the default) > is what it was before the object store builder: SSE-KMS 1`] = `
+exports[`the aws client (client: aws, the default until v0.192.0, deprecated) > is what it was before the object store builder: SSE-KMS 1`] = `
 {
   "bootstrap from a logical backup": [
     {
@@ -5016,7 +5016,7 @@ done
 }
 `;
 
-exports[`the aws client (the default) > is what it was before the object store builder: client image 1`] = `
+exports[`the aws client (client: aws, the default until v0.192.0, deprecated) > is what it was before the object store builder: client image 1`] = `
 {
   "bootstrap from a logical backup": [
     {
@@ -7085,7 +7085,7 @@ done
 }
 `;
 
-exports[`the aws client (the default) > is what it was before the object store builder: keys, endpoint and prefix 1`] = `
+exports[`the aws client (client: aws, the default until v0.192.0, deprecated) > is what it was before the object store builder: keys, endpoint and prefix 1`] = `
 {
   "bootstrap from a logical backup": [
     {
@@ -9464,7 +9464,7 @@ done
 }
 `;
 
-exports[`the aws client (the default) > is what it was before the object store builder: workload identity, region 1`] = `
+exports[`the aws client (client: aws, the default until v0.192.0, deprecated) > is what it was before the object store builder: workload identity, region 1`] = `
 {
   "bootstrap from a logical backup": [
     {
