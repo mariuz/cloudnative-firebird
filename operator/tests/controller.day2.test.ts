@@ -555,22 +555,27 @@ describe('FirebirdClusterController – replication seed sources', () => {
   });
 });
 
-describe('FirebirdClusterController – the deprecated aws S3 client (v0.192.0)', () => {
+describe('FirebirdClusterController – the removed aws S3 client (v0.193.0)', () => {
   const events = (api: (m: string) => ReturnType<typeof vi.fn>) =>
     api('createNamespacedEvent').mock.calls.map((c) => c[0].body as { reason: string; type: string; message: string });
 
-  it('reports a cluster that selects the aws CLI, and only then', async () => {
+  it('runs a cluster stored with the aws CLI named on the agent, and says so', async () => {
     const aws = makeMockKubeConfig();
     await new FirebirdClusterController(aws.kubeConfig).reconcile(
-      makeCluster({ backup: { enabled: true, schedule: '0 2 * * *', s3: { bucket: 'b', client: 'aws' } } }),
+      makeCluster({ backup: { enabled: true, schedule: '0 2 * * *', s3: { bucket: 'b', client: 'aws', clientImage: 'x/aws:1' } } }),
     );
-    const deprecated = events(aws.api).filter((e) => e.reason === 'S3ClientDeprecated');
-    expect(deprecated).toHaveLength(1);
-    expect(deprecated[0].type).toBe('Warning');
-    expect(deprecated[0].message).toMatch(/^spec.backup.s3: client aws \(the aws CLI of clientImage\) is deprecated/);
+    const removed = events(aws.api).filter((e) => e.reason === 'S3ClientRemoved');
+    expect(removed).toHaveLength(1);
+    expect(removed[0].type).toBe('Warning');
+    expect(removed[0].message).toMatch(/^spec.backup.s3.client, spec.backup.s3.clientImage: the aws CLI \(client aws, clientImage\) was removed in v0.193.0/);
+    // its backup CronJob runs the agent
+    const cron = aws.api('createNamespacedCronJob').mock.calls.map((c) => c[0].body)[0];
+    const containers = cron.spec.jobTemplate.spec.template.spec.containers;
+    expect(JSON.stringify(containers)).not.toMatch(/aws-cli|\baws s3\b|x\/aws:1/);
+    expect(JSON.stringify(containers)).toContain('fb-agent objects');
 
     const agent = makeMockKubeConfig();
     await new FirebirdClusterController(agent.kubeConfig).reconcile(makeCluster({ backup: { enabled: true, schedule: '0 2 * * *', s3: { bucket: 'b' } } }));
-    expect(events(agent.api).map((e) => e.reason)).not.toContain('S3ClientDeprecated');
+    expect(events(agent.api).map((e) => e.reason)).not.toContain('S3ClientRemoved');
   });
 });

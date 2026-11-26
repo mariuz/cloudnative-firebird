@@ -5,9 +5,10 @@ import {
   buildJournalArchiveCronJob,
   buildRestoreJob,
   buildScheduledBackupCronJob,
-  s3ClientEnv,
 } from '../src/utils/backup';
 import { buildStatefulSet, statefulSetNeedsUpdate } from '../src/utils/resources';
+import { objectStoreEnv } from '../src/utils/object-store';
+import { S3BackupConfiguration } from '../src/types';
 import { buildFencingJob } from '../src/utils/fencing';
 import { buildFailoverJob, buildSwitchoverJob } from '../src/utils/switchover';
 import { buildUserJob } from '../src/utils/users';
@@ -98,13 +99,11 @@ describe('serviceAccountName', () => {
 });
 
 describe('S3 without static keys', () => {
-  it('passes no keys when secretRef is not set, so the aws CLI uses workload identity', () => {
-    expect(s3ClientEnv(s3)).toEqual([{ name: 'AWS_DEFAULT_REGION', value: 'eu-west-1' }]);
-    expect(s3ClientEnv({ ...s3, secretRef: { name: 'keys' } }).map((e) => e.name)).toEqual([
-      'AWS_ACCESS_KEY_ID',
-      'AWS_SECRET_ACCESS_KEY',
-      'AWS_DEFAULT_REGION',
-    ]);
+  it('passes no keys when secretRef is not set, so the agent uses workload identity', () => {
+    const keys = (c: S3BackupConfiguration) => objectStoreEnv(c).map((e) => e.name).filter((n) => n.startsWith('AWS_') && n.includes('KEY'));
+    expect(keys(s3)).toEqual([]);
+    expect(objectStoreEnv(s3)).toContainEqual({ name: 'AWS_DEFAULT_REGION', value: 'eu-west-1' });
+    expect(keys({ ...s3, secretRef: { name: 'keys' } })).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']);
     expect(() => validateBackupSpec(backup)).not.toThrow();
     expect(() => validateClusterSpec(cluster({ backup: { enabled: true, s3 } }))).not.toThrow();
     expect(() => validateBackupSpec({ ...backup, spec: { ...backup.spec, s3: { ...s3, secretRef: { name: '' } } } })).toThrow();

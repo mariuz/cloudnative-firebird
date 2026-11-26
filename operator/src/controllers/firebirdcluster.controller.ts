@@ -1,5 +1,5 @@
 import { initSqlRefs } from '../utils/init-sql';
-import { awsClientDeprecation, awsClientPaths, journalArchiveOf } from '../utils/object-store';
+import { awsClientPaths, awsClientRemoval, journalArchiveOf } from '../utils/object-store';
 import { smartShutdownInProgress } from '../utils/lifecycle';
 import { reconciliationPaused } from '../utils/suspension';
 import { inheritMetadata, inheritedMetadataMissing, missingInheritedMetadata, withInheritedMetadata } from '../utils/pod-settings';
@@ -427,8 +427,9 @@ export class FirebirdClusterController {
 
       validateClusterSpec(cluster);
       desiredFencedInstances(cluster); // rejects a malformed fencedInstances annotation
-      const deprecation = awsClientDeprecation(awsClientPaths(cluster.spec));
-      if (deprecation) await this.event(cluster, 'Warning', EventReason.S3ClientDeprecated, deprecation);
+      // stored before v0.193.0 with the aws CLI named: it runs on the agent, and says so
+      const removed = awsClientRemoval(awsClientPaths(cluster.spec));
+      if (removed) await this.event(cluster, 'Warning', EventReason.S3ClientRemoved, removed);
 
       // Only a new cluster starts as Creating: rewriting the phase of a running cluster on every
       // reconcile made it read Creating until the end of the reconcile (e.g. every resync). An

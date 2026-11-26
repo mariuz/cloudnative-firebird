@@ -5,7 +5,7 @@ import { validateBackupSpec, validateClusterSpec } from '../src/utils/validation
 import { FirebirdBackupController } from '../src/controllers/backup.controller';
 import { FirebirdBackup, FirebirdCluster } from '../src/types';
 
-const s3 = { client: 'aws' as const, bucket: 'b' };
+const s3 = { bucket: 'b' };
 const cluster = (status: FirebirdCluster['status'] = {}): FirebirdCluster => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
   kind: 'FirebirdCluster',
@@ -76,7 +76,7 @@ describe('backup target', () => {
       spec: { clusterName: 'db', s3, target: 'prefer-standby' },
     });
     const job = api.createNamespacedJob.mock.calls[0][0].body;
-    const env = job.spec.template.spec.initContainers[0].env;
+    const env = job.spec.template.spec.initContainers.find((c: { name: string }) => c.name === 'firebird-backup').env;
     expect(env.find((e: { name: string }) => e.name === 'FIREBIRD_HOST').value).toBe('db-1.db-headless');
     const status = api.patchNamespacedCustomObjectStatus.mock.calls.at(-1)[0].body.at(-1).value;
     expect(status).toMatchObject({ phase: 'Running', instance: 'db-1' });

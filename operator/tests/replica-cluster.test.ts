@@ -14,7 +14,7 @@ import { validateClusterSpec } from '../src/utils/validation';
 import { FirebirdCluster, ReplicaClusterStatus } from '../src/types';
 import { makeCluster, notFoundError } from './helpers/factories';
 
-const source = { client: 'aws' as const, bucket: 'dr', prefix: 'prod', endpoint: 'http://s3:9000', secretRef: { name: 's3' } };
+const source = { bucket: 'dr', prefix: 'prod', endpoint: 'http://s3:9000', secretRef: { name: 's3' } };
 const replicaCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): FirebirdCluster =>
   makeCluster({
     instances: 1,
@@ -40,7 +40,7 @@ describe('replica clusters', () => {
     // more instances once promoted
     expect(replicaClusterErrors(replicaCluster({ instances: 3, replica: { enabled: false, journalS3: source } }))).toEqual([]);
     expect(
-      replicaClusterErrors(replicaCluster({ replication: { enabled: true, journalArchiveS3: { client: 'aws' as const, bucket: 'dr', prefix: 'prod' } } })),
+      replicaClusterErrors(replicaCluster({ replication: { enabled: true, journalArchiveS3: { bucket: 'dr', prefix: 'prod' } } })),
     ).toContainEqual(expect.stringMatching(/must not be the source/));
     expect(replicaClusterErrors(replicaCluster({ replica: { enabled: true, journalS3: source, pollIntervalSeconds: 1 } }))).toContainEqual(
       expect.stringMatching(/pollIntervalSeconds/),
@@ -51,13 +51,17 @@ describe('replica clusters', () => {
   it('runs the archive follower beside the instance while it follows', () => {
     const cluster = replicaCluster();
     const follower = buildArchiveFollowerContainer(cluster);
-    expect(follower.image).toBe('amazon/aws-cli:2.37.4');
+    // the agent's client in the instance image (the aws CLI was removed in v0.193.0)
+    expect(follower.image).toBe('firebirdsql/firebird:latest');
     expect(follower.command?.[2]).toContain('follow.state');
     expect(env(follower)).toMatchObject({
       SOURCE_DIR: '/var/lib/firebird/data/replication/source',
       REPLICATION_DIR: '/var/lib/firebird/data/replication',
-      JOURNALS: 's3://dr/prod/journals/',
-      S3_ENDPOINT: 'http://s3:9000',
+      JOURNALS: 'journals/',
+      OBJECT_STORE: 's3',
+      AWS_BUCKET: 'dr',
+      OBJECT_PREFIX: 'prod',
+      AWS_ENDPOINT: 'http://s3:9000',
       POLL_SECONDS: '10',
     });
     const names = (c: FirebirdCluster) => buildStatefulSet(c).spec!.template.spec!.containers.map((x) => x.name);
@@ -79,7 +83,8 @@ describe('replica clusters', () => {
     expect(env(restore).TARGET_TIME).toBeUndefined();
     expect(env(restore).TARGET_SEGMENT).toBeUndefined();
     const fetch = containers.find((c) => c.name === 'journal-fetch')!;
-    expect(fetch.args?.join(' ')).toContain('s3://dr/prod/journals/');
+    expect(fetch.args?.join(' ')).toContain(`/opt/fb-agent/fb-agent objects list --long 'journals/'`);
+    expect(env(fetch)).toMatchObject({ AWS_BUCKET: 'dr', OBJECT_PREFIX: 'prod' });
     // no bootstrap init containers: the Job does it, and keeps it after the promotion
     expect(buildBootstrapInitContainers(cluster)).toEqual([]);
     expect(buildBootstrapInitContainers(replicaCluster({ replica: { enabled: false, journalS3: source } }))).toEqual([]);

@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
+import { objectUri } from '../src/utils/object-store';
+import { clusterImage } from '../src/utils/image-catalog';
 import { V1Container, V1Job, V1PodSpec } from '@kubernetes/client-node';
 import {
-  DEFAULT_S3_CLIENT_IMAGE,
   buildBackupCronJob,
   buildBackupJob,
   buildBootstrapInitContainers,
@@ -13,7 +14,6 @@ import {
   compactUtc,
   jobOutcome,
   pointInTimeSourceError,
-  s3Uri,
   shellQuote,
 } from '../src/utils/backup';
 import {
@@ -31,7 +31,7 @@ const makeCluster = (overrides: Partial<FirebirdCluster['spec']> = {}): Firebird
   spec: { instances: 1, storage: { size: '1Gi' }, ...overrides },
 });
 
-const s3 = { client: 'aws' as const, bucket: 'bkt', prefix: 'fb/', secretRef: { name: 's3-creds' }, endpoint: 'http://minio:9000' };
+const s3 = { bucket: 'bkt', prefix: 'fb/', secretRef: { name: 's3-creds' }, endpoint: 'http://minio:9000' };
 
 const makeBackup = (spec: Partial<FirebirdBackup['spec']> = {}): FirebirdBackup => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
@@ -107,22 +107,26 @@ describe('backup Jobs (server-side, no S3)', () => {
 describe('backup Jobs (S3)', () => {
   it('streams a logical backup to the pod and uploads it with an S3 client container', () => {
     const pod = podOf(buildBackupJob(makeBackup({ s3 }), makeCluster()));
-    expect(pod.initContainers?.map((c) => c.name)).toEqual(['firebird-backup']);
-    expect(pod.initContainers?.[0].args?.[0]).toContain('gbak -b "$FIREBIRD_HOST:$DATABASE_PATH" "/work/$f"');
+    expect(ownInit(pod).map((c) => c.name)).toEqual(['firebird-backup']);
+    expect(ownInit(pod)[0].args?.[0]).toContain('gbak -b "$FIREBIRD_HOST:$DATABASE_PATH" "/work/$f"');
     const upload = pod.containers[0];
     expect(upload.name).toBe('upload');
-    expect(upload.image).toBe(DEFAULT_S3_CLIENT_IMAGE);
-    expect(upload.args?.[0]).toContain(`aws --endpoint-url 'http://minio:9000' s3 cp "/work/$f" "s3://bkt/fb/$f"`);
+    // the agent's client, in the cluster's image (the aws CLI was removed in v0.193.0)
+    expect(upload.image).toBe(clusterImage(makeCluster()));
+    expect(upload.args?.[0]).toContain(`/opt/fb-agent/fb-agent objects put "/work/$f" "$f"`);
+    expect(env(upload, 'AWS_ENDPOINT')?.value).toBe('http://minio:9000');
+    expect(env(upload, 'AWS_BUCKET')?.value).toBe('bkt');
+    expect(env(upload, 'OBJECT_PREFIX')?.value).toBe('fb');
     expect(env(upload, 'AWS_ACCESS_KEY_ID')?.valueFrom).toEqual({
       secretKeyRef: { name: 's3-creds', key: 'AWS_ACCESS_KEY_ID' },
     });
     expect(env(upload, 'AWS_DEFAULT_REGION')?.value).toBe('us-east-1');
-    expect(pod.volumes).toEqual([{ name: 'work', emptyDir: {} }]);
+    expect(pod.volumes!.map((v) => v.name)).toEqual(['work', 'fb-agent']);
   });
 
-  it('honours a custom S3 client image and region', () => {
+  it('honours the region, and ignores a clientImage stored before v0.193.0', () => {
     const pod = podOf(buildBackupJob(makeBackup({ s3: { ...s3, clientImage: 'my/aws:1', region: 'eu-west-1' } }), makeCluster()));
-    expect(pod.containers[0].image).toBe('my/aws:1');
+    expect(pod.containers[0].image).toBe(clusterImage(makeCluster()));
     expect(env(pod.containers[0], 'AWS_DEFAULT_REGION')?.value).toBe('eu-west-1');
   });
 });
@@ -130,13 +134,13 @@ describe('backup Jobs (S3)', () => {
 describe('backup verification', () => {
   it('restores and validates an S3 backup in the pod before it is uploaded', () => {
     const pod = podOf(buildBackupJob(makeBackup({ s3, verify: true }), makeCluster()));
-    expect(pod.initContainers?.map((c) => c.name)).toEqual(['firebird-backup', 'verify']);
-    const script = pod.initContainers![1].args![0];
+    expect(ownInit(pod).map((c) => c.name)).toEqual(['firebird-backup', 'verify']);
+    const script = ownInit(pod)[1].args![0];
     expect(script).toContain('gbak -c "/work/$f" "$v"');
     expect(script).toContain('gfix -v -full "$v"');
-    expect(pod.initContainers![1].volumeMounts).toEqual(pod.initContainers![0].volumeMounts);
+    expect(ownInit(pod)[1].volumeMounts).toEqual(ownInit(pod)[0].volumeMounts);
     // without verify, no restore
-    expect(podOf(buildBackupJob(makeBackup({ s3 }), makeCluster())).initContainers?.map((c) => c.name)).toEqual([
+    expect(ownInit(podOf(buildBackupJob(makeBackup({ s3 }), makeCluster()))).map((c) => c.name)).toEqual([
       'firebird-backup',
     ]);
   });
@@ -251,8 +255,8 @@ describe('restore Jobs', () => {
 
   it('downloads an S3 backup and restores it over the network', () => {
     const pod = podOf(buildRestoreJob(makeRestore(), makeCluster(), { type: 'logical', path: 'backup-b1.fbk', s3 }));
-    expect(pod.initContainers?.[0].name).toBe('download');
-    expect(pod.initContainers?.[0].args?.[0]).toContain(`s3 cp 's3://bkt/fb/backup-b1.fbk' /work/backup.fbk`);
+    expect(ownInit(pod)[0].name).toBe('download');
+    expect(ownInit(pod)[0].args?.[0]).toContain(`/opt/fb-agent/fb-agent objects get 'backup-b1.fbk' /work/backup.fbk`);
     expect(pod.containers[0].args?.[0]).toContain('gbak -c /work/backup.fbk "$FIREBIRD_HOST:$TARGET_PATH"');
   });
 });
@@ -276,7 +280,7 @@ describe('physical backups and restores with S3', () => {
     expect(backup.volumeMounts?.map((m) => m.name)).toEqual(['work', 'cluster-config', 'fb-agent']);
     expect(pod.volumes).toContainEqual({ name: 'cluster-config', configMap: { name: 'db-config' } });
     expect(pod.containers[0].name).toBe('upload');
-    expect(pod.containers[0].args![0]).toContain('s3 cp "/work/$f" "s3://bkt/fb/$f"');
+    expect(pod.containers[0].args![0]).toContain(`/opt/fb-agent/fb-agent objects put "/work/$f" "$f"`);
   });
 
   it("asks a replica's segment server about a FirebirdDatabase for its nbackup (DB <file> NBACKUP)", () => {
@@ -296,8 +300,8 @@ describe('physical backups and restores with S3', () => {
     expect(script).toContain('*"replica position"*) /opt/fb-agent/fb-agent backup-file get "$f.ctl" "/work/$f.ctl"');
     // the position before the backup: an uploaded nbackup taken on a replica has its .ctl
     const upload = pod.containers[0].args![0];
-    expect(upload).toContain(`if [ -f "/work/$f.ctl" ]; then aws --endpoint-url 'http://minio:9000' s3 cp "/work/$f.ctl" "s3://bkt/fb/$f.ctl"; fi`);
-    expect(upload.indexOf('$f.ctl')).toBeLessThan(upload.indexOf('s3 cp "/work/$f" '));
+    expect(upload).toContain(`if [ -f "/work/$f.ctl" ]; then /opt/fb-agent/fb-agent objects put "/work/$f.ctl" "$f.ctl"; fi`);
+    expect(upload.indexOf('$f.ctl')).toBeLessThan(upload.indexOf('put "/work/$f" '));
     // a logical backup has none
     const logical = podOf(buildBackupJob(makeBackup({ s3, target: 'prefer-standby' }), cluster, 'db-1', true));
     expect(logical.containers[0].args![0]).not.toContain('.ctl');
@@ -319,7 +323,7 @@ describe('physical backups and restores with S3', () => {
     expect(upload).toContain(`grep -E '^nbackup-l[0-2]-nightly-[0-9]{8}T[0-9]{6}Z[.]nbk$'`);
     expect(upload).toContain(' /work/history /work/all /work/series > /work/expired');
     // with an nbackup's replica position
-    expect(upload).toContain(`s3 rm 's3://bkt/fb/'"$k.ctl" >/dev/null 2>&1 || true`);
+    expect(upload).toContain(`/opt/fb-agent/fb-agent objects rm "$k.ctl" >/dev/null 2>&1 || true`);
     // without a retentionPolicy there is no history query
     const plain = buildScheduledBackupCronJob({ ...sb, spec: { ...sb.spec, retentionPolicy: undefined } }, cluster);
     expect(ownInit(plain.spec!.jobTemplate.spec!.template.spec!)[0].args![0]).not.toContain('rdb$backup_history');
@@ -335,8 +339,8 @@ describe('physical backups and restores with S3', () => {
       ),
     );
     const download = ownInit(pod)[0].args![0];
-    expect(download).toContain(`s3 cp 's3://bkt/fb/nbackup-l0-b0.nbk' /work/restore-r1-0.nbk`);
-    expect(download).toContain(`s3 cp 's3://bkt/fb/nbackup-l1-b1.nbk' /work/restore-r1-1.nbk`);
+    expect(download).toContain(`/opt/fb-agent/fb-agent objects get 'nbackup-l0-b0.nbk' /work/restore-r1-0.nbk`);
+    expect(download).toContain(`/opt/fb-agent/fb-agent objects get 'nbackup-l1-b1.nbk' /work/restore-r1-1.nbk`);
     const [restore] = pod.containers;
     const script = restore.args![0];
     expect(script).toContain(`trap '/opt/fb-agent/fb-agent backup-file remove restore-r1-0.nbk restore-r1-1.nbk || true' EXIT`);
@@ -352,15 +356,15 @@ describe('physical backups and restores with S3', () => {
 });
 
 describe('point-in-time recovery', () => {
-  const journals = { client: 'aws' as const, bucket: 'arch', prefix: 'prod', secretRef: { name: 'arch-creds' } };
+  const journals = { bucket: 'arch', prefix: 'prod', secretRef: { name: 'arch-creds' } };
   const replicated = makeCluster({ replication: { enabled: true, journalArchiveS3: journals } });
   const chain = { type: 'physical' as const, path: 'nbackup-l0-a.nbk', incrementalPaths: ['nbackup-l1-b.nbk'], s3 };
 
   it("replays a FirebirdDatabase's own journal archive", () => {
     const restore = makeRestore({ restoreType: 'physical', pointInTime: {} });
     const fetch = (source: typeof chain & { database?: string }) => podOf(buildRestoreJob(restore, replicated, source, 'db-1')).containers[1].args![0];
-    expect(fetch({ ...chain, database: 'sales.fdb' })).toContain(`s3 ls 's3://arch/prod/journals/sales.fdb/'`);
-    expect(fetch(chain)).toContain(`s3 ls 's3://arch/prod/journals/'`);
+    expect(fetch({ ...chain, database: 'sales.fdb' })).toContain(`/opt/fb-agent/fb-agent objects list --long 'journals/sales.fdb/'`);
+    expect(fetch(chain)).toContain(`/opt/fb-agent/fb-agent objects list --long 'journals/'`);
     expect(fetch(chain)).not.toContain('journals/sales.fdb/');
   });
 
@@ -369,12 +373,11 @@ describe('point-in-time recovery', () => {
     const pod = podOf(buildRestoreJob(restore, replicated, chain, 'db-1'));
     const download = ownInit(pod)[0];
     expect(download.env).toContainEqual(expect.objectContaining({ name: 'AWS_ACCESS_KEY_ID', valueFrom: { secretKeyRef: { name: 's3-creds', key: 'AWS_ACCESS_KEY_ID' } } }));
-    expect(download.args![0]).toContain(`s3 cp 's3://bkt/fb/nbackup-l0-a.nbk' /work/chain/0.nbk`);
-    expect(download.args![0]).toContain(`s3 cp 's3://bkt/fb/nbackup-l1-b.nbk' /work/chain/1.nbk`);
+    expect(download.args![0]).toContain(`/opt/fb-agent/fb-agent objects get 'nbackup-l0-a.nbk' /work/chain/0.nbk`);
+    expect(download.args![0]).toContain(`/opt/fb-agent/fb-agent objects get 'nbackup-l1-b.nbk' /work/chain/1.nbk`);
     // the replica position of a chain taken on a replica, when there is one
     expect(download.args![0]).toContain(
-      `if aws --endpoint-url 'http://minio:9000' s3 ls 's3://bkt/fb/nbackup-l1-b.nbk.ctl' >/dev/null 2>&1; then ` +
-        `aws --endpoint-url 'http://minio:9000' s3 cp 's3://bkt/fb/nbackup-l1-b.nbk.ctl' /work/chain/position.ctl; fi`,
+      `; if /opt/fb-agent/fb-agent objects exists 'nbackup-l1-b.nbk.ctl'; then /opt/fb-agent/fb-agent objects get 'nbackup-l1-b.nbk.ctl' /work/chain/position.ctl; fi`,
     );
     const [firebird, fetch] = pod.containers;
     expect(firebird.args![0]).toMatch(/^set -eu; \. \/etc\/firebird-operator\/pitr-restore\.sh; out=\$\(fbsvcmgr/);
@@ -388,8 +391,10 @@ describe('point-in-time recovery', () => {
     // the journal archive is read with its own credentials
     expect(fetch.name).toBe('journal-fetch');
     expect(fetch.env).toContainEqual(expect.objectContaining({ valueFrom: { secretKeyRef: { name: 'arch-creds', key: 'AWS_ACCESS_KEY_ID' } } }));
-    expect(fetch.args![0]).toContain(`aws s3 ls 's3://arch/prod/journals/' > $W/journals.tmp`);
-    expect(fetch.args![0]).toContain(`s3 cp --only-show-errors 's3://arch/prod/journals/'"$s" "$W/segments/$s"`);
+    expect(fetch.args![0]).toContain(`/opt/fb-agent/fb-agent objects list --long 'journals/' > $W/journals.tmp`);
+    expect(fetch.args![0]).toContain(`/opt/fb-agent/fb-agent objects get 'journals/'"$s" "$W/segments/$s"`);
+    expect(env(fetch, 'AWS_BUCKET')?.value).toBe('arch');
+    expect(env(fetch, 'OBJECT_PREFIX')?.value).toBe('prod');
     expect(fetch.args![0]).toContain('case "$s" in *[!A-Za-z0-9._-]*)');
     expect(pod.securityContext?.runAsNonRoot).toBe(true);
     expect(pod.volumes?.map((v) => v.name)).toEqual(['work', 'cluster-config', 'fb-agent']);
@@ -398,7 +403,7 @@ describe('point-in-time recovery', () => {
   it('takes a server-side chain through the file server, and a journal archive of its own', () => {
     const restore = makeRestore({
       restoreType: 'physical',
-      pointInTime: { targetSegment: 42, journalS3: { client: 'aws' as const, bucket: 'other' } },
+      pointInTime: { targetSegment: 42, journalS3: { bucket: 'other' } },
     });
     const pod = podOf(
       buildRestoreJob(restore, makeCluster(), { type: 'physical', path: '/var/lib/firebird/data/l0.nbk', incrementalPaths: ['l1.nbk'] }),
@@ -406,7 +411,8 @@ describe('point-in-time recovery', () => {
     expect(ownInit(pod)).toEqual([]);
     expect(env(pod.containers[0], 'SERVER_CHAIN')?.value).toBe('l0.nbk l1.nbk');
     expect(env(pod.containers[0], 'TARGET_SEGMENT')?.value).toBe('42');
-    expect(pod.containers[1].args![0]).toContain(`s3 ls 's3://other/journals/'`);
+    expect(pod.containers[1].args![0]).toContain(`/opt/fb-agent/fb-agent objects list --long 'journals/'`);
+    expect(env(pod.containers[1], 'AWS_BUCKET')?.value).toBe('other');
   });
 
   it('needs a physical backup, a journal archive and server-side files the file server serves', () => {
@@ -433,14 +439,14 @@ describe('journal archive CronJob', () => {
     const [list, , fetchDatabases] = ownInit(pod);
     expect(ownInit(pod).map((c) => c.name)).toEqual(['list-uploaded', 'fetch-segments', 'fetch-database-segments']);
     expect(env(list, 'DATABASES')?.value).toBe('app.fdb sales.fdb');
-    expect(list.args![0]).toContain(`s3 ls 's3://bkt/fb/journals/'"$f/" > $d/listing`);
+    expect(list.args![0]).toContain(`/opt/fb-agent/fb-agent objects list 'journals/'"$f/" > $d/uploaded`);
     expect(fetchDatabases.args![0]).toContain(
       'SEGMENT_DATABASE=$f OUT_DIR=$d/segments SKIP_FILE=$d/uploaded LISTED_FILE=$d/listed-max RESULT_FILE=$d/result /opt/fb-agent/fb-agent fetch-segments',
     );
     expect(env(fetchDatabases, 'FIREBIRD_HOST')?.value).toBe('db-1.db-headless');
     const upload = pod.containers[0];
-    expect(upload.args![0]).toContain(`s3 sync /work/segments/ 's3://bkt/fb/journals/'`);
-    expect(upload.args![0]).toContain(`s3 sync $d/segments/ 's3://bkt/fb/journals/'"$f/"`);
+    expect(upload.args![0]).toContain(`/opt/fb-agent/fb-agent objects sync /work/segments/ 'journals/'`);
+    expect(upload.args![0]).toContain(`/opt/fb-agent/fb-agent objects sync $d/segments/ 'journals/'"$f/"`);
     expect(env(upload, 'DATABASES')?.value).toBe('app.fdb sales.fdb');
     // without them (none yet, or none left) the Job is as before
     for (const c of [makeCluster({ replication: { enabled: true, journalArchiveS3: s3 } }), { ...cluster, status: { replicatedDatabases: [] } }]) {
@@ -465,7 +471,7 @@ describe('journal archive CronJob', () => {
     expect(ownInit(pod).map((c) => c.name)).toEqual(['list-uploaded', 'fetch-segments']);
     // without pruneAppliedSegments the upload ends the Job, as before
     expect(pod.containers.map((c) => c.name)).toEqual(['upload']);
-    expect(pod.containers[0].args?.[0]).toContain(`s3 sync /work/segments/ 's3://bkt/fb/journals/'`);
+    expect(pod.containers[0].args?.[0]).toContain(`/opt/fb-agent/fb-agent objects sync /work/segments/ 'journals/'`);
     expect(pod.volumes?.map((v) => v.name)).toEqual(['work', 'cluster-config', 'fb-agent']);
     expect(allMounts([...pod.initContainers!, ...pod.containers])).not.toContain('firebird-data');
   });
@@ -484,7 +490,7 @@ describe('journal archive CronJob', () => {
     expect(env(fetch, 'LISTED_FILE')?.value).toBe('/work/listed-max');
     expect(env(fetch, 'RESULT_FILE')?.value).toBe('/dev/termination-log');
     const upload = ownInit(pod)[2];
-    expect(upload.args?.[0]).toContain(`s3 sync /work/segments/ 's3://bkt/fb/journals/'`);
+    expect(upload.args?.[0]).toContain(`/opt/fb-agent/fb-agent objects sync /work/segments/ 'journals/'`);
     expect(upload.args?.[0]).not.toContain('--delete');
     // only after a successful upload: the primary learns which segments are in the bucket
     const report = pod.containers[0];
@@ -518,7 +524,7 @@ describe('bootstrap init containers', () => {
     const cluster = makeCluster({ bootstrap: { recovery: { s3 } } });
     const init = buildBootstrapInitContainers(cluster);
     expect(init.map((c) => c.name)).toEqual(['bootstrap-download', 'bootstrap-restore']);
-    expect(init[0].args?.[0]).toContain(`s3 cp 's3://bkt/fb/backup.fbk' /work/backup.fbk`);
+    expect(init[0].args?.[0]).toContain(`/opt/fb-agent/fb-agent objects get 'backup.fbk' /work/backup.fbk`);
     expect(init[1].args?.[0]).toContain(`gbak -c '/work/backup.fbk' "$TARGET_PATH.tmp"`);
     expect(init[1].args?.[0]).toContain('mv "$TARGET_PATH.tmp" "$TARGET_PATH"');
     expect(env(init[1], 'TARGET_PATH')?.value).toBe('/var/lib/firebird/data/mydb.fdb');
@@ -528,7 +534,7 @@ describe('bootstrap init containers', () => {
 
   it('uses sourcePath as the object key', () => {
     const init = buildBootstrapInitContainers(makeCluster({ bootstrap: { recovery: { s3, sourcePath: 'nightly/x.fbk' } } }));
-    expect(init[0].args?.[0]).toContain(`'s3://bkt/fb/nightly/x.fbk'`);
+    expect(init[0].args?.[0]).toContain(`/opt/fb-agent/fb-agent objects get 'nightly/x.fbk' /work/backup.fbk`);
   });
 
   it('restores a local sourcePath without a download step', () => {
@@ -598,8 +604,8 @@ describe('helpers', () => {
   });
 
   it('builds S3 URIs with a normalised prefix and quotes shell values', () => {
-    expect(s3Uri({ client: 'aws' as const, bucket: 'b', secretRef: { name: 's' } }, 'k')).toBe('s3://b/k');
-    expect(s3Uri({ client: 'aws' as const, bucket: 'b', prefix: '/a/b/', secretRef: { name: 's' } }, 'k')).toBe('s3://b/a/b/k');
+    expect(objectUri({ bucket: 'b', secretRef: { name: 's' } }, 'k')).toBe('s3://b/k');
+    expect(objectUri({ bucket: 'b', prefix: '/a/b/', secretRef: { name: 's' } }, 'k')).toBe('s3://b/a/b/k');
     expect(shellQuote("it's")).toBe(`'it'\\''s'`);
   });
 });

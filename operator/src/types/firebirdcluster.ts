@@ -108,13 +108,12 @@ export interface S3BackupConfiguration {
   /** Object key prefix/folder inside bucket */
   prefix?: string;
   /**
-   * The client of the uploads and downloads: "agent" (the default since v0.192.0), `fb-agent
-   * objects` in the instance image, over S3's own API; or "aws" (deprecated: removed with
-   * clientImage in a later release), the aws CLI of clientImage (docs/object-stores.md).
-   * clientImage is not used with "agent".
+   * The client of the uploads and downloads: "agent", `fb-agent objects` in the instance image,
+   * over S3's own API (docs/object-stores.md). "aws" (the aws CLI) was removed in v0.193.0: the
+   * webhook refuses it, and a resource stored with it runs on the agent.
    */
   client?: 'aws' | 'agent';
-  /** Image providing the `aws` CLI for uploads and downloads (default "amazon/aws-cli:2.37.4") */
+  /** Removed in v0.193.0 with the aws CLI: the webhook refuses it, and it is ignored when stored */
   clientImage?: string;
   /**
    * Server-side encryption of the objects written: "AES256" (SSE-S3, keys managed by S3) or

@@ -3,7 +3,7 @@ import { V1Container } from '@kubernetes/client-node';
 import { spawnSync } from 'child_process';
 import { buildRecoveryBootstrapJob } from '../src/utils/backup';
 import { buildStatefulSet } from '../src/utils/resources';
-import { buildArchiveFollowerContainer, FOLLOWER_AGENT_CLIENT, replicaClusterErrors } from '../src/utils/replica-cluster';
+import { buildArchiveFollowerContainer, replicaClusterErrors } from '../src/utils/replica-cluster';
 import { replicaSourceRefusal } from '../src/utils/replication';
 import { validateClusterSpec } from '../src/utils/validation';
 import { AzureBlobConfiguration, FirebirdCluster, GCSConfiguration, ReplicaClusterConfiguration } from '../src/types';
@@ -38,7 +38,7 @@ describe('replica clusters following an archive in Azure Blob or GCS (phase 4)',
       const dr = replicaCluster(replica);
       expect(() => validateClusterSpec(dr)).not.toThrow();
       const follower = buildArchiveFollowerContainer(dr);
-      expect(follower.command![2]).toContain(FOLLOWER_AGENT_CLIENT);
+      expect(follower.command![2]).toContain('objects() { "$FB_AGENT" objects "$@"; }');
       expect(follower.image).toBe('firebirdsql/firebird:latest');
       expect(value(follower, 'OBJECT_STORE')).toBe(kind);
       expect(value(follower, 'OBJECT_PREFIX')).toBe('src');

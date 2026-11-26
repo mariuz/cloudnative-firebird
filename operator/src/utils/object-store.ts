@@ -6,25 +6,15 @@ import { clusterImage } from './image-catalog';
 import { shellQuote, sseCustomerKeyFile } from './backup';
 
 /**
- * The object store clients (docs/object-stores.md, phase 1b): "aws", the aws CLI of
- * s3.clientImage (the default, its command lines as before), or "agent", `fb-agent objects` in
- * the instance image, over the store's own API (agent/fb-agent/src/objects.rs).
+ * The object store client: `fb-agent objects` in the instance image, over the store's own API
+ * (agent/fb-agent/src/objects.rs), for S3, Azure Blob and GCS (docs/object-stores.md; the aws
+ * CLI, s3.client: aws and s3.clientImage, was removed in v0.193.0).
  *
- * The call sites keep their aws command lines as they were and take the agent's from here: keys
- * are relative to the configuration's prefix (OBJECT_PREFIX), and a listing the scripts parse is
- * `list --long`, laid out as `aws s3 ls` prints it.
+ * Keys are relative to the configuration's prefix (OBJECT_PREFIX), and a listing the scripts parse
+ * is `list --long`, laid out as `aws s3 ls` printed it.
  */
 
 export * from './object-store-fields';
-
-/**
- * Whether the configuration's transfers run through `fb-agent objects`: always off S3, and on S3
- * unless it selects the aws CLI (client: aws, deprecated) — the default since v0.192.0
- * (docs/object-stores.md, phase 5)
- */
-export function agentClient(s3: S3BackupConfiguration): boolean {
-  return s3.client !== 'aws' || storeKind(s3) !== 's3';
-}
 
 /** `s3://bucket/prefix/key`, `azure://account/container/prefix/key` or `gs://bucket/prefix/key` */
 export function objectUri(s3: S3BackupConfiguration, key: string): string {

@@ -9,7 +9,7 @@ import {
 import { validateClusterSpec, validateScheduledBackupSpec } from '../src/utils/validation';
 import { FirebirdCluster, FirebirdScheduledBackup } from '../src/types';
 
-const s3 = { client: 'aws' as const, bucket: 'b', prefix: 'prod', endpoint: 'http://s3:8333' };
+const s3 = { bucket: 'b', prefix: 'prod', endpoint: 'http://s3:8333' };
 const cluster = (backup: FirebirdCluster['spec']['backup']): FirebirdCluster => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
   kind: 'FirebirdCluster',
@@ -36,7 +36,8 @@ describe('backup retention', () => {
   it('only matches the schedule\'s own timestamped series, and keeps the newest and the new upload', () => {
     const script = s3RetentionScript(s3, 'db.nightly', 86400);
     expect(script).toContain(`grep -E '^backup-db[.]nightly-[0-9]{8}T[0-9]{6}Z[.]fbk$'`);
-    expect(script).toContain(`s3 ls 's3://b/prod/'`);
+    // the names under the configuration's prefix (OBJECT_PREFIX), through the agent
+    expect(script).toContain(`{ /opt/fb-agent/fb-agent objects list ''; } > /work/all || true`);
     expect(script).toContain('- 86400 ))');
     expect(script).toContain('$0 != n && $0 != f');
   });

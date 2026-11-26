@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.192.0/cloudnative-firebird-0.192.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.193.0/cloudnative-firebird-0.193.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.192.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.193.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -240,7 +240,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.192.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.193.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -1503,14 +1503,11 @@ removes them again. Every transfer (backups, retention, restores, the journal ar
 point-in-time recovery, bootstrap and replica clusters' followers) runs the agent's own S3 client,
 `fb-agent objects`, in the cluster's image: no client image to pull, the secret's
 `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (or the pod's identity), the endpoint, region and
-encryption of the configuration. That is the default since v0.192.0 (opt-in as `s3.client: agent`
-since v0.188.0). `s3.client: aws` still selects the aws CLI of `s3.clientImage` (default
-`amazon/aws-cli`), but is deprecated: the webhook warns on every apply that selects it, a
-cluster that does gets an `S3ClientDeprecated` Warning event, and both go in a later release.
-Upgrading to v0.192.0 moves S3 configurations without a client onto the agent: their Jobs and
-CronJobs change, and a replica cluster following an S3 archive rolls its instance pod (its follower
-sidecar's image and environment change); set `client: aws` first to keep the aws CLI for now
-(docs/object-stores.md). Server-side backups share the primary's volume, so they protect against logical
+encryption of the configuration. It was opt-in as `s3.client: agent` from v0.188.0 and the
+default in v0.192.0; the aws CLI (`s3.client: aws`, `s3.clientImage`) was removed in v0.193.0.
+The webhook refuses either field on a create or a change, naming each place; a resource stored
+with them keeps working on the agent, and its cluster gets an `S3ClientRemoved` Warning event
+until they are removed from it (docs/object-stores.md). Server-side backups share the primary's volume, so they protect against logical
 errors, not against losing the volume.
 
 **Backups from a replica.** `target: prefer-standby` (CloudNativePG's `target`) on
@@ -1659,7 +1656,7 @@ image (docs/object-stores.md). At most one of `s3`, `azureBlob` and `gcs` is set
 `FirebirdBackup` reads its store, and `status.location` names it
 (`azure://<account>/<container>/<key>`, `gs://<bucket>/<key>`). Both services encrypt every object
 at rest, with a customer-managed key set on the account or the bucket, so S3's `region`,
-`encryption`, `kmsKeyId`, `sseCustomerKey`, `client` and `clientImage` have no equivalent.
+`encryption`, `kmsKeyId` and `sseCustomerKey` have no equivalent.
 
 The journal archive too (v0.190.0): `replication.journalArchiveAzureBlob` or
 `replication.journalArchiveGCS` instead of `journalArchiveS3` (declarative databases' segments

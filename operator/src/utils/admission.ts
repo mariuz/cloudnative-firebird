@@ -1,5 +1,5 @@
 import { replicaSourceRefusal, volumeSnapshotRefusal } from './replication';
-import { awsClientDeprecation, awsClientPaths, objectStoreOf } from './object-store';
+import { awsClientPaths, awsClientRemoval, objectStoreOf } from './object-store';
 import { segmentTlsRequired } from './segment-tls-default';
 import { CoordinationV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Secret } from '@kubernetes/client-node';
 import { API_GROUP, API_VERSION, FirebirdBackup, FirebirdCluster, FirebirdDatabase, FirebirdRestore, FirebirdRole, FirebirdUser, RESOURCE_PLURAL } from '../types';
@@ -133,8 +133,10 @@ export function createAdmissionValidator(lookups: AdmissionLookups): AdmissionVa
       return {};
     }
     if (!specChanged) return {};
-    const deprecation = awsClientDeprecation(awsClientPaths(object.spec));
-    if (deprecation) warnings.push(deprecation);
+    // the aws CLI is gone: what still names it is refused on a create or change (a stored
+    // resource keeps running on the agent, with a Warning event on its cluster)
+    const removed = awsClientRemoval(awsClientPaths(object.spec));
+    if (removed) return { denied: removed };
 
     const secretWarnings = async (names: string[]) => {
       for (const name of names) {

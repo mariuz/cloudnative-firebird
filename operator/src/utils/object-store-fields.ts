@@ -100,22 +100,24 @@ export function objectStorePrefix(s3: S3BackupConfiguration): string {
 }
 
 /**
- * The S3 configurations of a resource's spec that select the aws CLI (client: aws, deprecated
- * since v0.192.0 and removed with clientImage in a later release), by path, e.g.
- * "spec.backup.s3"; clientImage alone selects nothing since the agent became the default
+ * The S3 configurations of a resource's spec that still name the aws CLI (client: aws or
+ * clientImage, removed in v0.193.0), by path, e.g. "spec.backup.s3" (clientImage: "spec.backup.s3.clientImage")
  */
 export function awsClientPaths(spec: unknown, path = 'spec'): string[] {
   if (!spec || typeof spec !== 'object') return [];
   if (Array.isArray(spec)) return spec.flatMap((v, i) => awsClientPaths(v, `${path}[${i}]`));
   const o = spec as Record<string, unknown>;
-  const own = typeof o.bucket === 'string' && o.client === 'aws' ? [path] : [];
+  const own =
+    typeof o.bucket === 'string'
+      ? [...(o.client === 'aws' ? [`${path}.client`] : []), ...(o.clientImage !== undefined ? [`${path}.clientImage`] : [])]
+      : [];
   return [...own, ...Object.entries(o).flatMap(([k, v]) => awsClientPaths(v, `${path}.${k}`))];
 }
 
-/** The deprecation message for the paths that select the aws CLI */
-export function awsClientDeprecation(paths: string[]): string | undefined {
+/** What the paths that still name the aws CLI are told: refused by the webhook, ignored when stored */
+export function awsClientRemoval(paths: string[]): string | undefined {
   return paths.length
-    ? `${paths.join(', ')}: client aws (the aws CLI of clientImage) is deprecated since v0.192.0 and will be removed with ` +
-        'clientImage in a later release; the agent (fb-agent objects) is the default S3 client'
+    ? `${paths.join(', ')}: the aws CLI (client aws, clientImage) was removed in v0.193.0, deprecated since v0.192.0; ` +
+        'every S3 transfer runs the agent (fb-agent objects): remove these fields (or set client: agent)'
     : undefined;
 }

@@ -14,7 +14,7 @@ import { makeCluster } from './helpers/factories';
  * Job's pod, and every program the Job runs is the agent's command (agent/fb-agent/src/jobs.rs).
  * The commands' own tests are in jobs-conformance.test.ts and the tests of their Jobs.
  */
-const s3 = { client: 'aws' as const, bucket: 'bkt', prefix: 'fb/', secretRef: { name: 's3-creds' }, endpoint: 'http://minio:9000' };
+const s3 = { bucket: 'bkt', prefix: 'fb/', secretRef: { name: 's3-creds' }, endpoint: 'http://minio:9000' };
 const annotated = (cluster: FirebirdCluster, value: string): FirebirdCluster => ({
   ...cluster,
   metadata: { ...cluster.metadata, annotations: { ...cluster.metadata.annotations, [AGENT_ANNOTATION]: value } },
@@ -74,7 +74,8 @@ describe('the Jobs of a cluster run the Rust agent', () => {
     const rust = jobs(makeCluster(spec));
     // the Jobs that only run Firebird's tools are left as they are
     const without = Object.keys(rust).filter((name) => !containers(rust[name]).some((c) => c.name === 'agent-install'));
-    expect(without).toEqual(['logical backup', 'backup to S3 with retention', 'nbackup restore']);
+    // (a backup to S3 runs the agent's object store client since v0.192.0)
+    expect(without).toEqual(['logical backup', 'nbackup restore']);
     for (const name of without) {
       for (const c of containers(rust[name])) expect(c.env ?? [], `${name}/${c.name}`).not.toContainEqual(expect.objectContaining({ name: 'FB_AGENT' }));
     }

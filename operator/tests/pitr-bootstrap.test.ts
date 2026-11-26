@@ -6,8 +6,8 @@ import { buildBootstrapInitContainers, buildRecoveryBootstrapJob, bootstrapVolum
 import { validateClusterSpec } from '../src/utils/validation';
 import { makeCluster, notFoundError } from './helpers/factories';
 
-const s3 = { client: 'aws' as const, bucket: 'backups', prefix: 'prod', secretRef: { name: 'bk' } };
-const journals = { client: 'aws' as const, bucket: 'backups', prefix: 'prod', secretRef: { name: 'jr' } };
+const s3 = { bucket: 'backups', prefix: 'prod', secretRef: { name: 'bk' } };
+const journals = { bucket: 'backups', prefix: 'prod', secretRef: { name: 'jr' } };
 const pitrCluster = (spec: Partial<FirebirdCluster['spec']> = {}) =>
   makeCluster({
     instances: 2,
@@ -51,7 +51,7 @@ describe('point-in-time bootstrap', () => {
     expect(pod.volumes).toContainEqual({ name: 'firebird-data', persistentVolumeClaim: { claimName: 'firebird-data-test-cluster-0' } });
     expect(pod.securityContext).toMatchObject({ runAsUser: 84, runAsNonRoot: true, fsGroup: 84 });
     expect(pod.initContainers![0].name).toBe('agent-install');
-    expect(pod.initContainers![1].args![0]).toContain(`s3 cp 's3://backups/prod/nbackup-l1-b.nbk' /work/chain/1.nbk`);
+    expect(pod.initContainers![1].args![0]).toContain(`/opt/fb-agent/fb-agent objects get 'nbackup-l1-b.nbk' /work/chain/1.nbk`);
     const [firebird, fetch] = pod.containers;
     expect(firebird.args![0]).toBe('set -eu; . /etc/firebird-operator/pitr-restore.sh');
     const env = Object.fromEntries((firebird.env ?? []).map((e) => [e.name, e.value]));
@@ -71,10 +71,10 @@ describe('point-in-time bootstrap', () => {
     expect(() => validateClusterSpec(pitrCluster({ bootstrap: { recovery: { ...recovery, s3: undefined } } }))).toThrow('needs s3 and sourcePath');
     expect(() => validateClusterSpec(pitrCluster({ replication: undefined }))).toThrow('needs replication');
     expect(() =>
-      validateClusterSpec(pitrCluster({ replication: { enabled: true, journalArchiveS3: { client: 'aws' as const, bucket: 'backups', prefix: '/prod/' } } })),
+      validateClusterSpec(pitrCluster({ replication: { enabled: true, journalArchiveS3: { bucket: 'backups', prefix: '/prod/' } } })),
     ).toThrow('own replication.journalArchiveS3');
     expect(() =>
-      validateClusterSpec(pitrCluster({ replication: { enabled: true, journalArchiveS3: { client: 'aws' as const, bucket: 'backups', prefix: 'recovered' } } })),
+      validateClusterSpec(pitrCluster({ replication: { enabled: true, journalArchiveS3: { bucket: 'backups', prefix: 'recovered' } } })),
     ).not.toThrow();
     expect(() =>
       validateClusterSpec(pitrCluster({ bootstrap: { recovery: { ...recovery, pointInTime: { journalS3: journals, targetSegment: 0 } } } })),
