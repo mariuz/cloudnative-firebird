@@ -1,5 +1,5 @@
 import { INIT_SQL_DIR, INIT_SQL_VOLUME, initSqlVolume } from './init-sql';
-import { journalArchiveOf, sameObjectStoreLocation } from './object-store-fields';
+import { journalArchiveOf, replicaJournalOf, sameObjectStoreLocation } from './object-store-fields';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import { V1Container, V1EnvVar, V1VolumeMount } from '@kubernetes/client-node';
@@ -141,7 +141,7 @@ export function replicaClusterRefusal(cluster: FirebirdCluster): string | undefi
  * declarative databases into it (journals/<file>/), which a replica cluster does not follow
  */
 export function replicaSourceRefusal(replica: FirebirdCluster, clusters: FirebirdCluster[]): string | undefined {
-  const follows = replica.spec.replica?.enabled ? replica.spec.replica.journalS3 : undefined;
+  const follows = replica.spec.replica?.enabled ? replicaJournalOf(replica) : undefined;
   if (!follows) return undefined;
   const source = clusters.find((c) => {
     const archive = journalArchiveOf(c);

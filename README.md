@@ -145,7 +145,7 @@ and the operator Deployment pinned to the release's image. One apply installs or
 # the latest release
 kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/latest/download/cloudnative-firebird.yaml
 # a release by version
-kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.190.0/cloudnative-firebird-0.190.0.yaml
+kubectl apply -f https://github.com/mariuz/cloudnative-firebird/releases/download/v0.191.0/cloudnative-firebird-0.191.0.yaml
 ```
 
 The manifest is built by `hack/release/bundle.sh` from `config/crds` and `config/deploy` (the
@@ -163,7 +163,7 @@ optional PodMonitor (`charts/cloudnative-firebird/values.yaml`). It is pushed to
 
 ```bash
 helm install cloudnative-firebird oci://ghcr.io/mariuz/charts/cloudnative-firebird \
-  --version 0.190.0 -n cloudnative-firebird-system --create-namespace
+  --version 0.191.0 -n cloudnative-firebird-system --create-namespace
 # from a checkout
 helm install cloudnative-firebird charts/cloudnative-firebird -n cloudnative-firebird-system --create-namespace
 ```
@@ -240,7 +240,7 @@ push to `main`:
 
 | Tag | What it is |
 |-----|------------|
-| `<version>` (e.g. `0.190.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
+| `<version>` (e.g. `0.191.0`) | A release: the operator's version (`kubectl firebird version`, `PLUGIN_VERSION` in `operator/src/plugin/cli.ts`), published once, when the version first reaches `main`, together with the git tag `v<version>` and the GitHub Release carrying the install manifest. `config/deploy/deployment.yaml` pins it, so a checkout of a release deploys that release; `hack/release/version.sh` checks both agree (also a unit test), and that ROADMAP.md has an entry marked with the version: the GitHub Release's notes are that entry (`hack/release/notes.sh`), the image with its digest and the install commands (since v0.129.0). |
 | `latest` | The current `main`, published on every push that passed CI. |
 | `sha-<commit>` | The build of one commit of `main`. |
 
@@ -1661,8 +1661,13 @@ The journal archive too (v0.190.0): `replication.journalArchiveAzureBlob` or
 `replication.journalArchiveGCS` instead of `journalArchiveS3` (declarative databases' segments
 under `journals/<file>/` as in S3), and `pointInTime.journalAzureBlob` or `pointInTime.journalGCS`
 instead of `journalS3` on a `FirebirdRestore` or `bootstrap.recovery`; a point-in-time recovery
-without one replays the cluster's archive, whichever its store. Replica clusters still follow an
-archive in S3 only (`replica.journalS3`; the next phase).
+without one replays the cluster's archive, whichever its store.
+
+Replica clusters follow an archive in any of them (v0.191.0): `replica.journalAzureBlob` or
+`replica.journalGCS` instead of `replica.journalS3` (exactly one of the three), bootstrapped from
+the source's nbackup chain in `bootstrap.recovery.s3`, `azureBlob` or `gcs`. The follower sidecar
+reads Azure Blob and GCS through the agent; without a Secret for an Azure archive, the instance pod
+is labelled for AKS workload identity while it follows.
 
 ```yaml
 spec:

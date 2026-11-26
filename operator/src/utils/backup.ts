@@ -10,6 +10,7 @@ import {
   objectStoreOf,
   objectUri,
   pointInTimeJournalOf,
+  replicaJournalOf,
   storeKind,
   withObjectStoreLabels,
 } from './object-store';
@@ -1080,7 +1081,7 @@ export function buildRecoveryBootstrapJob(cluster: FirebirdCluster): V1Job {
     : `${FIREBIRD_DATA_DIR}/${databaseName(cluster)}`;
   const podSpec = replayPodSpec(cluster, {
     chain: { s3: objectStoreOf(recovery)!, keys },
-    journalS3: replica ? replica.journalS3 : pointInTimeJournalOf(recovery.pointInTime)!,
+    journalS3: replica ? replicaJournalOf(cluster)! : pointInTimeJournalOf(recovery.pointInTime)!,
     // a replica cluster: every archived segment
     target: replica ? {} : recovery.pointInTime!,
     command: `set -eu; . ${OPERATOR_CONFIG_DIR}/pitr-restore.sh`,
@@ -1452,13 +1453,14 @@ export function bootstrapVolumes(cluster: FirebirdCluster): V1Volume[] {
 }
 
 /**
- * Labels of the instance pods for the bootstrap init containers: AKS workload identity's when
- * the backup comes from an Azure container without a Secret
+ * Labels of the instance pods for their object store clients: AKS workload identity's when the
+ * bootstrap init containers' backup, or the archive a replica cluster's follower reads (phase 4),
+ * is an Azure container without a Secret
  */
 export function bootstrapPodLabels(cluster: FirebirdCluster): Record<string, string> {
   const recovery = cluster.spec.bootstrap?.recovery;
-  const store = objectStoreOf(recovery);
-  return store && !recovery?.pointInTime && storeKind(store) === 'azure' && !store.secretRef
-    ? { 'azure.workload.identity/use': 'true' }
-    : {};
+  const azureIdentity = (store?: S3BackupConfiguration) => Boolean(store && storeKind(store) === 'azure' && !store.secretRef);
+  const bootstrap = !recovery?.pointInTime && azureIdentity(objectStoreOf(recovery));
+  const follower = Boolean(cluster.spec.replica?.enabled) && replicationEnabled(cluster) && azureIdentity(replicaJournalOf(cluster));
+  return bootstrap || follower ? { 'azure.workload.identity/use': 'true' } : {};
 }

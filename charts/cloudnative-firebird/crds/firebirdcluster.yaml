@@ -813,11 +813,13 @@ spec:
                         - rule: self.all(k, k.lowerAscii() != 'securitydatabase')
                           message: SecurityDatabase is managed by the operator (the security database is kept on the instance volume)
                 replica:
-                  description: Replica cluster, following another cluster's journal archive in S3 as a read-only replica; enabled false promotes it
+                  description: Replica cluster, following another cluster's journal archive (S3, Azure Blob or GCS) as a read-only replica; enabled false promotes it
                   type: object
                   required:
                     - enabled
-                    - journalS3
+                  x-kubernetes-validations:
+                    - rule: '(has(self.journalS3) ? 1 : 0) + (has(self.journalAzureBlob) ? 1 : 0) + (has(self.journalGCS) ? 1 : 0) == 1'
+                      message: exactly one of journalS3, journalAzureBlob and journalGCS (the source's journal archive)
                   properties:
                     enabled:
                       description: true follows the source; false promotes this cluster to a primary of its own (once)
@@ -876,6 +878,49 @@ spec:
                             name:
                               type: string
                               minLength: 1
+                    journalAzureBlob:
+                      description: The source's journal archive in Azure Blob Storage instead of S3, through fb-agent objects (since v0.191.0)
+                      type: object
+                      required: [storageAccount, container]
+                      properties:
+                        storageAccount:
+                          type: string
+                          pattern: '^[a-z0-9]{3,24}$'
+                        container:
+                          type: string
+                          pattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'
+                        prefix:
+                          type: string
+                        endpoint:
+                          description: The account's Blob endpoint instead of https://<storageAccount>.blob.core.windows.net
+                          type: string
+                        secretRef:
+                          description: A Secret with AZURE_STORAGE_ACCOUNT_KEY or AZURE_STORAGE_SAS_KEY; without it AKS workload identity or a managed identity
+                          type: object
+                          required: [name]
+                          properties:
+                            name:
+                              type: string
+                    journalGCS:
+                      description: The source's journal archive in Google Cloud Storage instead of S3, through fb-agent objects (since v0.191.0)
+                      type: object
+                      required: [bucket]
+                      properties:
+                        bucket:
+                          type: string
+                          minLength: 1
+                        prefix:
+                          type: string
+                        endpoint:
+                          description: The storage API's base URL instead of https://storage.googleapis.com (tests)
+                          type: string
+                        secretRef:
+                          description: A Secret with APPLICATION_CREDENTIALS, a service account's JSON key; without it Application Default Credentials (GKE workload identity)
+                          type: object
+                          required: [name]
+                          properties:
+                            name:
+                              type: string
                     pollIntervalSeconds:
                       description: Seconds between two looks at the archive (default 30)
                       type: integer

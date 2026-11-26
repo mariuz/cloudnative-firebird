@@ -62,8 +62,15 @@ export interface ResourceRequirements {
 export interface ReplicaClusterConfiguration {
   /** true: follow the source; false: promote this cluster to a primary of its own (once) */
   enabled: boolean;
-  /** The source cluster's journal archive (its replication.journalArchiveS3) */
-  journalS3: S3BackupConfiguration;
+  /**
+   * The source cluster's journal archive (its replication.journalArchiveS3); exactly one of
+   * journalS3, journalAzureBlob and journalGCS
+   */
+  journalS3?: S3BackupConfiguration;
+  /** The source's journal archive in Azure Blob Storage (its journalArchiveAzureBlob; since v0.191.0) */
+  journalAzureBlob?: AzureBlobConfiguration;
+  /** The source's journal archive in Google Cloud Storage (its journalArchiveGCS; since v0.191.0) */
+  journalGCS?: GCSConfiguration;
   /** Seconds between two looks at the archive (default 30) */
   pollIntervalSeconds?: number;
 }

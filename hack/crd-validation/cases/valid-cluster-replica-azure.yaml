@@ -1,0 +1,23 @@
+# expect: valid
+apiVersion: firebird.cloudnative-firebird.io/v1
+kind: FirebirdCluster
+metadata:
+  name: c1
+spec:
+  instances: 1
+  storage:
+    size: 1Gi
+  replication:
+    enabled: true
+  replica:
+    enabled: true
+    journalAzureBlob:
+      storageAccount: account1
+      container: archive
+      prefix: src
+  bootstrap:
+    recovery:
+      sourcePath: nbackup-l0-src-base.nbk
+      azureBlob:
+        storageAccount: account1
+        container: backups
