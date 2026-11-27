@@ -112,8 +112,8 @@ export const EventReason = {
   RoleApplied: 'RoleApplied',
   RoleFailed: 'RoleFailed',
   RoleDropped: 'RoleDropped',
-  /** A spec selects the aws CLI as its S3 client (client: aws), deprecated since v0.192.0 */
-  S3ClientDeprecated: 'S3ClientDeprecated',
+  /** A stored spec still names the aws CLI (client: aws, clientImage), removed in v0.193.0: the agent runs */
+  S3ClientRemoved: 'S3ClientRemoved',
 } as const;
 
 export class EventRecorder {

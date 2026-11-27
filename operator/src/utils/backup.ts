@@ -1,7 +1,6 @@
 import { clusterImage } from './image-catalog';
 import { AGENT_PATH } from './agent';
 import {
-  agentClient,
   agentClientContainer,
   agentObjects,
   gcsKeyDir,
@@ -69,9 +68,6 @@ import {
  *   client.
  */
 
-/** Image providing the `aws` CLI for S3 uploads and downloads */
-export const DEFAULT_S3_CLIENT_IMAGE = 'amazon/aws-cli:2.37.4';
-
 /** Scratch directory shared by the containers of a backup or restore pod */
 const WORK_DIR = '/work';
 
@@ -99,16 +95,6 @@ export interface BackupSource {
    * recovery replays its own journal archive, journals/<file>/
    */
   database?: string;
-}
-
-/** Prefix for S3 object keys, with a trailing slash when set */
-export function s3KeyPrefix(s3: S3BackupConfiguration): string {
-  return s3.prefix ? `${s3.prefix.replace(/^\/+|\/+$/g, '')}/` : '';
-}
-
-/** `s3://bucket/prefix/key` */
-export function s3Uri(s3: S3BackupConfiguration, key: string): string {
-  return `s3://${s3.bucket}/${s3KeyPrefix(s3)}${key}`;
 }
 
 /** Accepted retentionPolicy values (CloudNativePG's format): days, weeks or months (30 days) */
@@ -192,23 +178,11 @@ function retentionScript(o: {
 /**
  * Retention of a backup series in S3 (after the upload); `history` for nbackup series
  */
-export function s3RetentionScript(s3: S3BackupConfiguration, series: string, seconds: number, history?: string): string {
-  if (agentClient(s3)) {
-    return retentionScript({
-      list: agentObjects.list(agentObjects.key('')),
-      remove: agentObjects.rm('"$k"') + (history ? `; ${agentObjects.rm('"$k.ctl"')} >/dev/null 2>&1 || true` : ''),
-      tmp: WORK_DIR,
-      series,
-      seconds,
-      history,
-    });
-  }
-  const dir = `s3://${s3.bucket}/${s3KeyPrefix(s3)}`;
+export function s3RetentionScript(_s3: S3BackupConfiguration, series: string, seconds: number, history?: string): string {
   return retentionScript({
-    list: `${awsCommand(s3)} s3 ls ${shellQuote(dir)} | awk '{ print $4 }'`,
+    list: agentObjects.list(agentObjects.key('')),
     // with an nbackup taken on a replica, its control file (missing ones are fine)
-    remove: `${awsCommand(s3)} s3 rm ${shellQuote(dir)}"$k"` +
-      (history ? `; ${awsCommand(s3)} s3 rm ${shellQuote(dir)}"$k.ctl" >/dev/null 2>&1 || true` : ''),
+    remove: agentObjects.rm('"$k"') + (history ? `; ${agentObjects.rm('"$k.ctl"')} >/dev/null 2>&1 || true` : ''),
     tmp: WORK_DIR,
     series,
     seconds,
@@ -241,29 +215,7 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function awsCommand(s3: S3BackupConfiguration): string {
-  return s3.endpoint ? `aws --endpoint-url ${shellQuote(s3.endpoint)}` : 'aws';
-}
 
-/**
- * Environment for the S3 client container: static keys from secretRef, or none, so that the aws
- * CLI uses the pod's own credentials (workload identity via the service account, instance profile)
- */
-export function s3ClientEnv(s3: S3BackupConfiguration): V1EnvVar[] {
-  const keys: V1EnvVar[] = s3.secretRef
-    ? [
-        {
-          name: 'AWS_ACCESS_KEY_ID',
-          valueFrom: { secretKeyRef: { name: s3.secretRef.name, key: 'AWS_ACCESS_KEY_ID' } },
-        },
-        {
-          name: 'AWS_SECRET_ACCESS_KEY',
-          valueFrom: { secretKeyRef: { name: s3.secretRef.name, key: 'AWS_SECRET_ACCESS_KEY' } },
-        },
-      ]
-    : [];
-  return [...keys, { name: 'AWS_DEFAULT_REGION', value: s3.region ?? 'us-east-1' }];
-}
 
 const SSE_C_DIR = '/var/run/s3-sse-c';
 
@@ -309,19 +261,7 @@ export function s3ClientMounts(s3: S3BackupConfiguration, id = 's3'): V1VolumeMo
   return [{ name: sseCustomerKeyVolumeName(id), mountPath: `${SSE_C_DIR}/${id}`, readOnly: true }];
 }
 
-/**
- * The server-side encryption arguments of `aws s3 cp` and `aws s3 sync`: SSE-S3 or SSE-KMS for
- * uploads only, SSE-C (the key from the mounted Secret) both ways
- */
-export function s3TransferArgs(s3: S3BackupConfiguration, direction: 'upload' | 'download', id = 's3'): string {
-  if (s3.sseCustomerKey) return ` --sse-c AES256 --sse-c-key fileb://${sseCustomerKeyFile(id)}`;
-  if (direction === 'download' || !s3.encryption) return '';
-  return ` --sse ${s3.encryption}` + (s3.encryption === 'aws:kms' && s3.kmsKeyId ? ` --sse-kms-key-id ${shellQuote(s3.kmsKeyId)}` : '');
-}
 
-export function s3ClientImage(s3: S3BackupConfiguration): string {
-  return s3.clientImage ?? DEFAULT_S3_CLIENT_IMAGE;
-}
 
 /** Resolves a server-side backup path against the data directory */
 export function serverPath(path: string): string {
@@ -482,8 +422,7 @@ export function buildBackupPodSpec(
         : []),
     ],
     containers: [
-      agentClient(s3)
-        ? agentClientContainer(cluster, s3, {
+      agentClientContainer(cluster, s3, {
             name: 'upload',
             command: ['/bin/sh', '-c'],
             args: [
@@ -500,30 +439,7 @@ export function buildBackupPodSpec(
                   : ''),
             ],
             volumeMounts: [workMount, ...s3ClientMounts(s3)],
-          })
-        : {
-        name: 'upload',
-        image: s3ClientImage(s3),
-        command: ['/bin/sh', '-c'],
-        args: [
-          `set -eu; f=$(cat ${WORK_DIR}/.name); ` +
-            // a replica's position first: an uploaded nbackup taken on a replica has its .ctl
-            (physical
-              ? `if [ -f "${WORK_DIR}/$f.ctl" ]; then ${awsCommand(s3)} s3 cp${s3TransferArgs(s3, 'upload')} "${WORK_DIR}/$f.ctl" "s3://${s3.bucket}/${s3KeyPrefix(s3)}$f.ctl"; fi; `
-              : '') +
-            `${awsCommand(s3)} s3 cp${s3TransferArgs(s3, 'upload')} "${WORK_DIR}/$f" "s3://${s3.bucket}/${s3KeyPrefix(s3)}$f"` +
-            (options.retention?.policy
-              ? `; ${s3RetentionScript(
-                  s3,
-                  options.retention.series,
-                  retentionSeconds(options.retention.policy),
-                  physical ? `${WORK_DIR}/history` : undefined,
-                )}`
-              : ''),
-        ],
-        env: s3ClientEnv(s3),
-        volumeMounts: [workMount, ...s3ClientMounts(s3)],
-      },
+          }),
     ],
     volumes: [workVolume, ...(physical ? [configVolume(cluster)] : []), ...s3ClientVolumes(s3)],
   });
@@ -745,26 +661,12 @@ export function buildRestoreJob(
     podSpec = jobPodSpec(cluster, {
       restartPolicy: 'Never',
       initContainers: [
-        agentClient(s3)
-          ? agentClientContainer(cluster, s3, {
+        agentClientContainer(cluster, s3, {
               name: 'download',
               command: ['/bin/sh', '-c'],
               args: ['set -eu; ' + keys.map((k, i) => agentObjects.get(agentObjects.key(k), `${WORK_DIR}/${serverNames[i]}`)).join('; ')],
               volumeMounts: [workMount, ...s3ClientMounts(s3)],
-            })
-          : {
-          name: 'download',
-          image: s3ClientImage(s3),
-          command: ['/bin/sh', '-c'],
-          args: [
-            'set -eu; ' +
-              keys
-                .map((k, i) => `${awsCommand(s3)} s3 cp${s3TransferArgs(s3, 'download')} ${shellQuote(s3Uri(s3, k))} ${WORK_DIR}/${serverNames[i]}`)
-                .join('; '),
-          ],
-          env: s3ClientEnv(s3),
-          volumeMounts: [workMount, ...s3ClientMounts(s3)],
-        },
+            }),
       ],
       containers: [
         {
@@ -787,21 +689,12 @@ export function buildRestoreJob(
     podSpec = jobPodSpec(cluster, {
       restartPolicy: 'Never',
       initContainers: [
-        agentClient(s3)
-          ? agentClientContainer(cluster, s3, {
+        agentClientContainer(cluster, s3, {
               name: 'download',
               command: ['/bin/sh', '-c'],
               args: [`set -eu; ${agentObjects.get(agentObjects.key(source.path), `${WORK_DIR}/backup.fbk`)}`],
               volumeMounts: [workMount, ...s3ClientMounts(s3)],
-            })
-          : {
-          name: 'download',
-          image: s3ClientImage(s3),
-          command: ['/bin/sh', '-c'],
-          args: [`set -eu; ${awsCommand(s3)} s3 cp${s3TransferArgs(s3, 'download')} ${shellQuote(s3Uri(s3, source.path))} ${WORK_DIR}/backup.fbk`],
-          env: s3ClientEnv(s3),
-          volumeMounts: [workMount, ...s3ClientMounts(s3)],
-        },
+            }),
       ],
       containers: [
         {
@@ -930,13 +823,11 @@ function replayPodSpec(
   },
 ): V1PodSpec {
   const { chain, journalS3, target } = options;
-  const journals = s3Uri(journalS3, options.journalPrefix ?? 'journals/');
   const fail = 'fail() { echo "$1" > /work/fetcher.failed; echo "$1" >&2; exit 1; }; ';
   const lastCtl = chain ? `${chain.keys[chain.keys.length - 1]}.ctl` : '';
   const initContainers: V1Container[] = chain
     ? [
-        agentClient(chain.s3)
-          ? agentClientContainer(
+        agentClientContainer(
               cluster,
               chain.s3,
               {
@@ -952,28 +843,11 @@ function replayPodSpec(
                 volumeMounts: [workMount, ...s3ClientMounts(chain.s3, 'chain')],
               },
               'chain',
-            )
-          : {
-          name: 'download',
-          image: s3ClientImage(chain.s3),
-          command: ['/bin/sh', '-c'],
-          args: [
-            `set -eu; mkdir -p ${WORK_DIR}/chain; ` +
-              chain.keys
-                .map((k, i) => `${awsCommand(chain.s3)} s3 cp${s3TransferArgs(chain.s3, 'download', 'chain')} ${shellQuote(s3Uri(chain.s3, k))} ${WORK_DIR}/chain/${i}.nbk`)
-                .join('; ') +
-              // taken on a replica: its position at the copy, next to the last file of the chain
-              `; if ${awsCommand(chain.s3)} s3 ls ${shellQuote(s3Uri(chain.s3, `${chain.keys[chain.keys.length - 1]}.ctl`))} >/dev/null 2>&1; then ` +
-              `${awsCommand(chain.s3)} s3 cp${s3TransferArgs(chain.s3, 'download', 'chain')} ${shellQuote(s3Uri(chain.s3, `${chain.keys[chain.keys.length - 1]}.ctl`))} ${WORK_DIR}/chain/position.ctl; fi`,
-          ],
-          env: s3ClientEnv(chain.s3),
-          volumeMounts: [workMount, ...s3ClientMounts(chain.s3, 'chain')],
-        },
+            ),
       ]
     : [];
   const journalKey = agentObjects.key(options.journalPrefix ?? 'journals/');
-  const fetcher: V1Container = agentClient(journalS3)
-    ? agentClientContainer(
+  const fetcher: V1Container = agentClientContainer(
         cluster,
         journalS3,
         {
@@ -998,31 +872,7 @@ function replayPodSpec(
           volumeMounts: [workMount, ...s3ClientMounts(journalS3, 'journals')],
         },
         'journals',
-      )
-    : {
-    name: 'journal-fetch',
-    image: s3ClientImage(journalS3),
-    command: ['/bin/sh', '-c'],
-    args: [
-      `set -eu; W=${WORK_DIR}; mkdir -p $W/segments $W/req; ${fail}` +
-        // an empty or missing prefix lists nothing and exits non-zero without an error message
-        `${awsCommand(journalS3)} s3 ls ${shellQuote(journals)} > $W/journals.tmp 2> $W/ls.err || ` +
-        '[ ! -s $W/ls.err ] || fail "listing the journal archive failed: $(cat $W/ls.err)"; ' +
-        'mv $W/journals.tmp $W/journals.list; start=$(date +%s); ' +
-        'while [ ! -f $W/finished ]; do ' +
-        'for r in $W/req/*.req; do [ -f "$r" ] || continue; err=""; ' +
-        'for s in $(cat "$r"); do ' +
-        'case "$s" in *[!A-Za-z0-9._-]*) err="invalid segment name $s"; break ;; esac; ' +
-        `${awsCommand(journalS3)} s3 cp --only-show-errors${s3TransferArgs(journalS3, 'download', 'journals')} ${shellQuote(journals)}"$s" "$W/segments/$s" 2> $W/cp.err || ` +
-        '{ err="$s: $(cat $W/cp.err)"; break; }; done; ' +
-        'if [ -z "$err" ]; then mv "$r" "${r%.req}.ok"; else echo "$err" > "${r%.req}.err"; rm -f "$r"; fi; done; ' +
-        // the Firebird container writes the time while it runs: stop when it was killed
-        'hb=$(cat $W/heartbeat 2>/dev/null || true); [ $(( $(date +%s) - ${hb:-$start} )) -lt 300 ] || ' +
-        'fail "the Firebird container stopped"; sleep 1; done',
-    ],
-    env: s3ClientEnv(journalS3),
-    volumeMounts: [workMount, ...s3ClientMounts(journalS3, 'journals')],
-  };
+      );
   return jobPodSpec(cluster, {
     restartPolicy: 'Never',
     initContainers,
@@ -1187,15 +1037,13 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
   if (!replicationEnabled(cluster) || !s3) return null;
 
   const labels = journalArchiveLabels(cluster);
-  const journals = s3Uri(s3, 'journals/');
   // the declarative databases' segments, each under journals/<file>/ (their own archive and
   // lineage; docs/multi-database-replication.md, phase 4b): listed, fetched and uploaded in loops
   // after the cluster database's, in ${WORK_DIR}/db/<file>/
   const databases = replicatedDatabaseFiles(cluster);
   const databasesEnv: V1EnvVar[] = databases.length ? [{ name: 'DATABASES', value: databases.join(' ') }] : [];
   const perDatabase = (body: string) => (databases.length ? `; for f in $DATABASES; do d=${WORK_DIR}/db/$f; mkdir -p $d; ${body}; done` : '');
-  const upload: V1Container = agentClient(s3)
-    ? agentClientContainer(cluster, s3, {
+  const upload: V1Container = agentClientContainer(cluster, s3, {
         name: 'upload',
         command: ['/bin/sh', '-c'],
         // the segments not in the archive yet (they never change once there)
@@ -1205,20 +1053,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
         ],
         env: databasesEnv,
         volumeMounts: [workMount, ...s3ClientMounts(s3)],
-      })
-    : {
-    name: 'upload',
-    image: s3ClientImage(s3),
-    command: ['/bin/sh', '-c'],
-    // no --delete: the primary prunes segments locally after segmentRetentionHours, while
-    // the object store keeps the full history for point-in-time recovery
-    args: [
-      `set -eu; ${awsCommand(s3)} s3 sync${s3TransferArgs(s3, 'upload')} ${WORK_DIR}/segments/ ${shellQuote(journals)}` +
-        perDatabase(`[ ! -d $d/segments ] || ${awsCommand(s3)} s3 sync${s3TransferArgs(s3, 'upload')} $d/segments/ ${shellQuote(journals)}"$f/"`),
-    ],
-    env: [...s3ClientEnv(s3), ...databasesEnv],
-    volumeMounts: [workMount, ...s3ClientMounts(s3)],
-  };
+      });
   const report: V1Container = {
     // after a successful upload: every listed segment is in the bucket (pruneAppliedSegments
     // lets the primary delete applied segments only up to there)
@@ -1239,8 +1074,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
   const podSpec: V1PodSpec = jobPodSpec(cluster, {
     restartPolicy: 'Never',
     initContainers: [
-      agentClient(s3)
-        ? agentClientContainer(
+      agentClientContainer(
             cluster,
             s3,
             {
@@ -1257,20 +1091,7 @@ export function buildJournalArchiveCronJob(cluster: FirebirdCluster, primaryPod?
             },
             's3',
             { sseCustomerKey: false },
-          )
-        : {
-        name: 'list-uploaded',
-        image: s3ClientImage(s3),
-        command: ['/bin/sh', '-c'],
-        // an empty or missing prefix lists nothing (and exits non-zero)
-        args: [
-          `${awsCommand(s3)} s3 ls ${shellQuote(journals)} > ${WORK_DIR}/listing || true; ` +
-            `awk '{ print $4 }' ${WORK_DIR}/listing > ${WORK_DIR}/uploaded` +
-            perDatabase(`{ ${awsCommand(s3)} s3 ls ${shellQuote(journals)}"$f/" > $d/listing || true; }; awk '{ print $4 }' $d/listing > $d/uploaded`),
-        ],
-        env: [...s3ClientEnv(s3), ...databasesEnv],
-        volumeMounts: [workMount],
-      },
+          ),
       {
         name: 'fetch-segments',
         image: clusterImage(cluster),
@@ -1423,22 +1244,13 @@ export function buildBootstrapInitContainers(cluster: FirebirdCluster): V1Contai
     const s3 = store;
     const key = recovery.sourcePath ?? 'backup.fbk';
     return [
-      agentClient(s3)
-        ? agentClientContainer(cluster, s3, {
+      agentClientContainer(cluster, s3, {
             name: 'bootstrap-download',
             command: ['/bin/sh', '-c'],
             args: [guard + agentObjects.get(agentObjects.key(key), `${WORK_DIR}/backup.fbk`)],
             env,
             volumeMounts: [...mounts, workMount, ...s3ClientMounts(s3)],
-          })
-        : {
-        name: 'bootstrap-download',
-        image: s3ClientImage(s3),
-        command: ['/bin/sh', '-c'],
-        args: [guard + `${awsCommand(s3)} s3 cp${s3TransferArgs(s3, 'download')} ${shellQuote(s3Uri(s3, key))} ${WORK_DIR}/backup.fbk`],
-        env: [...env, ...s3ClientEnv(s3)],
-        volumeMounts: [...mounts, workMount, ...s3ClientMounts(s3)],
-      },
+          }),
       restore(`${WORK_DIR}/backup.fbk`, [workMount]),
     ];
   }

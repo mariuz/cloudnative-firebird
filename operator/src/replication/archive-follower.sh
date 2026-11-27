@@ -1,8 +1,10 @@
 #!/bin/sh
-# Replica cluster (spec.replica): the archive-follower sidecar of the designated primary, in the S3
-# client image. The instance's database is a read-only replica of the source cluster; this copies
-# the source's archived journal segments (its journal archive in S3, "<prefix>/journals/") into
-# the replica's journal_source_directory, where the Firebird replica server applies them.
+# Replica cluster (spec.replica): the archive-follower sidecar of the designated primary, in the
+# instance image. The instance's database is a read-only replica of the source cluster; this
+# copies the source's archived journal segments (its journal archive, "<prefix>/journals/", in S3,
+# Azure Blob or GCS) into the replica's journal_source_directory, where the Firebird replica
+# server applies them. The archive is read through the agent (fb-agent objects), configured by
+# OBJECT_STORE and the store's own variables (utils/object-store.ts).
 #
 # Every POLL_SECONDS:
 # - reads the replica's position (the control file in SOURCE_DIR: the last segment applied, and
@@ -19,8 +21,8 @@
 # - writes its state to $REPLICATION_DIR/follow.state, one line the segment server returns for
 #   FOLLOW: "applied=<n> archived=<n>" plus " restart=<U>" or " error=<message>".
 #
-# Environment: SOURCE_DIR, REPLICATION_DIR, JOURNALS (s3://bucket/prefix/journals/), S3_ENDPOINT
-# (optional), S3_SSE_C_KEY_FILE (optional: the SSE-C key of the archive), POLL_SECONDS, BATCH.
+# Environment: SOURCE_DIR, REPLICATION_DIR, JOURNALS (journals/, relative to OBJECT_PREFIX),
+# FB_AGENT (the agent's binary), the store's (OBJECT_STORE, ...), POLL_SECONDS, BATCH.
 set -u
 # as the container's PID 1, sh ignores SIGTERM without a trap; the follower can stop at once (its
 # downloads go through temporary names)
@@ -30,7 +32,8 @@ BATCH=${BATCH:-20}
 STATE="$REPLICATION_DIR/follow.state"
 W=$(mktemp -d)
 
-aws_s3() { if [ -n "${S3_ENDPOINT:-}" ]; then aws --endpoint-url "$S3_ENDPOINT" s3 "$@"; else aws s3 "$@"; fi; }
+# the archive's objects: `list --long` (date, time, size and name per line), `get <key> <file>`
+objects() { "$FB_AGENT" objects "$@"; }
 report() { printf '%s\n' "$1" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"; }
 position() { # <control file>: "<applied> <offset>"
   printf '%s %s\n' "$(od -An -tu8 -j16 -N8 "$1" | tr -d ' ')" "$(od -An -tu4 -j24 -N4 "$1" | tr -d ' ')"
@@ -47,7 +50,7 @@ while :; do
   set -- $(position "$ctl")
   applied=${1:-0}
   offset=${2:-0}
-  if ! aws_s3 ls "$JOURNALS" > "$W/listing" 2> "$W/ls.err"; then
+  if ! objects list --long "$JOURNALS" > "$W/listing" 2> "$W/ls.err"; then
     # an empty prefix lists nothing and fails: an archive with no segment yet
     if [ -s "$W/ls.err" ]; then
       report "applied=$applied archived=0 error=listing $JOURNALS failed: $(tr '\n' ' ' < "$W/ls.err" | cut -c1-300)"
@@ -94,7 +97,7 @@ while :; do
     awk -v a="$applied" -v l="$limit" '$1 > a && $1 <= l { print $2 }' "$W/segments" | head -n "$BATCH" > "$W/wanted"
     while read -r name; do
       [ -f "$SOURCE_DIR/$name" ] && continue
-      if aws_s3 cp --only-show-errors ${S3_SSE_C_KEY_FILE:+--sse-c AES256 --sse-c-key "fileb://$S3_SSE_C_KEY_FILE"} "$JOURNALS$name" "$SOURCE_DIR/.$name.tmp" 2> "$W/cp.err"; then
+      if objects get "$JOURNALS$name" "$SOURCE_DIR/.$name.tmp" 2> "$W/cp.err"; then
         chmod 644 "$SOURCE_DIR/.$name.tmp"
         mv "$SOURCE_DIR/.$name.tmp" "$SOURCE_DIR/$name"
       else

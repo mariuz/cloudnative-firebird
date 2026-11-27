@@ -151,25 +151,25 @@ describe('admission checks', () => {
     status: { phase, backupFileName: phase === 'Completed' ? `${name}.fbk` : undefined, ...extra },
   });
 
-  it('warns about the deprecated aws client (client: aws), wherever an S3 configuration selects it', async () => {
+  it('refuses the removed aws client (client: aws, clientImage), wherever an S3 configuration names it', async () => {
     const validate = createAdmissionValidator(lookups({ clusters: [cluster] }));
     const out = await validate(
       req('FirebirdBackup', { metadata: { name: 'b', namespace: 'default' }, spec: { clusterName: 'db', s3: { bucket: 'b', client: 'aws' } } }),
     );
-    expect(out.denied).toBeUndefined();
-    expect(out.warnings).toContainEqual(expect.stringMatching(/^spec.s3: client aws \(the aws CLI of clientImage\) is deprecated since v0.192.0/));
+    expect(out.denied).toMatch(/^spec.s3.client: the aws CLI \(client aws, clientImage\) was removed in v0.193.0/);
     const replicated = {
       ...cluster,
-      spec: { ...cluster.spec, replication: { enabled: true, journalArchiveS3: { bucket: 'j', client: 'aws' } }, backup: { enabled: true, s3: { bucket: 'b', client: 'aws' } } },
+      spec: { ...cluster.spec, replication: { enabled: true, journalArchiveS3: { bucket: 'j', clientImage: 'x/aws:1' } }, backup: { enabled: true, s3: { bucket: 'b', client: 'aws' } } },
     };
-    expect((await validate(req('FirebirdCluster', replicated))).warnings).toContainEqual(
-      expect.stringMatching(/^spec.replication.journalArchiveS3, spec.backup.s3: client aws/),
-    );
-    // the default (the agent) and clientImage alone warn about nothing
-    const quiet = await validate(
-      req('FirebirdBackup', { metadata: { name: 'b', namespace: 'default' }, spec: { clusterName: 'db', s3: { bucket: 'b', clientImage: 'x/aws:1' } } }),
-    );
-    expect(quiet.warnings ?? []).not.toContainEqual(expect.stringMatching(/deprecated/));
+    expect((await validate(req('FirebirdCluster', replicated))).denied).toMatch(/^spec.replication.journalArchiveS3.clientImage, spec.backup.s3.client: /);
+    // the agent, named or not, is accepted
+    for (const s3 of [{ bucket: 'b' }, { bucket: 'b', client: 'agent' }]) {
+      const ok = await validate(req('FirebirdBackup', { metadata: { name: 'b', namespace: 'default' }, spec: { clusterName: 'db', s3 } }));
+      expect(ok.denied).toBeUndefined();
+    }
+    // a change that keeps the stored spec as it was is not refused (only a create or a spec change is checked)
+    const stored = { metadata: { name: 'b', namespace: 'default' }, spec: { clusterName: 'db', s3: { bucket: 'b', client: 'aws' } } };
+    expect((await validate(req('FirebirdBackup', stored, 'UPDATE', stored))).denied).toBeUndefined();
   });
 
   it('refuses restores the operator would fail for good', async () => {

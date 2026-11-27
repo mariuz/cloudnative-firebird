@@ -2569,9 +2569,7 @@ jobs:
       - name: Verify a replica cluster following a source through S3
         if: matrix.track.id == 'extended'
         run: |
-          # an S3 server in the cluster (rclone serve s3, buckets are directories) and its keys; this
-          # step keeps the deprecated aws CLI (client: aws, docs/object-stores.md phase 5), every
-          # other S3 step runs the default, the agent
+          # an S3 server in the cluster (rclone serve s3, buckets are directories) and its keys
           kubectl create secret generic s3-credentials --from-literal=AWS_ACCESS_KEY_ID=ci-key --from-literal=AWS_SECRET_ACCESS_KEY=ci-secret-key
           kubectl apply -f - <<'EOF'
           apiVersion: apps/v1
@@ -2604,7 +2602,7 @@ jobs:
           EOF
           kubectl rollout status deployment/s3 --timeout=180s
           kubectl exec deploy/s3 -- mkdir -p /data/dr
-          S3='{ bucket: dr, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials }, client: aws }'
+          S3='{ bucket: dr, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }'
           # the source: replication with its journal archive, every minute
           kubectl apply -f - <<EOF
           apiVersion: firebird.cloudnative-firebird.io/v1
@@ -2619,7 +2617,7 @@ jobs:
               enabled: true
               archiveSchedule: "* * * * *"
               archiveTimeoutSeconds: 5
-              journalArchiveS3: { bucket: dr, prefix: src, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials }, client: aws }
+              journalArchiveS3: { bucket: dr, prefix: src, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }
           EOF
           timeout 300 bash -c 'until kubectl get pod src-0 >/dev/null 2>&1; do sleep 3; done'
           kubectl wait pod/src-0 --for=condition=Ready --timeout=300s
@@ -2637,7 +2635,7 @@ jobs:
             clusterName: src
             type: physical
             level: 0
-            s3: { bucket: dr, prefix: src-backups, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials }, client: aws }
+            s3: { bucket: dr, prefix: src-backups, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }
           EOF
           timeout 300 bash -c 'until [ "$(kubectl get firebirdbackup src-base -o jsonpath={.status.phase})" = Completed ]; do
             [ "$(kubectl get firebirdbackup src-base -o jsonpath={.status.phase})" = Failed ] && { kubectl logs job/backup-src-base --all-containers; exit 1; }; sleep 5; done'
@@ -2666,11 +2664,11 @@ jobs:
             replica:
               enabled: true
               pollIntervalSeconds: 5
-              journalS3: { bucket: dr, prefix: src, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials }, client: aws }
+              journalS3: { bucket: dr, prefix: src, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }
             bootstrap:
               recovery:
                 sourcePath: nbackup-l0-src-base.nbk
-                s3: { bucket: dr, prefix: src-backups, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials }, client: aws }
+                s3: { bucket: dr, prefix: src-backups, endpoint: "http://s3.default.svc:8080", secretRef: { name: s3-credentials } }
           EOF
           timeout 600 bash -c 'until kubectl get pod dr-0 >/dev/null 2>&1; do
             [ -n "$(kubectl get job dr-pitr-recovery -o jsonpath="{.status.failed}" 2>/dev/null)" ] && { kubectl logs job/dr-pitr-recovery --all-containers; exit 1; }; sleep 5; done' \
@@ -2702,9 +2700,8 @@ jobs:
       - name: Verify the journal archive and point-in-time recovery of a replicated declarative database
         if: matrix.track.id == 'extended'
         run: |
-          # every transfer through fb-agent objects (s3.client: agent, the default since v0.192.0):
-          # the archive upload and listing, the backup's upload, the restore's chain and journal
-          # downloads; the replica cluster step above keeps the aws CLI (client: aws)
+          # every transfer through fb-agent objects (the only S3 client since v0.193.0): the archive
+          # upload and listing, the backup's upload, the restore's chain and journal downloads
           # docs/multi-database-replication.md, phase 4b, on the S3 server of the step above: a
           # declarative database archived under journals/<file>/ and recovered to a point in time
           kubectl apply -f - <<'EOF'

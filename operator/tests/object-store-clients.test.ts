@@ -9,7 +9,7 @@ import {
   buildRestoreJob,
   buildScheduledBackupCronJob,
 } from '../src/utils/backup';
-import { buildArchiveFollowerContainer, FOLLOWER_AGENT_CLIENT, FOLLOWER_AWS_CLIENT } from '../src/utils/replica-cluster';
+import { buildArchiveFollowerContainer } from '../src/utils/replica-cluster';
 import { withAgent } from '../src/utils/agent';
 import { validateS3Encryption } from '../src/utils/validation';
 import { spawnSync } from 'child_process';
@@ -17,8 +17,8 @@ import { FirebirdBackup, FirebirdCluster, FirebirdRestore, FirebirdScheduledBack
 
 /**
  * docs/object-stores.md, phase 1b: every pod and container that reads or writes an object store,
- * for a given S3 configuration. With the aws client (the default) they are pinned by a snapshot
- * taken before the object store builder existed, so that it changes nothing for them.
+ * for a given S3 configuration, through the agent's client (the aws CLI, pinned here by a
+ * snapshot from phase 1b to phase 5, was removed in v0.193.0).
  */
 const cluster = (spec: Partial<FirebirdCluster['spec']>, status?: FirebirdCluster['status']): FirebirdCluster => ({
   apiVersion: 'firebird.cloudnative-firebird.io/v1',
@@ -100,15 +100,7 @@ const configurations: Record<string, S3BackupConfiguration> = {
   'client image': { bucket: 'bkt', clientImage: 'example.com/aws-cli:2' },
 };
 
-describe('the aws client (client: aws, the default until v0.192.0, deprecated)', () => {
-  for (const [name, s3] of Object.entries(configurations)) {
-    it(`is what it was before the object store builder: ${name}`, () => {
-      expect(objectStorePods({ ...s3, client: 'aws' })).toMatchSnapshot();
-    });
-  }
-});
-
-describe('the default client (since v0.192.0, docs/object-stores.md phase 5)', () => {
+describe('the default client (the agent, the only one since v0.193.0)', () => {
   for (const [name, s3] of Object.entries(configurations)) {
     it(`is the agent at every place: ${name}`, () => {
       // the configurations name no client
@@ -183,21 +175,23 @@ describe('the agent client (s3.client: agent)', () => {
     expect(all('bootstrap from a logical backup')).toContain(`fb-agent objects get 'nightly/x.fbk' /work/backup.fbk`);
   });
 
-  it("runs the replica cluster's follower through the agent, the script otherwise the same", () => {
-    const aws = buildArchiveFollowerContainer(cluster({ instances: 1, replica: { enabled: true, journalS3: { bucket: 'bkt', client: 'aws' } } }));
-    const agent = buildArchiveFollowerContainer(cluster({ instances: 1, replica: { enabled: true, journalS3: { bucket: 'bkt', client: 'agent' } } }));
-    expect(agent.command![2]).toContain(FOLLOWER_AGENT_CLIENT);
-    expect(agent.command![2]).not.toContain(FOLLOWER_AWS_CLIENT);
-    expect(agent.command![2].replace(FOLLOWER_AGENT_CLIENT, FOLLOWER_AWS_CLIENT)).toBe(aws.command![2]);
-    expect(env(agent, 'JOURNALS')).toBe('journals/');
-    // the instance pod's agent installer gives it the binary
-    const pod = withAgent({ containers: [agent, aws] });
+  it("runs the replica cluster's follower through the agent", () => {
+    const follower = buildArchiveFollowerContainer(cluster({ instances: 1, replica: { enabled: true, journalS3: { bucket: 'bkt' } } }));
+    const script = follower.command![2];
+    expect(script).toContain('objects() { "$FB_AGENT" objects "$@"; }');
+    expect(script).toContain('objects list --long "$JOURNALS"');
+    expect(script).toContain('objects get "$JOURNALS$name" "$SOURCE_DIR/.$name.tmp"');
+    expect(script).not.toMatch(/\baws\b/);
+    expect(env(follower, 'JOURNALS')).toBe('journals/');
+    // the instance pod's agent installer gives it the binary, not a container of another kind
+    const other: V1Container = { name: 'other', image: 'x' };
+    const pod = withAgent({ containers: [follower, other] });
     expect(pod.containers[0].volumeMounts?.some((m) => m.mountPath === '/opt/fb-agent')).toBe(true);
     expect(pod.containers[1].volumeMounts?.some((m) => m.mountPath === '/opt/fb-agent')).toBeFalsy();
   });
 
-  it('writes scripts the shell parses, with either client', () => {
-    for (const client of ['aws', 'agent'] as const) {
+  it('writes scripts the shell parses', () => {
+    for (const client of [undefined, 'agent'] as const) {
       for (const [where, spec] of Object.entries(objectStorePods({ ...configurations['SSE-C'], client }))) {
         for (const c of containersOf(spec)) {
           const text = c.command?.[0] === '/bin/sh' ? (c.command[2] ?? c.args?.[0]) : undefined;

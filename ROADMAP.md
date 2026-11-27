@@ -4,7 +4,7 @@ Inspired by [cloudnative-pg](https://github.com/cloudnative-pg/cloudnative-pg), 
 
 This document outlines the feature roadmap for upcoming releases, categorized by core operational domain.
 
-> **Status note (v0.192.0):** every item below is done; open work is in [TODO.md](TODO.md).
+> **Status note (v0.193.0):** every item below is done; open work is in [TODO.md](TODO.md).
 > Journal replication (still experimental, see TODO.md) works against the official
 > `firebirdsql/firebird` image (Firebird 4, 5 and the 6 snapshot). It covers replica re-seeding,
 > lag metrics, planned switchover, automatic failover with a primary Lease, and rolling updates with
@@ -191,6 +191,10 @@ This document outlines the feature roadmap for upcoming releases, categorized by
   - `WAIT <seconds> [<segment>]` answers as soon as a segment after the given one is archived. The Rust puller sends it between two pulls instead of sleeping, so a segment is fetched when it appears. Measured with `hack/bench/puller.sh` (removed in v0.170.0) (three replicas on one archive, a 16 MB segment every 2 s, poll 5 s): 0.08 s from the archive to the replica (median, 0.16 s at most) against 2.4 s (5 s at most) for a polling puller. A Perl segment server answers `ERR bad request`; the puller then polls as before and asks again about once a minute. The archive timeout before it (`archiveTimeoutSeconds`) is unchanged.
   - Ten pullers waiting cost the front 0.07 s of CPU in ten seconds on an archive of 5,000 segments: the archive is looked at once for all of them, and read again only when its directory changed.
   - `tests/segment-server-front.test.ts` gives the same requests to the Perl server alone and to the front: listings, downloads, refusals, forwarded requests with uploads and downloads, the contact time the isolation check reads, stopping. The kind CI runs the replicated cluster behind the front, with segment TLS.
+- [x] **Object stores: the aws CLI removed** *(v0.193.0)*
+  - `s3.client: aws` and `s3.clientImage`, deprecated in v0.192.0, are gone: every S3 transfer runs `fb-agent objects`. The webhook refuses either field on a create or a change, naming each place (e.g. `spec.backup.s3.client`); a resource stored with them keeps working on the agent, and its cluster gets an `S3ClientRemoved` Warning event until they are removed. The CRDs keep both fields (with `aws` in the enum), so that a stored resource stays valid for its other updates (a finalizer's removal, for one).
+  - The aws command lines, the `amazon/aws-cli` default image, `awsCommand`, `s3ClientEnv`, `s3TransferArgs` and `s3Uri` are deleted; `archive-follower.sh` calls the agent itself (`objects list --long`, `objects get`) instead of an `aws_s3` the operator swapped.
+  - Tests: the phase 1b snapshot of the aws client's pods goes with it; the tests that pinned aws command lines (backups, restores, retention, the journal archive, point-in-time recovery, bootstrap, replica clusters, SSE-S3, SSE-KMS and SSE-C) assert the agent's commands, environment and key files now; the webhook's refusal and the stored cluster's event and agent CronJob. The kind CI's replica cluster step, the last on the aws CLI, runs on the agent.
 - [x] **Object stores from the agent, phase 5: the agent by default for S3** *(v0.192.0)*
   - `s3.client` defaults to `agent`: every S3 transfer (backups, retention, restores, the journal archive, point-in-time recovery, bootstrap, replica clusters' followers) runs `fb-agent objects` in the cluster's image, with no client image. It was opt-in for four releases (since v0.188.0) and ran on the kind CI's archive and recovery step throughout.
   - `client: aws` still selects the aws CLI of `clientImage`, deprecated for one minor release and then removed with `clientImage`: the webhook warns on every create or change that selects it (with each place, e.g. `spec.backup.s3`), and a cluster that does gets an `S3ClientDeprecated` Warning event.

@@ -120,12 +120,12 @@ spec:
                       type: string
                     client:
                       description: >-
-                        The object store client: agent (the default since v0.192.0), the instance image with fb-agent
-                        objects over the store's own API; or aws (deprecated), the aws CLI of clientImage (docs/object-stores.md)
+                        The object store client: agent, the instance image with fb-agent objects over the store's own
+                        API (docs/object-stores.md). aws (the aws CLI) was removed in v0.193.0: refused, and ignored when stored
                       type: string
                       enum: [aws, agent]
                     clientImage:
-                      description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                      description: Removed in v0.193.0 with the aws CLI (refused, and ignored when stored)
                       type: string
                     encryption:
                       description: 'Server-side encryption of the objects written: AES256 (SSE-S3) or aws:kms (SSE-KMS); without it the bucket default applies'
@@ -241,12 +241,12 @@ spec:
                           type: string
                         client:
                           description: >-
-                            The object store client: agent (the default since v0.192.0), the instance image with fb-agent
-                            objects over the store's own API; or aws (deprecated), the aws CLI of clientImage (docs/object-stores.md)
+                            The object store client: agent, the instance image with fb-agent objects over the store's own
+                            API (docs/object-stores.md). aws (the aws CLI) was removed in v0.193.0: refused, and ignored when stored
                           type: string
                           enum: [aws, agent]
                         clientImage:
-                          description: Image providing the aws CLI for uploads and downloads (default amazon/aws-cli:2.37.4)
+                          description: Removed in v0.193.0 with the aws CLI (refused, and ignored when stored)
                           type: string
                         encryption:
                           description: 'Server-side encryption of the objects written: AES256 (SSE-S3) or aws:kms (SSE-KMS); without it the bucket default applies'
